@@ -1,0 +1,12 @@
+{
+  "enabled": false,
+  "patterns": [],
+  "exclude": [
+    ".git",
+    ".venv",
+    "node_modules",
+    "logs",
+    "learnings/_human_only"
+  ],
+  "notes": "Define project-specific, reviewed detection patterns before enabling this scan. This placeholder is not evidence of compliance."
+}

@@ -1,0 +1,352 @@
+#!/usr/bin/env python3
+"""Safely create a project from the Initializing base and ordered overlays."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import shutil
+import sys
+import tempfile
+from pathlib import Path
+from typing import Iterable
+
+PACKAGE_ROOT = Path(__file__).resolve().parent.parent
+TEMPLATES = PACKAGE_ROOT / "templates"
+SKILLS = PACKAGE_ROOT / "skills"
+MODULE_ASSETS = PACKAGE_ROOT / "assets" / "module"
+TOKEN_RE = re.compile(r"__[A-Z][A-Z0-9_]*__")
+SAFE_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+SAFE_COMPONENT_RE = re.compile(r"\.?[A-Za-z0-9_][A-Za-z0-9._-]*")
+
+
+class InitializationError(ValueError):
+    """A preflight or safe-copy failure."""
+
+
+def fail(message: str) -> None:
+    raise InitializationError(message)
+
+
+def checked_relative(value: str, label: str) -> Path:
+    path = Path(value)
+    if not value or path.is_absolute() or any(part in ("", ".", "..") for part in path.parts):
+        fail(f"{label} must be a non-empty relative path without traversal: {value!r}")
+    if any(not SAFE_COMPONENT_RE.fullmatch(part) for part in path.parts):
+        fail(f"{label} contains an unsafe path component: {value!r}")
+    return path
+
+
+def safe_metadata(value: str, label: str) -> str:
+    if not value or any(ord(char) < 32 or ord(char) == 127 for char in value):
+        fail(f"{label} must be non-empty and contain no control characters")
+    return value
+
+
+def project_slug(name: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+    if not slug or not SAFE_ID_RE.fullmatch(slug):
+        fail("project name cannot produce a safe project slug")
+    return slug
+
+
+def python_package_name(slug: str) -> str:
+    package = slug.replace("-", "_")
+    if package[0].isdigit():
+        package = f"project_{package}"
+    return package
+
+
+def ensure_no_symlink_components(path: Path, *, include_leaf: bool = True) -> None:
+    candidate = path.absolute()
+    parts = candidate.parts
+    current = Path(parts[0])
+    stop = len(parts) if include_leaf else len(parts) - 1
+    for part in parts[1:stop]:
+        current /= part
+        if current.is_symlink():
+            fail(f"symlinked path component is not allowed: {current}")
+
+
+def inside(root: Path, candidate: Path) -> bool:
+    try:
+        candidate.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def read_manifest(template_id: str) -> dict:
+    require_safe_package_subtree(TEMPLATES, "template")
+    root = TEMPLATES / template_id
+    manifest_path = root / "manifest.json"
+    if not root.is_dir() or root.is_symlink() or not manifest_path.is_file() or manifest_path.is_symlink():
+        fail(f"template {template_id!r} has no safe manifest")
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        fail(f"template {template_id!r} manifest is invalid: {exc}")
+    allowed = {"id", "requires", "overrides"}
+    if set(manifest) != allowed or manifest["id"] != template_id:
+        fail(f"template {template_id!r} manifest must contain exactly id, requires, overrides")
+    if not isinstance(manifest["requires"], list) or not isinstance(manifest["overrides"], list):
+        fail(f"template {template_id!r} manifest lists are malformed")
+    for key in ("requires", "overrides"):
+        if not all(isinstance(item, str) for item in manifest[key]):
+            fail(f"template {template_id!r} manifest {key} must contain strings")
+    return manifest
+
+
+def regular_files(root: Path) -> Iterable[Path]:
+    for path in sorted(root.rglob("*")):
+        if path == root / "manifest.json":
+            continue
+        if path.is_symlink():
+            fail(f"template symlinks are not allowed: {path}")
+        if path.is_file():
+            relative = path.relative_to(root)
+            if not inside(root, path):
+                fail(f"template file escapes its root: {path}")
+            yield relative
+        elif not path.is_dir():
+            fail(f"unsupported template entry: {path}")
+
+
+def require_safe_source_directory(path: Path, label: str) -> None:
+    """Reject a missing or symlinked source directory before enumeration."""
+    if not path.is_dir() or path.is_symlink():
+        fail(f"unsafe or missing {label} source directory: {path}")
+
+
+def require_safe_package_subtree(path: Path, label: str) -> None:
+    """Ensure a package-owned source tree has no symlinked components."""
+    try:
+        relative = path.relative_to(PACKAGE_ROOT)
+    except ValueError:
+        fail(f"{label} source escapes package root: {path}")
+    current = PACKAGE_ROOT
+    for component in relative.parts:
+        current /= component
+        if current.is_symlink():
+            fail(f"symlinked {label} source component is not allowed: {current}")
+
+
+def render(path: Path, tokens: dict[str, str]) -> bytes:
+    data = path.read_bytes()
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        if TOKEN_RE.search(data.decode("utf-8", errors="ignore")):
+            fail(f"tokens in non-UTF-8 template file: {path}")
+        return data
+    if path.suffix == ".toml":
+        # Tokens are placed inside TOML basic strings, so escape only their
+        # string interiors rather than adding a second pair of quotes.
+        replacements = {key: value.replace("\\", "\\\\").replace('"', '\\"') for key, value in tokens.items()}
+    elif path.suffix == ".json":
+        # Likewise, JSON template tokens represent a string interior.
+        replacements = {key: json.dumps(value, ensure_ascii=False)[1:-1] for key, value in tokens.items()}
+    elif path.suffix == ".py":
+        # Python templates use tokens only inside triple-quoted docstrings.
+        replacements = {
+            key: value.replace("\\", "\\\\").replace('"""', '\\"""')
+            for key, value in tokens.items()
+        }
+    elif path.suffix in {".md", ".txt"}:
+        replacements = tokens
+    elif TOKEN_RE.search(text):
+        fail(f"tokens are not supported in this template format: {path}")
+    else:
+        replacements = {}
+    for token, value in replacements.items():
+        text = text.replace(token, value)
+    unresolved = TOKEN_RE.search(text)
+    if unresolved:
+        fail(f"unresolved template token {unresolved.group(0)!r} in {path}")
+    return text.encode("utf-8")
+
+
+def render_relative_path(relative: Path, tokens: dict[str, str]) -> Path:
+    """Render safe path tokens and retain a strictly relative output path."""
+    rendered = relative.as_posix()
+    for token, value in tokens.items():
+        rendered = rendered.replace(token, value)
+    if TOKEN_RE.search(rendered):
+        fail(f"unresolved template token in output path: {relative}")
+    return checked_relative(rendered, "rendered template path")
+
+
+def build_file_map(template_ids: list[str], tokens: dict[str, str]) -> dict[Path, bytes]:
+    outputs: dict[Path, bytes] = {}
+    for template_id in template_ids:
+        manifest = read_manifest(template_id)
+        if template_id != "base":
+            missing = [item for item in manifest["requires"] if item not in template_ids]
+            if missing:
+                fail(f"template {template_id!r} requires: {', '.join(missing)}")
+        allowed_overrides = {
+            render_relative_path(checked_relative(item, "manifest override"), tokens)
+            for item in manifest["overrides"]
+        }
+        root = TEMPLATES / template_id
+        for relative in regular_files(root):
+            destination = render_relative_path(relative, tokens)
+            if destination in outputs and destination not in allowed_overrides:
+                fail(f"undeclared template collision for {destination} in {template_id!r}")
+            outputs[destination] = render(root / relative, tokens)
+    return outputs
+
+
+def add_generated_output(outputs: dict[Path, bytes], destination: Path, content: bytes, label: str) -> None:
+    """Reserve generated-only paths instead of silently replacing template files."""
+    if destination in outputs:
+        fail(f"generated {label} collides with a template file: {destination}")
+    outputs[destination] = content
+
+
+def add_skills(outputs: dict[Path, bytes], surface: str) -> None:
+    names = []
+    if surface in ("claude", "both"):
+        require_safe_package_subtree(SKILLS, "skill")
+        source = SKILLS / "claude"
+        require_safe_source_directory(source, "Claude skill")
+        for path in sorted(source.glob("*.md")):
+            if path.is_symlink() or not path.is_file():
+                fail(f"unsafe Claude skill source: {path}")
+            add_generated_output(outputs, Path(".claude") / "commands" / path.name, path.read_bytes(), "skill")
+            names.append(f"Claude command: `.claude/commands/{path.name}`")
+    if surface in ("codex", "both"):
+        require_safe_package_subtree(SKILLS, "skill")
+        source = SKILLS / "codex"
+        require_safe_source_directory(source, "Codex skill")
+        for path in sorted(source.iterdir()):
+            skill = path / "SKILL.md"
+            if path.is_symlink() or not path.is_dir() or skill.is_symlink() or not skill.is_file():
+                fail(f"unsafe Codex skill source: {path}")
+            add_generated_output(outputs, Path(".agents") / "skills" / path.name / "SKILL.md", skill.read_bytes(), "skill")
+            names.append(f"Codex skill: `.agents/skills/{path.name}/SKILL.md`")
+    if not names:
+        fail("no skills selected")
+    inventory = "# Local skill inventory\n\nStatus: active\n\n" + "\n".join(f"- {line}" for line in names) + "\n"
+    add_generated_output(outputs, Path("docs") / "development" / "skill-inventory.md", inventory.encode(), "skill inventory")
+
+
+def add_modules(outputs: dict[Path, bytes], modules: list[str], tokens: dict[str, str]) -> None:
+    require_safe_package_subtree(MODULE_ASSETS, "module asset")
+    require_safe_source_directory(MODULE_ASSETS, "module asset")
+    for module in modules:
+        relative = checked_relative(module, "module")
+        for filename in ("context.md", "API.md"):
+            asset = MODULE_ASSETS / filename
+            if not asset.is_file() or asset.is_symlink():
+                fail(f"unsafe or missing module asset: {asset}")
+            destination = relative / filename
+            if destination in outputs:
+                # A deployment template may already provision this module's
+                # required documentation (for example the Python package
+                # skeleton). Do not overwrite it merely because the caller
+                # also names that module explicitly.
+                continue
+            outputs[destination] = render(asset, {
+                **tokens,
+                "__MODULE_PATH__": relative.as_posix(),
+                "__MODULE_NAME__": relative.name,
+            })
+
+
+def write_atomically(target: Path, outputs: dict[Path, bytes]) -> None:
+    parent = target.parent
+    ensure_no_symlink_components(parent)
+    if not parent.exists() or not parent.is_dir():
+        fail(f"target parent does not exist or is not a directory: {parent}")
+    staging = Path(tempfile.mkdtemp(prefix=".initializing-", dir=parent))
+    reserved_target = False
+    try:
+        for relative, content in outputs.items():
+            destination = staging / relative
+            if not inside(staging, destination):
+                fail(f"generated path escapes staging area: {relative}")
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            if destination.exists() or destination.is_symlink():
+                fail(f"duplicate generated destination: {relative}")
+            destination.write_bytes(content)
+        # mkdir is an atomic, no-replace reservation of the final name.  A
+        # preflight-only exists check has a TOCTOU gap: another process can
+        # otherwise create an empty target just before a directory rename.
+        try:
+            target.mkdir()
+            reserved_target = True
+        except FileExistsError:
+            fail(f"target already exists: {target}")
+        for child in staging.iterdir():
+            child.replace(target / child.name)
+        staging.rmdir()
+    except Exception:
+        shutil.rmtree(staging, ignore_errors=True)
+        # The target is reserved only after every generated file has been
+        # rendered into staging. Remove our empty reservation on a failure;
+        # never remove a target we did not create.
+        if reserved_target and target.exists() and not any(target.iterdir()):
+            target.rmdir()
+        raise
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("target", help="new project directory; it must not already exist")
+    parser.add_argument("--name", required=True, help="project display name")
+    parser.add_argument("--purpose", required=True, help="one-line project purpose")
+    parser.add_argument("--template", action="append", default=[], help="ordered overlay: python, web, or regulated-health")
+    parser.add_argument("--module", action="append", default=[], help="relative module directory to seed")
+    parser.add_argument("--skill-surface", choices=("claude", "codex", "both"), default="both")
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    try:
+        args = parse_args(argv or sys.argv[1:])
+        name, purpose = safe_metadata(args.name, "name"), safe_metadata(args.purpose, "purpose")
+        supplied_target = Path(args.target).expanduser()
+        if supplied_target.exists() or supplied_target.is_symlink():
+            fail(f"target already exists: {supplied_target}")
+        # Resolve parent aliases (for example macOS's /tmp -> /private/tmp)
+        # before confinement checks. The target leaf itself is still required to
+        # be new, and all generated content is written only beneath staging.
+        target = supplied_target.resolve(strict=False)
+        if not target.name or target.name in (".", ".."):
+            fail("target must name a new directory")
+        overlays = args.template
+        known = {entry.name for entry in TEMPLATES.iterdir() if entry.is_dir() and not entry.is_symlink()}
+        unknown = sorted(set(overlays) - (known - {"base"}))
+        if unknown:
+            fail(f"unknown template(s): {', '.join(unknown)}")
+        if len(set(overlays)) != len(overlays):
+            fail("duplicate overlays are not allowed")
+        modules = args.module
+        if len(set(modules)) != len(modules):
+            fail("duplicate modules are not allowed")
+        slug = project_slug(name)
+        tokens = {
+            "__PROJECT_NAME__": name,
+            "__PROJECT_SLUG__": slug,
+            "__PROJECT_PYTHON_PACKAGE__": python_package_name(slug),
+            "__PROJECT_PURPOSE__": purpose,
+            "__PROJECT_PYTHON_MODULE_PATH__": f"src/{python_package_name(slug)}",
+        }
+        outputs = build_file_map(["base", *overlays], tokens)
+        add_modules(outputs, modules, tokens)
+        add_skills(outputs, args.skill_surface)
+        write_atomically(target, outputs)
+        print(f"Initialized {target}")
+        print("Templates: " + ", ".join(["base", *overlays]))
+        print(f"Created files: {len(outputs)}")
+        print("Verification: preflight completed; manifests, paths, collisions, metadata, and tokens were validated.")
+        return 0
+    except InitializationError as exc:
+        print(f"initialize-project: error: {exc}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

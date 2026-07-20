@@ -1,0 +1,9 @@
+{
+  "status": "not_applicable",
+  "reason": "The Initializing workspace was not a Git repository at implementation time. No commit, push, pull request, or merge was requested or performed.",
+  "verification": [
+    "python3 tests/test_initializer.py -v: 9 passed",
+    "fresh generated python + regulated-health project: documentation status and link checks passed",
+    "python3 -m py_compile bin/initialize-project: passed"
+  ]
+}

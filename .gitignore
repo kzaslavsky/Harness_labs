@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.DS_Store
+
+# Harness run data is local evidence and may contain large transient artifacts.
+logs/runs/*
+!logs/runs/.gitkeep
+
+# Temporary directories produced by initializer smoke tests.
+initializing-compose.*
+initializing-smoke.*

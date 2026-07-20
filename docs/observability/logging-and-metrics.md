@@ -1,0 +1,99 @@
+# Logging and Metrics Contract
+
+Status: normative
+
+Logging exists to reconstruct behavior and improve the harness. It must support
+debugging, evaluation, optimization, and audit without becoming a store for
+secrets or uncontrolled prompt transcripts.
+
+## Run layout
+
+```text
+logs/runs/<run-id>/
+├── events.jsonl       # append-only ordered events
+├── decisions.jsonl    # run-scoped material decisions
+├── checkpoint.json    # atomically replaced resumable state
+├── summary.json       # final metrics and outcome
+└── artifacts/         # bounded evidence referenced by hash
+```
+
+Event and decision records MUST validate against the schemas in `schemas/`.
+Sequence numbers are monotonic within a run. Timestamps use UTC RFC 3339.
+Artifacts record a relative path, media type, size, and SHA-256 digest.
+
+Runtime logs are ignored by Git. Accepted decisions with durable architectural
+impact are promoted to `docs/decisions/` through a normal reviewed change.
+
+## Event principles
+
+Log state transitions, dispatches, results, verification, retries, failures,
+budget changes, Git operations, and integration proof. Record actor, task,
+phase, status, duration, evidence references, and relevant resource usage.
+
+Do not log credentials, access tokens, private keys, sensitive personal data,
+full environment dumps, or unredacted third-party content. Raw model reasoning
+is not a contract artifact; store concise decisions, inputs, outputs, and
+evidence instead.
+
+## Decision threshold
+
+Log a decision when an agent chooses among meaningful alternatives that affect
+architecture, scope, quality, safety, cost, permissions, recovery, or integration.
+Include the question, selected option, alternatives, rationale, evidence,
+consequences, reversibility, actor, and time. Routine deterministic actions need
+events, not decision records.
+
+## Metric families
+
+### Accuracy
+
+- acceptance criteria passed / required;
+- required gates passed / required;
+- weighted evaluation-suite score;
+- escaped defects by severity;
+- valid review findings and reopened work;
+- rework time and changed-line churn after review;
+- false success claims and contract violations.
+
+### Efficiency
+
+- wall-clock and critical-path latency;
+- summed agent execution time;
+- input and output tokens by task and role;
+- tool calls, failed calls, and redundant calls;
+- retries by class and recovery time;
+- agents spawned, useful parallelism, and coordination overhead;
+- lines or artifacts changed, reverted, and superseded;
+- time from verified candidate to integrated base commit.
+
+### Reliability
+
+- successful resume rate after interruption;
+- deterministic replay or repeated-run variance;
+- checkpoint corruption or stale-state rejection;
+- merge conflict and base-advancement frequency;
+- telemetry completeness and schema-validation rate.
+
+## Accuracy × efficiency
+
+The summary MAY publish a composite score:
+
+```text
+composite = normalized_accuracy * normalized_efficiency
+```
+
+The score is meaningful only when runs share the same versioned task suite,
+acceptance criteria, environment, model/tool configuration, budgets, and scoring
+method. Publish the component metrics and denominators with the composite.
+
+Required quality gates remain hard constraints. Prefer Pareto comparisons: a
+change is clearly better when it improves accuracy without increasing cost, or
+reduces cost without reducing accuracy. Treat any apparent gain caused by weaker
+tests, omitted work, hidden retries, or missing telemetry as invalid.
+
+## Experiment discipline
+
+Record the harness version, repository commit, configuration, task-suite version,
+model/tool versions, randomization where controllable, and collection failures.
+Use repeated trials for stochastic components. Compare medians and tail behavior,
+not only best runs. Preserve failed runs in aggregates to avoid survivor bias.

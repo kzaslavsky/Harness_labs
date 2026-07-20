@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://harness-labs.local/schemas/run-event.schema.json",
+  "title": "Harness run event",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "run_id",
+    "sequence",
+    "timestamp",
+    "event_type",
+    "actor",
+    "phase",
+    "status",
+    "payload"
+  ],
+  "properties": {
+    "schema_version": { "const": "1.0" },
+    "run_id": { "type": "string", "minLength": 1 },
+    "sequence": { "type": "integer", "minimum": 0 },
+    "timestamp": { "type": "string", "format": "date-time" },
+    "event_type": {
+      "enum": [
+        "run_started",
+        "phase_transition",
+        "task_dispatched",
+        "task_completed",
+        "verification",
+        "decision",
+        "checkpoint",
+        "git_operation",
+        "retry",
+        "run_completed",
+        "run_failed"
+      ]
+    },
+    "actor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "role", "parent_id"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "role": { "type": "string", "minLength": 1 },
+        "parent_id": { "type": ["string", "null"] }
+      }
+    },
+    "task_id": { "type": ["string", "null"] },
+    "phase": {
+      "enum": [
+        "orient",
+        "plan",
+        "implement",
+        "verify",
+        "review",
+        "integrate",
+        "report",
+        "blocked",
+        "failed",
+        "recovering"
+      ]
+    },
+    "status": { "enum": ["started", "succeeded", "failed", "skipped", "blocked"] },
+    "duration_ms": { "type": "integer", "minimum": 0 },
+    "metrics": {
+      "type": "object",
+      "additionalProperties": { "type": "number" }
+    },
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "sha256"],
+        "properties": {
+          "path": { "type": "string", "minLength": 1 },
+          "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+        }
+      }
+    },
+    "payload": { "type": "object" }
+  }
+}

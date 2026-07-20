@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://harness-labs.local/schemas/decision.schema.json",
+  "title": "Harness decision record",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "decision_id",
+    "run_id",
+    "timestamp",
+    "actor_id",
+    "phase",
+    "question",
+    "choice",
+    "alternatives",
+    "rationale",
+    "evidence",
+    "consequences",
+    "reversible",
+    "status"
+  ],
+  "properties": {
+    "schema_version": { "const": "1.0" },
+    "decision_id": { "type": "string", "minLength": 1 },
+    "run_id": { "type": "string", "minLength": 1 },
+    "timestamp": { "type": "string", "format": "date-time" },
+    "actor_id": { "type": "string", "minLength": 1 },
+    "phase": { "type": "string", "minLength": 1 },
+    "question": { "type": "string", "minLength": 1 },
+    "choice": { "type": "string", "minLength": 1 },
+    "alternatives": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "rationale": { "type": "string", "minLength": 1 },
+    "evidence": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "consequences": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "reversible": { "type": "boolean" },
+    "status": { "enum": ["proposed", "accepted", "rejected", "superseded"] }
+  }
+}
