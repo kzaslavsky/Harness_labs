@@ -146,6 +146,71 @@ class CodexFileReaderExecutorTests(unittest.TestCase):
         self.assertEqual(result.status, "failed")
         self.assertIn("did not perform a file read", result.payload["error"])
 
+    @patch("harness_labs.codex_delegation.shutil.which", return_value="/fake/codex")
+    @patch("harness_labs.codex_delegation.subprocess.run")
+    def test_retained_reader_resumes_same_thread_then_closes(
+        self,
+        run_mock,
+        _which_mock,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            treasure = Path(temporary) / "treasure_chest.txt"
+            treasure.write_text("there is booty here\n", encoding="utf-8")
+            store = InMemoryReferenceStore(
+                {
+                    "task:read": "Read treasure_chest.txt",
+                    "context:treasure": {"path": str(treasure)},
+                    "grant:treasure": {
+                        "capabilities": ["read_file"],
+                        "paths": [str(treasure)],
+                    },
+                }
+            )
+            attempt = TaskAttempt(
+                attempt_id="treasure/child-1",
+                task_ref="task:read",
+                context_ref="context:treasure",
+                grant_ref="grant:treasure",
+                parent_attempt_id="treasure",
+            )
+
+            def complete(argv, **kwargs):
+                output_path = Path(argv[argv.index("-o") + 1])
+                if "resume" in argv:
+                    output_path.write_text(
+                        "The granted read_file capability enabled me.",
+                        encoding="utf-8",
+                    )
+                    item_types = ("agent_message",)
+                else:
+                    output_path.write_text(
+                        "there is booty here",
+                        encoding="utf-8",
+                    )
+                    item_types = ("command_execution", "agent_message")
+                return subprocess.CompletedProcess(
+                    argv,
+                    0,
+                    events(*item_types),
+                    "",
+                )
+
+            run_mock.side_effect = complete
+            executor = CodexFileReaderExecutor(store, keep_alive=True)
+            initial = executor.execute(attempt)
+            followup = executor.send(
+                attempt,
+                "what enabled you to answer me this way?",
+            )
+            executor.close()
+
+        self.assertEqual(initial.status, "succeeded")
+        self.assertEqual(followup.status, "succeeded")
+        self.assertIn("read_file", followup.payload["text"])
+        self.assertIn("resume", run_mock.call_args_list[1].args[0])
+        self.assertIn(THREAD_ID, run_mock.call_args_list[1].args[0])
+        self.assertIsNone(executor._thread_id)
+
 
 if __name__ == "__main__":
     unittest.main()

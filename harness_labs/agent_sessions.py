@@ -114,7 +114,11 @@ class SessionToolExecutor:
     session: AgentSession
     dispatcher: ChildDispatcher
     max_tool_calls: int = 1
+    keep_child_alive: bool = False
     _tool_name: str = field(default="spawn_child", init=False, repr=False)
+    _message_tool_name: str = field(
+        default="send_child_message", init=False, repr=False
+    )
 
     def execute(self, attempt: TaskAttempt) -> TaskResult:
         resolved = self._resolve(attempt)
@@ -135,7 +139,7 @@ class SessionToolExecutor:
                 payload={"error": "no authorized child role is available"},
             )
 
-        tools = (
+        tools: tuple[ToolSpec, ...] = (
             ToolSpec(
                 name=self._tool_name,
                 description="Run one controller-authorized child task.",
@@ -153,10 +157,34 @@ class SessionToolExecutor:
                 },
             ),
         )
+        if self.keep_child_alive:
+            if "send_child_message" not in grant.get("capabilities", ()):
+                return TaskResult(
+                    attempt_id=attempt.attempt_id,
+                    status="blocked",
+                    payload={"error": "send_child_message capability is required"},
+                )
+            tools += (
+                ToolSpec(
+                    name=self._message_tool_name,
+                    description="Send one follow-up message to the retained child.",
+                    input_schema={
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": ["child_attempt_id", "message"],
+                        "properties": {
+                            "child_attempt_id": {"type": "string", "minLength": 1},
+                            "message": {"type": "string", "minLength": 1},
+                        },
+                    },
+                ),
+            )
 
         request = ModelRequest(task=task, context=context, tools=tools)
         session_id: str | None = None
         child_result: TaskResult | None = None
+        child_attempt_id: str | None = None
+        child_turns: list[TaskResult] = []
         tool_calls = 0
         try:
             session_id = self.session.open(request)
@@ -169,7 +197,11 @@ class SessionToolExecutor:
                     attempt,
                     event,
                     allowed_roles,
+                    child_attempt_id,
                 )
+                if child_result is not None:
+                    child_attempt_id = child_result.attempt_id
+                    child_turns.append(child_result)
                 event = self.session.step(session_id, tool_result)
 
             if isinstance(event, BackendFailure):
@@ -184,12 +216,18 @@ class SessionToolExecutor:
                 return self._failed(attempt, "parent backend did not call child")
             if child_result.status != "succeeded":
                 return self._failed(attempt, "authorized child did not succeed")
+            if self.keep_child_alive and len(child_turns) != 2:
+                return self._failed(
+                    attempt,
+                    "parent backend did not complete the retained-child follow-up",
+                )
             return self._succeeded(
                 attempt,
                 answer,
                 session_id,
                 event,
                 child_result,
+                tuple(child_turns),
             )
         except ChildRequestDenied as exc:
             return TaskResult(
@@ -200,8 +238,12 @@ class SessionToolExecutor:
         except Exception as exc:
             return self._failed(attempt, f"session execution failed: {exc}")
         finally:
-            if session_id is not None:
-                self.session.close(session_id)
+            try:
+                if child_attempt_id is not None and self.keep_child_alive:
+                    self.dispatcher.terminate_child(attempt, child_attempt_id)
+            finally:
+                if session_id is not None:
+                    self.session.close(session_id)
 
     def _resolve(
         self,
@@ -232,8 +274,31 @@ class SessionToolExecutor:
         parent: TaskAttempt,
         call: ToolCall,
         allowed_roles: tuple[str, ...],
+        child_attempt_id: str | None,
     ) -> tuple[ToolResult, TaskResult | None]:
-        if call.name != self._tool_name:
+        if call.name == self._message_tool_name and self.keep_child_alive:
+            requested_id = call.arguments.get("child_attempt_id")
+            message = call.arguments.get("message")
+            if (
+                requested_id != child_attempt_id
+                or not isinstance(message, str)
+                or not message.strip()
+            ):
+                return (
+                    ToolResult(
+                        call_id=call.call_id,
+                        success=False,
+                        payload={"error": "invalid retained-child message"},
+                    ),
+                    None,
+                )
+            child = self.dispatcher.send_child_message(
+                parent,
+                requested_id,
+                message,
+            )
+            return self._child_tool_result(call.call_id, child)
+        if call.name != self._tool_name or child_attempt_id is not None:
             return (
                 ToolResult(
                     call_id=call.call_id,
@@ -253,13 +318,21 @@ class SessionToolExecutor:
                 ),
                 None,
             )
-        child = self.dispatcher.run_child(
+        child = self.dispatcher.start_child(
             parent,
             ChildRequest(role=role, objective=objective),
+            keep_alive=self.keep_child_alive,
         )
+        return self._child_tool_result(call.call_id, child)
+
+    @staticmethod
+    def _child_tool_result(
+        call_id: str,
+        child: TaskResult,
+    ) -> tuple[ToolResult, TaskResult]:
         return (
             ToolResult(
-                call_id=call.call_id,
+                call_id=call_id,
                 success=child.status == "succeeded",
                 payload={
                     "attempt_id": child.attempt_id,
@@ -278,6 +351,7 @@ class SessionToolExecutor:
         session_id: str,
         event: FinalOutput,
         child_result: TaskResult | None,
+        child_turns: tuple[TaskResult, ...],
     ) -> TaskResult:
         digest = hashlib.sha256(answer.encode("utf-8")).hexdigest()
         evidence = (*event.evidence, f"parent-content:sha256:{digest}")
@@ -293,7 +367,18 @@ class SessionToolExecutor:
             }
         if child_result is not None:
             payload["child_attempt_id"] = child_result.attempt_id
-            evidence = (*child_result.evidence, *evidence)
+            payload["child_turns"] = [
+                {
+                    "status": turn.status,
+                    "payload": dict(turn.payload),
+                    "evidence": list(turn.evidence),
+                }
+                for turn in child_turns
+            ]
+            evidence = (
+                *(item for turn in child_turns for item in turn.evidence),
+                *evidence,
+            )
         return TaskResult(
             attempt_id=attempt.attempt_id,
             status="succeeded",

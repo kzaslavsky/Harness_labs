@@ -399,6 +399,33 @@ either child route. Output follows the child capability rather than the parent:
 both Codex-child routes return the treasure, while both oMLX-child routes return
 the model-generated refusal.
 
+### Optional retained child sessions
+
+`SessionToolExecutor.keep_child_alive` is off by default. When enabled, the
+parent grant must include `send_child_message`, the controller exposes that
+second tool, and the selected child executor must implement `send` and `close`.
+The dispatcher retains the child under its controller-issued attempt ID; the
+parent cannot select a different backend, grant, or child identity.
+
+The audited lifecycle is:
+
+```text
+child_dispatched -> child_responded -> child_message_sent
+-> child_responded -> child_terminated
+```
+
+Termination runs in the controller's `finally` path, including parent failure.
+The treasure scenario requires the parent to ask the same child
+`what enabled you to answer me this way?` after its first response.
+
+For the current Codex child transport, retention preserves and explicitly
+resumes the same Codex thread ID; each `codex exec` turn is still a separate
+process. Closing removes the controller handle and temporary workspace. The
+generic model-backed child retains its prior response and capability context
+across model calls, then clears that state on close. A future resident child
+transport can implement the same `execute`/`send`/`close` boundary without
+changing the controller tool loop.
+
 This is deliberately still a prototype. Its child events and active process
 identity are process-local, persistent Codex rollouts are not yet reattached
 after a controller crash, and the reader's read-only shell sandbox is not an

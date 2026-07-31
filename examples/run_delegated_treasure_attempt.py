@@ -48,12 +48,29 @@ def main() -> int:
             print(f"  status: {result.status}")
             if result.status == "succeeded":
                 print(f"  output: {result.payload['text']}")
+                child_turns = result.payload.get("child_turns", ())
+                if len(child_turns) > 1:
+                    print(
+                        "  child follow-up: "
+                        f"{child_turns[1]['payload']['text']}"
+                    )
                 if "usage" in result.payload:
                     print(f"  usage: {result.payload['usage']}")
             else:
                 print(f"  error: {result.payload.get('error', 'unknown')}")
                 exit_code = 1
-            print(f"  children: {len(dispatcher.events) // 2}")
+            print(
+                "  children: "
+                f"{sum(event.event_type == 'child_dispatched' for event in dispatcher.events)}"
+            )
+            print(
+                "  child responses: "
+                f"{sum(event.event_type == 'child_responded' for event in dispatcher.events)}"
+            )
+            print(
+                "  child terminated: "
+                f"{any(event.event_type == 'child_terminated' for event in dispatcher.events)}"
+            )
             for evidence in result.evidence:
                 print(f"  evidence: {evidence}")
     return exit_code

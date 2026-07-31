@@ -120,6 +120,11 @@ capability, but Qwen still runs and must return exactly
 `sorry, I cannot do that, Dave.` The result records model-invocation and
 capability-unavailable evidence.
 
+The scenario enables retained child sessions. After the initial response, the
+parent sends the same child `what enabled you to answer me this way?`, records
+the model's explanation, and the controller terminates the child handle. Output
+must report one child, two child responses, and successful termination.
+
 Run the inherited contract suite with Python 3.11 or later:
 
 ```sh

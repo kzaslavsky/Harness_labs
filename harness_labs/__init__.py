@@ -29,6 +29,7 @@ from .composition import (
     ChildEvent,
     ChildRequest,
     ChildRequestDenied,
+    ConversationalExecutor,
 )
 from .codex_delegation import (
     CodexDelegationError,
@@ -54,6 +55,7 @@ __all__ = [
     "ChildEvent",
     "ChildRequest",
     "ChildRequestDenied",
+    "ConversationalExecutor",
     "CodexExecBackend",
     "CodexDelegationError",
     "CodexFileReaderExecutor",

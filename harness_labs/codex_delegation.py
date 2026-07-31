@@ -7,7 +7,7 @@ import json
 import shutil
 import subprocess
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Mapping
 
@@ -33,7 +33,7 @@ class _CommandEvidence:
     exit_code: int
 
 
-@dataclass(frozen=True)
+@dataclass
 class CodexFileReaderExecutor:
     """Run a Codex child that must use its shell to read one granted file."""
 
@@ -42,6 +42,13 @@ class CodexFileReaderExecutor:
     reasoning: str = "low"
     executable: str = "codex"
     timeout_seconds: float | None = None
+    keep_alive: bool = False
+    _temporary: tempfile.TemporaryDirectory[str] | None = field(
+        default=None, init=False, repr=False
+    )
+    _workspace: Path | None = field(default=None, init=False, repr=False)
+    _thread_id: str | None = field(default=None, init=False, repr=False)
+    _attempt_id: str | None = field(default=None, init=False, repr=False)
 
     def execute(self, attempt: TaskAttempt) -> TaskResult:
         try:
@@ -80,38 +87,32 @@ class CodexFileReaderExecutor:
         if not path.is_file():
             return self._failed(attempt, "granted path is not a regular file")
 
-        with tempfile.TemporaryDirectory(prefix="harness-codex-reader-") as temporary:
-            workspace = Path(temporary) / "workspace"
-            workspace.mkdir()
-            (workspace / path.name).symlink_to(path)
-            output_path = Path(temporary) / "reader-result.txt"
-            prompt = (
-                "You are a file-reader child. You must use the shell tool to read "
-                "the authorized file in your working directory, then return only "
-                "its exact contents with no commentary or markdown.\n\n"
-                f"Task: {task}\nAuthorized file: {path.name}"
+        temporary = tempfile.TemporaryDirectory(prefix="harness-codex-reader-")
+        workspace = Path(temporary.name) / "workspace"
+        workspace.mkdir()
+        (workspace / path.name).symlink_to(path)
+        output_path = Path(temporary.name) / "reader-result.txt"
+        prompt = (
+            "You are a file-reader child. You must use the shell tool to read "
+            "the authorized file in your working directory, then return only "
+            "its exact contents with no commentary or markdown.\n\n"
+            f"Task: {task}\nAuthorized file: {path.name}"
+        )
+        try:
+            turn = _invoke_codex(
+                executable=self.executable,
+                model=self.model,
+                reasoning=self.reasoning,
+                timeout_seconds=self.timeout_seconds,
+                workspace=workspace,
+                output_path=output_path,
+                prompt=prompt,
+                disabled_features=_READER_DISABLED_FEATURES,
+                ephemeral=not self.keep_alive,
             )
-            try:
-                turn = _invoke_codex(
-                    executable=self.executable,
-                    model=self.model,
-                    reasoning=self.reasoning,
-                    timeout_seconds=self.timeout_seconds,
-                    workspace=workspace,
-                    output_path=output_path,
-                    prompt=prompt,
-                    disabled_features=(
-                        "apps",
-                        "browser_use",
-                        "browser_use_external",
-                        "computer_use",
-                        "image_generation",
-                        "multi_agent",
-                    ),
-                    ephemeral=True,
-                )
-            except CodexDelegationError as exc:
-                return self._failed(attempt, str(exc))
+        except CodexDelegationError as exc:
+            temporary.cleanup()
+            return self._failed(attempt, str(exc))
 
         successful_reads = tuple(
             command
@@ -119,15 +120,17 @@ class CodexFileReaderExecutor:
             if command.exit_code == 0 and path.name in command.command
         )
         if not successful_reads:
+            temporary.cleanup()
             return self._failed(attempt, "reader child did not perform a file read")
         expected = path.read_text(encoding="utf-8").strip()
         actual = turn.final_message.strip()
         if actual != expected:
+            temporary.cleanup()
             return self._failed(attempt, "reader child did not return exact file contents")
 
         file_digest = hashlib.sha256(path.read_bytes()).hexdigest()
         content_digest = hashlib.sha256(actual.encode("utf-8")).hexdigest()
-        return TaskResult(
+        result = TaskResult(
             attempt_id=attempt.attempt_id,
             status="succeeded",
             payload={"text": actual},
@@ -137,6 +140,67 @@ class CodexFileReaderExecutor:
                 "codex-tool:command_execution",
             ),
         )
+        if self.keep_alive:
+            self._temporary = temporary
+            self._workspace = workspace
+            self._thread_id = turn.thread_id
+            self._attempt_id = attempt.attempt_id
+        else:
+            temporary.cleanup()
+        return result
+
+    def send(self, attempt: TaskAttempt, message: str) -> TaskResult:
+        if (
+            not self.keep_alive
+            or self._temporary is None
+            or self._workspace is None
+            or self._thread_id is None
+            or self._attempt_id != attempt.attempt_id
+        ):
+            return self._failed(attempt, "Codex child session is not active")
+        output_path = Path(self._temporary.name) / "follow-up-result.txt"
+        prompt = (
+            "Continue as the same file-reader child. Answer the operator's "
+            "follow-up directly in one concise sentence. Explain which granted "
+            "capability enabled your earlier answer.\n\n"
+            f"Operator message: {message}"
+        )
+        try:
+            turn = _invoke_codex(
+                executable=self.executable,
+                model=self.model,
+                reasoning=self.reasoning,
+                timeout_seconds=self.timeout_seconds,
+                workspace=self._workspace,
+                output_path=output_path,
+                prompt=prompt,
+                disabled_features=_READER_DISABLED_FEATURES,
+                ephemeral=False,
+                resume_thread_id=self._thread_id,
+            )
+        except CodexDelegationError as exc:
+            return self._failed(attempt, str(exc))
+        if turn.thread_id != self._thread_id:
+            return self._failed(attempt, "Codex child thread identity changed")
+        text = turn.final_message.strip()
+        digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        return TaskResult(
+            attempt_id=attempt.attempt_id,
+            status="succeeded",
+            payload={"text": text},
+            evidence=(
+                "codex-session:resumed",
+                f"content:sha256:{digest}",
+            ),
+        )
+
+    def close(self) -> None:
+        if self._temporary is not None:
+            self._temporary.cleanup()
+        self._temporary = None
+        self._workspace = None
+        self._thread_id = None
+        self._attempt_id = None
 
     @staticmethod
     def _failed(attempt: TaskAttempt, error: str) -> TaskResult:
@@ -145,6 +209,16 @@ class CodexFileReaderExecutor:
             status="failed",
             payload={"error": error},
         )
+
+
+_READER_DISABLED_FEATURES = (
+    "apps",
+    "browser_use",
+    "browser_use_external",
+    "computer_use",
+    "image_generation",
+    "multi_agent",
+)
 
 
 def _invoke_codex(

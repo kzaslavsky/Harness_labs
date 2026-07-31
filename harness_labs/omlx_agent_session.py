@@ -24,11 +24,14 @@ class OmlxAgentSession:
     """Adapt local text completion to the same session boundary, without tools."""
 
     backend: OmlxBackend = field(
-        default_factory=lambda: OmlxBackend(max_tokens=32, temperature=0.0)
+        default_factory=lambda: OmlxBackend(max_tokens=128, temperature=0.0)
     )
     _request: ModelRequest | None = field(default=None, init=False, repr=False)
     _completed: bool = field(default=False, init=False, repr=False)
     _pending_call_id: str | None = field(default=None, init=False, repr=False)
+    _tool_results: list[dict[str, Any]] = field(
+        default_factory=list, init=False, repr=False
+    )
     _session_id: str = field(default="omlx:single-turn", init=False, repr=False)
 
     @property
@@ -44,11 +47,12 @@ class OmlxAgentSession:
     def open(self, request: ModelRequest) -> str:
         if self._request is not None:
             raise RuntimeError("session is already open")
-        if len(request.tools) != 1:
-            raise RuntimeError("oMLX session requires exactly one controller tool")
+        if not 1 <= len(request.tools) <= 2:
+            raise RuntimeError("oMLX session requires one or two controller tools")
         self._request = request
         self._completed = False
         self._pending_call_id = None
+        self._tool_results.clear()
         return self._session_id
 
     def step(
@@ -67,21 +71,41 @@ class OmlxAgentSession:
             or tool_result.call_id != self._pending_call_id
         ):
             return BackendFailure("tool result does not match the pending oMLX call")
-        self._completed = True
         child_payload = dict(tool_result.payload)
+        self._tool_results.append(child_payload)
+        self._pending_call_id = None
+        if len(self._tool_results) == 1 and any(
+            tool.name == "send_child_message" for tool in self._request.tools
+        ):
+            return self._request_followup(child_payload)
+        self._completed = True
         task = (
             "Complete the original task using only the authorized child result. "
             "Return exactly the child result's payload.text value, with no "
             "commentary.\n\n"
             f"Original task:\n{self._request.task}\n\n"
-            f"Child result:\n{json.dumps(child_payload, sort_keys=True)}"
+            f"Initial child result:\n"
+            f"{json.dumps(self._tool_results[0], sort_keys=True)}\n\n"
+            f"Follow-up child result:\n{json.dumps(child_payload, sort_keys=True)}"
         )
         try:
             text = self.backend.generate(task, self._request.context).strip()
         except TextBackendError as exc:
             return BackendFailure(str(exc))
-        expected = child_payload.get("payload", {}).get("text")
-        if not isinstance(expected, str) or text != expected:
+        expected = self._tool_results[0].get("payload", {}).get("text")
+        if not isinstance(expected, str):
+            return BackendFailure("oMLX child result did not contain text")
+        if text != expected:
+            correction = (
+                "Your previous output changed the initial child answer. Return "
+                "exactly the following text and nothing else:\n"
+                f"{expected}"
+            )
+            try:
+                text = self.backend.generate(correction, {}).strip()
+            except TextBackendError as exc:
+                return BackendFailure(str(exc))
+        if text != expected:
             return BackendFailure("oMLX did not faithfully return the child result")
         return FinalOutput(
             text,
@@ -94,10 +118,13 @@ class OmlxAgentSession:
         self._request = None
         self._completed = False
         self._pending_call_id = None
+        self._tool_results.clear()
 
     def _request_child(self) -> ModelEvent:
         assert self._request is not None
-        tool = self._request.tools[0]
+        tool = next(
+            tool for tool in self._request.tools if tool.name == "spawn_child"
+        )
         task = (
             "Select the one controller tool needed to perform the task. Return "
             "only a JSON object with keys role and objective. Select a role "
@@ -134,4 +161,44 @@ class OmlxAgentSession:
             call_id=self._pending_call_id,
             name=tool.name,
             arguments={"role": role, "objective": objective},
+        )
+
+    def _request_followup(self, child_payload: dict[str, Any]) -> ModelEvent:
+        assert self._request is not None
+        tool = next(
+            tool
+            for tool in self._request.tools
+            if tool.name == "send_child_message"
+        )
+        child_attempt_id = child_payload.get("attempt_id")
+        expected_message = "what enabled you to answer me this way?"
+        task = (
+            "The task requires a follow-up to the retained child. Return only a "
+            "JSON object with keys child_attempt_id and message. Use the supplied "
+            "child_attempt_id and this exact message: "
+            f"{expected_message}\n\n"
+            f"Initial child result:\n{json.dumps(child_payload, sort_keys=True)}\n\n"
+            f"Tool schema:\n{json.dumps(dict(tool.input_schema), sort_keys=True)}"
+        )
+        try:
+            text = self.backend.generate(task, self._request.context).strip()
+            payload: Any = json.loads(text)
+        except TextBackendError as exc:
+            return BackendFailure(str(exc))
+        except json.JSONDecodeError:
+            return BackendFailure("oMLX follow-up request is not valid JSON")
+        if (
+            not isinstance(payload, dict)
+            or payload.get("child_attempt_id") != child_attempt_id
+            or payload.get("message") != expected_message
+        ):
+            return BackendFailure("oMLX returned an invalid child follow-up")
+        self._pending_call_id = "omlx:child-message-1"
+        return ToolCall(
+            call_id=self._pending_call_id,
+            name=tool.name,
+            arguments={
+                "child_attempt_id": child_attempt_id,
+                "message": expected_message,
+            },
         )

@@ -17,6 +17,8 @@ from harness_labs import (
 class RecordingExecutor:
     def __init__(self) -> None:
         self.attempts: list[TaskAttempt] = []
+        self.messages: list[str] = []
+        self.closed = False
 
     def execute(self, attempt: TaskAttempt) -> TaskResult:
         self.attempts.append(attempt)
@@ -26,6 +28,18 @@ class RecordingExecutor:
             payload={"text": "there is booty here"},
             evidence=("file:sha256:abc",),
         )
+
+    def send(self, attempt: TaskAttempt, message: str) -> TaskResult:
+        self.messages.append(message)
+        return TaskResult(
+            attempt_id=attempt.attempt_id,
+            status="succeeded",
+            payload={"text": "The read_file capability enabled me."},
+            evidence=("model-invocation:follow-up",),
+        )
+
+    def close(self) -> None:
+        self.closed = True
 
 
 class ChildDispatcherTests(unittest.TestCase):
@@ -122,6 +136,36 @@ class ChildDispatcherTests(unittest.TestCase):
                 imposter,
                 ChildRequest(role="file_reader", objective="Read the treasure"),
             )
+
+    def test_retained_child_receives_message_then_terminates(self) -> None:
+        initial = self.dispatcher.start_child(
+            self.root,
+            ChildRequest(role="file_reader", objective="Read the treasure"),
+            keep_alive=True,
+        )
+        followup = self.dispatcher.send_child_message(
+            self.root,
+            initial.attempt_id,
+            "what enabled you to answer me this way?",
+        )
+        self.dispatcher.terminate_child(self.root, initial.attempt_id)
+
+        self.assertEqual(followup.status, "succeeded")
+        self.assertEqual(
+            self.reader.messages,
+            ["what enabled you to answer me this way?"],
+        )
+        self.assertTrue(self.reader.closed)
+        self.assertEqual(
+            [event.event_type for event in self.dispatcher.events],
+            [
+                "child_dispatched",
+                "child_responded",
+                "child_message_sent",
+                "child_responded",
+                "child_terminated",
+            ],
+        )
 
 
 if __name__ == "__main__":

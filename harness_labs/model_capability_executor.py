@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Mapping
 
 from .attempts import TaskAttempt, TaskResult
 from .text_executor import InMemoryReferenceStore, TextBackend, TextBackendError
 
 
-@dataclass(frozen=True)
+@dataclass
 class ModelCapabilityExecutor:
     """Always run a model, while failing safely for unavailable capabilities."""
 
@@ -19,6 +19,9 @@ class ModelCapabilityExecutor:
     backend_id: str
     capabilities: frozenset[str]
     unavailable_response: str
+    keep_alive: bool = False
+    _attempt_id: str | None = field(default=None, init=False, repr=False)
+    _last_text: str | None = field(default=None, init=False, repr=False)
 
     def execute(self, attempt: TaskAttempt) -> TaskResult:
         try:
@@ -75,12 +78,58 @@ class ModelCapabilityExecutor:
             f"content:sha256:{digest}",
         )
         evidence += tuple(f"capability:{name}:unavailable" for name in missing)
-        return TaskResult(
+        result = TaskResult(
             attempt_id=attempt.attempt_id,
             status="succeeded",
             payload={"text": text},
             evidence=evidence,
         )
+        if self.keep_alive:
+            self._attempt_id = attempt.attempt_id
+            self._last_text = text
+        return result
+
+    def send(self, attempt: TaskAttempt, message: str) -> TaskResult:
+        if (
+            not self.keep_alive
+            or self._attempt_id != attempt.attempt_id
+            or self._last_text is None
+        ):
+            return self._failed(attempt, "child model session is not active")
+        task = (
+            "Continue the same child task conversation. Explain what capability "
+            "or capability limitation enabled you to give your prior response. "
+            "Answer the operator's question directly in one concise sentence.\n\n"
+            f"Operator message: {message}\n"
+            f"Prior response: {self._last_text}"
+        )
+        context = {
+            "backend_id": self.backend_id,
+            "available_capabilities": sorted(self.capabilities),
+        }
+        try:
+            raw_text = self.backend.generate(task, context)
+        except TextBackendError as exc:
+            return self._failed(attempt, str(exc))
+        if not isinstance(raw_text, str) or not raw_text.strip():
+            return self._failed(attempt, "child model returned no follow-up text")
+        text = raw_text.strip()
+        self._last_text = text
+        digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        return TaskResult(
+            attempt_id=attempt.attempt_id,
+            status="succeeded",
+            payload={"text": text},
+            evidence=(
+                f"model-backend:{self.backend_id}",
+                "model-invocation:follow-up",
+                f"content:sha256:{digest}",
+            ),
+        )
+
+    def close(self) -> None:
+        self._attempt_id = None
+        self._last_text = None
 
     @staticmethod
     def _failed(attempt: TaskAttempt, error: str) -> TaskResult:

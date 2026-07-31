@@ -161,7 +161,10 @@ class CodexAppServerSession:
                         "You are a bounded parent task attempt. You cannot read files "
                         "or run commands. Use only the controller-provided spawn_child "
                         "tool when the task requires file access. Never guess file "
-                        "contents. After the tool result, answer using only that result."
+                        "contents. When send_child_message is available and the task "
+                        "requires a follow-up, send the exact requested message to the "
+                        "same child_attempt_id before finishing. Preserve the initial "
+                        "child answer as the final answer."
                     ),
                     "dynamicTools": [
                         {

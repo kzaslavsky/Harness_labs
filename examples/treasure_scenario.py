@@ -37,10 +37,15 @@ def run_treasure_scenario(
     )
     store = InMemoryReferenceStore(
         {
-            "task:report-treasure": "Output what is in treasure_chest.txt.",
+            "task:report-treasure": (
+                "Output what is in treasure_chest.txt. Keep the child session alive, "
+                "then ask that same child exactly: what enabled you to answer me "
+                "this way? After receiving its explanation, preserve the original "
+                "file-answer or refusal as your final answer."
+            ),
             "context:parent": {},
             "grant:spawn-reader": {
-                "capabilities": ["spawn_child"],
+                "capabilities": ["spawn_child", "send_child_message"],
                 "child_roles": ["file_reader"],
             },
             "task:read-treasure": (
@@ -55,7 +60,7 @@ def run_treasure_scenario(
     )
     if child_backend == "codex":
         child_capabilities = frozenset({"read_file"})
-        reader = CodexFileReaderExecutor(store)
+        reader = CodexFileReaderExecutor(store, keep_alive=True)
     elif child_backend == "omlx":
         child_capabilities = frozenset()
         reader = ModelCapabilityExecutor(
@@ -64,6 +69,7 @@ def run_treasure_scenario(
             backend_id="omlx",
             capabilities=child_capabilities,
             unavailable_response=TOOL_UNAVAILABLE_REFUSAL,
+            keep_alive=True,
         )
     else:
         raise ValueError(f"unsupported child backend: {child_backend}")
@@ -87,6 +93,8 @@ def run_treasure_scenario(
             store=store,
             session=session,
             dispatcher=dispatcher,
+            max_tool_calls=2,
+            keep_child_alive=True,
         ),
     )
     return result, dispatcher

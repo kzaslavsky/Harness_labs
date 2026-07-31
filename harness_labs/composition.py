@@ -3,13 +3,26 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Mapping
+from typing import Mapping, Protocol
 
 from .attempts import AttemptRunner, Executor, TaskAttempt, TaskResult
 
 
 class ChildRequestDenied(RuntimeError):
     """Raised when a parent requests a child outside controller policy."""
+
+
+class ConversationalExecutor(Protocol):
+    """An executor that can receive messages after its initial result."""
+
+    def execute(self, attempt: TaskAttempt) -> TaskResult:
+        """Run the initial child turn."""
+
+    def send(self, attempt: TaskAttempt, message: str) -> TaskResult:
+        """Run one follow-up turn in the retained child session."""
+
+    def close(self) -> None:
+        """Terminate the retained child session."""
 
 
 @dataclass(frozen=True)
@@ -100,6 +113,9 @@ class ChildDispatcher:
         self._depths = {root_attempt.attempt_id: 0}
         self._child_counts: dict[str, int] = {}
         self._events: list[ChildEvent] = []
+        self._active_children: dict[
+            str, tuple[TaskAttempt, ChildAuthorization, ConversationalExecutor]
+        ] = {}
 
     @property
     def allowed_roles(self) -> tuple[str, ...]:
@@ -110,6 +126,15 @@ class ChildDispatcher:
         return tuple(self._events)
 
     def run_child(self, parent: TaskAttempt, request: ChildRequest) -> TaskResult:
+        return self.start_child(parent, request, keep_alive=False)
+
+    def start_child(
+        self,
+        parent: TaskAttempt,
+        request: ChildRequest,
+        *,
+        keep_alive: bool,
+    ) -> TaskResult:
         known_parent = self._attempts.get(parent.attempt_id)
         if known_parent != parent:
             raise ChildRequestDenied("parent attempt is not registered")
@@ -165,8 +190,22 @@ class ChildDispatcher:
             )
             raise
 
+        conversational = _as_conversational(authorization.executor)
+        if keep_alive and result.status == "succeeded":
+            if conversational is None:
+                raise ChildRequestDenied(
+                    f"child backend does not support retained sessions: "
+                    f"{authorization.backend_id}"
+                )
+            self._active_children[child_id] = (
+                child,
+                authorization,
+                conversational,
+            )
+        elif conversational is not None:
+            conversational.close()
         self._append_event(
-            "child_completed",
+            "child_responded" if keep_alive else "child_completed",
             parent,
             child,
             request.role,
@@ -177,6 +216,67 @@ class ChildDispatcher:
             result.evidence,
         )
         return result
+
+    def send_child_message(
+        self,
+        parent: TaskAttempt,
+        child_attempt_id: str,
+        message: str,
+    ) -> TaskResult:
+        active = self._active_children.get(child_attempt_id)
+        if active is None:
+            raise ChildRequestDenied("child session is not active")
+        child, authorization, executor = active
+        if child.parent_attempt_id != parent.attempt_id:
+            raise ChildRequestDenied("child session belongs to another parent")
+        if not isinstance(message, str) or not message.strip():
+            raise ChildRequestDenied("child message must be non-empty")
+        self._append_event(
+            "child_message_sent",
+            parent,
+            child,
+            authorization.role,
+            authorization.backend_id,
+            authorization.capabilities,
+            message,
+            "started",
+        )
+        result = self._runner.run(
+            child,
+            _FollowupExecutor(executor=executor, message=message),
+        )
+        self._append_event(
+            "child_responded",
+            parent,
+            child,
+            authorization.role,
+            authorization.backend_id,
+            authorization.capabilities,
+            message,
+            result.status,
+            result.evidence,
+        )
+        return result
+
+    def terminate_child(self, parent: TaskAttempt, child_attempt_id: str) -> None:
+        active = self._active_children.get(child_attempt_id)
+        if active is None:
+            return
+        child, authorization, executor = active
+        if child.parent_attempt_id != parent.attempt_id:
+            raise ChildRequestDenied("child session belongs to another parent")
+        executor.close()
+        self._active_children.pop(child_attempt_id, None)
+        self._append_event(
+            "child_terminated",
+            parent,
+            child,
+            authorization.role,
+            authorization.backend_id,
+            authorization.capabilities,
+            "controller termination after follow-up",
+            "succeeded",
+        )
 
     def _append_event(
         self,
@@ -204,3 +304,21 @@ class ChildDispatcher:
                 evidence=evidence,
             )
         )
+
+
+@dataclass(frozen=True)
+class _FollowupExecutor:
+    executor: ConversationalExecutor
+    message: str
+
+    def execute(self, attempt: TaskAttempt) -> TaskResult:
+        return self.executor.send(attempt, self.message)
+
+
+def _as_conversational(executor: Executor) -> ConversationalExecutor | None:
+    if (
+        callable(getattr(executor, "send", None))
+        and callable(getattr(executor, "close", None))
+    ):
+        return executor  # type: ignore[return-value]
+    return None
