@@ -47,8 +47,19 @@ bootstrap utility, not the complete Harness Labs runtime.
 The first runtime primitive is the dependency-free
 [`TaskAttempt` runner](harness_labs/attempts.py). It invokes one replaceable
 executor and accepts only a typed result whose identity and status validate.
-Scheduling, persistence, capability enforcement, and lifecycle control remain
-future vertical slices.
+The dependency-free [`TextExecutor`](harness_labs/text_executor.py) is the first
+concrete executor: it resolves the attempt's task, context, and capability grant,
+then delegates generation to a replaceable text backend. A complete deterministic
+poem attempt is available in
+[`examples/run_poem_attempt.py`](examples/run_poem_attempt.py). Scheduling,
+persistence, external capability enforcement, and lifecycle control remain future
+vertical slices.
+
+Run the example from the repository root:
+
+```sh
+python3 -m examples.run_poem_attempt
+```
 
 Run the inherited contract suite with Python 3.11 or later:
 
