@@ -5,7 +5,6 @@ from __future__ import annotations
 import unittest
 
 from harness_labs import (
-    TOOL_UNAVAILABLE_REFUSAL,
     BackendCapabilities,
     ChildAuthorization,
     ChildDispatcher,
@@ -76,13 +75,13 @@ class ToolSession:
 
 
 class FakeOmlxBackend:
-    def __init__(self, answer: str) -> None:
-        self.answer = answer
+    def __init__(self, *answers: str) -> None:
+        self.answers = list(answers)
         self.tasks: list[str] = []
 
     def generate(self, task, context):
         self.tasks.append(task)
-        return self.answer
+        return self.answers.pop(0)
 
 
 class SessionToolExecutorTests(unittest.TestCase):
@@ -131,8 +130,11 @@ class SessionToolExecutorTests(unittest.TestCase):
         self.assertTrue(session.closed)
         self.assertEqual(session.request.tools[0].name, "spawn_child")
 
-    def test_tool_incapable_session_refuses_without_dispatching_child(self) -> None:
-        backend = FakeOmlxBackend(TOOL_UNAVAILABLE_REFUSAL)
+    def test_non_native_tool_transport_still_dispatches_child(self) -> None:
+        backend = FakeOmlxBackend(
+            '{"role":"file_reader","objective":"Read treasure_chest.txt"}',
+            "there is booty here",
+        )
         result = SessionToolExecutor(
             self.store,
             OmlxAgentSession(backend=backend),
@@ -140,21 +142,27 @@ class SessionToolExecutorTests(unittest.TestCase):
         ).execute(self.root)
 
         self.assertEqual(result.status, "succeeded")
-        self.assertEqual(result.payload["text"], TOOL_UNAVAILABLE_REFUSAL)
-        self.assertEqual(self.reader.calls, 0)
-        self.assertEqual(self.dispatcher.events, ())
-        self.assertIn(TOOL_UNAVAILABLE_REFUSAL, backend.tasks[0])
+        self.assertEqual(result.payload["text"], "there is booty here")
+        self.assertEqual(self.reader.calls, 1)
+        self.assertEqual(len(self.dispatcher.events), 2)
+        self.assertIn("Select the one controller tool", backend.tasks[0])
+        self.assertIn("authorized child result", backend.tasks[1])
 
-    def test_tool_incapable_session_fails_closed_on_wrong_answer(self) -> None:
+    def test_non_native_tool_transport_fails_closed_on_changed_child_answer(self) -> None:
         result = SessionToolExecutor(
             self.store,
-            OmlxAgentSession(backend=FakeOmlxBackend("I guessed")),
+            OmlxAgentSession(
+                backend=FakeOmlxBackend(
+                    '{"role":"file_reader","objective":"Read treasure_chest.txt"}',
+                    "I guessed",
+                )
+            ),
             self.dispatcher,
         ).execute(self.root)
 
         self.assertEqual(result.status, "failed")
-        self.assertIn("required refusal", result.payload["error"])
-        self.assertEqual(self.reader.calls, 0)
+        self.assertIn("faithfully return", result.payload["error"])
+        self.assertEqual(self.reader.calls, 1)
 
 
 if __name__ == "__main__":

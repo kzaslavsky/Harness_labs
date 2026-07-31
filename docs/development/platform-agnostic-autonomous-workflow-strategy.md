@@ -374,16 +374,23 @@ including cached input, and rejects unexpected provider tool items. Its dynamic
 tool transport is explicitly marked experimental in its capability report.
 
 `OmlxAgentSession` uses the same contract but declares
-`native_tool_calls=False`. Capability preflight therefore exposes no child tool,
-runs no child, and requires the exact safe refusal. This proves backend
-differences are handled at the transport/capability edge rather than by
-duplicating workflow logic.
+`native_tool_calls=False`. It translates the logical tool exchange into one
+schema-described, controller-validated completion for the child request and
+another completion for the child result. Transport capability therefore changes
+only the encoding, not whether a child runs.
+
+The backend capability report separately declares capabilities available to
+authorized children. The acceptance scenario always dispatches `file_reader`.
+Codex supplies a child with `read_file`; oMLX supplies a child without it, which
+returns the exact safe refusal. This keeps orchestration decisions separate from
+execution capabilities.
 
 The acceptance scenario grants one separate Codex reader child a fixed file
 task and read-only shell, requires real command-execution evidence, and compares
 its output with the granted file. Against Codex the result is
 `there is booty here`; against the current oMLX adapter it is
-`sorry, I cannot do that, Dave.` and the child event count is zero.
+`sorry, I cannot do that, Dave.` Both paths record one child dispatch and one
+child completion.
 
 This is deliberately still a prototype. Its child events and active process
 identity are process-local, persistent Codex rollouts are not yet reattached

@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from harness_labs import (
+    TOOL_UNAVAILABLE_REFUSAL,
     AgentSession,
     AttemptRunner,
     ChildAuthorization,
@@ -15,6 +16,18 @@ from harness_labs import (
     TaskAttempt,
     TaskResult,
 )
+
+
+class UnavailableFileReaderExecutor:
+    """Return a safe child result when its backend cannot read files."""
+
+    def execute(self, attempt: TaskAttempt) -> TaskResult:
+        return TaskResult(
+            attempt_id=attempt.attempt_id,
+            status="succeeded",
+            payload={"text": TOOL_UNAVAILABLE_REFUSAL},
+            evidence=("capability:read_file:unavailable",),
+        )
 
 
 def run_treasure_scenario(
@@ -49,6 +62,10 @@ def run_treasure_scenario(
             },
         }
     )
+    if "read_file" in session.capabilities.child_capabilities:
+        reader = CodexFileReaderExecutor(store)
+    else:
+        reader = UnavailableFileReaderExecutor()
     dispatcher = ChildDispatcher(
         parent,
         {
@@ -57,7 +74,7 @@ def run_treasure_scenario(
                 task_ref="task:read-treasure",
                 context_ref="context:treasure",
                 grant_ref="grant:read-treasure",
-                executor=CodexFileReaderExecutor(store),
+                executor=reader,
             )
         },
     )

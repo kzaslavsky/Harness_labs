@@ -62,8 +62,9 @@ the existing `AttemptRunner` recursively, and records parent/child events.
 Provider integration has one narrow [`AgentSession`](harness_labs/agent_sessions.py)
 contract and one controller-owned tool loop. The resident Codex app-server
 session exposes only the controller's dynamic child tool and stays alive while
-the child works; the oMLX session declares that it has no tools and therefore
-must fail safely without dispatching a child.
+the child works. The oMLX session translates the same logical tool exchange into
+two structured text completions because its adapter does not use a native tool
+transport.
 
 A complete deterministic poem attempt is available in
 [`examples/run_poem_attempt.py`](examples/run_poem_attempt.py). Scheduling,
@@ -107,9 +108,10 @@ attempt:
 python3 -m examples.run_delegated_treasure_attempt --backend all
 ```
 
-Codex must return `there is booty here` with child file-read evidence. oMLX has
-no child tool in this adapter and must return exactly
-`sorry, I cannot do that, Dave.` with zero child events.
+Both backends must dispatch exactly one child. The Codex child has `read_file`
+and returns `there is booty here` with file-read evidence. The oMLX child lacks
+that capability and returns exactly `sorry, I cannot do that, Dave.` with
+capability-unavailable evidence.
 
 Run the inherited contract suite with Python 3.11 or later:
 

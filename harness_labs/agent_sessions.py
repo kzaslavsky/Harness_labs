@@ -17,7 +17,7 @@ TOOL_UNAVAILABLE_REFUSAL = "sorry, I cannot do that, Dave."
 
 @dataclass(frozen=True)
 class BackendCapabilities:
-    """Capabilities that affect controller dispatch decisions."""
+    """Transport features and capabilities available to authorized children."""
 
     persistent_sessions: bool
     native_tool_calls: bool
@@ -25,6 +25,7 @@ class BackendCapabilities:
     cached_input_reporting: bool
     structured_output: bool
     experimental_tool_transport: bool = False
+    child_capabilities: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -135,27 +136,24 @@ class SessionToolExecutor:
                 payload={"error": "no authorized child role is available"},
             )
 
-        capabilities = self.session.capabilities
-        tools: tuple[ToolSpec, ...] = ()
-        if capabilities.native_tool_calls:
-            tools = (
-                ToolSpec(
-                    name=self._tool_name,
-                    description="Run one controller-authorized child task.",
-                    input_schema={
-                        "type": "object",
-                        "additionalProperties": False,
-                        "required": ["role", "objective"],
-                        "properties": {
-                            "role": {
-                                "type": "string",
-                                "enum": list(allowed_roles),
-                            },
-                            "objective": {"type": "string", "minLength": 1},
+        tools = (
+            ToolSpec(
+                name=self._tool_name,
+                description="Run one controller-authorized child task.",
+                input_schema={
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["role", "objective"],
+                    "properties": {
+                        "role": {
+                            "type": "string",
+                            "enum": list(allowed_roles),
                         },
+                        "objective": {"type": "string", "minLength": 1},
                     },
-                ),
-            )
+                },
+            ),
+        )
 
         request = ModelRequest(task=task, context=context, tools=tools)
         session_id: str | None = None
@@ -183,22 +181,9 @@ class SessionToolExecutor:
             answer = event.content.strip()
             if not answer:
                 return self._failed(attempt, "backend returned no answer")
-            if capabilities.native_tool_calls and child_result is None:
-                return self._failed(attempt, "tool-capable backend did not call child")
-            if not capabilities.native_tool_calls:
-                if answer != TOOL_UNAVAILABLE_REFUSAL:
-                    return self._failed(
-                        attempt,
-                        "tool-incapable backend returned the wrong refusal",
-                    )
-                return self._succeeded(
-                    attempt,
-                    answer,
-                    session_id,
-                    event,
-                    child_result=None,
-                )
-            if child_result is None or child_result.status != "succeeded":
+            if child_result is None:
+                return self._failed(attempt, "parent backend did not call child")
+            if child_result.status != "succeeded":
                 return self._failed(attempt, "authorized child did not succeed")
             return self._succeeded(
                 attempt,
