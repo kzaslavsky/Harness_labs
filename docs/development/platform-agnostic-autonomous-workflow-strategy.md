@@ -333,6 +333,43 @@ validated -> retry_scheduled/blocked/failed
 Only the controller mutates lifecycle state. The adapter reports liveness and
 results; it does not write the checkpoint.
 
+### Controller-brokered child attempts
+
+A Task Attempt does not directly construct a privileged descendant. It may emit
+an authority-free child request containing an objective and a requested role.
+The controller maps that role to a preauthorized child template containing fixed
+task, context, grant, and executor references:
+
+```text
+Parent executor
+  -> ChildRequest(role, objective)
+  -> controller authorization and bounds
+  -> child TaskAttempt with parent_attempt_id
+  -> recursive AttemptRunner.run(child, authorized_executor)
+  -> child TaskResult
+  -> parent executor
+```
+
+This keeps synchronous recursion as the smallest composition mechanism without
+letting the parent invent grants or select an arbitrary executor. The controller
+must reject unknown parents and roles, enforce maximum depth and children per
+attempt, record dispatch and completion events, and preserve child evidence in
+the parent result.
+
+The first executable prototype lives in `harness_labs/composition.py`. Its
+`ChildDispatcher` provides synchronous bounded recursion and its
+`DelegatingExecutor` brokers the result back to the parent. The Codex-specific
+acceptance fixture in `harness_labs/codex_delegation.py` uses a schema-bound
+parent thread with command and filesystem tools disabled. The controller grants
+one separate reader child a fixed file task and read-only shell, requires real
+command-execution evidence, and compares its output with the granted file before
+returning the result to the same parent thread.
+
+This is deliberately still a prototype. Its child events and active thread
+identity are process-local, and Codex's read-only shell sandbox is not an
+OS-level single-path read allowlist. Production use still requires the durable
+event/checkpoint store, crash recovery, and capability broker described above.
+
 ## Translating the Claude workflow
 
 | Claude workflow mechanism | Platform-agnostic form |

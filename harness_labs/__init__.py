@@ -9,6 +9,20 @@ from .attempts import (
     TaskResult,
 )
 from .backends import CodexExecBackend, OmlxBackend, PoemBackend
+from .composition import (
+    ChildAuthorization,
+    ChildDispatcher,
+    ChildEvent,
+    ChildRequest,
+    ChildRequestDenied,
+    DelegatingBackend,
+    DelegatingExecutor,
+)
+from .codex_delegation import (
+    CodexDelegatingBackend,
+    CodexDelegationError,
+    CodexFileReaderExecutor,
+)
 from .text_executor import (
     InMemoryReferenceStore,
     TextBackend,
@@ -18,7 +32,17 @@ from .text_executor import (
 
 __all__ = [
     "AttemptRunner",
+    "ChildAuthorization",
+    "ChildDispatcher",
+    "ChildEvent",
+    "ChildRequest",
+    "ChildRequestDenied",
+    "DelegatingBackend",
+    "DelegatingExecutor",
     "CodexExecBackend",
+    "CodexDelegatingBackend",
+    "CodexDelegationError",
+    "CodexFileReaderExecutor",
     "Executor",
     "InvalidAttempt",
     "InvalidResult",

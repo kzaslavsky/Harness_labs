@@ -52,7 +52,17 @@ concrete executor: it resolves the attempt's task, context, and capability grant
 then delegates generation to a replaceable text backend. The reusable backend
 layer includes the deterministic `PoemBackend` and an isolated, read-only
 `CodexExecBackend`, plus an `OmlxBackend` for local OpenAI-compatible oMLX
-servers. A complete deterministic poem attempt is available in
+servers.
+
+The next prototype composes attempts through the policy-controlled
+[`ChildDispatcher`](harness_labs/composition.py). A parent submits an
+authority-free `ChildRequest`; the dispatcher chooses fixed child task, context,
+grant, and executor references, enforces depth and child-count limits, invokes
+the existing `AttemptRunner` recursively, and records parent/child events. The
+Codex acceptance example gives the parent no execution tools and gives its one
+reader child read-only shell access.
+
+A complete deterministic poem attempt is available in
 [`examples/run_poem_attempt.py`](examples/run_poem_attempt.py). Scheduling,
 persistence, external capability enforcement, and lifecycle control remain future
 vertical slices.
@@ -75,6 +85,13 @@ endpoint `http://127.0.0.1:8100/v1` with
 
 ```sh
 python3 -m examples.run_omlx_poem_attempt
+```
+
+Run the delegated treasure test with a tool-disabled Codex parent and a
+file-reading Codex child:
+
+```sh
+python3 -m examples.run_delegated_treasure_attempt
 ```
 
 Run the inherited contract suite with Python 3.11 or later:
