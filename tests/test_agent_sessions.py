@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import json
+import tempfile
 import unittest
+from pathlib import Path
 
 from harness_labs import (
+    AuditActor,
+    AuditJournal,
     BackendCapabilities,
     ChildAuthorization,
     ChildDispatcher,
@@ -182,6 +187,67 @@ class SessionToolExecutorTests(unittest.TestCase):
         self.assertTrue(session.process_alive_during_child)
         self.assertTrue(session.closed)
         self.assertEqual(session.request.tools[0].name, "spawn_child")
+
+    def test_audit_reconstructs_parent_child_and_session_lifecycle(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            audit = AuditJournal(
+                Path(temporary) / "audit-run",
+                "audit-run",
+                actor=AuditActor("controller", "controller"),
+                evidence_classification="component",
+            )
+            reader = Reader()
+            dispatcher = ChildDispatcher(
+                self.root,
+                {
+                    "file_reader": ChildAuthorization(
+                        role="file_reader",
+                        task_ref="task:child",
+                        context_ref="context:child",
+                        grant_ref="grant:child",
+                        backend_id="recording",
+                        capabilities=frozenset({"read_file"}),
+                        executor=reader,
+                    )
+                },
+                audit=audit,
+            )
+            result = SessionToolExecutor(
+                self.store,
+                ToolSession(),
+                dispatcher,
+                audit=audit,
+            ).execute(self.root)
+            audit.finalize(
+                result.status,
+                result={
+                    "attempt_id": result.attempt_id,
+                    "status": result.status,
+                },
+            )
+
+            rows = [
+                json.loads(line)
+                for line in audit.events_path.read_text(
+                    encoding="utf-8"
+                ).splitlines()
+            ]
+            event_types = [row["event_type"] for row in rows]
+
+            self.assertEqual(result.status, "succeeded")
+            self.assertIn("authorization_bound", event_types)
+            self.assertIn("child_dispatched", event_types)
+            self.assertIn("tool_result", event_types)
+            self.assertIn("session_closed", event_types)
+            self.assertIn("attempt_completed", event_types)
+            self.assertTrue(
+                any(
+                    row["actor"]["id"] == "treasure/child-1"
+                    and row["parent_attempt_id"] == "treasure"
+                    for row in rows
+                )
+            )
+            AuditJournal.verify(audit.run_dir)
 
     def test_non_native_tool_transport_still_dispatches_child(self) -> None:
         backend = FakeOmlxBackend(

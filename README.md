@@ -120,6 +120,16 @@ capability, but Qwen still runs and must return exactly
 `sorry, I cannot do that, Dave.` The result records model-invocation and
 capability-unavailable evidence.
 
+Each treasure route creates a private, durable audit directory under
+`logs/runs/` and prints its independently anchorable chain-head hash. The
+journal captures controller authorization, parent/child causality, exact
+backend transport, session identities, command receipts, durations, final
+results, and termination proof. Validate it with:
+
+```sh
+python3 -m scripts.audit_run verify logs/runs/<run-id>
+```
+
 The scenario enables retained child sessions. After the initial response, the
 parent sends the same child `what enabled you to answer me this way?`, records
 the model's explanation, and the controller terminates the child handle. Output

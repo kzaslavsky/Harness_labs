@@ -1,0 +1,96 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://harness-labs.local/schemas/audit-event.schema.json",
+  "title": "Harness audit event",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol",
+    "run_id",
+    "evidence_classification",
+    "sequence",
+    "timestamp",
+    "monotonic_ns",
+    "event_type",
+    "status",
+    "actor",
+    "attempt_id",
+    "parent_attempt_id",
+    "session_id",
+    "backend_id",
+    "duration_ms",
+    "artifacts",
+    "payload",
+    "previous_hash",
+    "event_hash"
+  ],
+  "$defs": {
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "sha256",
+        "size_bytes",
+        "media_type",
+        "evidence_classification"
+      ],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "size_bytes": { "type": "integer", "minimum": 0 },
+        "media_type": { "type": "string", "minLength": 1 },
+        "evidence_classification": {
+          "enum": [
+            "production_lifecycle",
+            "component",
+            "synthetic",
+            "fabricated_fixture"
+          ]
+        }
+      }
+    }
+  },
+  "properties": {
+    "protocol": { "const": "harness-audit-event/1" },
+    "run_id": { "type": "string", "minLength": 1 },
+    "evidence_classification": {
+      "enum": [
+        "production_lifecycle",
+        "component",
+        "synthetic",
+        "fabricated_fixture"
+      ]
+    },
+    "sequence": { "type": "integer", "minimum": 0 },
+    "timestamp": { "type": "string", "format": "date-time" },
+    "monotonic_ns": { "type": "integer", "minimum": 0 },
+    "event_type": { "type": "string", "minLength": 1 },
+    "status": { "type": "string", "minLength": 1 },
+    "actor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "role", "parent_id"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "role": { "type": "string", "minLength": 1 },
+        "parent_id": { "type": ["string", "null"] }
+      }
+    },
+    "attempt_id": { "type": ["string", "null"] },
+    "parent_attempt_id": { "type": ["string", "null"] },
+    "session_id": { "type": ["string", "null"] },
+    "backend_id": { "type": ["string", "null"] },
+    "duration_ms": { "type": ["integer", "null"], "minimum": 0 },
+    "artifacts": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/artifact" }
+    },
+    "payload": { "type": "object" },
+    "previous_hash": {
+      "type": ["string", "null"],
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "event_hash": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+  }
+}

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import queue
@@ -14,6 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
+from .audit import AuditActor, AuditJournal
 from .agent_sessions import (
     BackendCapabilities,
     BackendFailure,
@@ -68,6 +70,7 @@ class CodexAppServerSession:
     executable: str = "codex"
     timeout_seconds: float = 180.0
     persistent_rollout: bool = True
+    audit: AuditJournal | None = field(default=None, repr=False)
     _process: subprocess.Popen[str] | None = field(default=None, init=False, repr=False)
     _workspace: tempfile.TemporaryDirectory[str] | None = field(
         default=None, init=False, repr=False
@@ -133,6 +136,28 @@ class CodexAppServerSession:
         except OSError as exc:
             self._cleanup()
             raise CodexSessionError(f"Codex app-server failed to start: {exc}") from exc
+        if self.audit is not None:
+            identity = {
+                "path": codex,
+                "sha256": _file_sha256(Path(codex)),
+                "argv": argv,
+                "model": self.model,
+                "reasoning": self.reasoning,
+                "persistent_rollout": self.persistent_rollout,
+                "pid": self._process.pid,
+            }
+            artifact = self.audit.write_artifact(
+                "codex-app-server-identity",
+                identity,
+            )
+            self.audit.append(
+                "backend_process_started",
+                status="started",
+                payload=identity,
+                actor=AuditActor("codex-app-server", "backend"),
+                backend_id="codex-app-server",
+                artifacts=(artifact,),
+            )
 
         threading.Thread(target=self._read_stdout, daemon=True).start()
         threading.Thread(target=self._read_stderr, daemon=True).start()
@@ -204,6 +229,15 @@ class CodexAppServerSession:
             )
             turn_id = _nested_string(turn, "turn", "id")
             self._state = _SessionState(thread_id=thread_id, turn_id=turn_id)
+            if self.audit is not None:
+                self.audit.append(
+                    "backend_session_identified",
+                    status="succeeded",
+                    payload={"thread_id": thread_id, "turn_id": turn_id},
+                    actor=AuditActor("codex-app-server", "backend"),
+                    session_id=thread_id,
+                    backend_id="codex-app-server",
+                )
             return thread_id
         except Exception:
             self._cleanup()
@@ -338,7 +372,27 @@ class CodexAppServerSession:
         if process is None or process.stdin is None or process.poll() is not None:
             detail = " | ".join(self._stderr)
             raise CodexSessionError(f"Codex app-server is not running: {detail}")
-        process.stdin.write(json.dumps(message, separators=(",", ":")) + "\n")
+        encoded = json.dumps(message, separators=(",", ":")) + "\n"
+        if self.audit is not None:
+            artifact = self.audit.write_artifact(
+                "codex-app-server-outbound",
+                encoded,
+                media_type="application/x-ndjson",
+            )
+            self.audit.append(
+                "transport_message",
+                status="sent",
+                payload={
+                    "direction": "outbound",
+                    "method": message.get("method"),
+                    "request_id": message.get("id"),
+                },
+                actor=AuditActor("codex-app-server", "backend"),
+                session_id=self._state.thread_id if self._state else None,
+                backend_id="codex-app-server",
+                artifacts=(artifact,),
+            )
+        process.stdin.write(encoded)
         process.stdin.flush()
 
     def _read_stdout(self) -> None:
@@ -348,8 +402,30 @@ class CodexAppServerSession:
         try:
             for line in process.stdout:
                 if line.strip():
-                    self._messages.put(json.loads(line))
-        except (json.JSONDecodeError, OSError) as exc:
+                    message = json.loads(line)
+                    if self.audit is not None:
+                        artifact = self.audit.write_artifact(
+                            "codex-app-server-inbound",
+                            line,
+                            media_type="application/x-ndjson",
+                        )
+                        self.audit.append(
+                            "transport_message",
+                            status="received",
+                            payload={
+                                "direction": "inbound",
+                                "method": message.get("method"),
+                                "request_id": message.get("id"),
+                            },
+                            actor=AuditActor("codex-app-server", "backend"),
+                            session_id=(
+                                self._state.thread_id if self._state else None
+                            ),
+                            backend_id="codex-app-server",
+                            artifacts=(artifact,),
+                        )
+                    self._messages.put(message)
+        except (json.JSONDecodeError, OSError, RuntimeError) as exc:
             self._messages.put(CodexSessionError(f"invalid app-server output: {exc}"))
 
     def _read_stderr(self) -> None:
@@ -367,6 +443,8 @@ class CodexAppServerSession:
 
     def _cleanup(self) -> None:
         process = self._process
+        state = self._state
+        workspace_path = self._workspace.name if self._workspace is not None else None
         self._process = None
         self._state = None
         if process is not None:
@@ -379,9 +457,34 @@ class CodexAppServerSession:
                 except subprocess.TimeoutExpired:
                     process.kill()
                     process.wait(timeout=5)
+        returncode = process.returncode if process is not None else None
         if self._workspace is not None:
             self._workspace.cleanup()
             self._workspace = None
+        if self.audit is not None and process is not None:
+            stderr_artifact = self.audit.write_artifact(
+                "codex-app-server-stderr",
+                "\n".join(self._stderr),
+                media_type="text/plain",
+            )
+            self.audit.append(
+                "backend_process_terminated",
+                status="succeeded" if returncode is not None else "failed",
+                payload={
+                    "pid": process.pid,
+                    "returncode": returncode,
+                    "process_alive": process.poll() is None,
+                    "workspace": workspace_path,
+                    "workspace_removed": (
+                        workspace_path is None or not Path(workspace_path).exists()
+                    ),
+                    "termination_scope": "resident_process_and_workspace",
+                },
+                actor=AuditActor("codex-app-server", "backend"),
+                session_id=state.thread_id if state else None,
+                backend_id="codex-app-server",
+                artifacts=(stderr_artifact,),
+            )
 
 
 def _nested_string(value: Mapping[str, Any], key: str, nested_key: str) -> str:
@@ -391,3 +494,11 @@ def _nested_string(value: Mapping[str, Any], key: str, nested_key: str) -> str:
     ):
         raise CodexSessionError(f"Codex response is missing {key}.{nested_key}")
     return nested[nested_key]
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()

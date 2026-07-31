@@ -23,6 +23,7 @@ from .agent_sessions import (
     Usage,
 )
 from .backends import CodexExecBackend, OmlxBackend, PoemBackend
+from .audit import AuditActor, AuditArtifact, AuditError, AuditJournal
 from .composition import (
     ChildAuthorization,
     ChildDispatcher,
@@ -47,6 +48,10 @@ from .text_executor import (
 
 __all__ = [
     "AttemptRunner",
+    "AuditActor",
+    "AuditArtifact",
+    "AuditError",
+    "AuditJournal",
     "AgentSession",
     "BackendCapabilities",
     "BackendFailure",

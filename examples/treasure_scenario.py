@@ -8,6 +8,7 @@ from harness_labs import (
     TOOL_UNAVAILABLE_REFUSAL,
     AgentSession,
     AttemptRunner,
+    AuditJournal,
     ChildAuthorization,
     ChildDispatcher,
     CodexFileReaderExecutor,
@@ -25,6 +26,7 @@ def run_treasure_scenario(
     *,
     attempt_id: str,
     child_backend: str,
+    audit: AuditJournal | None = None,
 ) -> tuple[TaskResult, ChildDispatcher]:
     """Run the same parent attempt and authorization policy on any session."""
 
@@ -60,16 +62,17 @@ def run_treasure_scenario(
     )
     if child_backend == "codex":
         child_capabilities = frozenset({"read_file"})
-        reader = CodexFileReaderExecutor(store, keep_alive=True)
+        reader = CodexFileReaderExecutor(store, keep_alive=True, audit=audit)
     elif child_backend == "omlx":
         child_capabilities = frozenset()
         reader = ModelCapabilityExecutor(
             store=store,
-            backend=OmlxBackend(max_tokens=32, temperature=0.0),
+            backend=OmlxBackend(max_tokens=32, temperature=0.0, audit=audit),
             backend_id="omlx",
             capabilities=child_capabilities,
             unavailable_response=TOOL_UNAVAILABLE_REFUSAL,
             keep_alive=True,
+            audit=audit,
         )
     else:
         raise ValueError(f"unsupported child backend: {child_backend}")
@@ -86,6 +89,7 @@ def run_treasure_scenario(
                 executor=reader,
             )
         },
+        audit=audit,
     )
     result = AttemptRunner().run(
         parent,
@@ -95,6 +99,7 @@ def run_treasure_scenario(
             dispatcher=dispatcher,
             max_tool_calls=2,
             keep_child_alive=True,
+            audit=audit,
         ),
     )
     return result, dispatcher

@@ -5,9 +5,11 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass, field
+from time import monotonic_ns
 from typing import Any, Mapping, Protocol, TypeAlias
 
 from .attempts import TaskAttempt, TaskResult
+from .audit import AuditActor, AuditJournal
 from .composition import ChildDispatcher, ChildRequest, ChildRequestDenied
 from .text_executor import InMemoryReferenceStore
 
@@ -115,12 +117,71 @@ class SessionToolExecutor:
     dispatcher: ChildDispatcher
     max_tool_calls: int = 1
     keep_child_alive: bool = False
+    audit: AuditJournal | None = None
     _tool_name: str = field(default="spawn_child", init=False, repr=False)
     _message_tool_name: str = field(
         default="send_child_message", init=False, repr=False
     )
 
     def execute(self, attempt: TaskAttempt) -> TaskResult:
+        started_ns = monotonic_ns()
+        actor = AuditActor(attempt.attempt_id, "parent")
+        if self.audit is not None:
+            attempt_artifact = self.audit.write_artifact(
+                "parent-attempt",
+                {
+                    "attempt_id": attempt.attempt_id,
+                    "parent_attempt_id": attempt.parent_attempt_id,
+                    "task_ref": attempt.task_ref,
+                    "context_ref": attempt.context_ref,
+                    "grant_ref": attempt.grant_ref,
+                },
+            )
+            self.audit.append(
+                "attempt_started",
+                status="started",
+                payload={"keep_child_alive": self.keep_child_alive},
+                actor=actor,
+                attempt_id=attempt.attempt_id,
+                artifacts=(attempt_artifact,),
+            )
+            self.audit.merge_checkpoint(
+                updates={"active_attempt": attempt.attempt_id}
+            )
+        try:
+            result = self._execute(attempt)
+        except Exception as exc:
+            if self.audit is not None:
+                self.audit.append(
+                    "attempt_crashed",
+                    status="failed",
+                    payload={"error_type": type(exc).__name__, "error": str(exc)},
+                    actor=actor,
+                    attempt_id=attempt.attempt_id,
+                    duration_ms=(monotonic_ns() - started_ns) // 1_000_000,
+                )
+            raise
+        if self.audit is not None:
+            result_artifact = self.audit.write_artifact(
+                "parent-task-result",
+                _task_result_dict(result),
+            )
+            self.audit.append(
+                "attempt_completed",
+                status=result.status,
+                payload={"evidence": list(result.evidence)},
+                actor=actor,
+                attempt_id=attempt.attempt_id,
+                duration_ms=(monotonic_ns() - started_ns) // 1_000_000,
+                artifacts=(result_artifact,),
+            )
+            self.audit.merge_checkpoint(
+                status=result.status,
+                updates={"active_attempt": None},
+            )
+        return result
+
+    def _execute(self, attempt: TaskAttempt) -> TaskResult:
         resolved = self._resolve(attempt)
         if isinstance(resolved, TaskResult):
             return resolved
@@ -181,6 +242,31 @@ class SessionToolExecutor:
             )
 
         request = ModelRequest(task=task, context=context, tools=tools)
+        if self.audit is not None:
+            request_artifact = self.audit.write_artifact(
+                "parent-model-request",
+                _model_request_dict(request),
+            )
+            authorization_artifact = self.audit.write_artifact(
+                "parent-authorization",
+                {
+                    "grant_ref": attempt.grant_ref,
+                    "grant": dict(grant),
+                    "allowed_roles": list(allowed_roles),
+                    "tool_names": [tool.name for tool in tools],
+                },
+            )
+            self.audit.append(
+                "authorization_bound",
+                status="succeeded",
+                payload={
+                    "allowed_roles": list(allowed_roles),
+                    "tool_names": [tool.name for tool in tools],
+                },
+                actor=AuditActor(attempt.attempt_id, "parent"),
+                attempt_id=attempt.attempt_id,
+                artifacts=(request_artifact, authorization_artifact),
+            )
         session_id: str | None = None
         child_result: TaskResult | None = None
         child_attempt_id: str | None = None
@@ -188,7 +274,22 @@ class SessionToolExecutor:
         tool_calls = 0
         try:
             session_id = self.session.open(request)
+            if self.audit is not None:
+                sessions = self.audit.checkpoint_ids("active_sessions")
+                sessions.add(session_id)
+                self.audit.append(
+                    "session_opened",
+                    status="started",
+                    payload={"persistent": self.session.capabilities.persistent_sessions},
+                    actor=AuditActor(attempt.attempt_id, "parent"),
+                    attempt_id=attempt.attempt_id,
+                    session_id=session_id,
+                )
+                self.audit.merge_checkpoint(
+                    updates={"active_sessions": sorted(sessions)}
+                )
             event = self.session.step(session_id)
+            self._record_model_event(attempt, session_id, event)
             while isinstance(event, ToolCall):
                 tool_calls += 1
                 if tool_calls > self.max_tool_calls:
@@ -202,7 +303,25 @@ class SessionToolExecutor:
                 if child_result is not None:
                     child_attempt_id = child_result.attempt_id
                     child_turns.append(child_result)
+                if self.audit is not None:
+                    result_artifact = self.audit.write_artifact(
+                        f"tool-result-{event.call_id}",
+                        _tool_result_dict(tool_result),
+                    )
+                    self.audit.append(
+                        "tool_result",
+                        status="succeeded" if tool_result.success else "failed",
+                        payload={
+                            "call_id": tool_result.call_id,
+                            "tool_name": event.name,
+                        },
+                        actor=AuditActor(attempt.attempt_id, "parent"),
+                        attempt_id=attempt.attempt_id,
+                        session_id=session_id,
+                        artifacts=(result_artifact,),
+                    )
                 event = self.session.step(session_id, tool_result)
+                self._record_model_event(attempt, session_id, event)
 
             if isinstance(event, BackendFailure):
                 return self._failed(attempt, f"backend failed: {event.error}")
@@ -244,6 +363,43 @@ class SessionToolExecutor:
             finally:
                 if session_id is not None:
                     self.session.close(session_id)
+                    if self.audit is not None:
+                        sessions = self.audit.checkpoint_ids("active_sessions")
+                        sessions.discard(session_id)
+                        self.audit.append(
+                            "session_closed",
+                            status="succeeded",
+                            payload={"termination_scope": "transport_session"},
+                            actor=AuditActor(attempt.attempt_id, "parent"),
+                            attempt_id=attempt.attempt_id,
+                            session_id=session_id,
+                        )
+                        self.audit.merge_checkpoint(
+                            updates={"active_sessions": sorted(sessions)}
+                        )
+
+    def _record_model_event(
+        self,
+        attempt: TaskAttempt,
+        session_id: str,
+        event: ModelEvent,
+    ) -> None:
+        if self.audit is None:
+            return
+        artifact = self.audit.write_artifact(
+            f"model-event-{type(event).__name__}",
+            _model_event_dict(event),
+        )
+        status = "failed" if isinstance(event, BackendFailure) else "succeeded"
+        self.audit.append(
+            "model_event",
+            status=status,
+            payload={"event_kind": type(event).__name__},
+            actor=AuditActor(attempt.attempt_id, "parent"),
+            attempt_id=attempt.attempt_id,
+            session_id=session_id,
+            artifacts=(artifact,),
+        )
 
     def _resolve(
         self,
@@ -407,3 +563,63 @@ def tool_result_json(result: ToolResult) -> str:
         },
         sort_keys=True,
     )
+
+
+def _model_request_dict(request: ModelRequest) -> dict[str, Any]:
+    return {
+        "task": request.task,
+        "context": dict(request.context),
+        "tools": [
+            {
+                "name": tool.name,
+                "description": tool.description,
+                "input_schema": dict(tool.input_schema),
+            }
+            for tool in request.tools
+        ],
+        "unavailable_tool_response": request.unavailable_tool_response,
+    }
+
+
+def _tool_result_dict(result: ToolResult) -> dict[str, Any]:
+    return {
+        "call_id": result.call_id,
+        "success": result.success,
+        "payload": dict(result.payload),
+        "evidence": list(result.evidence),
+    }
+
+
+def _model_event_dict(event: ModelEvent) -> dict[str, Any]:
+    if isinstance(event, ToolCall):
+        return {
+            "kind": "tool_call",
+            "call_id": event.call_id,
+            "name": event.name,
+            "arguments": dict(event.arguments),
+        }
+    if isinstance(event, FinalOutput):
+        return {
+            "kind": "final_output",
+            "content": event.content,
+            "usage": (
+                {
+                    "input_tokens": event.usage.input_tokens,
+                    "cached_input_tokens": event.usage.cached_input_tokens,
+                    "output_tokens": event.usage.output_tokens,
+                }
+                if event.usage is not None
+                else None
+            ),
+            "evidence": list(event.evidence),
+        }
+    return {"kind": "backend_failure", "error": event.error}
+
+
+def _task_result_dict(result: TaskResult) -> dict[str, Any]:
+    return {
+        "attempt_id": result.attempt_id,
+        "status": result.status,
+        "payload": dict(result.payload),
+        "evidence": list(result.evidence),
+    }

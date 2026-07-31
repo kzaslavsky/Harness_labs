@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from time import monotonic_ns
 from typing import Mapping, Protocol
 
 from .attempts import AttemptRunner, Executor, TaskAttempt, TaskResult
+from .audit import AuditActor, AuditJournal
 
 
 class ChildRequestDenied(RuntimeError):
@@ -92,6 +94,7 @@ class ChildDispatcher:
         runner: AttemptRunner | None = None,
         max_depth: int = 1,
         max_children_per_attempt: int = 1,
+        audit: AuditJournal | None = None,
     ) -> None:
         if root_attempt.parent_attempt_id is not None:
             raise ValueError("dispatcher root must not have a parent")
@@ -113,6 +116,7 @@ class ChildDispatcher:
         self._depths = {root_attempt.attempt_id: 0}
         self._child_counts: dict[str, int] = {}
         self._events: list[ChildEvent] = []
+        self._audit = audit
         self._active_children: dict[
             str, tuple[TaskAttempt, ChildAuthorization, ConversationalExecutor]
         ] = {}
@@ -175,6 +179,7 @@ class ChildDispatcher:
             "started",
         )
 
+        started_ns = monotonic_ns()
         try:
             result = self._runner.run(child, authorization.executor)
         except Exception:
@@ -187,6 +192,7 @@ class ChildDispatcher:
                 authorization.capabilities,
                 request.objective,
                 "failed",
+                duration_ms=(monotonic_ns() - started_ns) // 1_000_000,
             )
             raise
 
@@ -214,6 +220,7 @@ class ChildDispatcher:
             request.objective,
             result.status,
             result.evidence,
+            duration_ms=(monotonic_ns() - started_ns) // 1_000_000,
         )
         return result
 
@@ -241,6 +248,7 @@ class ChildDispatcher:
             message,
             "started",
         )
+        started_ns = monotonic_ns()
         result = self._runner.run(
             child,
             _FollowupExecutor(executor=executor, message=message),
@@ -255,6 +263,7 @@ class ChildDispatcher:
             message,
             result.status,
             result.evidence,
+            duration_ms=(monotonic_ns() - started_ns) // 1_000_000,
         )
         return result
 
@@ -289,21 +298,65 @@ class ChildDispatcher:
         objective: str,
         status: str,
         evidence: tuple[str, ...] = (),
+        duration_ms: int | None = None,
     ) -> None:
-        self._events.append(
-            ChildEvent(
-                sequence=len(self._events),
-                event_type=event_type,
-                parent_attempt_id=parent.attempt_id,
-                child_attempt_id=child.attempt_id,
-                role=role,
-                backend_id=backend_id,
-                capabilities=tuple(sorted(capabilities)),
-                objective=objective,
-                status=status,
-                evidence=evidence,
-            )
+        event = ChildEvent(
+            sequence=len(self._events),
+            event_type=event_type,
+            parent_attempt_id=parent.attempt_id,
+            child_attempt_id=child.attempt_id,
+            role=role,
+            backend_id=backend_id,
+            capabilities=tuple(sorted(capabilities)),
+            objective=objective,
+            status=status,
+            evidence=evidence,
         )
+        self._events.append(event)
+        if self._audit is not None:
+            artifact = self._audit.write_artifact(
+                f"child-event-{event.sequence}",
+                {
+                    "sequence": event.sequence,
+                    "event_type": event.event_type,
+                    "parent_attempt_id": event.parent_attempt_id,
+                    "child_attempt_id": event.child_attempt_id,
+                    "role": event.role,
+                    "backend_id": event.backend_id,
+                    "capabilities": list(event.capabilities),
+                    "objective": event.objective,
+                    "status": event.status,
+                    "evidence": list(event.evidence),
+                },
+            )
+            self._audit.append(
+                event.event_type,
+                status=event.status,
+                payload={
+                    "role": event.role,
+                    "capabilities": list(event.capabilities),
+                    "objective": event.objective,
+                    "evidence": list(event.evidence),
+                },
+                attempt_id=event.child_attempt_id,
+                parent_attempt_id=event.parent_attempt_id,
+                backend_id=event.backend_id,
+                duration_ms=duration_ms,
+                actor=AuditActor(
+                    id=event.child_attempt_id,
+                    role=event.role,
+                    parent_id=event.parent_attempt_id,
+                ),
+                artifacts=(artifact,),
+            )
+            checkpoint = self._audit.checkpoint_ids("active_children")
+            if event.event_type == "child_dispatched":
+                checkpoint.add(event.child_attempt_id)
+            elif event.event_type in {"child_completed", "child_terminated"}:
+                checkpoint.discard(event.child_attempt_id)
+            self._audit.merge_checkpoint(
+                updates={"active_children": sorted(checkpoint)}
+            )
 
 
 @dataclass(frozen=True)

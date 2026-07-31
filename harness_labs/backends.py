@@ -2,31 +2,60 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import subprocess
 import tempfile
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from time import monotonic_ns
 from typing import Any, Literal, Mapping
 from urllib.parse import urlparse
 
+from .audit import AuditActor, AuditJournal
 from .text_executor import TextBackendError
 
 
+@dataclass(frozen=True)
 class PoemBackend:
     """The original deterministic poem backend."""
 
+    audit: AuditJournal | None = field(default=None, compare=False, repr=False)
+
     def generate(self, task: str, context: Mapping[str, Any]) -> str:
         subject = context.get("subject", "the operator")
-        return (
+        text = (
             f"For {subject}, who keeps the systems bright,\n"
             "And turns uncertain signals into light,\n"
             "May every careful command find its way,\n"
             "And quiet, well-run engines mark the day."
         )
+        if self.audit is not None:
+            request = self.audit.write_artifact(
+                "poem-backend-request",
+                {"task": task, "context": dict(context)},
+            )
+            response = self.audit.write_artifact(
+                "poem-backend-response",
+                text,
+                media_type="text/plain",
+            )
+            self.audit.append(
+                "backend_transport",
+                status="succeeded",
+                payload={
+                    "transport": "deterministic-python",
+                    "implementation": f"{type(self).__module__}.{type(self).__name__}",
+                },
+                actor=AuditActor("poem", "backend"),
+                backend_id="poem",
+                duration_ms=0,
+                artifacts=(request, response),
+            )
+        return text
 
 
 @dataclass(frozen=True)
@@ -37,6 +66,7 @@ class CodexExecBackend:
     reasoning: Literal["low", "medium"] = "low"
     executable: str = "codex"
     timeout_seconds: float | None = None
+    audit: AuditJournal | None = field(default=None, compare=False, repr=False)
 
     def generate(self, task: str, context: Mapping[str, Any]) -> str:
         codex = shutil.which(self.executable)
@@ -54,6 +84,18 @@ class CodexExecBackend:
             "text, with no preface, explanation, quotation marks, or markdown fence.\n\n"
             f"Task:\n{task}\n\nContext:\n{context_json}\n"
         )
+        executable_artifact = None
+        prompt_artifact = None
+        if self.audit is not None:
+            executable_artifact = self.audit.write_artifact(
+                "codex-executable-identity",
+                {"path": codex, "sha256": _file_sha256(Path(codex))},
+            )
+            prompt_artifact = self.audit.write_artifact(
+                "codex-exec-prompt",
+                prompt,
+                media_type="text/plain",
+            )
 
         with tempfile.TemporaryDirectory(prefix="harness-codex-text-") as temporary:
             working_directory = Path(temporary)
@@ -83,6 +125,7 @@ class CodexExecBackend:
                 str(output_path),
                 "-",
             ]
+            started_ns = monotonic_ns()
             try:
                 completed = subprocess.run(
                     argv,
@@ -96,6 +139,39 @@ class CodexExecBackend:
                 raise TextBackendError("Codex execution timed out") from exc
             except OSError as exc:
                 raise TextBackendError(f"Codex execution failed to start: {exc}") from exc
+            if self.audit is not None:
+                stdout_artifact = self.audit.write_artifact(
+                    "codex-exec-stdout",
+                    completed.stdout,
+                    media_type="application/x-ndjson",
+                )
+                stderr_artifact = self.audit.write_artifact(
+                    "codex-exec-stderr",
+                    completed.stderr,
+                    media_type="text/plain",
+                )
+                self.audit.append(
+                    "backend_transport",
+                    status="succeeded" if completed.returncode == 0 else "failed",
+                    payload={
+                        "transport": "codex-exec",
+                        "model": self.model,
+                        "reasoning": self.reasoning,
+                        "executable_path": codex,
+                        "executable_sha256": _file_sha256(Path(codex)),
+                        "argv": argv,
+                        "returncode": completed.returncode,
+                    },
+                    actor=AuditActor("codex-exec", "backend"),
+                    backend_id="codex-exec",
+                    duration_ms=(monotonic_ns() - started_ns) // 1_000_000,
+                    artifacts=(
+                        prompt_artifact,
+                        executable_artifact,
+                        stdout_artifact,
+                        stderr_artifact,
+                    ),
+                )
 
             if completed.returncode != 0:
                 detail = completed.stderr.strip() or completed.stdout.strip()
@@ -120,6 +196,7 @@ class OmlxBackend:
     timeout_seconds: float = 120.0
     max_tokens: int = 256
     temperature: float = 0.2
+    audit: AuditJournal | None = field(default=None, compare=False, repr=False)
 
     def __post_init__(self) -> None:
         parsed = urlparse(self.endpoint)
@@ -166,24 +243,65 @@ class OmlxBackend:
             "max_tokens": self.max_tokens,
             "chat_template_kwargs": {"enable_thinking": False},
         }
+        request_body = json.dumps(body).encode("utf-8")
         request = urllib.request.Request(
             self.endpoint,
-            data=json.dumps(body).encode("utf-8"),
+            data=request_body,
             headers={"Content-Type": "application/json"},
             method="POST",
         )
 
+        request_artifact = None
+        if self.audit is not None:
+            request_artifact = self.audit.write_artifact(
+                "omlx-http-request",
+                request_body,
+                media_type="application/json",
+            )
+        started_ns = monotonic_ns()
         try:
             with urllib.request.urlopen(
                 request, timeout=self.timeout_seconds
             ) as response:
                 response_body = response.read()
+                response_status = getattr(response, "status", 200)
         except urllib.error.HTTPError as exc:
-            detail = exc.read(512).decode("utf-8", errors="replace").strip()
+            error_body = exc.read()
+            self._record_transport(
+                request_artifact,
+                error_body,
+                status="failed",
+                status_code=exc.code,
+                duration_ms=(monotonic_ns() - started_ns) // 1_000_000,
+            )
+            detail = error_body[:512].decode("utf-8", errors="replace").strip()
             suffix = f": {detail}" if detail else ""
             raise TextBackendError(f"oMLX returned HTTP {exc.code}{suffix}") from exc
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            if self.audit is not None:
+                self.audit.append(
+                    "backend_transport",
+                    status="failed",
+                    payload={
+                        "transport": "openai-compatible-http",
+                        "endpoint": self.endpoint,
+                        "model": self.model,
+                        "error_type": type(exc).__name__,
+                        "error": str(exc),
+                    },
+                    actor=AuditActor("omlx", "backend"),
+                    backend_id="omlx",
+                    duration_ms=(monotonic_ns() - started_ns) // 1_000_000,
+                    artifacts=(request_artifact,) if request_artifact else (),
+                )
             raise TextBackendError(f"oMLX request failed: {exc}") from exc
+        self._record_transport(
+            request_artifact,
+            response_body,
+            status="succeeded",
+            status_code=response_status,
+            duration_ms=(monotonic_ns() - started_ns) // 1_000_000,
+        )
 
         try:
             payload = json.loads(response_body)
@@ -193,3 +311,46 @@ class OmlxBackend:
         if not text:
             raise TextBackendError("oMLX returned an empty chat completion")
         return text
+
+    def _record_transport(
+        self,
+        request_artifact,
+        response_body: bytes,
+        *,
+        status: str,
+        status_code: int,
+        duration_ms: int,
+    ) -> None:
+        if self.audit is None:
+            return
+        response_artifact = self.audit.write_artifact(
+            "omlx-http-response",
+            response_body,
+            media_type="application/json",
+        )
+        self.audit.append(
+            "backend_transport",
+            status=status,
+            payload={
+                "transport": "openai-compatible-http",
+                "endpoint": self.endpoint,
+                "model": self.model,
+                "temperature": self.temperature,
+                "max_tokens": self.max_tokens,
+                "timeout_seconds": self.timeout_seconds,
+                "http_status": status_code,
+                "headers_recorded": ["Content-Type"],
+            },
+            actor=AuditActor("omlx", "backend"),
+            backend_id="omlx",
+            duration_ms=duration_ms,
+            artifacts=(request_artifact, response_artifact),
+        )
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()

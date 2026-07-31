@@ -3,8 +3,17 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
+from pathlib import Path
+from uuid import uuid4
 
-from harness_labs import CodexAppServerSession, OmlxAgentSession
+from harness_labs import (
+    AuditActor,
+    AuditJournal,
+    CodexAppServerSession,
+    OmlxAgentSession,
+    OmlxBackend,
+)
 
 from .treasure_scenario import run_treasure_scenario
 
@@ -34,16 +43,48 @@ def main() -> int:
             else ((parent_name,) if args.child == "matched" else (args.child,))
         )
         for child_name in child_names:
+            run_id = (
+                datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+                + f"-{parent_name}-to-{child_name}-{uuid4().hex[:8]}"
+            )
+            run_dir = (
+                Path(__file__).resolve().parent.parent
+                / "logs"
+                / "runs"
+                / run_id
+            )
+            audit = AuditJournal(
+                run_dir,
+                run_id,
+                actor=AuditActor(run_id, "controller"),
+            )
             session = (
-                CodexAppServerSession()
+                CodexAppServerSession(audit=audit)
                 if parent_name == "codex"
-                else OmlxAgentSession()
+                else OmlxAgentSession(
+                    backend=OmlxBackend(
+                        max_tokens=128,
+                        temperature=0.0,
+                        audit=audit,
+                    )
+                )
             )
             result, dispatcher = run_treasure_scenario(
                 session,
                 attempt_id=f"treasure-{parent_name}-to-{child_name}",
                 child_backend=child_name,
+                audit=audit,
             )
+            audit.finalize(
+                result.status,
+                result={
+                    "attempt_id": result.attempt_id,
+                    "status": result.status,
+                    "payload": dict(result.payload),
+                    "evidence": list(result.evidence),
+                },
+            )
+            verification = AuditJournal.verify(run_dir)
             print(f"parent={parent_name} child={child_name}:")
             print(f"  status: {result.status}")
             if result.status == "succeeded":
@@ -71,6 +112,8 @@ def main() -> int:
                 "  child terminated: "
                 f"{any(event.event_type == 'child_terminated' for event in dispatcher.events)}"
             )
+            print(f"  audit: {run_dir}")
+            print(f"  audit head: {verification['head_hash']}")
             for evidence in result.evidence:
                 print(f"  evidence: {evidence}")
     return exit_code

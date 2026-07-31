@@ -4,13 +4,21 @@ from __future__ import annotations
 
 import json
 import subprocess
+import tempfile
 import unittest
 from io import BytesIO
 from urllib.error import URLError
 from pathlib import Path
 from unittest.mock import patch
 
-from harness_labs import CodexExecBackend, OmlxBackend, PoemBackend, TextBackendError
+from harness_labs import (
+    AuditActor,
+    AuditJournal,
+    CodexExecBackend,
+    OmlxBackend,
+    PoemBackend,
+    TextBackendError,
+)
 
 
 class BackendTests(unittest.TestCase):
@@ -97,6 +105,48 @@ class BackendTests(unittest.TestCase):
     def test_omlx_backend_refuses_non_loopback_endpoint(self) -> None:
         with self.assertRaisesRegex(ValueError, "loopback"):
             OmlxBackend(endpoint="https://example.com/v1/chat/completions")
+
+    @patch("harness_labs.backends.urllib.request.urlopen")
+    def test_omlx_audit_retains_exact_request_and_response(
+        self, urlopen_mock
+    ) -> None:
+        class Response(BytesIO):
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                self.close()
+
+        raw_response = b'{"choices":[{"message":{"content":"audited"}}]}'
+        urlopen_mock.return_value = Response(raw_response)
+        with tempfile.TemporaryDirectory() as temporary:
+            journal = AuditJournal(
+                Path(temporary) / "run",
+                "run",
+                actor=AuditActor("controller", "controller"),
+                evidence_classification="component",
+            )
+            backend = OmlxBackend(audit=journal)
+
+            self.assertEqual(backend.generate("task", {"value": 1}), "audited")
+
+            rows = [
+                json.loads(line)
+                for line in journal.events_path.read_text(
+                    encoding="utf-8"
+                ).splitlines()
+            ]
+            transport = next(
+                row for row in rows if row["event_type"] == "backend_transport"
+            )
+            artifacts = [
+                (journal.run_dir / item["path"]).read_bytes()
+                for item in transport["artifacts"]
+            ]
+            self.assertEqual(artifacts[0], urlopen_mock.call_args.args[0].data)
+            self.assertEqual(artifacts[1], raw_response)
 
     @patch("harness_labs.backends.urllib.request.urlopen")
     def test_omlx_backend_reports_connection_failure(self, urlopen_mock) -> None:

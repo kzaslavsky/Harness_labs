@@ -14,12 +14,59 @@ logs/runs/<run-id>/
 ├── decisions.jsonl    # run-scoped material decisions
 ├── checkpoint.json    # atomically replaced resumable state
 ├── summary.json       # final metrics and outcome
+├── manifest.json      # terminal hashes and artifact inventory
+├── .audit.lock        # sole-writer advisory lock
 └── artifacts/         # bounded evidence referenced by hash
 ```
 
 Event and decision records MUST validate against the schemas in `schemas/`.
 Sequence numbers are monotonic within a run. Timestamps use UTC RFC 3339.
 Artifacts record a relative path, media type, size, and SHA-256 digest.
+
+The executable attempt runner uses the `harness-audit-event/1`,
+`harness-audit-checkpoint/1`, and `harness-audit-manifest/1` contracts. Every
+event includes a run identity, contiguous sequence, UTC and monotonic time,
+actor/parent identity, attempt/session/backend identity where applicable,
+duration, evidence classification, evidence artifacts, and the preceding event
+hash. The event hash is computed over canonical JSON. The terminal manifest
+binds the event-chain head, the final checkpoint, and a complete artifact
+inventory.
+
+Writes are fail-closed, append-only for events, `fsync`-backed, and protected by
+a sole-writer lock. Checkpoints and artifacts are atomically published. Run
+directories are mode `0700`; event, checkpoint, manifest, lock, and artifact
+files are mode `0600`.
+
+The treasure scenario additionally records:
+
+- resolved authorization and task-attempt contracts;
+- normalized model events, tool calls/results, child lifecycle, and durations;
+- Codex executable path/digest, arguments, thread/turn identities, command
+  receipts, stdout/stderr, and process/workspace termination proof;
+- exact oMLX HTTP request/response bodies and non-secret transport settings;
+- exact app-server JSONL in both directions; and
+- final task results and child follow-up results.
+
+Raw transport artifacts are intentionally retained for this PHI-free
+verification scenario. Never enable that capture for credentials, secrets,
+sensitive personal data, or unredacted third-party content. Authentication
+files, authorization headers, environment dumps, and raw model reasoning are
+not recorded.
+
+Verify a run, or terminalize a nonterminal run after its controller disappeared:
+
+```sh
+python3 -m scripts.audit_run verify logs/runs/<run-id>
+python3 -m scripts.audit_run recover logs/runs/<run-id> \
+  --reason "controller process disappeared"
+```
+
+Recovery validates the existing chain and checkpoint before writing a recovery
+event, clears active child/session state, and produces an `interrupted`
+manifest. It does not silently replay model or tool actions. A printed
+`head_hash` can be copied to an independent system as an external anchor;
+without such an anchor, a privileged actor who can rewrite the entire run
+directory can also regenerate its hash chain.
 
 Runtime logs are ignored by Git. Accepted decisions with durable architectural
 impact are promoted to `docs/decisions/` through a normal reviewed change.

@@ -9,9 +9,11 @@ import subprocess
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
+from time import monotonic_ns
 from typing import Mapping
 
 from .attempts import TaskAttempt, TaskResult
+from .audit import AuditActor, AuditJournal
 from .text_executor import InMemoryReferenceStore
 
 
@@ -43,6 +45,7 @@ class CodexFileReaderExecutor:
     executable: str = "codex"
     timeout_seconds: float | None = None
     keep_alive: bool = False
+    audit: AuditJournal | None = field(default=None, repr=False)
     _temporary: tempfile.TemporaryDirectory[str] | None = field(
         default=None, init=False, repr=False
     )
@@ -109,6 +112,8 @@ class CodexFileReaderExecutor:
                 prompt=prompt,
                 disabled_features=_READER_DISABLED_FEATURES,
                 ephemeral=not self.keep_alive,
+                audit=self.audit,
+                attempt_id=attempt.attempt_id,
             )
         except CodexDelegationError as exc:
             temporary.cleanup()
@@ -133,7 +138,12 @@ class CodexFileReaderExecutor:
         result = TaskResult(
             attempt_id=attempt.attempt_id,
             status="succeeded",
-            payload={"text": actual},
+            payload={
+                "text": actual,
+                "session_id": turn.thread_id,
+                "backend_id": "codex-exec",
+                "model": self.model,
+            },
             evidence=(
                 f"file:sha256:{file_digest}",
                 f"content:sha256:{content_digest}",
@@ -177,6 +187,8 @@ class CodexFileReaderExecutor:
                 disabled_features=_READER_DISABLED_FEATURES,
                 ephemeral=False,
                 resume_thread_id=self._thread_id,
+                audit=self.audit,
+                attempt_id=attempt.attempt_id,
             )
         except CodexDelegationError as exc:
             return self._failed(attempt, str(exc))
@@ -187,7 +199,12 @@ class CodexFileReaderExecutor:
         return TaskResult(
             attempt_id=attempt.attempt_id,
             status="succeeded",
-            payload={"text": text},
+            payload={
+                "text": text,
+                "session_id": turn.thread_id,
+                "backend_id": "codex-exec",
+                "model": self.model,
+            },
             evidence=(
                 "codex-session:resumed",
                 f"content:sha256:{digest}",
@@ -195,12 +212,43 @@ class CodexFileReaderExecutor:
         )
 
     def close(self) -> None:
+        thread_id = self._thread_id
+        attempt_id = self._attempt_id
+        workspace = str(self._workspace) if self._workspace is not None else None
         if self._temporary is not None:
             self._temporary.cleanup()
         self._temporary = None
         self._workspace = None
         self._thread_id = None
         self._attempt_id = None
+        if self.audit is not None and thread_id is not None:
+            self.audit.append(
+                "child_session_terminated",
+                status="succeeded",
+                payload={
+                    "thread_id": thread_id,
+                    "controller_handle_active": False,
+                    "process_alive": False,
+                    "workspace": workspace,
+                    "workspace_removed": (
+                        workspace is None or not Path(workspace).exists()
+                    ),
+                    "provider_thread_deleted": False,
+                    "termination_scope": "controller_handle_and_workspace",
+                },
+                actor=AuditActor(
+                    attempt_id or "codex-child",
+                    "file_reader",
+                    parent_id=(
+                        attempt_id.rsplit("/child-", 1)[0]
+                        if attempt_id and "/child-" in attempt_id
+                        else None
+                    ),
+                ),
+                attempt_id=attempt_id,
+                session_id=thread_id,
+                backend_id="codex-exec",
+            )
 
     @staticmethod
     def _failed(attempt: TaskAttempt, error: str) -> TaskResult:
@@ -234,6 +282,8 @@ def _invoke_codex(
     ephemeral: bool,
     schema_path: Path | None = None,
     resume_thread_id: str | None = None,
+    audit: AuditJournal | None = None,
+    attempt_id: str | None = None,
 ) -> _CodexTurn:
     codex = shutil.which(executable)
     if codex is None:
@@ -271,6 +321,7 @@ def _invoke_codex(
         argv.append(resume_thread_id)
     argv.append("-")
 
+    started_ns = monotonic_ns()
     try:
         completed = subprocess.run(
             argv,
@@ -285,6 +336,64 @@ def _invoke_codex(
         raise CodexDelegationError("Codex execution timed out") from exc
     except OSError as exc:
         raise CodexDelegationError(f"Codex execution failed to start: {exc}") from exc
+    if audit is not None:
+        prompt_artifact = audit.write_artifact(
+            "codex-child-prompt",
+            prompt,
+            media_type="text/plain",
+        )
+        stdout_artifact = audit.write_artifact(
+            "codex-child-stdout",
+            completed.stdout,
+            media_type="application/x-ndjson",
+        )
+        stderr_artifact = audit.write_artifact(
+            "codex-child-stderr",
+            completed.stderr,
+            media_type="text/plain",
+        )
+        executable_identity = {
+            "path": codex,
+            "sha256": _file_sha256(Path(codex)),
+        }
+        executable_artifact = audit.write_artifact(
+            "codex-child-executable-identity",
+            executable_identity,
+        )
+        audit.append(
+            "backend_transport",
+            status="succeeded" if completed.returncode == 0 else "failed",
+            payload={
+                "transport": "codex-exec",
+                "argv": argv,
+                "cwd": str(workspace),
+                "returncode": completed.returncode,
+                "model": model,
+                "reasoning": reasoning,
+                "executable": executable_identity,
+                "resume_thread_id": resume_thread_id,
+                "ephemeral": ephemeral,
+            },
+            actor=AuditActor(
+                attempt_id or "codex-child",
+                "file_reader",
+                parent_id=(
+                    attempt_id.rsplit("/child-", 1)[0]
+                    if attempt_id and "/child-" in attempt_id
+                    else None
+                ),
+            ),
+            attempt_id=attempt_id,
+            session_id=resume_thread_id,
+            backend_id="codex-exec",
+            duration_ms=(monotonic_ns() - started_ns) // 1_000_000,
+            artifacts=(
+                prompt_artifact,
+                stdout_artifact,
+                stderr_artifact,
+                executable_artifact,
+            ),
+        )
     if completed.returncode != 0:
         detail = (completed.stderr.strip() or completed.stdout.strip())[-1000:]
         raise CodexDelegationError(
@@ -327,9 +436,53 @@ def _invoke_codex(
     final_message = output_path.read_text(encoding="utf-8").strip()
     if not final_message:
         raise CodexDelegationError("Codex returned an empty final message")
-    return _CodexTurn(
+    turn = _CodexTurn(
         final_message=final_message,
         thread_id=thread_ids[0],
         item_types=tuple(item_types),
         commands=tuple(commands),
     )
+    if audit is not None:
+        final_artifact = audit.write_artifact(
+            "codex-child-final-message",
+            final_message,
+            media_type="text/plain",
+        )
+        commands_artifact = audit.write_artifact(
+            "codex-child-command-receipts",
+            [
+                {"command": command.command, "exit_code": command.exit_code}
+                for command in commands
+            ],
+        )
+        audit.append(
+            "backend_turn_completed",
+            status="succeeded",
+            payload={
+                "thread_id": turn.thread_id,
+                "item_types": list(turn.item_types),
+                "command_count": len(turn.commands),
+            },
+            actor=AuditActor(
+                attempt_id or "codex-child",
+                "file_reader",
+                parent_id=(
+                    attempt_id.rsplit("/child-", 1)[0]
+                    if attempt_id and "/child-" in attempt_id
+                    else None
+                ),
+            ),
+            attempt_id=attempt_id,
+            session_id=turn.thread_id,
+            backend_id="codex-exec",
+            artifacts=(final_artifact, commands_artifact),
+        )
+    return turn
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()

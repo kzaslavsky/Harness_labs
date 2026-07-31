@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping
 
 from .attempts import TaskAttempt, TaskResult
+from .audit import AuditActor, AuditJournal
 from .text_executor import InMemoryReferenceStore, TextBackend, TextBackendError
 
 
@@ -20,8 +21,10 @@ class ModelCapabilityExecutor:
     capabilities: frozenset[str]
     unavailable_response: str
     keep_alive: bool = False
+    audit: AuditJournal | None = field(default=None, repr=False)
     _attempt_id: str | None = field(default=None, init=False, repr=False)
     _last_text: str | None = field(default=None, init=False, repr=False)
+    _session_id: str | None = field(default=None, init=False, repr=False)
 
     def execute(self, attempt: TaskAttempt) -> TaskResult:
         try:
@@ -81,12 +84,35 @@ class ModelCapabilityExecutor:
         result = TaskResult(
             attempt_id=attempt.attempt_id,
             status="succeeded",
-            payload={"text": text},
+            payload={
+                "text": text,
+                "session_id": f"{self.backend_id}:{attempt.attempt_id}",
+                "backend_id": self.backend_id,
+            },
             evidence=evidence,
         )
         if self.keep_alive:
             self._attempt_id = attempt.attempt_id
             self._last_text = text
+            self._session_id = f"{self.backend_id}:{attempt.attempt_id}"
+            if self.audit is not None:
+                self.audit.append(
+                    "child_session_opened",
+                    status="started",
+                    payload={
+                        "emulated_session": True,
+                        "available_capabilities": sorted(self.capabilities),
+                    },
+                    actor=AuditActor(
+                        attempt.attempt_id,
+                        "model_child",
+                        parent_id=attempt.parent_attempt_id,
+                    ),
+                    attempt_id=attempt.attempt_id,
+                    parent_attempt_id=attempt.parent_attempt_id,
+                    session_id=self._session_id,
+                    backend_id=self.backend_id,
+                )
         return result
 
     def send(self, attempt: TaskAttempt, message: str) -> TaskResult:
@@ -119,7 +145,11 @@ class ModelCapabilityExecutor:
         return TaskResult(
             attempt_id=attempt.attempt_id,
             status="succeeded",
-            payload={"text": text},
+            payload={
+                "text": text,
+                "session_id": self._session_id,
+                "backend_id": self.backend_id,
+            },
             evidence=(
                 f"model-backend:{self.backend_id}",
                 "model-invocation:follow-up",
@@ -128,8 +158,34 @@ class ModelCapabilityExecutor:
         )
 
     def close(self) -> None:
+        attempt_id = self._attempt_id
+        session_id = self._session_id
         self._attempt_id = None
         self._last_text = None
+        self._session_id = None
+        if self.audit is not None and session_id is not None:
+            self.audit.append(
+                "child_session_terminated",
+                status="succeeded",
+                payload={
+                    "emulated_session": True,
+                    "controller_handle_active": False,
+                    "process_alive": False,
+                    "termination_scope": "in_memory_conversation_state",
+                },
+                actor=AuditActor(
+                    attempt_id or "model-child",
+                    "model_child",
+                    parent_id=(
+                        attempt_id.rsplit("/child-", 1)[0]
+                        if attempt_id and "/child-" in attempt_id
+                        else None
+                    ),
+                ),
+                attempt_id=attempt_id,
+                session_id=session_id,
+                backend_id=self.backend_id,
+            )
 
     @staticmethod
     def _failed(attempt: TaskAttempt, error: str) -> TaskResult:
