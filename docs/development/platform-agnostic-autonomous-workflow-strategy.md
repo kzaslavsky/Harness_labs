@@ -379,11 +379,13 @@ schema-described, controller-validated completion for the child request and
 another completion for the child result. Transport capability therefore changes
 only the encoding, not whether a child runs.
 
-The backend capability report separately declares capabilities available to
-authorized children. The acceptance scenario always dispatches `file_reader`.
-Codex supplies a child with `read_file`; oMLX supplies a child without it, which
-returns the exact safe refusal. This keeps orchestration decisions separate from
-execution capabilities.
+The controller-owned child route separately declares its backend identity,
+capabilities, and executor. Parent transport capabilities never select or imply
+the child backend. The acceptance scenario always dispatches `file_reader`.
+Codex supplies a child with `read_file`; oMLX supplies a model-backed child
+without it. Qwen is still invoked, receives no file path, and its exact safe
+refusal is validated. This keeps orchestration, parent transport, and child
+execution capabilities separate.
 
 The acceptance scenario grants one separate Codex reader child a fixed file
 task and read-only shell, requires real command-execution evidence, and compares
@@ -391,6 +393,11 @@ its output with the granted file. Against Codex the result is
 `there is booty here`; against the current oMLX adapter it is
 `sorry, I cannot do that, Dave.` Both paths record one child dispatch and one
 child completion.
+
+The cross-backend matrix is symmetric: Codex and oMLX parents can each dispatch
+either child route. Output follows the child capability rather than the parent:
+both Codex-child routes return the treasure, while both oMLX-child routes return
+the model-generated refusal.
 
 This is deliberately still a prototype. Its child events and active process
 identity are process-local, persistent Codex rollouts are not yet reattached

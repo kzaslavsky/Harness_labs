@@ -36,6 +36,7 @@ from .codex_delegation import (
 )
 from .codex_agent_session import CodexAppServerSession, CodexSessionError
 from .omlx_agent_session import OmlxAgentSession
+from .model_capability_executor import ModelCapabilityExecutor
 from .text_executor import (
     InMemoryReferenceStore,
     TextBackend,
@@ -65,6 +66,7 @@ __all__ = [
     "FinalOutput",
     "ModelEvent",
     "ModelRequest",
+    "ModelCapabilityExecutor",
     "OmlxBackend",
     "OmlxAgentSession",
     "PoemBackend",

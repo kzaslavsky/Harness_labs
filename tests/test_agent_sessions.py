@@ -107,11 +107,13 @@ class SessionToolExecutorTests(unittest.TestCase):
             self.root,
             {
                 "file_reader": ChildAuthorization(
-                    "file_reader",
-                    "task:child",
-                    "context:child",
-                    "grant:child",
-                    self.reader,
+                    role="file_reader",
+                    task_ref="task:child",
+                    context_ref="context:child",
+                    grant_ref="grant:child",
+                    backend_id="recording",
+                    capabilities=frozenset({"read_file"}),
+                    executor=self.reader,
                 )
             },
         )

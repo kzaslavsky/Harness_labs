@@ -45,6 +45,8 @@ class ChildDispatcherTests(unittest.TestCase):
                     task_ref="task:read-treasure",
                     context_ref="context:treasure",
                     grant_ref="grant:read-treasure",
+                    backend_id="recording",
+                    capabilities=frozenset({"read_file"}),
                     executor=self.reader,
                 )
             },
@@ -71,6 +73,11 @@ class ChildDispatcherTests(unittest.TestCase):
         self.assertEqual(
             self.dispatcher.events[-1].evidence,
             ("file:sha256:abc",),
+        )
+        self.assertEqual(self.dispatcher.events[0].backend_id, "recording")
+        self.assertEqual(
+            self.dispatcher.events[0].capabilities,
+            ("read_file",),
         )
 
     def test_parent_cannot_select_an_unauthorized_role(self) -> None:

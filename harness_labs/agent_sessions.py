@@ -17,7 +17,7 @@ TOOL_UNAVAILABLE_REFUSAL = "sorry, I cannot do that, Dave."
 
 @dataclass(frozen=True)
 class BackendCapabilities:
-    """Transport features and capabilities available to authorized children."""
+    """Features of one parent-model transport."""
 
     persistent_sessions: bool
     native_tool_calls: bool
@@ -25,7 +25,6 @@ class BackendCapabilities:
     cached_input_reporting: bool
     structured_output: bool
     experimental_tool_transport: bool = False
-    child_capabilities: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)

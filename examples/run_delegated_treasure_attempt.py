@@ -12,35 +12,50 @@ from .treasure_scenario import run_treasure_scenario
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
+        "--parent",
         "--backend",
+        dest="parent",
         choices=("codex", "omlx", "all"),
         default="all",
     )
+    parser.add_argument(
+        "--child",
+        choices=("matched", "codex", "omlx", "all"),
+        default="matched",
+    )
     args = parser.parse_args()
-    sessions = []
-    if args.backend in {"codex", "all"}:
-        sessions.append(("codex", CodexAppServerSession()))
-    if args.backend in {"omlx", "all"}:
-        sessions.append(("omlx", OmlxAgentSession()))
+    parent_names = ("codex", "omlx") if args.parent == "all" else (args.parent,)
 
     exit_code = 0
-    for name, session in sessions:
-        result, dispatcher = run_treasure_scenario(
-            session,
-            attempt_id=f"treasure-parent-{name}",
+    for parent_name in parent_names:
+        child_names = (
+            ("codex", "omlx")
+            if args.child == "all"
+            else ((parent_name,) if args.child == "matched" else (args.child,))
         )
-        print(f"{name}:")
-        print(f"  status: {result.status}")
-        if result.status == "succeeded":
-            print(f"  output: {result.payload['text']}")
-            if "usage" in result.payload:
-                print(f"  usage: {result.payload['usage']}")
-        else:
-            print(f"  error: {result.payload.get('error', 'unknown')}")
-            exit_code = 1
-        print(f"  children: {len(dispatcher.events) // 2}")
-        for evidence in result.evidence:
-            print(f"  evidence: {evidence}")
+        for child_name in child_names:
+            session = (
+                CodexAppServerSession()
+                if parent_name == "codex"
+                else OmlxAgentSession()
+            )
+            result, dispatcher = run_treasure_scenario(
+                session,
+                attempt_id=f"treasure-{parent_name}-to-{child_name}",
+                child_backend=child_name,
+            )
+            print(f"parent={parent_name} child={child_name}:")
+            print(f"  status: {result.status}")
+            if result.status == "succeeded":
+                print(f"  output: {result.payload['text']}")
+                if "usage" in result.payload:
+                    print(f"  usage: {result.payload['usage']}")
+            else:
+                print(f"  error: {result.payload.get('error', 'unknown')}")
+                exit_code = 1
+            print(f"  children: {len(dispatcher.events) // 2}")
+            for evidence in result.evidence:
+                print(f"  evidence: {evidence}")
     return exit_code
 
 

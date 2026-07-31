@@ -34,13 +34,22 @@ class ChildAuthorization:
     task_ref: str
     context_ref: str
     grant_ref: str
+    backend_id: str
+    capabilities: frozenset[str]
     executor: Executor
 
     def __post_init__(self) -> None:
-        for name in ("role", "task_ref", "context_ref", "grant_ref"):
+        for name in ("role", "task_ref", "context_ref", "grant_ref", "backend_id"):
             value = getattr(self, name)
             if not isinstance(value, str) or not value.strip():
                 raise ValueError(f"child authorization {name} must be non-empty")
+        if not isinstance(self.capabilities, frozenset) or not all(
+            isinstance(capability, str) and capability
+            for capability in self.capabilities
+        ):
+            raise ValueError(
+                "child authorization capabilities must be a frozenset of names"
+            )
 
 
 @dataclass(frozen=True)
@@ -52,6 +61,8 @@ class ChildEvent:
     parent_attempt_id: str
     child_attempt_id: str
     role: str
+    backend_id: str
+    capabilities: tuple[str, ...]
     objective: str
     status: str
     evidence: tuple[str, ...] = ()
@@ -133,6 +144,8 @@ class ChildDispatcher:
             parent,
             child,
             request.role,
+            authorization.backend_id,
+            authorization.capabilities,
             request.objective,
             "started",
         )
@@ -145,6 +158,8 @@ class ChildDispatcher:
                 parent,
                 child,
                 request.role,
+                authorization.backend_id,
+                authorization.capabilities,
                 request.objective,
                 "failed",
             )
@@ -155,6 +170,8 @@ class ChildDispatcher:
             parent,
             child,
             request.role,
+            authorization.backend_id,
+            authorization.capabilities,
             request.objective,
             result.status,
             result.evidence,
@@ -167,6 +184,8 @@ class ChildDispatcher:
         parent: TaskAttempt,
         child: TaskAttempt,
         role: str,
+        backend_id: str,
+        capabilities: frozenset[str],
         objective: str,
         status: str,
         evidence: tuple[str, ...] = (),
@@ -178,6 +197,8 @@ class ChildDispatcher:
                 parent_attempt_id=parent.attempt_id,
                 child_attempt_id=child.attempt_id,
                 role=role,
+                backend_id=backend_id,
+                capabilities=tuple(sorted(capabilities)),
                 objective=objective,
                 status=status,
                 evidence=evidence,

@@ -90,7 +90,6 @@ class CodexAppServerSession:
             cached_input_reporting=True,
             structured_output=True,
             experimental_tool_transport=True,
-            child_capabilities=frozenset({"read_file"}),
         )
 
     @property

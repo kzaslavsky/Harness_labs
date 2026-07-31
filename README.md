@@ -108,9 +108,16 @@ attempt:
 python3 -m examples.run_delegated_treasure_attempt --backend all
 ```
 
-Both backends must dispatch exactly one child. The Codex child has `read_file`
-and returns `there is booty here` with file-read evidence. The oMLX child lacks
-that capability and returns exactly `sorry, I cannot do that, Dave.` with
+Parent and child backends are selected independently. Exercise all four routes:
+
+```sh
+python3 -m examples.run_delegated_treasure_attempt --parent all --child all
+```
+
+Every route dispatches exactly one child. A Codex child has `read_file` and
+returns `there is booty here` with file-read evidence. An oMLX child lacks that
+capability, but Qwen still runs and must return exactly
+`sorry, I cannot do that, Dave.` The result records model-invocation and
 capability-unavailable evidence.
 
 Run the inherited contract suite with Python 3.11 or later:

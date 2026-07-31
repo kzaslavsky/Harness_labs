@@ -39,7 +39,6 @@ class OmlxAgentSession:
             resumable_sessions=False,
             cached_input_reporting=False,
             structured_output=False,
-            child_capabilities=frozenset(),
         )
 
     def open(self, request: ModelRequest) -> str:

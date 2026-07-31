@@ -12,28 +12,19 @@ from harness_labs import (
     ChildDispatcher,
     CodexFileReaderExecutor,
     InMemoryReferenceStore,
+    ModelCapabilityExecutor,
+    OmlxBackend,
     SessionToolExecutor,
     TaskAttempt,
     TaskResult,
 )
 
 
-class UnavailableFileReaderExecutor:
-    """Return a safe child result when its backend cannot read files."""
-
-    def execute(self, attempt: TaskAttempt) -> TaskResult:
-        return TaskResult(
-            attempt_id=attempt.attempt_id,
-            status="succeeded",
-            payload={"text": TOOL_UNAVAILABLE_REFUSAL},
-            evidence=("capability:read_file:unavailable",),
-        )
-
-
 def run_treasure_scenario(
     session: AgentSession,
     *,
     attempt_id: str,
+    child_backend: str,
 ) -> tuple[TaskResult, ChildDispatcher]:
     """Run the same parent attempt and authorization policy on any session."""
 
@@ -62,10 +53,20 @@ def run_treasure_scenario(
             },
         }
     )
-    if "read_file" in session.capabilities.child_capabilities:
+    if child_backend == "codex":
+        child_capabilities = frozenset({"read_file"})
         reader = CodexFileReaderExecutor(store)
+    elif child_backend == "omlx":
+        child_capabilities = frozenset()
+        reader = ModelCapabilityExecutor(
+            store=store,
+            backend=OmlxBackend(max_tokens=32, temperature=0.0),
+            backend_id="omlx",
+            capabilities=child_capabilities,
+            unavailable_response=TOOL_UNAVAILABLE_REFUSAL,
+        )
     else:
-        reader = UnavailableFileReaderExecutor()
+        raise ValueError(f"unsupported child backend: {child_backend}")
     dispatcher = ChildDispatcher(
         parent,
         {
@@ -74,6 +75,8 @@ def run_treasure_scenario(
                 task_ref="task:read-treasure",
                 context_ref="context:treasure",
                 grant_ref="grant:read-treasure",
+                backend_id=child_backend,
+                capabilities=child_capabilities,
                 executor=reader,
             )
         },
