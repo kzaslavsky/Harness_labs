@@ -2,27 +2,13 @@
 
 from __future__ import annotations
 
-from typing import Any, Mapping
-
 from harness_labs import (
     AttemptRunner,
     InMemoryReferenceStore,
+    PoemBackend,
     TaskAttempt,
     TextExecutor,
 )
-
-
-class PoemBackend:
-    """A deterministic program backend used to prove the executor boundary."""
-
-    def generate(self, task: str, context: Mapping[str, Any]) -> str:
-        subject = context.get("subject", "the operator")
-        return (
-            f"For {subject}, who keeps the systems bright,\n"
-            "And turns uncertain signals into light,\n"
-            "May every careful command find its way,\n"
-            "And quiet, well-run engines mark the day."
-        )
 
 
 def main() -> int:

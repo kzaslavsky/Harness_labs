@@ -10,6 +10,7 @@ from harness_labs import (
     AttemptRunner,
     InMemoryReferenceStore,
     TaskAttempt,
+    TextBackendError,
     TextExecutor,
 )
 
@@ -86,6 +87,22 @@ class TextExecutorTests(unittest.TestCase):
 
         self.assertEqual(result.status, "failed")
         self.assertIn("task:poem", result.payload["error"])
+
+    def test_converts_backend_error_to_failed_result(self) -> None:
+        class FailingBackend:
+            def generate(self, task, context):
+                raise TextBackendError("backend unavailable")
+
+        result = AttemptRunner().run(
+            self.attempt,
+            TextExecutor(
+                store=InMemoryReferenceStore(self.values),
+                backend=FailingBackend(),
+            ),
+        )
+
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(result.payload["error"], "backend unavailable")
 
 
 if __name__ == "__main__":

@@ -8,20 +8,25 @@ from .attempts import (
     TaskAttempt,
     TaskResult,
 )
+from .backends import CodexExecBackend, PoemBackend
 from .text_executor import (
     InMemoryReferenceStore,
     TextBackend,
+    TextBackendError,
     TextExecutor,
 )
 
 __all__ = [
     "AttemptRunner",
+    "CodexExecBackend",
     "Executor",
     "InvalidAttempt",
     "InvalidResult",
     "InMemoryReferenceStore",
+    "PoemBackend",
     "TaskAttempt",
     "TaskResult",
     "TextBackend",
+    "TextBackendError",
     "TextExecutor",
 ]

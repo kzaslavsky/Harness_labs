@@ -16,6 +16,10 @@ class TextBackend(Protocol):
         """Generate text for a task and its context."""
 
 
+class TextBackendError(RuntimeError):
+    """Raised when a backend cannot produce text."""
+
+
 @dataclass(frozen=True)
 class InMemoryReferenceStore:
     """Resolve attempt references from an in-memory mapping."""
@@ -66,7 +70,14 @@ class TextExecutor:
                 payload={"error": "context must resolve to a mapping"},
             )
 
-        text = self.backend.generate(task, context)
+        try:
+            text = self.backend.generate(task, context)
+        except TextBackendError as exc:
+            return TaskResult(
+                attempt_id=attempt.attempt_id,
+                status="failed",
+                payload={"error": str(exc)},
+            )
         if not isinstance(text, str) or not text.strip():
             return TaskResult(
                 attempt_id=attempt.attempt_id,
