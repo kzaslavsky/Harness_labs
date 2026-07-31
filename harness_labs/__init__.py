@@ -8,7 +8,7 @@ from .attempts import (
     TaskAttempt,
     TaskResult,
 )
-from .backends import CodexExecBackend, PoemBackend
+from .backends import CodexExecBackend, OmlxBackend, PoemBackend
 from .text_executor import (
     InMemoryReferenceStore,
     TextBackend,
@@ -23,6 +23,7 @@ __all__ = [
     "InvalidAttempt",
     "InvalidResult",
     "InMemoryReferenceStore",
+    "OmlxBackend",
     "PoemBackend",
     "TaskAttempt",
     "TaskResult",

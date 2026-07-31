@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 import unittest
+from io import BytesIO
+from urllib.error import URLError
 from pathlib import Path
 from unittest.mock import patch
 
-from harness_labs import CodexExecBackend, PoemBackend, TextBackendError
+from harness_labs import CodexExecBackend, OmlxBackend, PoemBackend, TextBackendError
 
 
 class BackendTests(unittest.TestCase):
@@ -61,6 +64,46 @@ class BackendTests(unittest.TestCase):
 
         with self.assertRaisesRegex(TextBackendError, "backend unavailable"):
             CodexExecBackend().generate("task", {})
+
+    @patch("harness_labs.backends.urllib.request.urlopen")
+    def test_omlx_backend_calls_qwen_over_loopback(self, urlopen_mock) -> None:
+        class Response(BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                self.close()
+
+        urlopen_mock.return_value = Response(
+            b'{"choices":[{"message":{"content":"A local poem."}}]}'
+        )
+
+        text = OmlxBackend().generate(
+            "write a poem about the operator",
+            {"subject": "the operator"},
+        )
+
+        self.assertEqual(text, "A local poem.")
+        request = urlopen_mock.call_args.args[0]
+        body = json.loads(request.data)
+        self.assertEqual(body["model"], "Qwen3.5-4B-MLX-4bit")
+        self.assertFalse(body["stream"])
+        self.assertEqual(
+            body["chat_template_kwargs"],
+            {"enable_thinking": False},
+        )
+        self.assertIn("write a poem about the operator", body["messages"][1]["content"])
+
+    def test_omlx_backend_refuses_non_loopback_endpoint(self) -> None:
+        with self.assertRaisesRegex(ValueError, "loopback"):
+            OmlxBackend(endpoint="https://example.com/v1/chat/completions")
+
+    @patch("harness_labs.backends.urllib.request.urlopen")
+    def test_omlx_backend_reports_connection_failure(self, urlopen_mock) -> None:
+        urlopen_mock.side_effect = URLError("connection refused")
+
+        with self.assertRaisesRegex(TextBackendError, "connection refused"):
+            OmlxBackend().generate("task", {})
 
 
 if __name__ == "__main__":
