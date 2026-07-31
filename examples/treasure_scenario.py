@@ -1,0 +1,72 @@
+"""Shared construction for the cross-backend treasure scenario."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from harness_labs import (
+    AgentSession,
+    AttemptRunner,
+    ChildAuthorization,
+    ChildDispatcher,
+    CodexFileReaderExecutor,
+    InMemoryReferenceStore,
+    SessionToolExecutor,
+    TaskAttempt,
+    TaskResult,
+)
+
+
+def run_treasure_scenario(
+    session: AgentSession,
+    *,
+    attempt_id: str,
+) -> tuple[TaskResult, ChildDispatcher]:
+    """Run the same parent attempt and authorization policy on any session."""
+
+    treasure_path = Path(__file__).resolve().parent.parent / "treasure_chest.txt"
+    parent = TaskAttempt(
+        attempt_id=attempt_id,
+        task_ref="task:report-treasure",
+        context_ref="context:parent",
+        grant_ref="grant:spawn-reader",
+    )
+    store = InMemoryReferenceStore(
+        {
+            "task:report-treasure": "Output what is in treasure_chest.txt.",
+            "context:parent": {},
+            "grant:spawn-reader": {
+                "capabilities": ["spawn_child"],
+                "child_roles": ["file_reader"],
+            },
+            "task:read-treasure": (
+                "Read treasure_chest.txt and return its exact contents."
+            ),
+            "context:treasure": {"path": str(treasure_path)},
+            "grant:read-treasure": {
+                "capabilities": ["read_file"],
+                "paths": [str(treasure_path)],
+            },
+        }
+    )
+    dispatcher = ChildDispatcher(
+        parent,
+        {
+            "file_reader": ChildAuthorization(
+                role="file_reader",
+                task_ref="task:read-treasure",
+                context_ref="context:treasure",
+                grant_ref="grant:read-treasure",
+                executor=CodexFileReaderExecutor(store),
+            )
+        },
+    )
+    result = AttemptRunner().run(
+        parent,
+        SessionToolExecutor(
+            store=store,
+            session=session,
+            dispatcher=dispatcher,
+        ),
+    )
+    return result, dispatcher

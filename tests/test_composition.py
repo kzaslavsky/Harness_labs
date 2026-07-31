@@ -9,9 +9,6 @@ from harness_labs import (
     ChildDispatcher,
     ChildRequest,
     ChildRequestDenied,
-    DelegatingExecutor,
-    InMemoryReferenceStore,
-    AttemptRunner,
     TaskAttempt,
     TaskResult,
 )
@@ -118,85 +115,6 @@ class ChildDispatcherTests(unittest.TestCase):
                 imposter,
                 ChildRequest(role="file_reader", objective="Read the treasure"),
             )
-
-
-class RecordingParentBackend:
-    def __init__(self, requested_role: str = "file_reader") -> None:
-        self.requested_role = requested_role
-        self.child_result: TaskResult | None = None
-
-    def request_child(self, task, context, allowed_roles):
-        return ChildRequest(
-            role=self.requested_role,
-            objective="Read treasure_chest.txt",
-        )
-
-    def finish(self, task, context, child_result):
-        self.child_result = child_result
-        return child_result.payload["text"]
-
-
-class DelegatingExecutorTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self.root = TaskAttempt(
-            attempt_id="treasure",
-            task_ref="task:parent",
-            context_ref="context:parent",
-            grant_ref="grant:spawn-reader",
-        )
-        self.reader = RecordingExecutor()
-        self.dispatcher = ChildDispatcher(
-            self.root,
-            {
-                "file_reader": ChildAuthorization(
-                    role="file_reader",
-                    task_ref="task:read-treasure",
-                    context_ref="context:treasure",
-                    grant_ref="grant:read-treasure",
-                    executor=self.reader,
-                )
-            },
-        )
-        self.store = InMemoryReferenceStore(
-            {
-                "task:parent": "Output what is in treasure_chest.txt",
-                "context:parent": {},
-                "grant:spawn-reader": {
-                    "capabilities": ["spawn_child"],
-                    "child_roles": ["file_reader"],
-                },
-            }
-        )
-
-    def test_parent_receives_child_result_and_finishes(self) -> None:
-        parent = RecordingParentBackend()
-
-        result = AttemptRunner().run(
-            self.root,
-            DelegatingExecutor(self.store, parent, self.dispatcher),
-        )
-
-        self.assertEqual(result.status, "succeeded")
-        self.assertEqual(result.payload["text"], "there is booty here")
-        self.assertEqual(
-            result.payload["child_attempt_id"],
-            "treasure/child-1",
-        )
-        self.assertIsNotNone(parent.child_result)
-        self.assertEqual(parent.child_result.attempt_id, "treasure/child-1")
-        self.assertEqual(result.evidence[0], "file:sha256:abc")
-
-    def test_parent_cannot_request_role_omitted_from_its_grant(self) -> None:
-        parent = RecordingParentBackend(requested_role="arbitrary_shell")
-
-        result = AttemptRunner().run(
-            self.root,
-            DelegatingExecutor(self.store, parent, self.dispatcher),
-        )
-
-        self.assertEqual(result.status, "blocked")
-        self.assertIn("ungranted role", result.payload["error"])
-        self.assertEqual(self.reader.attempts, [])
 
 
 if __name__ == "__main__":

@@ -58,9 +58,12 @@ The next prototype composes attempts through the policy-controlled
 [`ChildDispatcher`](harness_labs/composition.py). A parent submits an
 authority-free `ChildRequest`; the dispatcher chooses fixed child task, context,
 grant, and executor references, enforces depth and child-count limits, invokes
-the existing `AttemptRunner` recursively, and records parent/child events. The
-Codex acceptance example gives the parent no execution tools and gives its one
-reader child read-only shell access.
+the existing `AttemptRunner` recursively, and records parent/child events.
+Provider integration has one narrow [`AgentSession`](harness_labs/agent_sessions.py)
+contract and one controller-owned tool loop. The resident Codex app-server
+session exposes only the controller's dynamic child tool and stays alive while
+the child works; the oMLX session declares that it has no tools and therefore
+must fail safely without dispatching a child.
 
 A complete deterministic poem attempt is available in
 [`examples/run_poem_attempt.py`](examples/run_poem_attempt.py). Scheduling,
@@ -87,12 +90,26 @@ endpoint `http://127.0.0.1:8100/v1` with
 python3 -m examples.run_omlx_poem_attempt
 ```
 
-Run the delegated treasure test with a tool-disabled Codex parent and a
-file-reading Codex child:
+Run the treasure test with a resident Codex parent and a file-reading Codex
+child:
 
 ```sh
-python3 -m examples.run_delegated_treasure_attempt
+python3 -m examples.run_delegated_treasure_attempt --backend codex
 ```
+
+Start the Retinology oMLX server, then compare both backends on the identical
+attempt:
+
+```sh
+/Users/kirillzaslavsky/claudeprojects/RDPcrawler/.omlx-venv/bin/python \
+  /Users/kirillzaslavsky/claudeprojects/RDPcrawler/scripts/start_omlx_server.py \
+  --port 8100 --max-memory 8GB
+python3 -m examples.run_delegated_treasure_attempt --backend all
+```
+
+Codex must return `there is booty here` with child file-read evidence. oMLX has
+no child tool in this adapter and must return exactly
+`sorry, I cannot do that, Dave.` with zero child events.
 
 Run the inherited contract suite with Python 3.11 or later:
 

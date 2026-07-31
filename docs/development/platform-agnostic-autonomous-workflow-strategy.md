@@ -340,14 +340,18 @@ an authority-free child request containing an objective and a requested role.
 The controller maps that role to a preauthorized child template containing fixed
 task, context, grant, and executor references:
 
-```text
-Parent executor
-  -> ChildRequest(role, objective)
-  -> controller authorization and bounds
-  -> child TaskAttempt with parent_attempt_id
-  -> recursive AttemptRunner.run(child, authorized_executor)
-  -> child TaskResult
-  -> parent executor
+```mermaid
+flowchart LR
+    A["TaskAttempt"] --> C["SessionToolExecutor"]
+    C --> S["AgentSession"]
+    S -->|"ToolCall"| C
+    C --> D["ChildDispatcher"]
+    D --> R["AttemptRunner: authorized child"]
+    R -->|"TaskResult + evidence"| D
+    D -->|"ToolResult"| C
+    C -->|"continue same resident session"| S
+    S -->|"FinalOutput"| C
+    C --> O["Parent TaskResult"]
 ```
 
 This keeps synchronous recursion as the smallest composition mechanism without
@@ -356,17 +360,34 @@ must reject unknown parents and roles, enforce maximum depth and children per
 attempt, record dispatch and completion events, and preserve child evidence in
 the parent result.
 
-The first executable prototype lives in `harness_labs/composition.py`. Its
-`ChildDispatcher` provides synchronous bounded recursion and its
-`DelegatingExecutor` brokers the result back to the parent. The Codex-specific
-acceptance fixture in `harness_labs/codex_delegation.py` uses a schema-bound
-parent thread with command and filesystem tools disabled. The controller grants
-one separate reader child a fixed file task and read-only shell, requires real
-command-execution evidence, and compares its output with the granted file before
-returning the result to the same parent thread.
+The executable prototype has one provider-neutral boundary:
+`AgentSession.open`, `AgentSession.step`, and `AgentSession.close`.
+`SessionToolExecutor` owns the only tool loop. A backend transport may report a
+`ToolCall`, `FinalOutput`, or `BackendFailure`; it cannot authorize or execute a
+child itself. `ChildDispatcher` remains the policy boundary that constructs and
+runs a bounded child.
 
-This is deliberately still a prototype. Its child events and active thread
-identity are process-local, and Codex's read-only shell sandbox is not an
+`CodexAppServerSession` is a thin JSON-RPC transport. It keeps one app-server
+process and parent turn resident while the controller runs the child, then
+returns the tool result to that pending turn. It normalizes token usage,
+including cached input, and rejects unexpected provider tool items. Its dynamic
+tool transport is explicitly marked experimental in its capability report.
+
+`OmlxAgentSession` uses the same contract but declares
+`native_tool_calls=False`. Capability preflight therefore exposes no child tool,
+runs no child, and requires the exact safe refusal. This proves backend
+differences are handled at the transport/capability edge rather than by
+duplicating workflow logic.
+
+The acceptance scenario grants one separate Codex reader child a fixed file
+task and read-only shell, requires real command-execution evidence, and compares
+its output with the granted file. Against Codex the result is
+`there is booty here`; against the current oMLX adapter it is
+`sorry, I cannot do that, Dave.` and the child event count is zero.
+
+This is deliberately still a prototype. Its child events and active process
+identity are process-local, persistent Codex rollouts are not yet reattached
+after a controller crash, and the reader's read-only shell sandbox is not an
 OS-level single-path read allowlist. Production use still requires the durable
 event/checkpoint store, crash recovery, and capability broker described above.
 

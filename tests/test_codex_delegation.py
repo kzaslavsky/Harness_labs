@@ -10,12 +10,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 from harness_labs import (
-    CodexDelegatingBackend,
-    CodexDelegationError,
     CodexFileReaderExecutor,
     InMemoryReferenceStore,
     TaskAttempt,
-    TaskResult,
 )
 
 
@@ -44,104 +41,6 @@ def events(*item_types: str) -> str:
     )
     rows.append({"type": "turn.completed", "usage": {}})
     return "\n".join(json.dumps(row) for row in rows)
-
-
-class CodexDelegatingBackendTests(unittest.TestCase):
-    @patch("harness_labs.codex_delegation.shutil.which", return_value="/fake/codex")
-    @patch("harness_labs.codex_delegation.subprocess.run")
-    def test_parent_has_no_execution_tools_and_resumes_same_thread(
-        self,
-        run_mock,
-        _which_mock,
-    ) -> None:
-        calls: list[list[str]] = []
-
-        def complete(argv, **kwargs):
-            calls.append(argv)
-            output_path = Path(argv[argv.index("-o") + 1])
-            if "resume" in argv:
-                output_path.write_text(
-                    '{"action":"finish","answer":"there is booty here"}',
-                    encoding="utf-8",
-                )
-            else:
-                output_path.write_text(
-                    json.dumps(
-                        {
-                            "action": "request_child",
-                            "role": "file_reader",
-                            "objective": "Read treasure_chest.txt",
-                        }
-                    ),
-                    encoding="utf-8",
-                )
-            return subprocess.CompletedProcess(
-                argv,
-                0,
-                events("agent_message"),
-                "",
-            )
-
-        run_mock.side_effect = complete
-        backend = CodexDelegatingBackend()
-
-        request = backend.request_child(
-            "Output what is in treasure_chest.txt",
-            {},
-            ("file_reader",),
-        )
-        answer = backend.finish(
-            "Output what is in treasure_chest.txt",
-            {},
-            TaskResult(
-                attempt_id="treasure/child-1",
-                status="succeeded",
-                payload={"text": "there is booty here"},
-            ),
-        )
-
-        self.assertEqual(request.role, "file_reader")
-        self.assertEqual(answer, "there is booty here")
-        self.assertEqual(backend.thread_id, THREAD_ID)
-        self.assertEqual(
-            backend.item_types,
-            ("agent_message", "agent_message"),
-        )
-        first, second = calls
-        self.assertEqual(first[:3], ["/fake/codex", "exec", "-C"])
-        self.assertIn("shell_tool", first)
-        self.assertIn("unified_exec", first)
-        self.assertEqual(first[first.index("--sandbox") + 1], "read-only")
-        self.assertEqual(second[:3], ["/fake/codex", "exec", "resume"])
-        self.assertIn(THREAD_ID, second)
-        self.assertIn("shell_tool", second)
-        self.assertIn("unified_exec", second)
-
-    @patch("harness_labs.codex_delegation.shutil.which", return_value="/fake/codex")
-    @patch("harness_labs.codex_delegation.subprocess.run")
-    def test_parent_rejects_any_tool_event(self, run_mock, _which_mock) -> None:
-        def complete(argv, **kwargs):
-            output_path = Path(argv[argv.index("-o") + 1])
-            output_path.write_text(
-                '{"action":"request_child","role":"file_reader",'
-                '"objective":"Read treasure_chest.txt"}',
-                encoding="utf-8",
-            )
-            return subprocess.CompletedProcess(
-                argv,
-                0,
-                events("command_execution", "agent_message"),
-                "",
-            )
-
-        run_mock.side_effect = complete
-
-        with self.assertRaisesRegex(CodexDelegationError, "tool items"):
-            CodexDelegatingBackend().request_child(
-                "Output what is in treasure_chest.txt",
-                {},
-                ("file_reader",),
-            )
 
 
 class CodexFileReaderExecutorTests(unittest.TestCase):

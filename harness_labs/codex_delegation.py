@@ -7,12 +7,11 @@ import json
 import shutil
 import subprocess
 import tempfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Mapping
 
 from .attempts import TaskAttempt, TaskResult
-from .composition import ChildRequest
 from .text_executor import InMemoryReferenceStore
 
 
@@ -32,175 +31,6 @@ class _CodexTurn:
 class _CommandEvidence:
     command: str
     exit_code: int
-
-
-_PARENT_DISABLED_FEATURES = (
-    "apps",
-    "browser_use",
-    "browser_use_external",
-    "code_mode",
-    "code_mode_host",
-    "computer_use",
-    "image_generation",
-    "multi_agent",
-    "shell_tool",
-    "unified_exec",
-)
-
-_NON_TOOL_ITEM_TYPES = frozenset({"agent_message", "reasoning"})
-
-
-@dataclass
-class CodexDelegatingBackend:
-    """Use one persistent, tool-disabled Codex thread as a parent model."""
-
-    model: str = "gpt-5.6-terra"
-    reasoning: str = "low"
-    executable: str = "codex"
-    timeout_seconds: float | None = None
-    _thread_id: str | None = field(default=None, init=False, repr=False)
-    _working_directory: tempfile.TemporaryDirectory[str] | None = field(
-        default=None,
-        init=False,
-        repr=False,
-    )
-    _item_types: list[str] = field(default_factory=list, init=False, repr=False)
-
-    @property
-    def thread_id(self) -> str | None:
-        return self._thread_id
-
-    @property
-    def item_types(self) -> tuple[str, ...]:
-        return tuple(self._item_types)
-
-    def request_child(
-        self,
-        task: str,
-        context: Mapping[str, Any],
-        allowed_roles: tuple[str, ...],
-    ) -> ChildRequest:
-        if self._thread_id is not None:
-            raise CodexDelegationError("parent already requested a child")
-
-        temporary = tempfile.TemporaryDirectory(prefix="harness-codex-parent-")
-        self._working_directory = temporary
-        workspace = Path(temporary.name)
-        schema_path = workspace / "child-request.schema.json"
-        output_path = workspace / "child-request.json"
-        schema = {
-            "type": "object",
-            "additionalProperties": False,
-            "required": ["action", "role", "objective"],
-            "properties": {
-                "action": {"type": "string", "const": "request_child"},
-                "role": {"type": "string", "enum": list(allowed_roles)},
-                "objective": {"type": "string", "minLength": 1},
-            },
-        }
-        schema_path.write_text(json.dumps(schema), encoding="utf-8")
-        context_json = _json_context(context)
-        prompt = (
-            "You are the parent of a bounded task attempt. You have no filesystem "
-            "or command tools. Your only permitted action is to request one child "
-            "from the allowed roles. Do not guess the requested file's contents.\n\n"
-            f"Task:\n{task}\n\nContext:\n{context_json}\n\n"
-            f"Allowed child roles: {json.dumps(allowed_roles)}"
-        )
-
-        try:
-            turn = _invoke_codex(
-                executable=self.executable,
-                model=self.model,
-                reasoning=self.reasoning,
-                timeout_seconds=self.timeout_seconds,
-                workspace=workspace,
-                schema_path=schema_path,
-                output_path=output_path,
-                prompt=prompt,
-                disabled_features=_PARENT_DISABLED_FEATURES,
-                ephemeral=False,
-            )
-            _require_no_tools(turn)
-            self._item_types.extend(turn.item_types)
-            payload = _load_json_object(turn.final_message, "parent child request")
-            if payload.get("action") != "request_child":
-                raise CodexDelegationError("parent did not request a child")
-            role = payload.get("role")
-            objective = payload.get("objective")
-            if role not in allowed_roles or not isinstance(objective, str):
-                raise CodexDelegationError("parent returned an invalid child request")
-        except Exception:
-            temporary.cleanup()
-            self._working_directory = None
-            raise
-
-        self._thread_id = turn.thread_id
-        return ChildRequest(role=role, objective=objective)
-
-    def finish(
-        self,
-        task: str,
-        context: Mapping[str, Any],
-        child_result: TaskResult,
-    ) -> str:
-        if self._thread_id is None or self._working_directory is None:
-            raise CodexDelegationError("parent has no child request to resume")
-
-        workspace = Path(self._working_directory.name)
-        schema_path = workspace / "parent-result.schema.json"
-        output_path = workspace / "parent-result.json"
-        schema = {
-            "type": "object",
-            "additionalProperties": False,
-            "required": ["action", "answer"],
-            "properties": {
-                "action": {"type": "string", "const": "finish"},
-                "answer": {"type": "string", "minLength": 1},
-            },
-        }
-        schema_path.write_text(json.dumps(schema), encoding="utf-8")
-        child_payload = {
-            "attempt_id": child_result.attempt_id,
-            "status": child_result.status,
-            "payload": dict(child_result.payload),
-            "evidence": list(child_result.evidence),
-        }
-        prompt = (
-            "The authorized child has returned the following result. Complete the "
-            "original task using only this child result. Return the exact requested "
-            "answer without commentary.\n\n"
-            f"Child result:\n{json.dumps(child_payload, sort_keys=True)}"
-        )
-
-        try:
-            turn = _invoke_codex(
-                executable=self.executable,
-                model=self.model,
-                reasoning=self.reasoning,
-                timeout_seconds=self.timeout_seconds,
-                workspace=workspace,
-                schema_path=schema_path,
-                output_path=output_path,
-                prompt=prompt,
-                disabled_features=_PARENT_DISABLED_FEATURES,
-                ephemeral=False,
-                resume_thread_id=self._thread_id,
-            )
-            _require_no_tools(turn)
-            self._item_types.extend(turn.item_types)
-            if turn.thread_id != self._thread_id:
-                raise CodexDelegationError("parent thread identity changed")
-            payload = _load_json_object(turn.final_message, "parent result")
-            if payload.get("action") != "finish":
-                raise CodexDelegationError("parent did not finish")
-            answer = payload.get("answer")
-            if not isinstance(answer, str) or not answer.strip():
-                raise CodexDelegationError("parent returned an empty answer")
-            return answer.strip()
-        finally:
-            self._working_directory.cleanup()
-            self._working_directory = None
 
 
 @dataclass(frozen=True)
@@ -314,31 +144,6 @@ class CodexFileReaderExecutor:
             attempt_id=attempt.attempt_id,
             status="failed",
             payload={"error": error},
-        )
-
-
-def _json_context(context: Mapping[str, Any]) -> str:
-    try:
-        return json.dumps(context, sort_keys=True)
-    except (TypeError, ValueError) as exc:
-        raise CodexDelegationError(f"context is not JSON-serializable: {exc}") from exc
-
-
-def _load_json_object(raw: str, label: str) -> dict[str, Any]:
-    try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise CodexDelegationError(f"{label} is not valid JSON") from exc
-    if not isinstance(payload, dict):
-        raise CodexDelegationError(f"{label} must be a JSON object")
-    return payload
-
-
-def _require_no_tools(turn: _CodexTurn) -> None:
-    unexpected = set(turn.item_types) - _NON_TOOL_ITEM_TYPES
-    if unexpected:
-        raise CodexDelegationError(
-            f"tool-disabled parent emitted tool items: {sorted(unexpected)}"
         )
 
 
