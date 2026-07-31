@@ -44,11 +44,17 @@ launcher, templates, assets, portable skills, and contract tests remain under
 `bin/`, `templates/`, `assets/`, `skills/`, and `tests/`. They are the initial
 bootstrap utility, not the complete Harness Labs runtime.
 
+The first runtime primitive is the dependency-free
+[`TaskAttempt` runner](harness_labs/attempts.py). It invokes one replaceable
+executor and accepts only a typed result whose identity and status validate.
+Scheduling, persistence, capability enforcement, and lifecycle control remain
+future vertical slices.
+
 Run the inherited contract suite with Python 3.11 or later:
 
 ```sh
 python3 scripts/check_repository_contracts.py
-python3 tests/test_initializer.py -v
+python3 -m unittest discover -s tests -v
 ```
 
 The first implementation milestone is defined in
