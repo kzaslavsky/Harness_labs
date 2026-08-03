@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+import hashlib
 import threading
 from time import monotonic_ns
 from typing import Literal, Mapping, Protocol
@@ -35,12 +36,15 @@ class ChildRequest:
 
     role: str
     objective: str
+    context: str = ""
 
     def __post_init__(self) -> None:
         if not isinstance(self.role, str) or not self.role.strip():
             raise ValueError("child role must be non-empty")
         if not isinstance(self.objective, str) or not self.objective.strip():
             raise ValueError("child objective must be non-empty")
+        if not isinstance(self.context, str):
+            raise ValueError("child context must be a string")
 
 
 @dataclass(frozen=True)
@@ -113,6 +117,7 @@ class ChildEvent:
     backend_id: str
     capabilities: tuple[str, ...]
     objective: str
+    context_sha256: str
     status: str
     evidence: tuple[str, ...] = ()
 
@@ -336,6 +341,7 @@ class ChildDispatcher:
             context_ref=authorization.context_ref,
             grant_ref=authorization.grant_ref,
             parent_attempt_id=parent.attempt_id,
+            context=request.context,
         )
         self._child_counts[parent.attempt_id] = child_number
         self._attempts[child_id] = child
@@ -456,7 +462,12 @@ class ChildDispatcher:
                 "parent_attempt_id": parent.attempt_id,
                 "child_attempt_ids": child_ids,
                 "request_order": [
-                    {"role": request.role, "objective": request.objective}
+                    {
+                        "role": request.role,
+                        "objective": request.objective,
+                        "context": request.context,
+                        "context_sha256": _sha256_text(request.context),
+                    }
                     for _, request, _ in prepared
                 ],
                 "max_parallelism": max_parallelism,
@@ -563,6 +574,7 @@ class ChildDispatcher:
                 backend_id=backend_id,
                 capabilities=tuple(sorted(capabilities)),
                 objective=objective,
+                context_sha256=_sha256_text(child.context),
                 status=status,
                 evidence=evidence,
             )
@@ -580,6 +592,8 @@ class ChildDispatcher:
                         "backend_id": event.backend_id,
                         "capabilities": list(event.capabilities),
                         "objective": event.objective,
+                        "context": child.context,
+                        "context_sha256": event.context_sha256,
                         "status": event.status,
                         "evidence": list(event.evidence),
                     },
@@ -591,6 +605,7 @@ class ChildDispatcher:
                         "role": event.role,
                         "capabilities": list(event.capabilities),
                         "objective": event.objective,
+                        "context_sha256": event.context_sha256,
                         "evidence": list(event.evidence),
                     },
                     attempt_id=event.child_attempt_id,
@@ -612,6 +627,10 @@ class ChildDispatcher:
                 audit.merge_checkpoint(
                     updates={"active_children": sorted(checkpoint)}
                 )
+
+
+def _sha256_text(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
 @dataclass(frozen=True)

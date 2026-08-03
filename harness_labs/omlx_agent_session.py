@@ -138,8 +138,10 @@ class OmlxAgentSession:
             return self._request_batch(tool)
         task = (
             "Select the one controller tool needed to perform the task. Return "
-            "only a JSON object with keys role and objective. Select a role "
-            "allowed by the supplied schema.\n\n"
+            "only a JSON object with keys role, objective, and context. Select a "
+            "role allowed by the supplied schema. Put the exact text the child "
+            "needs to start the task in context; use an empty string when no "
+            "context is needed.\n\n"
             f"Task:\n{self._request.task}\n\n"
             f"Tool schema:\n{json.dumps(dict(tool.input_schema), sort_keys=True)}"
         )
@@ -154,6 +156,7 @@ class OmlxAgentSession:
             return BackendFailure("oMLX child request must be an object")
         role = payload.get("role")
         objective = payload.get("objective")
+        context = payload.get("context")
         properties = tool.input_schema.get("properties", {})
         role_schema = (
             properties.get("role", {}) if isinstance(properties, dict) else {}
@@ -165,6 +168,7 @@ class OmlxAgentSession:
             role not in allowed_roles
             or not isinstance(objective, str)
             or not objective
+            or not isinstance(context, str)
         ):
             return BackendFailure("oMLX returned an invalid child request")
         self._pending_call_id = "omlx:child-1"
@@ -172,7 +176,7 @@ class OmlxAgentSession:
         return ToolCall(
             call_id=self._pending_call_id,
             name=tool.name,
-            arguments={"role": role, "objective": objective},
+            arguments={"role": role, "objective": objective, "context": context},
         )
 
     def _request_batch(self, tool) -> ModelEvent:
@@ -180,8 +184,10 @@ class OmlxAgentSession:
         task = (
             "Select the independent controller child tasks needed to perform the "
             "task. Return only a JSON object with key requests, whose value is an "
-            "array of objects with keys role and objective. Use each required role "
-            "once and obey the supplied schema.\n\n"
+            "array of objects with keys role, objective, and context. Put the exact "
+            "text each child needs to start its task in context; use an empty string "
+            "when none is needed. Use each required role once and obey the supplied "
+            "schema.\n\n"
             f"Task:\n{self._request.task}\n\n"
             f"Tool schema:\n{json.dumps(dict(tool.input_schema), sort_keys=True)}"
         )
@@ -229,6 +235,7 @@ class OmlxAgentSession:
                 or request.get("role") not in allowed_roles
                 or not isinstance(request.get("objective"), str)
                 or not request["objective"].strip()
+                or not isinstance(request.get("context"), str)
                 for request in requests
             )
         ):

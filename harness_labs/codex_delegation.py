@@ -37,7 +37,7 @@ class _CommandEvidence:
 
 @dataclass
 class CodexFileReaderExecutor:
-    """Run a Codex child that must use its shell to read one granted file."""
+    """Run a Codex child that must use its shell for a granted read task."""
 
     store: InMemoryReferenceStore
     model: str = "gpt-5.6-terra"
@@ -72,35 +72,22 @@ class CodexFileReaderExecutor:
                 payload={"error": "read_file capability is required"},
             )
 
-        raw_path = context.get("path")
-        allowed_paths = grant.get("paths", ())
-        if not isinstance(raw_path, str) or not isinstance(allowed_paths, (list, tuple)):
-            return self._failed(attempt, "reader path grant is invalid")
-        try:
-            path = Path(raw_path).resolve(strict=True)
-            granted = {Path(value).resolve(strict=True) for value in allowed_paths}
-        except (OSError, TypeError) as exc:
-            return self._failed(attempt, f"reader path cannot be resolved: {exc}")
-        if path not in granted:
-            return TaskResult(
-                attempt_id=attempt.attempt_id,
-                status="blocked",
-                payload={"error": "requested file is not granted"},
-            )
-        if not path.is_file():
-            return self._failed(attempt, "granted path is not a regular file")
-
         temporary = tempfile.TemporaryDirectory(prefix="harness-codex-reader-")
-        workspace = Path(temporary.name) / "workspace"
-        workspace.mkdir()
-        (workspace / path.name).symlink_to(path)
+        if "workspace" in context:
+            prepared = self._prepare_context_read(attempt, task, context, grant)
+            if isinstance(prepared, TaskResult):
+                temporary.cleanup()
+                return prepared
+            workspace, path, required_read_name, prompt = prepared
+        else:
+            prepared = self._prepare_direct_read(
+                attempt, task, context, grant, temporary
+            )
+            if isinstance(prepared, TaskResult):
+                temporary.cleanup()
+                return prepared
+            workspace, path, required_read_name, prompt = prepared
         output_path = Path(temporary.name) / "reader-result.txt"
-        prompt = (
-            "You are a file-reader child. You must use the shell tool to read "
-            "the authorized file in your working directory, then return only "
-            "its exact contents with no commentary or markdown.\n\n"
-            f"Task: {task}\nAuthorized file: {path.name}"
-        )
         try:
             turn = _invoke_codex(
                 executable=self.executable,
@@ -122,7 +109,7 @@ class CodexFileReaderExecutor:
         successful_reads = tuple(
             command
             for command in turn.commands
-            if command.exit_code == 0 and path.name in command.command
+            if command.exit_code == 0 and required_read_name in command.command
         )
         if not successful_reads:
             temporary.cleanup()
@@ -158,6 +145,96 @@ class CodexFileReaderExecutor:
         else:
             temporary.cleanup()
         return result
+
+    def _prepare_context_read(
+        self,
+        attempt: TaskAttempt,
+        task: str,
+        context: Mapping[str, object],
+        grant: Mapping[str, object],
+    ) -> tuple[Path, Path, str, str] | TaskResult:
+        """Prepare a read where the request context tells the model where to start."""
+
+        raw_workspace = context.get("workspace")
+        raw_expected_path = context.get("expected_path")
+        raw_locator_path = context.get("locator_path")
+        allowed_workspaces = grant.get("workspaces", ())
+        if (
+            not isinstance(raw_workspace, str)
+            or not isinstance(raw_expected_path, str)
+            or not isinstance(raw_locator_path, str)
+            or not isinstance(allowed_workspaces, (list, tuple))
+        ):
+            return self._failed(attempt, "context reader grant is invalid")
+        try:
+            workspace = Path(raw_workspace).resolve(strict=True)
+            expected_path = Path(raw_expected_path).resolve(strict=True)
+            locator_path = Path(raw_locator_path).resolve(strict=True)
+            granted = {
+                Path(value).resolve(strict=True) for value in allowed_workspaces
+            }
+        except (OSError, TypeError) as exc:
+            return self._failed(attempt, f"context reader path cannot be resolved: {exc}")
+        if workspace not in granted:
+            return TaskResult(
+                attempt_id=attempt.attempt_id,
+                status="blocked",
+                payload={"error": "requested workspace is not granted"},
+            )
+        if not expected_path.is_file() or not locator_path.is_file():
+            return self._failed(attempt, "context reader fixture is not a regular file")
+        if workspace not in expected_path.parents or workspace not in locator_path.parents:
+            return self._failed(attempt, "context reader fixture escapes its workspace")
+        if not attempt.context.strip():
+            return self._failed(attempt, "supplied child context is empty")
+        prompt = (
+            "You are a file-reader child. Use shell commands to follow the supplied "
+            "context. It identifies a locator file; read that file, then read the "
+            "target path it contains. Return only the target file's exact contents "
+            "with no commentary or markdown. Do not infer or guess a path absent "
+            "from the supplied context or locator file.\n\n"
+            f"Task:\n{task}\n\n"
+            f"Supplied context:\n{attempt.context}"
+        )
+        return workspace, expected_path, locator_path.name, prompt
+
+    def _prepare_direct_read(
+        self,
+        attempt: TaskAttempt,
+        task: str,
+        context: Mapping[str, object],
+        grant: Mapping[str, object],
+        temporary: tempfile.TemporaryDirectory[str],
+    ) -> tuple[Path, Path, str, str] | TaskResult:
+        """Preserve the original single-file reader contract."""
+
+        raw_path = context.get("path")
+        allowed_paths = grant.get("paths", ())
+        if not isinstance(raw_path, str) or not isinstance(allowed_paths, (list, tuple)):
+            return self._failed(attempt, "reader path grant is invalid")
+        try:
+            path = Path(raw_path).resolve(strict=True)
+            granted = {Path(value).resolve(strict=True) for value in allowed_paths}
+        except (OSError, TypeError) as exc:
+            return self._failed(attempt, f"reader path cannot be resolved: {exc}")
+        if path not in granted:
+            return TaskResult(
+                attempt_id=attempt.attempt_id,
+                status="blocked",
+                payload={"error": "requested file is not granted"},
+            )
+        if not path.is_file():
+            return self._failed(attempt, "granted path is not a regular file")
+        workspace = Path(temporary.name) / "workspace"
+        workspace.mkdir()
+        (workspace / path.name).symlink_to(path)
+        prompt = (
+            "You are a file-reader child. You must use the shell tool to read "
+            "the authorized file in your working directory, then return only "
+            "its exact contents with no commentary or markdown.\n\n"
+            f"Task: {task}\nAuthorized file: {path.name}"
+        )
+        return workspace, path, path.name, prompt
 
     def send(self, attempt: TaskAttempt, message: str) -> TaskResult:
         if (
@@ -337,6 +414,7 @@ class CodexReadOnlyWorktreeExecutor:
                 "active_base_orchestration, historical_completed, benchmark_residue, "
                 "aborted_or_stale_residue, or uncertain.\n\n"
                 f"Assigned task:\n{task}\n\n"
+                f"Supplied context:\n{attempt.context}\n\n"
                 f"Worktree:\n{workspace}"
             )
             try:

@@ -19,7 +19,10 @@ from harness_labs import (
 THREAD_ID = "019fb7de-a1b3-7d63-8a94-fc9bcf3985f7"
 
 
-def events(*item_types: str) -> str:
+def events(
+    *item_types: str,
+    command: str = "/bin/zsh -lc 'cat treasure_chest.txt'",
+) -> str:
     rows = [{"type": "thread.started", "thread_id": THREAD_ID}]
     rows.extend(
         {
@@ -29,7 +32,7 @@ def events(*item_types: str) -> str:
                 "type": item_type,
                 **(
                     {
-                        "command": "/bin/zsh -lc 'cat treasure_chest.txt'",
+                        "command": command,
                         "exit_code": 0,
                     }
                     if item_type == "command_execution"
@@ -51,6 +54,74 @@ class CodexFileReaderExecutorTests(unittest.TestCase):
             treasure.read_text(encoding="utf-8").strip(),
             "there is booty here",
         )
+
+    @patch("harness_labs.codex_delegation.shutil.which", return_value="/fake/codex")
+    @patch("harness_labs.codex_delegation.subprocess.run")
+    def test_supplied_context_leads_reader_through_locator_file(
+        self,
+        run_mock,
+        _which_mock,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            workspace = Path(temporary)
+            treasure = workspace / "treasure_chest.txt"
+            locator = workspace / "treasure_locator.txt"
+            treasure.write_text("there is booty here\n", encoding="utf-8")
+            locator.write_text("treasure_chest.txt\n", encoding="utf-8")
+            supplied = (
+                f"The locator file is {locator}. Read it first, then read the "
+                "target path it contains."
+            )
+            store = InMemoryReferenceStore(
+                {
+                    "task:read": "Return the located target's exact contents.",
+                    "context:reader": {
+                        "workspace": str(workspace),
+                        "locator_path": str(locator),
+                        "expected_path": str(treasure),
+                    },
+                    "grant:reader": {
+                        "capabilities": ["read_file"],
+                        "workspaces": [str(workspace)],
+                    },
+                }
+            )
+            attempt = TaskAttempt(
+                attempt_id="treasure/child-1",
+                task_ref="task:read",
+                context_ref="context:reader",
+                grant_ref="grant:reader",
+                parent_attempt_id="treasure",
+                context=supplied,
+            )
+
+            def complete(argv, **kwargs):
+                self.assertEqual(Path(kwargs["cwd"]), workspace.resolve())
+                self.assertIn(supplied, kwargs["input"])
+                self.assertNotIn(
+                    f"Supplied context:\n{treasure}",
+                    kwargs["input"],
+                )
+                output_path = Path(argv[argv.index("-o") + 1])
+                output_path.write_text("there is booty here", encoding="utf-8")
+                return subprocess.CompletedProcess(
+                    argv,
+                    0,
+                    events(
+                        "command_execution",
+                        "agent_message",
+                        command=(
+                            f"/bin/zsh -lc 'cat \"$(cat {locator})\"'"
+                        ),
+                    ),
+                    "",
+                )
+
+            run_mock.side_effect = complete
+            result = CodexFileReaderExecutor(store).execute(attempt)
+
+        self.assertEqual(result.status, "succeeded")
+        self.assertEqual(result.payload["text"], "there is booty here")
 
     @patch("harness_labs.codex_delegation.shutil.which", return_value="/fake/codex")
     @patch("harness_labs.codex_delegation.subprocess.run")

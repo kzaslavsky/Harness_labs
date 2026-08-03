@@ -155,6 +155,10 @@ class SessionToolExecutor:
                     "task_ref": attempt.task_ref,
                     "context_ref": attempt.context_ref,
                     "grant_ref": attempt.grant_ref,
+                    "context": attempt.context,
+                    "context_sha256": hashlib.sha256(
+                        attempt.context.encode("utf-8")
+                    ).hexdigest(),
                 },
             )
             self.audit.append(
@@ -229,13 +233,14 @@ class SessionToolExecutor:
                 input_schema={
                     "type": "object",
                     "additionalProperties": False,
-                    "required": ["role", "objective"],
+                    "required": ["role", "objective", "context"],
                     "properties": {
                         "role": {
                             "type": "string",
                             "enum": list(allowed_roles),
                         },
                         "objective": {"type": "string", "minLength": 1},
+                        "context": {"type": "string"},
                     },
                 },
             ),)
@@ -262,7 +267,7 @@ class SessionToolExecutor:
                             "items": {
                                 "type": "object",
                                 "additionalProperties": False,
-                                "required": ["role", "objective"],
+                                "required": ["role", "objective", "context"],
                                 "properties": {
                                     "role": {
                                         "type": "string",
@@ -272,6 +277,7 @@ class SessionToolExecutor:
                                         "type": "string",
                                         "minLength": 1,
                                     },
+                                    "context": {"type": "string"},
                                 },
                             },
                         }
@@ -572,10 +578,12 @@ class SessionToolExecutor:
                     )
                 role = raw_request.get("role")
                 objective = raw_request.get("objective")
+                context = raw_request.get("context", "")
                 if (
                     role not in allowed_roles
                     or not isinstance(objective, str)
                     or not objective.strip()
+                    or not isinstance(context, str)
                 ):
                     return (
                         ToolResult(
@@ -585,7 +593,9 @@ class SessionToolExecutor:
                         ),
                         (),
                     )
-                requests.append(ChildRequest(role=role, objective=objective))
+                requests.append(
+                    ChildRequest(role=role, objective=objective, context=context)
+                )
             if self.require_all_child_roles and {
                 request.role for request in requests
             } != set(allowed_roles):
@@ -621,7 +631,13 @@ class SessionToolExecutor:
             )
         role = call.arguments.get("role")
         objective = call.arguments.get("objective")
-        if role not in allowed_roles or not isinstance(objective, str):
+        context = call.arguments.get("context", "")
+        if (
+            role not in allowed_roles
+            or not isinstance(objective, str)
+            or not objective.strip()
+            or not isinstance(context, str)
+        ):
             return (
                 ToolResult(
                     call_id=call.call_id,
@@ -632,7 +648,7 @@ class SessionToolExecutor:
             )
         child = self.dispatcher.start_child(
             parent,
-            ChildRequest(role=role, objective=objective),
+            ChildRequest(role=role, objective=objective, context=context),
             keep_alive=self.keep_child_alive,
         )
         tool_result, result = self._child_tool_result(call.call_id, child)

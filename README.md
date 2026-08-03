@@ -56,9 +56,11 @@ servers.
 
 The next prototype composes attempts through the policy-controlled
 [`ChildDispatcher`](harness_labs/composition.py). A parent submits an
-authority-free `ChildRequest`; the dispatcher chooses fixed child task, context,
-grant, and executor references, enforces depth and child-count limits, invokes
-the existing `AttemptRunner` recursively, and records parent/child events.
+authority-free `ChildRequest` containing a role, objective, and task-specific
+context string. The dispatcher copies that string unchanged to the child
+attempt, chooses fixed task, grant, backend-configuration, and executor
+references, enforces depth and child-count limits, invokes the existing
+`AttemptRunner`, and records parent/child events.
 Provider integration has one narrow [`AgentSession`](harness_labs/agent_sessions.py)
 contract and one controller-owned tool loop. The resident Codex app-server
 session exposes only the controller's dynamic child tool and stays alive while
@@ -114,9 +116,12 @@ Parent and child backends are selected independently. Exercise all four routes:
 python3 -m examples.run_delegated_treasure_attempt --parent all --child all
 ```
 
-Every route dispatches exactly one child. A Codex child has `read_file` and
-returns `there is booty here` with file-read evidence. An oMLX child lacks that
-capability, but Qwen still runs and must return exactly
+Every route dispatches exactly one child. The parent receives the path to
+`treasure_locator.txt` as context and passes locator instructions to the child;
+the target path exists only inside that locator file. A Codex child has
+`read_file`, follows the locator, and returns `there is booty here` with
+file-read evidence. An oMLX child lacks that capability, but Qwen still runs and
+must return exactly
 `sorry, I cannot do that, Dave.` The result records model-invocation and
 capability-unavailable evidence.
 

@@ -81,6 +81,7 @@ class ToolSession:
                 {
                     "role": "file_reader",
                     "objective": "Read treasure_chest.txt",
+                    "context": "Start with treasure_locator.txt",
                 },
             )
         self.process_alive_during_child = self.opened and not self.closed
@@ -143,8 +144,10 @@ class RetainedToolSession:
 class NamedReader:
     def __init__(self, text: str) -> None:
         self.text = text
+        self.attempts: list[TaskAttempt] = []
 
     def execute(self, attempt: TaskAttempt) -> TaskResult:
+        self.attempts.append(attempt)
         return TaskResult(
             attempt_id=attempt.attempt_id,
             status="succeeded",
@@ -173,8 +176,16 @@ class BatchToolSession:
                 "spawn_children",
                 {
                     "requests": [
-                        {"role": "left", "objective": "Inspect left"},
-                        {"role": "right", "objective": "Inspect right"},
+                        {
+                            "role": "left",
+                            "objective": "Inspect left",
+                            "context": "left context",
+                        },
+                        {
+                            "role": "right",
+                            "objective": "Inspect right",
+                            "context": "right context",
+                        },
                     ]
                 },
             )
@@ -296,11 +307,24 @@ class SessionToolExecutorTests(unittest.TestCase):
                     for row in rows
                 )
             )
+            dispatch_artifact = next(
+                audit.artifacts_dir.glob("*-child-event-0.json")
+            )
+            dispatch = json.loads(
+                dispatch_artifact.read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                dispatch["context"],
+                "Start with treasure_locator.txt",
+            )
             AuditJournal.verify(audit.run_dir)
 
     def test_non_native_tool_transport_still_dispatches_child(self) -> None:
         backend = FakeOmlxBackend(
-            '{"role":"file_reader","objective":"Read treasure_chest.txt"}',
+            (
+                '{"role":"file_reader","objective":"Read treasure_chest.txt",'
+                '"context":"Start with treasure_locator.txt"}'
+            ),
             "there is booty here",
         )
         result = SessionToolExecutor(
@@ -321,7 +345,10 @@ class SessionToolExecutorTests(unittest.TestCase):
             self.store,
             OmlxAgentSession(
                 backend=FakeOmlxBackend(
-                    '{"role":"file_reader","objective":"Read treasure_chest.txt"}',
+                    (
+                        '{"role":"file_reader","objective":"Read treasure_chest.txt",'
+                        '"context":"Start with treasure_locator.txt"}'
+                    ),
                     "I guessed",
                     "I still guessed",
                 )
@@ -366,6 +393,7 @@ class SessionToolExecutorTests(unittest.TestCase):
                 },
             }
         )
+        readers = {role: NamedReader(role) for role in ("left", "right")}
         dispatcher = ChildDispatcher(
             self.root,
             {
@@ -376,7 +404,7 @@ class SessionToolExecutorTests(unittest.TestCase):
                     grant_ref=f"grant:{role}",
                     backend_id="recording",
                     capabilities=frozenset({"inspect"}),
-                    executor=NamedReader(role),
+                    executor=readers[role],
                 )
                 for role in ("left", "right")
             },
@@ -403,11 +431,16 @@ class SessionToolExecutorTests(unittest.TestCase):
         self.assertTrue(session.process_alive_during_batch)
         self.assertTrue(session.closed)
         self.assertEqual(session.request.tools[0].name, "spawn_children")
+        self.assertEqual(readers["left"].attempts[0].context, "left context")
+        self.assertEqual(readers["right"].attempts[0].context, "right context")
 
     def test_omlx_transport_emulates_two_tool_turns(self) -> None:
         child_id = "treasure/child-1"
         backend = FakeOmlxBackend(
-            '{"role":"file_reader","objective":"Read treasure_chest.txt"}',
+            (
+                '{"role":"file_reader","objective":"Read treasure_chest.txt",'
+                '"context":"Start with treasure_locator.txt"}'
+            ),
             (
                 '{"child_attempt_id":"treasure/child-1",'
                 '"message":"what enabled you to answer me this way?"}'
@@ -471,8 +504,8 @@ class SessionToolExecutorTests(unittest.TestCase):
         backend = FakeOmlxBackend(
             (
                 '{"requests":['
-                '{"role":"left","objective":"Inspect left"},'
-                '{"role":"right","objective":"Inspect right"}]}'
+                '{"role":"left","objective":"Inspect left","context":"left"},'
+                '{"role":"right","objective":"Inspect right","context":"right"}]}'
             ),
             "left + right",
         )
@@ -526,7 +559,10 @@ class SessionToolExecutorTests(unittest.TestCase):
 
     def test_omlx_single_child_payload_named_results_is_not_a_batch(self) -> None:
         backend = FakeOmlxBackend(
-            '{"role":"file_reader","objective":"Read treasure_chest.txt"}',
+            (
+                '{"role":"file_reader","objective":"Read treasure_chest.txt",'
+                '"context":"Start with treasure_locator.txt"}'
+            ),
             "there is booty here",
         )
         session = OmlxAgentSession(backend=backend)

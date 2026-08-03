@@ -30,7 +30,14 @@ def run_treasure_scenario(
 ) -> tuple[TaskResult, ChildDispatcher]:
     """Run the same parent attempt and authorization policy on any session."""
 
-    treasure_path = Path(__file__).resolve().parent.parent / "treasure_chest.txt"
+    workspace = Path(__file__).resolve().parent.parent
+    treasure_path = workspace / "treasure_chest.txt"
+    locator_path = workspace / "treasure_locator.txt"
+    child_context = (
+        f"The locator file is {locator_path}. Read it first. It contains the path "
+        "to the target file; resolve that path from your working directory and "
+        "return the target file's exact contents."
+    )
     parent = TaskAttempt(
         attempt_id=attempt_id,
         task_ref="task:report-treasure",
@@ -40,23 +47,31 @@ def run_treasure_scenario(
     store = InMemoryReferenceStore(
         {
             "task:report-treasure": (
-                "Output what is in treasure_chest.txt. Keep the child session alive, "
-                "then ask that same child exactly: what enabled you to answer me "
-                "this way? After receiving its explanation, preserve the original "
-                "file-answer or refusal as your final answer."
+                "Output the contents of the target identified by the locator file. "
+                "Call spawn_child with the file_reader role and copy "
+                "context.child_context exactly into the child request's context "
+                "field. Keep the child session alive, then ask that same child "
+                "exactly: what enabled you to answer me this way? After receiving "
+                "its explanation, preserve the original file-answer or refusal as "
+                "your final answer."
             ),
-            "context:parent": {},
+            "context:parent": {"child_context": child_context},
             "grant:spawn-reader": {
                 "capabilities": ["spawn_child", "send_child_message"],
                 "child_roles": ["file_reader"],
             },
             "task:read-treasure": (
-                "Read treasure_chest.txt and return its exact contents."
+                "Follow the supplied context and return the target file's exact "
+                "contents."
             ),
-            "context:treasure": {"path": str(treasure_path)},
+            "context:treasure": {
+                "workspace": str(workspace),
+                "locator_path": str(locator_path),
+                "expected_path": str(treasure_path),
+            },
             "grant:read-treasure": {
                 "capabilities": ["read_file"],
-                "paths": [str(treasure_path)],
+                "workspaces": [str(workspace)],
             },
         }
     )

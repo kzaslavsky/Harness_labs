@@ -11,6 +11,8 @@ Status: active
 - Durable decisions: [`../decisions/README.md`](../decisions/README.md)
 - Parallel child dispatch:
   [`parallel-child-dispatch-plan.md`](parallel-child-dispatch-plan.md)
+- Pass-through child context:
+  [`pass-through-child-context-plan.md`](pass-through-child-context-plan.md)
 
 ## Seed implementation records
 

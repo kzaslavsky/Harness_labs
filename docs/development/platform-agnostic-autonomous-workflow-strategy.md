@@ -22,6 +22,12 @@ The successor must not encode required lifecycle behavior only in a prompt.
 Prompts may guide judgment; executable controllers must own state transitions,
 budgets, retries, handoffs, gates, and terminal settlement.
 
+The first implemented parent/child context primitive is intentionally smaller
+than the target packet design: `ChildRequest.context` is one string copied
+unchanged to the child `TaskAttempt`. This proves role-specific context handoff
+across Codex and local-model transports. Selection, redaction, provenance, and
+authorization remain later controller policies around the same boundary.
+
 ## Design thesis
 
 Separate the workflow into three concerns:

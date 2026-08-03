@@ -32,12 +32,15 @@ class TaskAttempt:
     context_ref: str
     grant_ref: str
     parent_attempt_id: str | None = None
+    context: str = ""
 
     def __post_init__(self) -> None:
         for name in ("attempt_id", "task_ref", "context_ref", "grant_ref"):
             _require_reference(name, getattr(self, name))
         if self.parent_attempt_id is not None:
             _require_reference("parent_attempt_id", self.parent_attempt_id)
+        if not isinstance(self.context, str):
+            raise InvalidAttempt("context must be a string")
 
 
 @dataclass(frozen=True)

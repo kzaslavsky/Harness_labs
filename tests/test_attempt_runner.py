@@ -75,6 +75,16 @@ class AttemptRunnerTests(unittest.TestCase):
                 grant_ref="grant-1",
             )
 
+    def test_rejects_non_string_supplied_context(self) -> None:
+        with self.assertRaisesRegex(InvalidAttempt, "context must be a string"):
+            TaskAttempt(
+                attempt_id="attempt-1",
+                task_ref="task:sha256:abc",
+                context_ref="context:sha256:def",
+                grant_ref="grant-1",
+                context={"not": "text"},  # type: ignore[arg-type]
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

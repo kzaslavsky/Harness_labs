@@ -6,6 +6,13 @@ Context is an input artifact, not an informal transcript. Every dispatched task
 MUST receive a versioned context packet that is sufficient, minimal, traceable,
 and explicit about uncertainty.
 
+The current prototype composition layer has a deliberately smaller transport:
+the parent supplies one `ChildRequest.context` string and the controller copies
+it unchanged to the child attempt. That string is bootstrap context, not yet the
+production packet required by this contract. Role capabilities and workspace
+authority remain separate. A future packet boundary may validate or replace the
+string without changing the parent/child result envelope.
+
 ## Required packet fields
 
 A context packet records:
@@ -39,6 +46,8 @@ A context packet records:
 ## Parent/child boundary
 
 A parent may summarize broader context but remains accountable for omissions.
+A child may gather additional context through its separately granted tools;
+supplied bootstrap context does not restrict those capabilities.
 A child MUST report missing or contradictory context instead of silently
 inventing requirements. Child output returns through the result contract; it
 does not become trusted shared context until validated and promoted by the

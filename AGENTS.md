@@ -53,6 +53,9 @@ No required contract may exist only in a prompt or in an agent's memory.
 - Give each worker the smallest sufficient context packet. Include objective,
   scope, constraints, relevant files or symbols, acceptance checks, permissions,
   output schema, and escalation conditions.
+- The prototype `ChildRequest.context` string is a pass-through bootstrap value,
+  not a production context packet or authority boundary. Keep capabilities and
+  workspace grants separate until packet validation is implemented.
 - Keep agent responsibilities and writable paths disjoint when work runs in
   parallel. A parent remains accountable for validating child output.
 - Record material alternatives, assumptions, deviations, retries, and deferrals.

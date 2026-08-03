@@ -2,6 +2,13 @@
 
 Status: proposed
 
+## Current prototype slice
+
+The composition layer now carries task-specific text directly from a parent
+`ChildRequest` to the child `TaskAttempt`. The controller intentionally performs
+no content selection or authorization yet. See
+[`pass-through-child-context-plan.md`](pass-through-child-context-plan.md).
+
 ## Milestone 1 — minimal conforming harness
 
 Build one end-to-end Codex feature harness that conforms to the architecture,

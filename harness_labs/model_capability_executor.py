@@ -45,7 +45,10 @@ class ModelCapabilityExecutor:
         missing = tuple(sorted(set(required) - self.capabilities))
 
         model_task = task
-        model_context: Mapping[str, Any] = context
+        expanded_context = dict(context)
+        if attempt.context:
+            expanded_context["supplied_context"] = attempt.context
+        model_context: Mapping[str, Any] = expanded_context
         expected: str | None = None
         if missing:
             expected = self.unavailable_response
@@ -58,6 +61,7 @@ class ModelCapabilityExecutor:
             model_context = {
                 "available_capabilities": sorted(self.capabilities),
                 "missing_capabilities": list(missing),
+                "supplied_context": attempt.context,
             }
         try:
             raw_text = self.backend.generate(model_task, model_context)

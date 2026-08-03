@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import threading
 import time
 import unittest
@@ -136,6 +137,7 @@ class ChildDispatcherTests(unittest.TestCase):
             ChildRequest(
                 role="file_reader",
                 objective="Read treasure_chest.txt",
+                context="Start with treasure_locator.txt",
             ),
         )
 
@@ -144,6 +146,13 @@ class ChildDispatcherTests(unittest.TestCase):
         self.assertEqual(child.parent_attempt_id, self.root.attempt_id)
         self.assertEqual(child.task_ref, "task:read-treasure")
         self.assertEqual(child.grant_ref, "grant:read-treasure")
+        self.assertEqual(child.context, "Start with treasure_locator.txt")
+        self.assertEqual(
+            self.dispatcher.events[0].context_sha256,
+            hashlib.sha256(
+                b"Start with treasure_locator.txt"
+            ).hexdigest(),
+        )
         self.assertEqual(
             [event.event_type for event in self.dispatcher.events],
             ["child_dispatched", "child_completed"],

@@ -71,7 +71,13 @@ class TextExecutor:
             )
 
         try:
-            text = self.backend.generate(task, context)
+            backend_context = dict(context)
+            if attempt.context:
+                backend_context["supplied_context"] = attempt.context
+            text = self.backend.generate(
+                task,
+                backend_context,
+            )
         except TextBackendError as exc:
             return TaskResult(
                 attempt_id=attempt.attempt_id,
