@@ -6,6 +6,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from harness_labs.audit import AuditActor, AuditError, AuditJournal
 
@@ -169,6 +170,116 @@ class AuditJournalTests(unittest.TestCase):
 
             with self.assertRaisesRegex(AuditError, "inventory is incomplete"):
                 AuditJournal.verify(run_dir)
+
+    def test_open_existing_reconciles_valid_events_ahead_of_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            run_dir = Path(temporary) / "run-7"
+            journal = AuditJournal(
+                run_dir,
+                "run-7",
+                actor=AuditActor("controller-1", "controller"),
+                evidence_classification="fabricated_fixture",
+            )
+            journal.append(
+                "child_completed",
+                status="succeeded",
+                payload={"child_attempt_id": "child-1"},
+            )
+
+            with self.assertRaisesRegex(
+                AuditError,
+                "checkpoint does not bind the journal head",
+            ):
+                AuditJournal.verify(run_dir)
+
+            reopened = AuditJournal.open_existing(
+                run_dir,
+                actor=AuditActor("recovery-1", "recovery"),
+            )
+            verification = AuditJournal.verify(run_dir)
+            rows = [
+                json.loads(line)
+                for line in reopened.events_path.read_text(
+                    encoding="utf-8"
+                ).splitlines()
+            ]
+
+            self.assertEqual(
+                rows[-1]["event_type"],
+                "checkpoint_reconciled",
+            )
+            self.assertEqual(verification["event_count"], 3)
+            checkpoint = json.loads(
+                reopened.checkpoint_path.read_text(encoding="utf-8")
+            )
+            self.assertEqual(checkpoint["status"], "running")
+            self.assertEqual(
+                checkpoint["state"]["reconciled_event_count"],
+                1,
+            )
+
+    def test_append_retries_transient_permission_error(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            run_dir = Path(temporary) / "run-8"
+            journal = AuditJournal(
+                run_dir,
+                "run-8",
+                actor=AuditActor("controller-1", "controller"),
+                evidence_classification="fabricated_fixture",
+            )
+            original_open = __import__("os").open
+            attempts = 0
+
+            def transient_open(path, flags, mode=0o777):
+                nonlocal attempts
+                if Path(path) == journal.events_path and attempts < 2:
+                    attempts += 1
+                    raise PermissionError(1, "transient denial", str(path))
+                return original_open(path, flags, mode)
+
+            with patch("harness_labs.audit.os.open", side_effect=transient_open):
+                journal.append(
+                    "retry_probe",
+                    status="succeeded",
+                    payload={},
+                )
+                journal.merge_checkpoint(updates={})
+
+            self.assertEqual(attempts, 2)
+            AuditJournal.verify(run_dir)
+
+    def test_terminal_checkpoint_without_manifest_is_not_reconciled(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            run_dir = Path(temporary) / "run-9"
+            journal = AuditJournal(
+                run_dir,
+                "run-9",
+                actor=AuditActor("controller-1", "controller"),
+                evidence_classification="fabricated_fixture",
+            )
+            journal.checkpoint(
+                "failed",
+                {"active_children": [], "active_sessions": []},
+            )
+            journal.append(
+                "late_event",
+                status="failed",
+                payload={},
+            )
+
+            with self.assertRaisesRegex(
+                AuditError,
+                "terminal checkpoint is missing its manifest",
+            ):
+                AuditJournal.verify(run_dir)
+            with self.assertRaisesRegex(
+                AuditError,
+                "terminal checkpoint is missing its manifest",
+            ):
+                AuditJournal.open_existing(
+                    run_dir,
+                    actor=AuditActor("recovery-1", "recovery"),
+                )
 
 
 if __name__ == "__main__":

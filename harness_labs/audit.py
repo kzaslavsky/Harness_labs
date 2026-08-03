@@ -11,7 +11,7 @@ import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from time import monotonic_ns
+from time import monotonic_ns, sleep
 from typing import Any, Mapping
 
 try:
@@ -133,8 +133,59 @@ class AuditJournal:
         actor: AuditActor,
     ) -> AuditJournal:
         run_dir = run_dir.resolve()
-        verification = cls.verify(run_dir)
+        verification = _verify_event_journal(run_dir)
         checkpoint = _load_json(run_dir / "checkpoint.json")
+        _validate_checkpoint(checkpoint)
+        if checkpoint.get("run_id") != verification["run_id"]:
+            raise AuditError("checkpoint run identity does not match the journal")
+        if (
+            checkpoint.get("evidence_classification")
+            != verification["evidence_classification"]
+        ):
+            raise AuditError(
+                "checkpoint evidence classification does not match the journal"
+            )
+        checkpoint_sequence = checkpoint.get("sequence")
+        if (
+            not isinstance(checkpoint_sequence, int)
+            or checkpoint_sequence > verification["event_count"]
+        ):
+            raise AuditError("checkpoint sequence is ahead of the journal")
+        expected_checkpoint_head = (
+            verification["event_hashes"][checkpoint_sequence - 1]
+            if checkpoint_sequence
+            else None
+        )
+        if checkpoint.get("head_hash") != expected_checkpoint_head:
+            raise AuditError("checkpoint does not bind its journal position")
+        checkpoint_lag = verification["event_count"] - checkpoint_sequence
+        manifest_exists = (run_dir / "manifest.json").is_file()
+        if checkpoint.get("status") in _TERMINAL and not manifest_exists:
+            raise AuditError("terminal checkpoint is missing its manifest")
+        if manifest_exists:
+            cls.verify(run_dir)
+        if checkpoint_lag:
+            if manifest_exists:
+                raise AuditError("finalized audit checkpoint lags its journal")
+            prior_revision = checkpoint["revision"]
+            checkpoint = {
+                **checkpoint,
+                "revision": prior_revision + 1,
+                "status": "recovering",
+                "sequence": verification["event_count"],
+                "head_hash": verification["head_hash"],
+                "updated_at": _timestamp(),
+                "state": {
+                    **checkpoint["state"],
+                    "reconciled_from_revision": prior_revision,
+                    "reconciled_event_count": checkpoint_lag,
+                },
+            }
+            _atomic_write(
+                run_dir / "checkpoint.json",
+                (_canonical(checkpoint) + "\n").encode("utf-8"),
+                mode=0o600,
+            )
         instance = cls.__new__(cls)
         instance.run_dir = run_dir
         instance.run_id = verification["run_id"]
@@ -152,6 +203,17 @@ class AuditJournal:
         instance._started_at = checkpoint["started_at"]
         instance._mutex = threading.RLock()
         instance._finalized = instance.manifest_path.is_file()
+        if checkpoint_lag:
+            instance.append(
+                "checkpoint_reconciled",
+                status="succeeded",
+                payload={
+                    "prior_revision": prior_revision,
+                    "reconciled_event_count": checkpoint_lag,
+                },
+                actor=actor,
+            )
+            instance.merge_checkpoint(status="running", updates={})
         return instance
 
     @_synchronized
@@ -232,10 +294,8 @@ class AuditJournal:
         event["event_hash"] = event_hash
         encoded = (_canonical(event) + "\n").encode("utf-8")
         with self._locked():
-            descriptor = os.open(
+            descriptor = _open_append_with_retry(
                 self.events_path,
-                os.O_WRONLY | os.O_APPEND,
-                0o600,
             )
             try:
                 os.write(descriptor, encoded)
@@ -394,49 +454,11 @@ class AuditJournal:
     @staticmethod
     def verify(run_dir: Path) -> dict[str, Any]:
         run_dir = run_dir.resolve()
-        events_path = run_dir / "events.jsonl"
-        if not events_path.is_file():
-            raise AuditError("audit event journal is missing")
-        previous: str | None = None
-        run_id: str | None = None
-        evidence_classification: str | None = None
-        count = 0
-        with events_path.open("r", encoding="utf-8") as stream:
-            for line in stream:
-                try:
-                    event = json.loads(line)
-                except json.JSONDecodeError as exc:
-                    raise AuditError("audit event journal contains invalid JSON") from exc
-                _validate_event(event)
-                supplied_hash = event.pop("event_hash", None)
-                computed_hash = hashlib.sha256(
-                    _canonical(event).encode("utf-8")
-                ).hexdigest()
-                if supplied_hash != computed_hash:
-                    raise AuditError(f"audit event {count} hash does not match")
-                if event.get("sequence") != count:
-                    raise AuditError("audit event sequence is not contiguous")
-                if event.get("previous_hash") != previous:
-                    raise AuditError("audit event hash chain is broken")
-                if event.get("protocol") != AUDIT_PROTOCOL:
-                    raise AuditError("audit event protocol is invalid")
-                if run_id is None:
-                    run_id = event.get("run_id")
-                elif event.get("run_id") != run_id:
-                    raise AuditError("audit event run identity changed")
-                if evidence_classification is None:
-                    evidence_classification = event.get("evidence_classification")
-                elif (
-                    event.get("evidence_classification")
-                    != evidence_classification
-                ):
-                    raise AuditError("audit evidence classification changed")
-                for artifact in event.get("artifacts", []):
-                    _verify_artifact(run_dir, artifact)
-                previous = supplied_hash
-                count += 1
-        if count == 0 or not isinstance(run_id, str):
-            raise AuditError("audit event journal is empty")
+        verification = _verify_event_journal(run_dir)
+        previous = verification["head_hash"]
+        run_id = verification["run_id"]
+        evidence_classification = verification["evidence_classification"]
+        count = verification["event_count"]
         checkpoint = _load_json(run_dir / "checkpoint.json")
         _validate_checkpoint(checkpoint)
         if checkpoint.get("run_id") != run_id:
@@ -445,11 +467,13 @@ class AuditJournal:
             raise AuditError(
                 "checkpoint evidence classification does not match the journal"
             )
+        manifest_path = run_dir / "manifest.json"
+        if checkpoint.get("status") in _TERMINAL and not manifest_path.is_file():
+            raise AuditError("terminal checkpoint is missing its manifest")
         if checkpoint.get("head_hash") != previous:
             raise AuditError("checkpoint does not bind the journal head")
         if checkpoint.get("sequence") != count:
             raise AuditError("checkpoint sequence does not match the journal")
-        manifest_path = run_dir / "manifest.json"
         if manifest_path.is_file():
             manifest = _load_json(manifest_path)
             _validate_manifest(manifest)
@@ -526,6 +550,57 @@ class _FileLock:
         self.stream.close()
 
 
+def _verify_event_journal(run_dir: Path) -> dict[str, Any]:
+    events_path = run_dir / "events.jsonl"
+    if not events_path.is_file():
+        raise AuditError("audit event journal is missing")
+    previous: str | None = None
+    run_id: str | None = None
+    evidence_classification: str | None = None
+    hashes: list[str] = []
+    with events_path.open("r", encoding="utf-8") as stream:
+        for count, line in enumerate(stream):
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise AuditError("audit event journal contains invalid JSON") from exc
+            _validate_event(event)
+            supplied_hash = event.pop("event_hash", None)
+            computed_hash = hashlib.sha256(
+                _canonical(event).encode("utf-8")
+            ).hexdigest()
+            if supplied_hash != computed_hash:
+                raise AuditError(f"audit event {count} hash does not match")
+            if event.get("sequence") != count:
+                raise AuditError("audit event sequence is not contiguous")
+            if event.get("previous_hash") != previous:
+                raise AuditError("audit event hash chain is broken")
+            if event.get("protocol") != AUDIT_PROTOCOL:
+                raise AuditError("audit event protocol is invalid")
+            if run_id is None:
+                run_id = event.get("run_id")
+            elif event.get("run_id") != run_id:
+                raise AuditError("audit event run identity changed")
+            if evidence_classification is None:
+                evidence_classification = event.get("evidence_classification")
+            elif event.get("evidence_classification") != evidence_classification:
+                raise AuditError("audit evidence classification changed")
+            for artifact in event.get("artifacts", []):
+                _verify_artifact(run_dir, artifact)
+            assert isinstance(supplied_hash, str)
+            previous = supplied_hash
+            hashes.append(supplied_hash)
+    if not hashes or not isinstance(run_id, str):
+        raise AuditError("audit event journal is empty")
+    return {
+        "run_id": run_id,
+        "event_count": len(hashes),
+        "head_hash": previous,
+        "event_hashes": tuple(hashes),
+        "evidence_classification": evidence_classification,
+    }
+
+
 def _canonical(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
@@ -554,6 +629,21 @@ def _atomic_write(path: Path, content: bytes, *, mode: int) -> None:
             os.close(descriptor)
         if temporary.exists():
             temporary.unlink()
+
+
+def _open_append_with_retry(path: Path) -> int:
+    """Tolerate brief macOS EPERM/EACCES windows without losing an event."""
+
+    delay = 0.005
+    for attempt in range(8):
+        try:
+            return os.open(path, os.O_WRONLY | os.O_APPEND, 0o600)
+        except PermissionError:
+            if attempt == 7:
+                raise
+            sleep(delay)
+            delay *= 2
+    raise AssertionError("unreachable")
 
 
 def _fsync_directory(path: Path) -> None:

@@ -184,12 +184,14 @@ class CodexAppServerSession:
                     "ephemeral": not self.persistent_rollout,
                     "baseInstructions": (
                         "You are a bounded parent task attempt. You cannot read files "
-                        "or run commands. Use only the controller-provided spawn_child "
-                        "tool when the task requires file access. Never guess file "
-                        "contents. When send_child_message is available and the task "
-                        "requires a follow-up, send the exact requested message to the "
-                        "same child_attempt_id before finishing. Preserve the initial "
-                        "child answer as the final answer."
+                        "or run commands. Use only controller-provided child tools when "
+                        "the task requires delegated access. Use spawn_children once "
+                        "when independent child work can run concurrently, and wait for "
+                        "the complete ordered result array before collating. Never guess "
+                        "missing evidence. When send_child_message is available and the "
+                        "task requires a follow-up, send the exact requested message to "
+                        "the same child_attempt_id before finishing. Preserve the initial "
+                        "child answer as the final answer when the task says to do so."
                     ),
                     "dynamicTools": [
                         {

@@ -9,6 +9,8 @@ Status: active
 - Context contract: [`../architecture/context-engineering.md`](../architecture/context-engineering.md)
 - Observability contract: [`../observability/logging-and-metrics.md`](../observability/logging-and-metrics.md)
 - Durable decisions: [`../decisions/README.md`](../decisions/README.md)
+- Parallel child dispatch:
+  [`parallel-child-dispatch-plan.md`](parallel-child-dispatch-plan.md)
 
 ## Seed implementation records
 

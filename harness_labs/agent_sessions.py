@@ -10,7 +10,13 @@ from typing import Any, Mapping, Protocol, TypeAlias
 
 from .attempts import TaskAttempt, TaskResult
 from .audit import AuditActor, AuditJournal
-from .composition import ChildDispatcher, ChildRequest, ChildRequestDenied
+from .composition import (
+    ChildBatchRequest,
+    ChildBatchResult,
+    ChildDispatcher,
+    ChildRequest,
+    ChildRequestDenied,
+)
 from .text_executor import InMemoryReferenceStore
 
 
@@ -116,12 +122,26 @@ class SessionToolExecutor:
     session: AgentSession
     dispatcher: ChildDispatcher
     max_tool_calls: int = 1
+    max_parallel_children: int = 1
+    max_batch_children: int | None = None
+    require_all_child_roles: bool = False
     keep_child_alive: bool = False
     audit: AuditJournal | None = None
     _tool_name: str = field(default="spawn_child", init=False, repr=False)
+    _batch_tool_name: str = field(
+        default="spawn_children", init=False, repr=False
+    )
     _message_tool_name: str = field(
         default="send_child_message", init=False, repr=False
     )
+
+    def __post_init__(self) -> None:
+        if self.max_tool_calls < 1:
+            raise ValueError("max_tool_calls must be positive")
+        if self.max_parallel_children < 1:
+            raise ValueError("max_parallel_children must be positive")
+        if self.max_batch_children is not None and self.max_batch_children < 1:
+            raise ValueError("max_batch_children must be positive")
 
     def execute(self, attempt: TaskAttempt) -> TaskResult:
         started_ns = monotonic_ns()
@@ -200,8 +220,10 @@ class SessionToolExecutor:
                 payload={"error": "no authorized child role is available"},
             )
 
-        tools: tuple[ToolSpec, ...] = (
-            ToolSpec(
+        capabilities = grant.get("capabilities", ())
+        tools: tuple[ToolSpec, ...] = ()
+        if "spawn_child" in capabilities:
+            tools += (ToolSpec(
                 name=self._tool_name,
                 description="Run one controller-authorized child task.",
                 input_schema={
@@ -216,8 +238,46 @@ class SessionToolExecutor:
                         "objective": {"type": "string", "minLength": 1},
                     },
                 },
-            ),
-        )
+            ),)
+        if "spawn_children" in capabilities:
+            tools += (ToolSpec(
+                name=self._batch_tool_name,
+                description=(
+                    "Run independent controller-authorized child tasks concurrently "
+                    "and return all results in request order."
+                ),
+                input_schema={
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["requests"],
+                    "properties": {
+                        "requests": {
+                            "type": "array",
+                            "minItems": 1,
+                            "maxItems": (
+                                self.max_batch_children
+                                if self.max_batch_children is not None
+                                else self.max_parallel_children
+                            ),
+                            "items": {
+                                "type": "object",
+                                "additionalProperties": False,
+                                "required": ["role", "objective"],
+                                "properties": {
+                                    "role": {
+                                        "type": "string",
+                                        "enum": list(allowed_roles),
+                                    },
+                                    "objective": {
+                                        "type": "string",
+                                        "minLength": 1,
+                                    },
+                                },
+                            },
+                        }
+                    },
+                },
+            ),)
         if self.keep_child_alive:
             if "send_child_message" not in grant.get("capabilities", ()):
                 return TaskResult(
@@ -271,6 +331,7 @@ class SessionToolExecutor:
         child_result: TaskResult | None = None
         child_attempt_id: str | None = None
         child_turns: list[TaskResult] = []
+        child_results: list[TaskResult] = []
         tool_calls = 0
         try:
             session_id = self.session.open(request)
@@ -294,15 +355,23 @@ class SessionToolExecutor:
                 tool_calls += 1
                 if tool_calls > self.max_tool_calls:
                     return self._failed(attempt, "maximum parent tool calls exceeded")
-                tool_result, child_result = self._run_tool(
+                tool_result, returned_children = self._run_tool(
                     attempt,
                     event,
                     allowed_roles,
                     child_attempt_id,
                 )
-                if child_result is not None:
+                if returned_children:
+                    child_results.extend(returned_children)
+                    child_result = returned_children[-1]
+                if len(returned_children) == 1 and event.name == self._tool_name:
                     child_attempt_id = child_result.attempt_id
                     child_turns.append(child_result)
+                elif (
+                    len(returned_children) == 1
+                    and event.name == self._message_tool_name
+                ):
+                    child_turns.append(returned_children[0])
                 if self.audit is not None:
                     result_artifact = self.audit.write_artifact(
                         f"tool-result-{event.call_id}",
@@ -331,10 +400,10 @@ class SessionToolExecutor:
             answer = event.content.strip()
             if not answer:
                 return self._failed(attempt, "backend returned no answer")
-            if child_result is None:
+            if not child_results:
                 return self._failed(attempt, "parent backend did not call child")
-            if child_result.status != "succeeded":
-                return self._failed(attempt, "authorized child did not succeed")
+            if any(result.status != "succeeded" for result in child_results):
+                return self._failed(attempt, "one or more authorized children failed")
             if self.keep_child_alive and len(child_turns) != 2:
                 return self._failed(
                     attempt,
@@ -347,6 +416,7 @@ class SessionToolExecutor:
                 event,
                 child_result,
                 tuple(child_turns),
+                tuple(child_results),
             )
         except ChildRequestDenied as exc:
             return TaskResult(
@@ -415,13 +485,14 @@ class SessionToolExecutor:
             return self._failed(attempt, "task must resolve to non-empty text")
         if not isinstance(context, Mapping):
             return self._failed(attempt, "context must resolve to a mapping")
-        if not isinstance(grant, Mapping) or "spawn_child" not in grant.get(
-            "capabilities", ()
-        ):
+        if not isinstance(grant, Mapping) or not {
+            "spawn_child",
+            "spawn_children",
+        }.intersection(grant.get("capabilities", ())):
             return TaskResult(
                 attempt_id=attempt.attempt_id,
                 status="blocked",
-                payload={"error": "spawn_child capability is required"},
+                payload={"error": "a child-spawn capability is required"},
             )
         return task, context, grant
 
@@ -431,7 +502,7 @@ class SessionToolExecutor:
         call: ToolCall,
         allowed_roles: tuple[str, ...],
         child_attempt_id: str | None,
-    ) -> tuple[ToolResult, TaskResult | None]:
+    ) -> tuple[ToolResult, tuple[TaskResult, ...]]:
         if call.name == self._message_tool_name and self.keep_child_alive:
             requested_id = call.arguments.get("child_attempt_id")
             message = call.arguments.get("message")
@@ -446,14 +517,99 @@ class SessionToolExecutor:
                         success=False,
                         payload={"error": "invalid retained-child message"},
                     ),
-                    None,
+                    (),
                 )
             child = self.dispatcher.send_child_message(
                 parent,
                 requested_id,
                 message,
             )
-            return self._child_tool_result(call.call_id, child)
+            tool_result, result = self._child_tool_result(call.call_id, child)
+            return tool_result, (result,)
+        if call.name == self._batch_tool_name and child_attempt_id is None:
+            if self.keep_child_alive:
+                return (
+                    ToolResult(
+                        call_id=call.call_id,
+                        success=False,
+                        payload={
+                            "error": (
+                                "retained child sessions require individual dispatch"
+                            )
+                        },
+                    ),
+                    (),
+                )
+            raw_requests = call.arguments.get("requests")
+            if (
+                not isinstance(raw_requests, list)
+                or not 1
+                <= len(raw_requests)
+                <= (
+                    self.max_batch_children
+                    if self.max_batch_children is not None
+                    else self.max_parallel_children
+                )
+            ):
+                return (
+                    ToolResult(
+                        call_id=call.call_id,
+                        success=False,
+                        payload={"error": "invalid child batch request"},
+                    ),
+                    (),
+                )
+            requests: list[ChildRequest] = []
+            for raw_request in raw_requests:
+                if not isinstance(raw_request, Mapping):
+                    return (
+                        ToolResult(
+                            call_id=call.call_id,
+                            success=False,
+                            payload={"error": "invalid child batch request"},
+                        ),
+                        (),
+                    )
+                role = raw_request.get("role")
+                objective = raw_request.get("objective")
+                if (
+                    role not in allowed_roles
+                    or not isinstance(objective, str)
+                    or not objective.strip()
+                ):
+                    return (
+                        ToolResult(
+                            call_id=call.call_id,
+                            success=False,
+                            payload={"error": "invalid child batch request"},
+                        ),
+                        (),
+                    )
+                requests.append(ChildRequest(role=role, objective=objective))
+            if self.require_all_child_roles and {
+                request.role for request in requests
+            } != set(allowed_roles):
+                return (
+                    ToolResult(
+                        call_id=call.call_id,
+                        success=False,
+                        payload={
+                            "error": (
+                                "child batch must contain every authorized role "
+                                "exactly once"
+                            )
+                        },
+                    ),
+                    (),
+                )
+            batch = self.dispatcher.run_children(
+                parent,
+                ChildBatchRequest(
+                    requests=tuple(requests),
+                    max_parallelism=self.max_parallel_children,
+                ),
+            )
+            return self._batch_tool_result(call.call_id, batch)
         if call.name != self._tool_name or child_attempt_id is not None:
             return (
                 ToolResult(
@@ -461,7 +617,7 @@ class SessionToolExecutor:
                     success=False,
                     payload={"error": f"unknown tool: {call.name}"},
                 ),
-                None,
+                (),
             )
         role = call.arguments.get("role")
         objective = call.arguments.get("objective")
@@ -472,14 +628,15 @@ class SessionToolExecutor:
                     success=False,
                     payload={"error": "invalid child request"},
                 ),
-                None,
+                (),
             )
         child = self.dispatcher.start_child(
             parent,
             ChildRequest(role=role, objective=objective),
             keep_alive=self.keep_child_alive,
         )
-        return self._child_tool_result(call.call_id, child)
+        tool_result, result = self._child_tool_result(call.call_id, child)
+        return tool_result, (result,)
 
     @staticmethod
     def _child_tool_result(
@@ -501,6 +658,35 @@ class SessionToolExecutor:
         )
 
     @staticmethod
+    def _batch_tool_result(
+        call_id: str,
+        batch: ChildBatchResult,
+    ) -> tuple[ToolResult, tuple[TaskResult, ...]]:
+        evidence = tuple(
+            item for result in batch.results for item in result.evidence
+        )
+        return (
+            ToolResult(
+                call_id=call_id,
+                success=batch.succeeded,
+                payload={
+                    "batch_id": batch.batch_id,
+                    "max_parallelism": batch.max_parallelism,
+                    "results": [
+                        {
+                            "attempt_id": result.attempt_id,
+                            "status": result.status,
+                            "payload": dict(result.payload),
+                        }
+                        for result in batch.results
+                    ],
+                },
+                evidence=evidence,
+            ),
+            batch.results,
+        )
+
+    @staticmethod
     def _succeeded(
         attempt: TaskAttempt,
         answer: str,
@@ -508,6 +694,7 @@ class SessionToolExecutor:
         event: FinalOutput,
         child_result: TaskResult | None,
         child_turns: tuple[TaskResult, ...],
+        child_results: tuple[TaskResult, ...],
     ) -> TaskResult:
         digest = hashlib.sha256(answer.encode("utf-8")).hexdigest()
         evidence = (*event.evidence, f"parent-content:sha256:{digest}")
@@ -523,6 +710,15 @@ class SessionToolExecutor:
             }
         if child_result is not None:
             payload["child_attempt_id"] = child_result.attempt_id
+            payload["child_results"] = [
+                {
+                    "attempt_id": result.attempt_id,
+                    "status": result.status,
+                    "payload": dict(result.payload),
+                    "evidence": list(result.evidence),
+                }
+                for result in child_results
+            ]
             payload["child_turns"] = [
                 {
                     "status": turn.status,

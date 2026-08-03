@@ -140,6 +140,55 @@ class RetainedToolSession:
         pass
 
 
+class NamedReader:
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+    def execute(self, attempt: TaskAttempt) -> TaskResult:
+        return TaskResult(
+            attempt_id=attempt.attempt_id,
+            status="succeeded",
+            payload={"text": self.text},
+        )
+
+
+class BatchToolSession:
+    capabilities = BackendCapabilities(True, True, True, True, True)
+
+    def __init__(self) -> None:
+        self.request: ModelRequest | None = None
+        self.opened = False
+        self.closed = False
+        self.process_alive_during_batch = False
+
+    def open(self, request: ModelRequest) -> str:
+        self.request = request
+        self.opened = True
+        return "resident-batch"
+
+    def step(self, session_id: str, tool_result: ToolResult | None = None):
+        if tool_result is None:
+            return ToolCall(
+                "batch-1",
+                "spawn_children",
+                {
+                    "requests": [
+                        {"role": "left", "objective": "Inspect left"},
+                        {"role": "right", "objective": "Inspect right"},
+                    ]
+                },
+            )
+        self.process_alive_during_batch = self.opened and not self.closed
+        texts = [
+            result["payload"]["text"]
+            for result in tool_result.payload["results"]
+        ]
+        return FinalOutput(" + ".join(texts), evidence=("session:resident",))
+
+    def close(self, session_id: str) -> None:
+        self.closed = True
+
+
 class SessionToolExecutorTests(unittest.TestCase):
     def setUp(self) -> None:
         self.root = TaskAttempt(
@@ -306,6 +355,55 @@ class SessionToolExecutorTests(unittest.TestCase):
             "child_terminated",
         )
 
+    def test_resident_parent_dispatches_batch_and_receives_ordered_join(self) -> None:
+        store = InMemoryReferenceStore(
+            {
+                "task:parent": "Inspect both sides and collate.",
+                "context:parent": {},
+                "grant:parent": {
+                    "capabilities": ["spawn_children"],
+                    "child_roles": ["left", "right"],
+                },
+            }
+        )
+        dispatcher = ChildDispatcher(
+            self.root,
+            {
+                role: ChildAuthorization(
+                    role=role,
+                    task_ref=f"task:{role}",
+                    context_ref=f"context:{role}",
+                    grant_ref=f"grant:{role}",
+                    backend_id="recording",
+                    capabilities=frozenset({"inspect"}),
+                    executor=NamedReader(role),
+                )
+                for role in ("left", "right")
+            },
+            max_children_per_attempt=2,
+        )
+        session = BatchToolSession()
+
+        result = SessionToolExecutor(
+            store,
+            session,
+            dispatcher,
+            max_parallel_children=2,
+        ).execute(self.root)
+
+        self.assertEqual(result.status, "succeeded")
+        self.assertEqual(result.payload["text"], "left + right")
+        self.assertEqual(
+            [
+                child["payload"]["text"]
+                for child in result.payload["child_results"]
+            ],
+            ["left", "right"],
+        )
+        self.assertTrue(session.process_alive_during_batch)
+        self.assertTrue(session.closed)
+        self.assertEqual(session.request.tools[0].name, "spawn_children")
+
     def test_omlx_transport_emulates_two_tool_turns(self) -> None:
         child_id = "treasure/child-1"
         backend = FakeOmlxBackend(
@@ -368,6 +466,104 @@ class SessionToolExecutorTests(unittest.TestCase):
         self.assertEqual(followup.name, "send_child_message")
         self.assertEqual(final.content, "there is booty here")
         self.assertEqual(len(backend.tasks), 3)
+
+    def test_omlx_transport_emulates_parallel_batch_tool(self) -> None:
+        backend = FakeOmlxBackend(
+            (
+                '{"requests":['
+                '{"role":"left","objective":"Inspect left"},'
+                '{"role":"right","objective":"Inspect right"}]}'
+            ),
+            "left + right",
+        )
+        session = OmlxAgentSession(backend=backend)
+        session_id = session.open(
+            ModelRequest(
+                task="Inspect both sides.",
+                context={},
+                tools=(
+                    ToolSpec(
+                        "spawn_children",
+                        "Spawn batch",
+                        {
+                            "properties": {
+                                "requests": {
+                                    "maxItems": 2,
+                                    "items": {
+                                        "properties": {
+                                            "role": {
+                                                "enum": ["left", "right"]
+                                            }
+                                        }
+                                    },
+                                }
+                            }
+                        },
+                    ),
+                ),
+            )
+        )
+
+        spawn = session.step(session_id)
+        final = session.step(
+            session_id,
+            ToolResult(
+                spawn.call_id,
+                True,
+                {
+                    "batch_id": "batch-1",
+                    "results": [
+                        {"payload": {"text": "left"}},
+                        {"payload": {"text": "right"}},
+                    ],
+                },
+            ),
+        )
+
+        self.assertEqual(spawn.name, "spawn_children")
+        self.assertEqual(len(spawn.arguments["requests"]), 2)
+        self.assertEqual(final.content, "left + right")
+
+    def test_omlx_single_child_payload_named_results_is_not_a_batch(self) -> None:
+        backend = FakeOmlxBackend(
+            '{"role":"file_reader","objective":"Read treasure_chest.txt"}',
+            "there is booty here",
+        )
+        session = OmlxAgentSession(backend=backend)
+        session_id = session.open(
+            ModelRequest(
+                task="Read the treasure.",
+                context={},
+                tools=(
+                    ToolSpec(
+                        "spawn_child",
+                        "Spawn",
+                        {
+                            "properties": {
+                                "role": {"enum": ["file_reader"]}
+                            }
+                        },
+                    ),
+                ),
+            )
+        )
+
+        spawn = session.step(session_id)
+        final = session.step(
+            session_id,
+            ToolResult(
+                spawn.call_id,
+                True,
+                {
+                    "attempt_id": "treasure/child-1",
+                    "payload": {"text": "there is booty here"},
+                    "results": ["domain data, not a child batch"],
+                },
+            ),
+        )
+
+        self.assertEqual(final.content, "there is booty here")
+        self.assertIn("using only the authorized child result", backend.tasks[1])
 
 
 if __name__ == "__main__":

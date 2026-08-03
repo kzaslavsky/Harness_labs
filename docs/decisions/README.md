@@ -9,3 +9,7 @@ that future contributors must understand.
 
 Name records `NNNN-short-title.md` and use [`TEMPLATE.md`](TEMPLATE.md). A record
 is immutable after acceptance except for status and links to superseding records.
+
+Accepted records:
+
+- [`0001-controller-owned-parallel-child-batches.md`](0001-controller-owned-parallel-child-batches.md)

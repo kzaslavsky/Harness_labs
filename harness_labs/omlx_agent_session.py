@@ -29,6 +29,7 @@ class OmlxAgentSession:
     _request: ModelRequest | None = field(default=None, init=False, repr=False)
     _completed: bool = field(default=False, init=False, repr=False)
     _pending_call_id: str | None = field(default=None, init=False, repr=False)
+    _pending_tool_name: str | None = field(default=None, init=False, repr=False)
     _tool_results: list[dict[str, Any]] = field(
         default_factory=list, init=False, repr=False
     )
@@ -52,6 +53,7 @@ class OmlxAgentSession:
         self._request = request
         self._completed = False
         self._pending_call_id = None
+        self._pending_tool_name = None
         self._tool_results.clear()
         return self._session_id
 
@@ -71,9 +73,13 @@ class OmlxAgentSession:
             or tool_result.call_id != self._pending_call_id
         ):
             return BackendFailure("tool result does not match the pending oMLX call")
+        pending_tool_name = self._pending_tool_name
         child_payload = dict(tool_result.payload)
         self._tool_results.append(child_payload)
         self._pending_call_id = None
+        self._pending_tool_name = None
+        if pending_tool_name == "spawn_children":
+            return self._complete_batch(child_payload)
         if len(self._tool_results) == 1 and any(
             tool.name == "send_child_message" for tool in self._request.tools
         ):
@@ -118,13 +124,18 @@ class OmlxAgentSession:
         self._request = None
         self._completed = False
         self._pending_call_id = None
+        self._pending_tool_name = None
         self._tool_results.clear()
 
     def _request_child(self) -> ModelEvent:
         assert self._request is not None
         tool = next(
-            tool for tool in self._request.tools if tool.name == "spawn_child"
+            tool
+            for tool in self._request.tools
+            if tool.name in {"spawn_child", "spawn_children"}
         )
+        if tool.name == "spawn_children":
+            return self._request_batch(tool)
         task = (
             "Select the one controller tool needed to perform the task. Return "
             "only a JSON object with keys role and objective. Select a role "
@@ -157,10 +168,98 @@ class OmlxAgentSession:
         ):
             return BackendFailure("oMLX returned an invalid child request")
         self._pending_call_id = "omlx:child-1"
+        self._pending_tool_name = tool.name
         return ToolCall(
             call_id=self._pending_call_id,
             name=tool.name,
             arguments={"role": role, "objective": objective},
+        )
+
+    def _request_batch(self, tool) -> ModelEvent:
+        assert self._request is not None
+        task = (
+            "Select the independent controller child tasks needed to perform the "
+            "task. Return only a JSON object with key requests, whose value is an "
+            "array of objects with keys role and objective. Use each required role "
+            "once and obey the supplied schema.\n\n"
+            f"Task:\n{self._request.task}\n\n"
+            f"Tool schema:\n{json.dumps(dict(tool.input_schema), sort_keys=True)}"
+        )
+        try:
+            text = self.backend.generate(task, self._request.context).strip()
+            payload: Any = json.loads(text)
+        except TextBackendError as exc:
+            return BackendFailure(str(exc))
+        except json.JSONDecodeError:
+            return BackendFailure("oMLX child batch request is not valid JSON")
+        requests = payload.get("requests") if isinstance(payload, dict) else None
+        properties = tool.input_schema.get("properties", {})
+        request_schema = (
+            properties.get("requests", {}) if isinstance(properties, dict) else {}
+        )
+        item_schema = (
+            request_schema.get("items", {})
+            if isinstance(request_schema, dict)
+            else {}
+        )
+        item_properties = (
+            item_schema.get("properties", {})
+            if isinstance(item_schema, dict)
+            else {}
+        )
+        role_schema = (
+            item_properties.get("role", {})
+            if isinstance(item_properties, dict)
+            else {}
+        )
+        allowed_roles = (
+            role_schema.get("enum", []) if isinstance(role_schema, dict) else []
+        )
+        max_items = (
+            request_schema.get("maxItems", len(allowed_roles))
+            if isinstance(request_schema, dict)
+            else 0
+        )
+        if (
+            not isinstance(requests, list)
+            or not isinstance(max_items, int)
+            or not 1 <= len(requests) <= max_items
+            or any(
+                not isinstance(request, dict)
+                or request.get("role") not in allowed_roles
+                or not isinstance(request.get("objective"), str)
+                or not request["objective"].strip()
+                for request in requests
+            )
+        ):
+            return BackendFailure("oMLX returned an invalid child batch request")
+        self._pending_call_id = "omlx:batch-1"
+        self._pending_tool_name = tool.name
+        return ToolCall(
+            call_id=self._pending_call_id,
+            name=tool.name,
+            arguments={"requests": requests},
+        )
+
+    def _complete_batch(self, child_payload: dict[str, Any]) -> ModelEvent:
+        assert self._request is not None
+        self._completed = True
+        task = (
+            "Complete the original task by collating every ordered authorized "
+            "child result below. Do not claim evidence absent from those results. "
+            "Return a concise direct answer.\n\n"
+            f"Original task:\n{self._request.task}\n\n"
+            f"Child batch result:\n{json.dumps(child_payload, sort_keys=True)}"
+        )
+        try:
+            text = self.backend.generate(task, self._request.context).strip()
+        except TextBackendError as exc:
+            return BackendFailure(str(exc))
+        if not text:
+            return BackendFailure("oMLX returned no batch collation")
+        return FinalOutput(
+            text,
+            evidence=("omlx-transport:openai-compatible-http",),
         )
 
     def _request_followup(self, child_payload: dict[str, Any]) -> ModelEvent:
@@ -194,6 +293,7 @@ class OmlxAgentSession:
         ):
             return BackendFailure("oMLX returned an invalid child follow-up")
         self._pending_call_id = "omlx:child-message-1"
+        self._pending_tool_name = tool.name
         return ToolCall(
             call_id=self._pending_call_id,
             name=tool.name,

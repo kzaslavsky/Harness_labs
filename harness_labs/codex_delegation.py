@@ -259,6 +259,195 @@ class CodexFileReaderExecutor:
         )
 
 
+@dataclass(frozen=True)
+class CodexReadOnlyWorktreeExecutor:
+    """Run one fresh Codex analyst inside one explicitly granted worktree."""
+
+    store: InMemoryReferenceStore
+    model: str = "gpt-5.6-terra"
+    reasoning: str = "low"
+    executable: str = "codex"
+    timeout_seconds: float | None = None
+    audit: AuditJournal | None = field(default=None, repr=False)
+
+    def execute(self, attempt: TaskAttempt) -> TaskResult:
+        try:
+            task = self.store.resolve(attempt.task_ref)
+            context = self.store.resolve(attempt.context_ref)
+            grant = self.store.resolve(attempt.grant_ref)
+        except KeyError as exc:
+            return self._failed(attempt, f"unresolved reference: {exc.args[0]}")
+        if not isinstance(task, str) or not task.strip():
+            return self._failed(attempt, "task must resolve to non-empty text")
+        if not isinstance(context, Mapping) or not isinstance(grant, Mapping):
+            return self._failed(attempt, "worktree context and grant must be mappings")
+        if "read_repository" not in grant.get("capabilities", ()):
+            return TaskResult(
+                attempt_id=attempt.attempt_id,
+                status="blocked",
+                payload={"error": "read_repository capability is required"},
+            )
+        raw_path = context.get("worktree")
+        allowed_paths = grant.get("worktrees", ())
+        if not isinstance(raw_path, str) or not isinstance(
+            allowed_paths, (list, tuple)
+        ):
+            return self._failed(attempt, "worktree path grant is invalid")
+        try:
+            workspace = Path(raw_path).resolve(strict=True)
+            granted = {
+                Path(value).resolve(strict=True) for value in allowed_paths
+            }
+        except (OSError, TypeError) as exc:
+            return self._failed(attempt, f"worktree cannot be resolved: {exc}")
+        if workspace not in granted:
+            return TaskResult(
+                attempt_id=attempt.attempt_id,
+                status="blocked",
+                payload={"error": "requested worktree is not granted"},
+            )
+        if not (workspace / ".git").exists():
+            return self._failed(attempt, "granted path is not a Git worktree")
+
+        with tempfile.TemporaryDirectory(
+            prefix="harness-codex-worktree-analyst-"
+        ) as temporary:
+            output_path = Path(temporary) / "worktree-report.txt"
+            prompt = (
+                "You are one read-only worktree analyst. Inspect only the Git "
+                "worktree supplied as your current directory. Use shell commands "
+                "for every repository claim. Do not modify any file. Compare the "
+                "branch to refs/heads/main when available, including merge-base, "
+                "ahead/behind, recent commits, working-tree status, and patch "
+                "equivalence or cherry information. Inspect harness checkpoint or "
+                "run residue only when present. Distinguish active substantive "
+                "unmerged product work from a base/orchestration branch, completed "
+                "or merged history, benchmark residue, and aborted/stale residue. "
+                "Active substantive requires evidence that the line is current: "
+                "recent patch-unique work or a live/resumable non-superseded run. "
+                "A large dirty tree alone is never evidence of current activity; "
+                "old uncommitted implement-run files with no live process or a "
+                "superseding implementation are stale residue. Conversely, recent "
+                "substantial patch-unique commits can be active unmerged work even "
+                "when the worktree is clean and has no live process. "
+                "Return one compact JSON object with exactly these keys: worktree, "
+                "branch, head, classification, active_substantive (boolean), "
+                "summary, evidence (array of strings), uncertainty (string). "
+                "classification must be one of active_substantive, "
+                "active_base_orchestration, historical_completed, benchmark_residue, "
+                "aborted_or_stale_residue, or uncertain.\n\n"
+                f"Assigned task:\n{task}\n\n"
+                f"Worktree:\n{workspace}"
+            )
+            try:
+                turn = _invoke_codex(
+                    executable=self.executable,
+                    model=self.model,
+                    reasoning=self.reasoning,
+                    timeout_seconds=self.timeout_seconds,
+                    workspace=workspace,
+                    output_path=output_path,
+                    prompt=prompt,
+                    disabled_features=_READER_DISABLED_FEATURES,
+                    ephemeral=True,
+                    audit=self.audit,
+                    attempt_id=attempt.attempt_id,
+                )
+            except CodexDelegationError as exc:
+                return self._failed(attempt, str(exc))
+        if not turn.commands or not any(
+            command.exit_code == 0 for command in turn.commands
+        ):
+            return self._failed(
+                attempt,
+                "worktree analyst produced no successful command evidence",
+            )
+        try:
+            report = json.loads(turn.final_message)
+        except json.JSONDecodeError:
+            return self._failed(attempt, "worktree analyst output is not JSON")
+        error = _validate_worktree_report(report, workspace)
+        if error is not None:
+            return self._failed(attempt, error)
+        encoded = json.dumps(report, sort_keys=True)
+        digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+        compact_report = {
+            "branch": _bounded_text(report["branch"], 100),
+            "head": _bounded_text(report["head"], 40),
+            "classification": report["classification"],
+            "active_substantive": report["active_substantive"],
+            "summary": _bounded_text(report["summary"], 240),
+            "evidence": [
+                _bounded_text(item, 180) for item in report["evidence"][:1]
+            ],
+            "uncertainty": _bounded_text(report["uncertainty"], 100),
+        }
+        return TaskResult(
+            attempt_id=attempt.attempt_id,
+            status="succeeded",
+            payload={"report": compact_report},
+            evidence=(
+                f"worktree-report:sha256:{digest}",
+                f"codex-command-count:{len(turn.commands)}",
+                f"codex-thread:{turn.thread_id}",
+            ),
+        )
+
+    @staticmethod
+    def _failed(attempt: TaskAttempt, error: str) -> TaskResult:
+        return TaskResult(
+            attempt_id=attempt.attempt_id,
+            status="failed",
+            payload={"error": error},
+        )
+
+
+def _validate_worktree_report(report: object, workspace: Path) -> str | None:
+    if not isinstance(report, dict):
+        return "worktree analyst output must be an object"
+    required = {
+        "worktree",
+        "branch",
+        "head",
+        "classification",
+        "active_substantive",
+        "summary",
+        "evidence",
+        "uncertainty",
+    }
+    if set(report) != required:
+        return "worktree analyst output keys do not match the contract"
+    classifications = {
+        "active_substantive",
+        "active_base_orchestration",
+        "historical_completed",
+        "benchmark_residue",
+        "aborted_or_stale_residue",
+        "uncertain",
+    }
+    if report.get("classification") not in classifications:
+        return "worktree analyst classification is invalid"
+    if not isinstance(report.get("active_substantive"), bool):
+        return "worktree analyst active_substantive must be boolean"
+    if report.get("worktree") not in {str(workspace), workspace.name}:
+        return "worktree analyst reported the wrong worktree"
+    for name in ("branch", "head", "summary", "uncertainty"):
+        if not isinstance(report.get(name), str):
+            return f"worktree analyst {name} must be a string"
+    evidence = report.get("evidence")
+    if not isinstance(evidence, list) or not all(
+        isinstance(item, str) for item in evidence
+    ):
+        return "worktree analyst evidence must be an array of strings"
+    return None
+
+
+def _bounded_text(value: str, limit: int) -> str:
+    if len(value) <= limit:
+        return value
+    return value[: limit - 1].rstrip() + "…"
+
+
 _READER_DISABLED_FEATURES = (
     "apps",
     "browser_use",

@@ -426,6 +426,35 @@ across model calls, then clears that state on close. A future resident child
 transport can implement the same `execute`/`send`/`close` boundary without
 changing the controller tool loop.
 
+### Parallel child batches
+
+Independent children compose through a controller-owned fork/join boundary:
+
+```text
+resident parent
+    -> spawn_children(ordered requests)
+    -> validate and reserve every child
+    -> bounded concurrent execution
+    -> collect every terminal result
+    -> ordered ChildBatchResult
+    -> parent collation
+```
+
+The parent and backend adapter never create worker threads or select child
+executors. `ChildBatchRequest` declares ordered requests, an explicit
+parallelism cap, and the `collect_all` failure policy. The dispatcher assigns
+stable attempt IDs before launch and rejects the entire batch if any request is
+unauthorized. Parallel roles must be unique because an authorization currently
+owns one potentially stateful executor instance.
+
+Completion events may follow runtime order; returned results always follow
+submission order. The parent session remains resident while the controller
+blocks on the join, preserving the same provider thread and its cached context.
+The audit journal records batch membership and cap in addition to per-child
+lifecycle evidence. Recovery may reconcile a valid contiguous journal that is
+ahead of its last checkpoint, but it never accepts a broken chain or a checkpoint
+ahead of events.
+
 This is deliberately still a prototype. Its child events and active process
 identity are process-local, persistent Codex rollouts are not yet reattached
 after a controller crash, and the reader's read-only shell sandbox is not an

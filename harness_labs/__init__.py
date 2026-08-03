@@ -26,6 +26,8 @@ from .backends import CodexExecBackend, OmlxBackend, PoemBackend
 from .audit import AuditActor, AuditArtifact, AuditError, AuditJournal
 from .composition import (
     ChildAuthorization,
+    ChildBatchRequest,
+    ChildBatchResult,
     ChildDispatcher,
     ChildEvent,
     ChildRequest,
@@ -35,6 +37,7 @@ from .composition import (
 from .codex_delegation import (
     CodexDelegationError,
     CodexFileReaderExecutor,
+    CodexReadOnlyWorktreeExecutor,
 )
 from .codex_agent_session import CodexAppServerSession, CodexSessionError
 from .omlx_agent_session import OmlxAgentSession
@@ -56,6 +59,8 @@ __all__ = [
     "BackendCapabilities",
     "BackendFailure",
     "ChildAuthorization",
+    "ChildBatchRequest",
+    "ChildBatchResult",
     "ChildDispatcher",
     "ChildEvent",
     "ChildRequest",
@@ -64,6 +69,7 @@ __all__ = [
     "CodexExecBackend",
     "CodexDelegationError",
     "CodexFileReaderExecutor",
+    "CodexReadOnlyWorktreeExecutor",
     "CodexAppServerSession",
     "CodexSessionError",
     "Executor",
