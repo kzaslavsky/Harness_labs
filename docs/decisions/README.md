@@ -12,5 +12,5 @@ is immutable after acceptance except for status and links to superseding records
 
 Accepted records:
 
-- [`0001-controller-owned-parallel-child-batches.md`](0001-controller-owned-parallel-child-batches.md)
-- [`0002-pass-through-child-context.md`](0002-pass-through-child-context.md)
+- [`0002-controller-owned-parallel-child-batches.md`](0002-controller-owned-parallel-child-batches.md)
+- [`0003-pass-through-child-context.md`](0003-pass-through-child-context.md)

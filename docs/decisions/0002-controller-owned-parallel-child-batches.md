@@ -1,4 +1,4 @@
-# 0001 — Controller-owned parallel child batches
+# 0002 — Controller-owned parallel child batches
 
 Status: accepted
 Date: 2026-08-02

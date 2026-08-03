@@ -2,7 +2,7 @@
 
 Status: implemented
 Date: 2026-08-03
-Decision: [ADR 0002](../decisions/0002-pass-through-child-context.md)
+Decision: [ADR 0003](../decisions/0003-pass-through-child-context.md)
 
 ## Repository identity
 

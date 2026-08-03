@@ -1,4 +1,4 @@
-# 0002 — Pass-through child context
+# 0003 — Pass-through child context
 
 Status: accepted
 Date: 2026-08-03
