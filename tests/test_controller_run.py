@@ -16,7 +16,7 @@ from harness_labs.controller_evidence import EvidenceCatalog
 from harness_labs.controller_kernel import ControllerKernel, RunContract
 from harness_labs.controller_projection import ControllerQueries
 from harness_labs.controller_results import semantic_payload
-from harness_labs.controller_run import resume_controller
+from harness_labs.controller_run import resume_controller, run_fixture_spec
 from harness_labs.controller_scheduler import CapabilityScheduler, RoleProfile
 
 from tests.controller_scenario_fixtures import (
@@ -27,6 +27,21 @@ from tests.controller_scenario_fixtures import (
 
 
 class ControllerRunTests(unittest.TestCase):
+    def test_fixture_rejects_renamed_max_fan_out_limit(self) -> None:
+        fixture = {
+            "contract": {
+                "run_id": "legacy-limit",
+                "objective": "Reject an ambiguous legacy limit.",
+                "limits": {"max_fan_out": 2},
+            }
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaisesRegex(ValueError, "max_subagents"):
+                run_fixture_spec(
+                    fixture,
+                    run_dir=Path(temporary) / "run",
+                )
+
     def test_fixture_cli_runs_real_controller_and_writes_manifest(self) -> None:
         fixture = {
             "contract": {

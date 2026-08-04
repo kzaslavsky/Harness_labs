@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://harness-labs.local/schemas/controller-preflight.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol", "status", "mode", "flow_id", "flow_spec_sha256", "models",
+    "python", "jsonschema", "codex_executable", "codex_version",
+    "codex_executable_sha256", "auth_file_private", "support_files_sha256",
+    "live_model_probe", "quota_headroom", "checked_at"
+  ],
+  "properties": {
+    "protocol": {"const": "codex-phase-flow/controller-preflight/1"},
+    "status": {"const": "ready"},
+    "mode": {"enum": ["debug", "project"]},
+    "flow_id": {"type": "string", "minLength": 1},
+    "flow_spec_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "models": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+    "python": {"type": "string", "minLength": 1},
+    "jsonschema": {"type": "string", "minLength": 1},
+    "codex_executable": {"type": "string", "minLength": 1},
+    "codex_version": {"type": "string", "minLength": 1},
+    "codex_executable_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "auth_file_private": {"const": true},
+    "support_files_sha256": {"type": "object", "minProperties": 1, "additionalProperties": {"type": "string", "pattern": "^[a-f0-9]{64}$"}},
+    "live_model_probe": {"const": "first_child"},
+    "quota_headroom": {"const": "not_exposed_by_cli"},
+    "checked_at": {"type": "string", "format": "date-time"}
+  }
+}

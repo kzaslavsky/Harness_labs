@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["protocol", "migration_id", "state", "old_package_identity", "new_package_digest", "authorization_evidence_sha256", "identity", "authorities", "write_order", "journal_revision"],
+  "properties": {
+    "protocol": {"type": "string", "const": "implement-v13-codex/controller-migration/1"},
+    "migration_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "state": {"type": "string", "enum": ["prepared", "validated", "committed"]},
+    "old_package_identity": {"type": "string", "minLength": 1},
+    "new_package_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "authorization_evidence_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "identity": {"type": "object"},
+    "authorities": {"type": "object"},
+    "write_order": {"type": "array", "minItems": 7, "items": {"type": "string"}},
+    "rollover_summary": {"type": "object"},
+    "invariant_results": {"type": "array", "items": {"type": "string"}},
+    "journal_revision": {"type": "integer", "minimum": 0},
+    "validated_at": {"type": "string"},
+    "committed_at": {"type": "string"}
+  },
+  "additionalProperties": true
+}

@@ -102,6 +102,7 @@ def project_run_view(kernel: ControllerKernel) -> dict[str, Any]:
         "completion_failures": list(kernel.completion_failures()),
         "anomalies": copy.deepcopy(state["anomalies"]),
         "operator_questions": copy.deepcopy(state["operator_questions"]),
+        "coordinator_dispatch": copy.deepcopy(state["coordinator_dispatch"]),
         "allowed_commands": sorted(
             {
                 "criterion.propose",

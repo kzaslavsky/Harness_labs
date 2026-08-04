@@ -224,7 +224,13 @@ def add_skills(outputs: dict[Path, bytes], surface: str) -> None:
             skill = path / "SKILL.md"
             if path.is_symlink() or not path.is_dir() or skill.is_symlink() or not skill.is_file():
                 fail(f"unsafe Codex skill source: {path}")
-            add_generated_output(outputs, Path(".agents") / "skills" / path.name / "SKILL.md", skill.read_bytes(), "skill")
+            for relative in regular_files(path):
+                add_generated_output(
+                    outputs,
+                    Path(".agents") / "skills" / path.name / relative,
+                    (path / relative).read_bytes(),
+                    "skill",
+                )
             names.append(f"Codex skill: `.agents/skills/{path.name}/SKILL.md`")
     if not names:
         fail("no skills selected")

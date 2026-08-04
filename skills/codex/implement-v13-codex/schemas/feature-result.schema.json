@@ -1,0 +1,7 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["protocol", "status", "queue_run_id", "feature_run_id", "feature_index", "completed_at", "manifest", "merge_receipt", "clearance_report", "base_head", "cleanup_proof"],
+  "properties": {"protocol": {"type": "string", "const": "implement-v13-codex/feature-result/1"}, "status": {"type": "string", "const": "done"}, "queue_run_id": {"type": "string"}, "feature_run_id": {"type": "string"}, "feature_index": {}, "completed_at": {"type": "string"}, "manifest": {"type": "string"}, "merge_receipt": {"type": "string"}, "clearance_report": {"type": "string"}, "base_head": {"type": "string"}, "cleanup_proof": {"type": "string"}}
+}

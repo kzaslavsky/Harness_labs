@@ -10,8 +10,9 @@ that future contributors must understand.
 Name records `NNNN-short-title.md` and use [`TEMPLATE.md`](TEMPLATE.md). A record
 is immutable after acceptance except for status and links to superseding records.
 
-Accepted records:
+## Accepted decisions
 
-- [`0002-controller-owned-parallel-child-batches.md`](0002-controller-owned-parallel-child-batches.md)
-- [`0003-pass-through-child-context.md`](0003-pass-through-child-context.md)
-- [`0004-hybrid-controller-command-kernel.md`](0004-hybrid-controller-command-kernel.md)
+- [`0001 — Execution-first production lifecycle`](0001-execution-first-production-lifecycle.md)
+- [`0002 — Controller-owned parallel child batches`](0002-controller-owned-parallel-child-batches.md)
+- [`0003 — Pass-through child context`](0003-pass-through-child-context.md)
+- [`0004 — Hybrid controller command kernel`](0004-hybrid-controller-command-kernel.md)

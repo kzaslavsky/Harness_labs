@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["protocol", "package_version", "files", "manifest_digest"],
+  "properties": {
+    "protocol": {"type": "string", "const": "implement-v13-codex/controller-package-manifest/1"},
+    "package_version": {"type": "string", "const": "1"},
+    "files": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "sha256", "mode", "executable"],
+        "properties": {
+          "path": {"type": "string", "minLength": 1},
+          "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "mode": {"type": "integer"},
+          "executable": {"type": "boolean"}
+        },
+        "additionalProperties": false
+      }
+    },
+    "manifest_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  },
+  "additionalProperties": false
+}

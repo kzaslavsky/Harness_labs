@@ -1,0 +1,1 @@
+{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","additionalProperties":false,"required":["protocol","status","checks"],"properties":{"protocol":{"type":"string","const":"implement-v13-codex/smoke-result/1"},"status":{"type":"string","enum":["passed","failed"]},"checks":{"type":"array","items":{"type":"object"}}}}

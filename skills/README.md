@@ -7,7 +7,7 @@ Claude Code or Codex is installed.
 | Source | Destination in a generated project | Contents |
 | --- | --- | --- |
 | `claude/` | `.claude/commands/` | Claude Code slash-command prompts |
-| `codex/` | `.agents/skills/<name>/SKILL.md` | project-local Codex skill folders |
+| `codex/` | `.agents/skills/<name>/` | complete project-local Codex skill folders |
 
 Available workflows:
 
@@ -17,6 +17,8 @@ Available workflows:
 - `serial-implement` — run a queue of features sequentially through `implement-v11`.
 - `local-review` — review uncommitted changes.
 - `local-review-pr` — review a committed branch range before a pull request or merge.
+- `implement-v13-codex` — run one feature through the durable Codex-native production lifecycle.
+- `serial-implement-codex` — dispatch a sequential feature queue through `implement-v13-codex`.
 
 These are templates, not universal policy. Adapt commands, validation gates, branch
 rules, and compliance language to the generated project's `AGENTS.md` and selected

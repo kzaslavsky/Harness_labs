@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["task", "phase", "phase_detail", "phase_state", "base_branch", "queue_run_id", "feature_run_id", "state_revision"],
+  "properties": {
+    "protocol_version": {"type": "string", "enum": ["1.0", "1.1"]},
+    "phase": {"type": "string", "enum": ["PLANNING", "PLAN_REVIEW", "IMPLEMENTING", "RUNTIME_SMOKE", "REVIEWING", "COMMITTING"]},
+    "phase_state": {"type": "string", "enum": ["ready", "running", "validating", "blocked", "complete"]},
+    "state_revision": {"type": "integer", "minimum": 0},
+    "controller_package_protocol": {"type": "string", "const": "implement-v13-codex/controller-package-manifest/1"},
+    "controller_package_version": {"type": "string", "const": "1"},
+    "controller_package_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "controller_package_path": {"type": "string", "minLength": 1},
+    "controller_migration_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  },
+  "allOf": [{"if": {"properties": {"protocol_version": {"const": "1.1"}}, "required": ["protocol_version"]}, "then": {"required": ["controller_package_protocol", "controller_package_version", "controller_package_digest", "controller_package_path"]}}],
+  "additionalProperties": true
+}

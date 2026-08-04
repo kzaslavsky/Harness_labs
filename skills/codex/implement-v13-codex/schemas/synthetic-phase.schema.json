@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openai.local/implement-v13-codex/synthetic-phase.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol", "queue_run_id", "feature_run_id", "dispatch_sha256",
+    "ordinal", "phase", "phase_detail", "role", "nonce", "statement"
+  ],
+  "properties": {
+    "protocol": {"type": "string", "const": "implement-v13-codex/synthetic-phase/1"},
+    "queue_run_id": {"type": "string", "minLength": 1},
+    "feature_run_id": {"type": "string", "minLength": 1},
+    "dispatch_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "ordinal": {"type": "integer", "minimum": 0, "maximum": 31},
+    "phase": {"enum": ["PLANNING", "PLAN_REVIEW", "IMPLEMENTING", "RUNTIME_SMOKE", "REVIEWING", "COMMITTING"]},
+    "phase_detail": {"type": "string", "minLength": 1},
+    "role": {"type": "string", "pattern": "^synthetic_[a-z0-9_]+$"},
+    "nonce": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+    "statement": {"type": "string", "minLength": 1}
+  }
+}

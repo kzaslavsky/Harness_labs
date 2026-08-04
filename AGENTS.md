@@ -34,7 +34,7 @@ Every production harness must provide:
 2. A dynamic plane: runtime decomposition, worker selection, scheduling,
    context assembly, retries, escalation, and evidence-based stopping.
 3. A bounded hierarchy: one accountable run owner, explicit parent/child task
-   relationships, bounded fan-out and depth, and a single integration owner.
+   relationships, bounded subagent count and depth, and a single integration owner.
 4. Explicit contracts for tasks, context packets, worker results, artifacts,
    decisions, verification, checkpoints, and integration.
 5. Durable, structured logs and decision records sufficient to reconstruct why
@@ -66,6 +66,8 @@ No required contract may exist only in a prompt or in an agent's memory.
 - Update documentation and contracts in the same change as behavior.
 - Never place credentials, private prompts, secrets, or sensitive user data in
   logs, metrics, fixtures, or context packets.
+- **CRITICAL**: No generalized snapshot framework or unrelated refactor when reviewing changes. **CRITIAL**
+- **CRITICAL**: bounded work only
 
 ## Required run lifecycle
 

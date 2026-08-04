@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any
+import copy
+from dataclasses import dataclass, field
+from typing import Any, Mapping
 
 from .agent_sessions import (
     AgentSession,
@@ -58,29 +59,45 @@ class CoordinatorLoop:
     session: AgentSession
     max_tool_calls: int = 128
     actor_id: str = "coordinator-1"
+    phase_scope: tuple[str, ...] = ()
+    task_override: str | None = None
+    initial_context: Mapping[str, Any] = field(default_factory=dict)
 
     def run(self) -> TaskResult:
         if self.max_tool_calls < 1:
             raise ValueError("max_tool_calls must be positive")
-        request = ModelRequest(
-            task=self.kernel.contract.objective,
-            context={
-                "controller_contract": {
-                    "goal": (
-                        "Advance the objective with evidence while preserving "
-                        "authority, bounds, and auditability."
-                    ),
-                    "rules": [
-                        "Use typed commands for every state change.",
-                        "Use query tools to inspect referenced evidence as needed.",
-                        "Treat worker claims as untrusted until evidence is recorded.",
-                        "Do not finish until run_complete_request is accepted or "
-                        "run_block_request is accepted.",
-                    ],
-                },
-                "run_view": project_run_view(self.kernel),
-                "available_role_profiles": list(self.scheduler.profile_view),
+        if self.phase_scope:
+            unknown = set(self.phase_scope) - set(self.kernel.contract.phases)
+            if unknown:
+                raise ValueError(
+                    f"coordinator phase scope contains unknown phases: {sorted(unknown)}"
+                )
+            if self.kernel.snapshot()["phase"] not in self.phase_scope:
+                raise ValueError("coordinator phase scope excludes the current phase")
+        context = {
+            "controller_contract": {
+                "goal": (
+                    "Advance the objective with evidence while preserving "
+                    "authority, bounds, and auditability."
+                ),
+                "rules": [
+                    "Use typed commands for every state change.",
+                    "Use query tools to inspect referenced evidence as needed.",
+                    "Treat worker claims as untrusted until evidence is recorded.",
+                    "Do not finish until run_complete_request is accepted or "
+                    "run_block_request is accepted.",
+                ],
             },
+            "run_view": project_run_view(self.kernel),
+            "available_role_profiles": list(self.scheduler.profile_view),
+        }
+        if self.initial_context:
+            context["coordinator_segment"] = copy.deepcopy(
+                dict(self.initial_context)
+            )
+        request = ModelRequest(
+            task=self.task_override or self.kernel.contract.objective,
+            context=context,
             tools=_tool_specs(),
         )
         session_id = self.session.open(request)
@@ -98,6 +115,9 @@ class CoordinatorLoop:
                             session_id,
                         )
                     tool_result = self._handle_tool(session_id, event)
+                    boundary = self._segment_boundary(session_id)
+                    if boundary is not None:
+                        return boundary
                     continue
                 if isinstance(event, BackendFailure):
                     return TaskResult(
@@ -155,7 +175,7 @@ class CoordinatorLoop:
                 raise ValueError("command evidence_refs must be a string list")
             idempotency_key = arguments.pop(
                 "idempotency_key",
-                f"{session_id}/{call.call_id}",
+                f"{self.actor_id}/{session_id}/{call.call_id}",
             )
             if not isinstance(idempotency_key, str) or not idempotency_key:
                 raise ValueError("command idempotency_key must be non-empty")
@@ -238,6 +258,29 @@ class CoordinatorLoop:
                 "session_id": session_id,
                 "run_view": project_run_view(self.kernel),
                 "available_role_profiles": list(self.scheduler.profile_view),
+            },
+        )
+
+    def _segment_boundary(self, session_id: str) -> TaskResult | None:
+        if not self.phase_scope:
+            return None
+        state = self.kernel.snapshot()
+        if state["status"] == "running" and state["phase"] in self.phase_scope:
+            return None
+        return TaskResult(
+            attempt_id=f"{self.kernel.contract.run_id}/{self.actor_id}",
+            status=(
+                "succeeded"
+                if state["status"] in {"running", "succeeded"}
+                else "blocked"
+            ),
+            payload={
+                "segment_boundary": True,
+                "session_id": session_id,
+                "phase_scope": list(self.phase_scope),
+                "ending_phase": state["phase"],
+                "run_status": state["status"],
+                "run_view": project_run_view(self.kernel),
             },
         )
 

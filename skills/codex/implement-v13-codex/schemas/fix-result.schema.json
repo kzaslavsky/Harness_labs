@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["protocol", "queue_run_id", "feature_run_id", "repair_generation", "status", "assigned_findings", "addressed_findings", "changed_paths", "tests", "decisions", "blockers"],
+  "properties": {
+    "protocol": {"type": "string", "const": "implement-v13-codex/fix-result/1"},
+    "queue_run_id": {"type": "string"},
+    "feature_run_id": {"type": "string"},
+    "repair_generation": {"type": "integer", "minimum": 1},
+    "status": {"type": "string", "enum": ["passed", "failed", "blocked"]},
+    "assigned_findings": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+    "addressed_findings": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "changed_paths": {"type": "array", "items": {"type": "string"}},
+    "tests": {"type": "array", "items": {"$ref": "#/$defs/test_result"}},
+    "decisions": {"type": "array", "items": {"$ref": "#/$defs/decision"}},
+    "blockers": {"type": "array", "items": {"$ref": "#/$defs/blocker"}}
+  },
+  "$defs": {
+    "test_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["command", "status", "evidence"],
+      "properties": {
+        "command": {"type": "string"},
+        "status": {"type": "string", "enum": ["passed", "failed", "skipped"]},
+        "evidence": {"type": "string"}
+      }
+    },
+    "decision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "decision", "rationale", "evidence"],
+      "properties": {
+        "id": {"type": "string"},
+        "decision": {"type": "string"},
+        "rationale": {"type": "string"},
+        "evidence": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "blocker": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "class", "question", "evidence"],
+      "properties": {
+        "id": {"type": "string"},
+        "class": {"type": "string"},
+        "question": {"type": "string"},
+        "evidence": {"type": "array", "items": {"type": "string"}}
+      }
+    }
+  }
+}

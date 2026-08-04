@@ -1,0 +1,1 @@
+{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","required":["worktree_name","branch","base_branch","no_merge","manifest","queue_run_id","feature_run_id","status"],"properties":{"status":{"type":"string","enum":["prepared","merged","blocked"]}},"additionalProperties":true}

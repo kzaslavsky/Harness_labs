@@ -229,6 +229,10 @@ def run_fixture_spec(spec: Mapping[str, Any], *, run_dir: Path) -> ControllerRun
     limits_value = contract_value.get("limits", {})
     if not isinstance(limits_value, Mapping):
         raise ValueError("fixture limits must be an object")
+    if "max_fan_out" in limits_value:
+        raise ValueError(
+            "fixture limit max_fan_out was renamed to max_subagents"
+        )
     contract = RunContract(
         run_id=str(contract_value["run_id"]),
         objective=str(contract_value["objective"]),
@@ -239,7 +243,7 @@ def run_fixture_spec(spec: Mapping[str, Any], *, run_dir: Path) -> ControllerRun
         ),
         limits=RunLimits(
             max_depth=int(limits_value.get("max_depth", 2)),
-            max_fan_out=int(limits_value.get("max_fan_out", 8)),
+            max_subagents=int(limits_value.get("max_subagents", 8)),
             max_parallelism=int(limits_value.get("max_parallelism", 4)),
             max_tasks=int(limits_value.get("max_tasks", 32)),
         ),

@@ -68,6 +68,11 @@ manifest. It does not silently replay model or tool actions. A printed
 without such an anchor, a privileged actor who can rewrite the entire run
 directory can also regenerate its hash chain.
 
+Long-lived foreground controllers SHOULD emit a compact `controller.phase`
+event on each durable checkpoint transition. The event identifies the checkpoint
+as phase authority and process state as liveness-only evidence; parent monitors
+must not infer phase from an open shell session.
+
 Runtime logs are ignored by Git. Accepted decisions with durable architectural
 impact are promoted to `docs/decisions/` through a normal reviewed change.
 
@@ -81,6 +86,16 @@ Do not log credentials, access tokens, private keys, sensitive personal data,
 full environment dumps, or unredacted third-party content. Raw model reasoning
 is not a contract artifact; store concise decisions, inputs, outputs, and
 evidence instead.
+
+Every run artifact and summary metric MUST classify its evidence as one of:
+
+- `production_lifecycle`: emitted by the real production entrypoint and controller;
+- `component`: emitted by an isolated production component test;
+- `synthetic`: emitted by a debug, marker, or orchestration-only flow;
+- `fabricated_fixture`: constructed directly by a test.
+
+Synthetic and fabricated evidence MUST NOT be aggregated with production feature
+completion or used to claim lifecycle conformance.
 
 ## Decision threshold
 
@@ -120,6 +135,10 @@ events, not decision records.
 - checkpoint corruption or stale-state rejection;
 - merge conflict and base-advancement frequency;
 - telemetry completeness and schema-validation rate.
+- time from dispatch to the first real implementation worker;
+- time spent at a nonterminal ready checkpoint without a verified live owner;
+- premature parent exits and failed ownership handoffs;
+- uninterrupted production-lifecycle completion rate.
 
 ## Accuracy × efficiency
 

@@ -53,7 +53,7 @@ class ControllerSchedulerTests(unittest.TestCase):
                 phases=("active",),
                 limits=RunLimits(
                     max_depth=3,
-                    max_fan_out=6,
+                    max_subagents=6,
                     max_parallelism=3,
                     max_tasks=12,
                 ),

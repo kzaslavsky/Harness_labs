@@ -1,0 +1,7 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["protocol", "worktree", "created_at", "inputs"],
+  "properties": {"protocol": {"type": "string", "const": "implement-v13-codex/planning-inputs/1"}, "worktree": {"type": "string"}, "created_at": {"type": "string"}, "inputs": {"type": "array", "items": {"type": "object", "required": ["id", "role", "resolved_path", "sha256"], "properties": {"id": {"type": "string"}, "role": {"type": "string", "enum": ["governing", "background", "acceptance", "seed_plan"]}, "resolved_path": {"type": "string"}, "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}}}},
+  "additionalProperties": true
+}

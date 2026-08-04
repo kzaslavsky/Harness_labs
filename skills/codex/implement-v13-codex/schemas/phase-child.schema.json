@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://harness-labs.local/schemas/phase-child.schema.json",
+  "title": "Neutral phase child identity",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["protocol", "run_nonce", "unit_index", "unit_nonce", "statement"],
+  "properties": {
+    "protocol": { "type": "string", "const": "phase-child/1" },
+    "run_nonce": { "type": "string", "pattern": "^[a-f0-9]{32}$" },
+    "unit_index": { "type": "integer", "minimum": 0 },
+    "unit_nonce": { "type": "string", "pattern": "^[a-f0-9]{32}$" },
+    "statement": { "type": "string", "const": "identity marker created" }
+  }
+}

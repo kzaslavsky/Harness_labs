@@ -21,6 +21,7 @@
     "completion_failures",
     "anomalies",
     "operator_questions",
+    "coordinator_dispatch",
     "allowed_commands",
     "event_cursor"
   ],
@@ -49,7 +50,20 @@
       "minLength": 1
     },
     "limits": {
-      "type": "object"
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "max_depth",
+        "max_subagents",
+        "max_parallelism",
+        "max_tasks"
+      ],
+      "properties": {
+        "max_depth": { "type": "integer", "minimum": 1 },
+        "max_subagents": { "type": "integer", "minimum": 1 },
+        "max_parallelism": { "type": "integer", "minimum": 1 },
+        "max_tasks": { "type": "integer", "minimum": 1 }
+      }
     },
     "criteria": {
       "type": "array",
@@ -103,6 +117,35 @@
       "type": "array",
       "items": {
         "type": "object"
+      }
+    },
+    "coordinator_dispatch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "active_session",
+        "sessions"
+      ],
+      "properties": {
+        "schema": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "active_session": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "sessions": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        }
       }
     },
     "allowed_commands": {

@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["protocol", "queue_run_id", "feature_run_id", "phase", "phase_detail", "role", "status", "summary", "strategy_family", "effect_contract", "design"],
+  "properties": {
+    "protocol": {"type": "string"},
+    "queue_run_id": {"type": "string", "minLength": 1},
+    "feature_run_id": {"type": "string", "minLength": 1},
+    "phase": {"type": "string"},
+    "phase_detail": {"type": "string"},
+    "role": {"type": "string"},
+    "status": {"type": "string", "enum": ["passed", "blocked"]},
+    "summary": {"type": "string", "minLength": 1},
+    "strategy_family": {"type": "string", "minLength": 1},
+    "effect_contract": {"$ref": "#/$defs/effect_contract"},
+    "design": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["objective", "invariants", "changes", "tests", "related_closures", "excluded_scope", "risks"],
+      "properties": {
+        "objective": {"type": "string", "minLength": 1},
+        "invariants": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+        "changes": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["path", "symbol", "action"],
+            "properties": {
+              "path": {"type": "string", "minLength": 1},
+              "symbol": {"type": "string", "minLength": 1},
+              "action": {"type": "string", "minLength": 1}
+            }
+          }
+        },
+        "tests": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+        "related_closures": {"type": "array", "items": {"type": "string", "minLength": 1}},
+        "excluded_scope": {"type": "array", "items": {"type": "string", "minLength": 1}},
+        "risks": {"type": "array", "items": {"type": "string", "minLength": 1}}
+      }
+    }
+  },
+  "$defs": {
+    "effect_contract": {
+      "type": "object", "additionalProperties": false,
+      "required": ["protocol", "must_persist", "must_remain_absent", "must_remain_unchanged"],
+      "properties": {
+        "protocol": {"type": "string", "const": "implement-v13-codex/repair-effect-contract/1"},
+        "must_persist": {"type": "array", "items": {"$ref": "#/$defs/effect"}},
+        "must_remain_absent": {"type": "array", "items": {"$ref": "#/$defs/effect"}},
+        "must_remain_unchanged": {"type": "array", "items": {"$ref": "#/$defs/effect"}}
+      }
+    },
+    "effect": {
+      "type": "string", "enum": ["failure_checkpoint", "blocked_queue", "failure_summary", "failure_event", "success_result", "success_receipt", "integration_artifact", "dispatcher_acknowledgement", "base_git_state"]
+    }
+  }
+}

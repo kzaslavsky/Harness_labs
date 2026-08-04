@@ -42,6 +42,11 @@ A context packet records:
    result changes materially.
 7. Record context size and composition so later experiments can measure which
    inputs improved correctness or merely added cost.
+8. Inject immutable execution-environment facts into every command-capable role.
+   For a macOS/zsh run this includes BSD userland, zsh read-only parameters,
+   portable file discovery, and the distinction between an optional search's
+   no-match exit and a required assertion failure. Do not rely on the coordinator
+   to remember to copy these facts into child prompts.
 
 ## Parent/child boundary
 
@@ -52,6 +57,18 @@ A child MUST report missing or contradictory context instead of silently
 inventing requirements. Child output returns through the result contract; it
 does not become trusted shared context until validated and promoted by the
 parent.
+
+## Production-consumer trace
+
+Every context packet MUST name the production role and executable dispatch path
+that consumes it. Context infrastructure without a launched production consumer
+is not lifecycle progress and MUST NOT be counted as feature completion.
+
+Each packet source MUST trace to an acceptance criterion or a decision assigned
+to that role. Proposed context expansion without that trace MUST be deferred. An
+end-to-end lifecycle test MUST exercise packet assembly through the same production
+entrypoint used by a real run; prompt-unit and synthetic-context tests are only
+supporting evidence.
 
 ## Context quality metrics
 

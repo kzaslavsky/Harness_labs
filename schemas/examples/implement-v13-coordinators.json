@@ -1,0 +1,90 @@
+{
+  "protocol": "coordinator-dispatch-schema/1",
+  "schema_id": "implement-v13-shaped/1",
+  "segments": [
+    {
+      "id": "plan-refute",
+      "phases": [
+        "orient",
+        "plan"
+      ],
+      "instructions": "Ground the repository, produce an implementation-ready plan, independently refute it, adjudicate findings, and leave a durable build handoff.",
+      "coordinator_profile": "planning-coordinator",
+      "context": {
+        "artifact_kinds": [
+          "orientation-report",
+          "plan-review"
+        ],
+        "required_artifact_kinds": []
+      },
+      "max_attempts": 2,
+      "max_tool_calls": 96
+    },
+    {
+      "id": "build",
+      "phases": [
+        "implement"
+      ],
+      "instructions": "Implement the accepted plan in the isolated worktree, gather additional context as needed, run targeted checks, and produce an implementation handoff.",
+      "coordinator_profile": "build-coordinator",
+      "context": {
+        "artifact_kinds": [
+          "implementation-plan",
+          "plan-review",
+          "build-briefing"
+        ],
+        "required_artifact_kinds": [
+          "implementation-plan"
+        ]
+      },
+      "max_attempts": 2,
+      "max_tool_calls": 128
+    },
+    {
+      "id": "verify-review",
+      "phases": [
+        "verify",
+        "review"
+      ],
+      "instructions": "Verify the actual candidate, construct review work proportional to its risk, remediate valid findings, and leave no unresolved required finding.",
+      "coordinator_profile": "review-coordinator",
+      "context": {
+        "artifact_kinds": [
+          "implementation-plan",
+          "implementation-summary",
+          "workspace-change-receipt",
+          "verification-report",
+          "review-report"
+        ],
+        "required_artifact_kinds": [
+          "implementation-summary"
+        ]
+      },
+      "max_attempts": 2,
+      "max_tool_calls": 160
+    },
+    {
+      "id": "integrate-report",
+      "phases": [
+        "integrate",
+        "report"
+      ],
+      "instructions": "Integrate only after all authoritative gates pass, then report the exact candidate, evidence, residual risks, and merge state.",
+      "coordinator_profile": "integration-coordinator",
+      "context": {
+        "artifact_kinds": [
+          "implementation-plan",
+          "verification-report",
+          "review-report",
+          "integration-receipt"
+        ],
+        "required_artifact_kinds": [
+          "verification-report",
+          "review-report"
+        ]
+      },
+      "max_attempts": 1,
+      "max_tool_calls": 48
+    }
+  ]
+}

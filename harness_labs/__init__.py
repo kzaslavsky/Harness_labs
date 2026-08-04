@@ -58,6 +58,19 @@ from .controller_commands import (
     KernelEvent,
 )
 from .controller_coordinator import CoordinatorLoop
+from .coordinator_dispatcher import (
+    CoordinatorDispatchResult,
+    CoordinatorDispatcher,
+    CoordinatorLaunch,
+    CoordinatorSessionFactory,
+    DispatchedControllerRunResult,
+    run_dispatched_controller,
+)
+from .coordinator_schema import (
+    COORDINATOR_SCHEMA_PROTOCOL,
+    CoordinatorDispatchSchema,
+    CoordinatorSegment,
+)
 from .controller_evidence import (
     EvidenceCatalog,
     EvidenceError,
@@ -149,6 +162,14 @@ __all__ = [
     "ControllerQueries",
     "ControllerRunResult",
     "CoordinatorLoop",
+    "COORDINATOR_SCHEMA_PROTOCOL",
+    "CoordinatorDispatchResult",
+    "CoordinatorDispatcher",
+    "CoordinatorDispatchSchema",
+    "CoordinatorLaunch",
+    "CoordinatorSegment",
+    "CoordinatorSessionFactory",
+    "DispatchedControllerRunResult",
     "EvidenceCatalog",
     "EvidenceError",
     "EvidenceRecord",
@@ -164,6 +185,7 @@ __all__ = [
     "SemanticTaskResult",
     "project_run_view",
     "run_controller",
+    "run_dispatched_controller",
     "run_fixture_spec",
     "resume_controller",
     "semantic_payload",

@@ -85,6 +85,9 @@ class InitializerTests(unittest.TestCase):
             target = Path(temp) / "project"
             self.assert_success(self.run_initializer(target, "--skill-surface", "codex"))
             self.assertTrue((target / ".agents/skills/serial-implement/SKILL.md").is_file())
+            self.assertTrue((target / ".agents/skills/serial-implement-codex/scripts/serial_state.py").is_file())
+            self.assertTrue((target / ".agents/skills/implement-v13-codex/scripts/run_feature.py").is_file())
+            self.assertTrue((target / ".agents/skills/implement-v13-codex/schemas/closure-program.schema.json").is_file())
             self.assertFalse((target / ".claude").exists())
             inventory = (target / "docs/development/skill-inventory.md").read_text()
             self.assertIn("Codex skill", inventory)

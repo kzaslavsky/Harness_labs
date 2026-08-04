@@ -7,14 +7,26 @@ Status: active
 - Next milestone: [`NEXT_STEPS.md`](NEXT_STEPS.md)
 - Harness contract: [`../architecture/harness-contract.md`](../architecture/harness-contract.md)
 - Context contract: [`../architecture/context-engineering.md`](../architecture/context-engineering.md)
+- Coordinator dispatch contract:
+  [`../architecture/coordinator-dispatch.md`](../architecture/coordinator-dispatch.md)
 - Observability contract: [`../observability/logging-and-metrics.md`](../observability/logging-and-metrics.md)
 - Durable decisions: [`../decisions/README.md`](../decisions/README.md)
+- Execution-first lifecycle decision:
+  [`../decisions/0001-execution-first-production-lifecycle.md`](../decisions/0001-execution-first-production-lifecycle.md)
+- Active implement-v13 efficiency repair:
+  [`implement-v13-efficiency-repair-plan.md`](implement-v13-efficiency-repair-plan.md)
+- Proposed platform-agnostic autonomous workflow:
+  [`platform-agnostic-autonomous-workflow-strategy.md`](platform-agnostic-autonomous-workflow-strategy.md)
+- Initial runtime primitive:
+  [`../../harness_labs/attempts.py`](../../harness_labs/attempts.py)
 - Parallel child dispatch:
   [`parallel-child-dispatch-plan.md`](parallel-child-dispatch-plan.md)
 - Pass-through child context:
   [`pass-through-child-context-plan.md`](pass-through-child-context-plan.md)
 - Hybrid controller and coordinator:
   [`hybrid-controller-coordinator.md`](hybrid-controller-coordinator.md)
+- Claude `solo-phased-reviewfix` and FeatureRun comparison:
+  [`solo-phased-reviewfix-feature-run-comparison.md`](solo-phased-reviewfix-feature-run-comparison.md)
 
 ## Seed implementation records
 

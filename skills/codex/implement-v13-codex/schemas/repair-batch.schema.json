@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol",
+    "feature_run_id",
+    "batch_id",
+    "dependency_graph_path",
+    "dependency_graph_sha256",
+    "closure_ids",
+    "component_closure_ids",
+    "union_write_set",
+    "changed_surfaces",
+    "independent_reviewers",
+    "selected_test_nodes",
+    "selected_commands"
+  ],
+  "properties": {
+    "protocol": {
+      "type": "string",
+      "const": "implement-v13-codex/repair-batch/2"
+    },
+    "feature_run_id": {"type": "string", "minLength": 1},
+    "batch_id": {"type": "string", "minLength": 1},
+    "dependency_graph_path": {"type": "string", "minLength": 1},
+    "dependency_graph_sha256": {"$ref": "#/$defs/sha256"},
+    "closure_ids": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 3,
+      "items": {"type": "string", "minLength": 1}
+    },
+    "component_closure_ids": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"type": "string", "minLength": 1}
+    },
+    "union_write_set": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"type": "string", "minLength": 1}
+    },
+    "changed_surfaces": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"type": "string", "minLength": 1}
+    },
+    "independent_reviewers": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 3,
+      "items": {"type": "string", "minLength": 1}
+    },
+    "selected_test_nodes": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"type": "string", "minLength": 1}
+    },
+    "selected_commands": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/test_command"}
+    }
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "test_command": {
+      "type": "object", "additionalProperties": false,
+      "required": ["protocol", "argv", "certification_runtime_sha256", "environment_profile"],
+      "properties": {
+        "protocol": {"type": "string", "const": "implement-v13-codex/test-command/1"},
+        "argv": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+        "certification_runtime_sha256": {"$ref": "#/$defs/sha256"},
+        "environment_profile": {"type": "string", "const": "controller_certification"}
+      }
+    }
+  }
+}

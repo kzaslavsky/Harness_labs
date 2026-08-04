@@ -1,0 +1,172 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol",
+    "authority",
+    "resolution_kind",
+    "active_subject",
+    "effect_contract",
+    "operator_authorization_sha256",
+    "capability",
+    "dataflow_proof",
+    "evidence"
+  ],
+  "properties": {
+    "protocol": {
+      "type": "string",
+      "const": "implement-v13-codex/operator-resolution-profile/1"
+    },
+    "authority": {"type": "string", "const": "operator"},
+    "resolution_kind": {
+      "type": "string",
+      "enum": [
+        "controller_owned_failure_persistence",
+        "digest_bound_test_compatibility",
+        "controller_attested_test_compatibility",
+        "controller_owned_anonymous_capability"
+      ]
+    },
+    "active_subject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repository_identity",
+        "feature_run_id",
+        "closure_id",
+        "test_node_id",
+        "test_source_path",
+        "test_source_sha256",
+        "assertion_map_sha256"
+      ],
+      "properties": {
+        "repository_identity": {"$ref": "#/$defs/sha256"},
+        "feature_run_id": {"type": "string", "minLength": 1},
+        "closure_id": {"type": "string", "minLength": 1},
+        "test_node_id": {"type": "string", "minLength": 1},
+        "test_source_path": {"type": "string", "minLength": 1},
+        "test_source_sha256": {"$ref": "#/$defs/sha256"},
+        "assertion_map_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "effect_contract": {"$ref": "#/$defs/effect_contract"},
+    "operator_authorization_sha256": {"$ref": "#/$defs/sha256"},
+    "capability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "transport",
+        "minting_authority",
+        "controller_minted",
+        "single_use",
+        "role_visible",
+        "caller_supplied",
+        "caller_claim_selectable",
+        "production_selectable",
+        "fail_closed_on_absence",
+        "fail_closed_on_reuse",
+        "fail_closed_on_mismatch"
+      ],
+      "properties": {
+        "transport": {
+          "type": "string",
+          "enum": ["none", "anonymous_pipe"]
+        },
+        "minting_authority": {"type": "string", "const": "controller_only"},
+        "controller_minted": {"type": "boolean", "const": true},
+        "single_use": {"type": "boolean", "const": true},
+        "role_visible": {"type": "boolean", "const": false},
+        "caller_supplied": {"type": "boolean", "const": false},
+        "caller_claim_selectable": {"type": "boolean", "const": false},
+        "production_selectable": {"type": "boolean", "const": false},
+        "fail_closed_on_absence": {"type": "boolean", "const": true},
+        "fail_closed_on_reuse": {"type": "boolean", "const": true},
+        "fail_closed_on_mismatch": {"type": "boolean", "const": true}
+      }
+    },
+    "dataflow_proof": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol",
+        "profile_subject_sha256",
+        "minted_by_controller",
+        "transport_exercised",
+        "consumed_once",
+        "absence_rejected",
+        "reuse_rejected",
+        "mismatch_rejected",
+        "ordinary_dispatch_rejected",
+        "token_sha256",
+        "status"
+      ],
+      "properties": {
+        "protocol": {
+          "type": "string",
+          "const": "implement-v13-codex/operator-resolution-dataflow-proof/1"
+        },
+        "profile_subject_sha256": {"$ref": "#/$defs/sha256"},
+        "minted_by_controller": {"type": "boolean", "const": true},
+        "transport_exercised": {"type": "boolean", "const": true},
+        "consumed_once": {"type": "boolean", "const": true},
+        "absence_rejected": {"type": "boolean", "const": true},
+        "reuse_rejected": {"type": "boolean", "const": true},
+        "mismatch_rejected": {"type": "boolean", "const": true},
+        "ordinary_dispatch_rejected": {"type": "boolean", "const": true},
+        "token_sha256": {"$ref": "#/$defs/sha256"},
+        "status": {"type": "string", "const": "passed"}
+      }
+    },
+    "evidence": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"type": "string", "minLength": 1}
+    }
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "effect": {
+      "type": "string",
+      "enum": [
+        "failure_checkpoint",
+        "blocked_queue",
+        "failure_summary",
+        "failure_event",
+        "success_result",
+        "success_receipt",
+        "integration_artifact",
+        "dispatcher_acknowledgement",
+        "base_git_state"
+      ]
+    },
+    "effect_contract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol",
+        "must_persist",
+        "must_remain_absent",
+        "must_remain_unchanged"
+      ],
+      "properties": {
+        "protocol": {
+          "type": "string",
+          "const": "implement-v13-codex/repair-effect-contract/1"
+        },
+        "must_persist": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/effect"}
+        },
+        "must_remain_absent": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/effect"}
+        },
+        "must_remain_unchanged": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/effect"}
+        }
+      }
+    }
+  }
+}

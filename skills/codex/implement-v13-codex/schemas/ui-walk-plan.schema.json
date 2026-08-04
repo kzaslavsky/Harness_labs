@@ -1,0 +1,91 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["protocol", "state_graph", "permutations", "setup", "server", "steps", "artifacts", "failure_criteria", "cleanup"],
+  "properties": {
+    "protocol": {"type": "string", "const": "implement-v13-codex/ui-walk-plan/1"},
+    "state_graph": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["states", "edges"],
+      "properties": {
+        "states": {"type": "array", "items": {"$ref": "#/$defs/state"}},
+        "edges": {"type": "array", "items": {"$ref": "#/$defs/edge"}}
+      }
+    },
+    "permutations": {"type": "array", "items": {"$ref": "#/$defs/permutation"}},
+    "setup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["synthetic_data", "commands"],
+      "properties": {
+        "synthetic_data": {"type": "string"},
+        "commands": {"type": "array", "items": {"$ref": "#/$defs/command"}}
+      }
+    },
+    "server": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["command", "health_url", "port_policy"],
+      "properties": {
+        "command": {"$ref": "#/$defs/command"},
+        "health_url": {"type": "string"},
+        "port_policy": {"type": "string", "const": "unique_loopback"}
+      }
+    },
+    "steps": {"type": "array", "items": {"$ref": "#/$defs/step"}},
+    "artifacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["screenshot_directory", "browser_log", "server_log"],
+      "properties": {
+        "screenshot_directory": {"type": "string"},
+        "browser_log": {"type": "string"},
+        "server_log": {"type": "string"}
+      }
+    },
+    "failure_criteria": {"type": "array", "items": {"type": "string"}},
+    "cleanup": {"type": "array", "items": {"$ref": "#/$defs/command"}}
+  },
+  "$defs": {
+    "command": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+    "state": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "description"],
+      "properties": {"id": {"type": "string"}, "description": {"type": "string"}}
+    },
+    "edge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["from", "to", "action"],
+      "properties": {"from": {"type": "string"}, "to": {"type": "string"}, "action": {"type": "string"}}
+    },
+    "permutation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "state_ids", "purpose"],
+      "properties": {
+        "id": {"type": "string"},
+        "state_ids": {"type": "array", "items": {"type": "string"}},
+        "purpose": {"type": "string"}
+      }
+    },
+    "step": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "state_id", "route", "action", "target", "input", "expected", "screenshot"],
+      "properties": {
+        "id": {"type": "string"},
+        "state_id": {"type": "string"},
+        "route": {"type": "string"},
+        "action": {"type": "string"},
+        "target": {"type": "string"},
+        "input": {"type": ["string", "null"]},
+        "expected": {"type": "string"},
+        "screenshot": {"type": ["string", "null"]}
+      }
+    }
+  }
+}

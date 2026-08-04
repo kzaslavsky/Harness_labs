@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol",
+    "feature_run_id",
+    "generation",
+    "prior_last_turn",
+    "cause",
+    "prior_thread_id",
+    "checkpoint_sha256",
+    "closure_ledger_sha256",
+    "dependency_graph_sha256",
+    "recent_receipts_sha256",
+    "decisions_sha256",
+    "unresolved_judgments_sha256",
+    "controller_package_digest",
+    "summary_sha256",
+    "telemetry"
+  ],
+  "properties": {
+    "protocol": {
+      "type": "string",
+      "const": "implement-v13-codex/coordinator-rollover/2"
+    },
+    "feature_run_id": {"type": "string", "minLength": 1},
+    "generation": {"type": "integer", "minimum": 1},
+    "prior_last_turn": {"type": "integer", "minimum": 1},
+    "cause": {
+      "type": "string",
+      "enum": [
+        "phase_boundary",
+        "closure_boundary",
+        "turn_limit",
+        "input_token_slope_limit",
+        "package_migration"
+      ]
+    },
+    "prior_thread_id": {"type": "string", "minLength": 1},
+    "checkpoint_sha256": {"$ref": "#/$defs/sha256"},
+    "closure_ledger_sha256": {"$ref": "#/$defs/nullable_sha256"},
+    "dependency_graph_sha256": {"$ref": "#/$defs/nullable_sha256"},
+    "recent_receipts_sha256": {"$ref": "#/$defs/sha256"},
+    "decisions_sha256": {"$ref": "#/$defs/sha256"},
+    "unresolved_judgments_sha256": {"$ref": "#/$defs/sha256"},
+    "controller_package_digest": {"$ref": "#/$defs/sha256"},
+    "summary_sha256": {"$ref": "#/$defs/sha256"},
+    "telemetry": {"$ref": "#/$defs/telemetry"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "nullable_sha256": {
+      "anyOf": [
+        {"$ref": "#/$defs/sha256"},
+        {"type": "null"}
+      ]
+    },
+    "telemetry": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "turns_in_context", "input_tokens_in_context", "input_token_slope", "slope_window_turns", "coordinator_turns_avoided"],
+          "properties": {
+            "status": {"type": "string", "const": "recorded"},
+            "turns_in_context": {"type": "integer", "minimum": 0},
+            "input_tokens_in_context": {"type": "integer", "minimum": 0},
+            "input_token_slope": {"type": "integer", "minimum": 0},
+            "slope_window_turns": {"type": "integer", "minimum": 1},
+            "coordinator_turns_avoided": {"type": "integer", "minimum": 0}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "turns_in_context", "input_tokens_in_context", "input_token_slope", "slope_window_turns", "coordinator_turns_avoided"],
+          "properties": {
+            "status": {"type": "string", "const": "unknown"},
+            "turns_in_context": {"type": "integer", "minimum": 0},
+            "input_tokens_in_context": {"type": "null"},
+            "input_token_slope": {"type": "null"},
+            "slope_window_turns": {"type": "integer", "minimum": 1},
+            "coordinator_turns_avoided": {"type": "integer", "minimum": 0}
+          }
+        }
+      ]
+    }
+  }
+}

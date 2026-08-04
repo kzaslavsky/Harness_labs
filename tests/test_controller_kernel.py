@@ -41,7 +41,7 @@ class ControllerKernelTests(unittest.TestCase):
             terminal_artifact_kinds=("final-report",),
             limits=RunLimits(
                 max_depth=2,
-                max_fan_out=3,
+                max_subagents=3,
                 max_parallelism=2,
                 max_tasks=6,
             ),
@@ -51,6 +51,35 @@ class ControllerKernelTests(unittest.TestCase):
             evidence=self.evidence,
         )
         self.actor = CommandActor("coordinator-1", "run_coordinator")
+
+    def test_run_limits_distinguish_subagent_count_from_parallelism(self) -> None:
+        limits = self.contract.limits.as_dict()
+        self.assertEqual(limits["max_subagents"], 3)
+        self.assertEqual(limits["max_parallelism"], 2)
+        self.assertNotIn("max_fan_out", limits)
+
+    def test_dispatch_rejects_more_than_max_subagents(self) -> None:
+        tasks = [
+            {
+                "id": f"worker-{index}",
+                "role": "worker",
+                "objective": "Work",
+                "details_schema": "work/1",
+                "required_capabilities": [],
+                "acceptance_criteria": [],
+                "dependencies": [],
+            }
+            for index in range(4)
+        ]
+        receipt = self.kernel.handle(
+            self.command(
+                "task.dispatch",
+                {"tasks": tasks, "max_parallelism": 1},
+                command_id="too-many-subagents",
+            )
+        )
+        self.assertFalse(receipt.accepted)
+        self.assertIn("max_subagents", receipt.message)
 
     def command(
         self,

@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["protocol", "task", "reviewer", "findings"],
+  "properties": {
+    "protocol": {
+      "type": "string",
+      "const": "implement-v13-codex/1"
+    },
+    "task": {
+      "type": "string",
+      "minLength": 1
+    },
+    "reviewer": {
+      "type": "string",
+      "enum": ["source_binding", "necessity", "frame"]
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "severity", "summary", "evidence", "recommendation"],
+        "properties": {
+          "id": {"type": "string", "minLength": 1},
+          "severity": {
+            "type": "string",
+            "enum": ["critical", "medium", "low", "none"]
+          },
+          "summary": {"type": "string"},
+          "evidence": {"type": "string"},
+          "recommendation": {"type": "string"}
+        }
+      }
+    }
+  }
+}

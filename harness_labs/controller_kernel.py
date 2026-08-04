@@ -47,6 +47,14 @@ OPERATOR_COMMANDS = frozenset(
         "decision.reject",
     }
 )
+DISPATCHER_COMMANDS = frozenset(
+    {
+        "coordinator.schema_register",
+        "coordinator.session_start",
+        "coordinator.session_end",
+        "run.block_request",
+    }
+)
 
 
 class KernelError(RuntimeError):
@@ -56,14 +64,14 @@ class KernelError(RuntimeError):
 @dataclass(frozen=True)
 class RunLimits:
     max_depth: int = 2
-    max_fan_out: int = 8
+    max_subagents: int = 8
     max_parallelism: int = 4
     max_tasks: int = 32
 
     def __post_init__(self) -> None:
         if min(
             self.max_depth,
-            self.max_fan_out,
+            self.max_subagents,
             self.max_parallelism,
             self.max_tasks,
         ) < 1:
@@ -72,7 +80,7 @@ class RunLimits:
     def as_dict(self) -> dict[str, int]:
         return {
             "max_depth": self.max_depth,
-            "max_fan_out": self.max_fan_out,
+            "max_subagents": self.max_subagents,
             "max_parallelism": self.max_parallelism,
             "max_tasks": self.max_tasks,
         }
@@ -146,6 +154,11 @@ class ControllerKernel:
             "anomalies": [],
             "budgets": {},
             "receipts": {},
+            "coordinator_dispatch": {
+                "schema": None,
+                "active_session": None,
+                "sessions": [],
+            },
         }
         if audit is not None:
             audit.append(
@@ -199,6 +212,10 @@ class ControllerKernel:
         ):
             raise KernelError("controller snapshot event count is invalid")
         instance._events = stored_events[:checkpoint_event_count]
+        state.setdefault(
+            "coordinator_dispatch",
+            {"schema": None, "active_session": None, "sessions": []},
+        )
         instance._state = state
         instance._receipts = {}
         for key, value in state.get("receipts", {}).items():
@@ -376,12 +393,17 @@ class ControllerKernel:
             return "run_mismatch", "command run_id does not match the kernel"
         if command.expected_revision != self._state["revision"]:
             return "stale_revision", "command expected_revision is stale"
-        if self._state["status"] in {"succeeded", "failed", "cancelled"}:
+        if (
+            self._state["status"] in {"succeeded", "failed", "cancelled"}
+            and command.type != "coordinator.session_end"
+        ):
             return "terminal_run", "terminal run cannot accept commands"
         if command.actor.role == "operator":
             allowed = OPERATOR_COMMANDS
         elif command.actor.role == "run_coordinator":
             allowed = COORDINATOR_COMMANDS
+        elif command.actor.role == "dispatcher":
+            allowed = DISPATCHER_COMMANDS
         elif command.actor.role == "worker":
             allowed = frozenset({"task.dispatch", "operator_input.request"})
         else:
@@ -416,8 +438,185 @@ class ControllerKernel:
             "permission.revoke": self._administrative_record,
             "decision.approve": self._administrative_record,
             "decision.reject": self._administrative_record,
+            "coordinator.schema_register": self._coordinator_schema_register,
+            "coordinator.session_start": self._coordinator_session_start,
+            "coordinator.session_end": self._coordinator_session_end,
         }[command.type]
         return handler(command)
+
+    def _coordinator_schema_register(
+        self,
+        command: CommandEnvelope,
+    ) -> tuple[list[tuple[str, dict[str, Any]]], tuple[str, ...]]:
+        protocol = _payload_text(
+            command.payload,
+            "protocol",
+            "coordinator schema",
+        )
+        if protocol != "coordinator-dispatch-schema/1":
+            raise ValueError("coordinator schema protocol is invalid")
+        schema_id = _payload_text(
+            command.payload,
+            "schema_id",
+            "coordinator schema",
+        )
+        digest = _payload_text(
+            command.payload,
+            "sha256",
+            "coordinator schema",
+        )
+        if len(digest) != 64 or any(
+            character not in "0123456789abcdef" for character in digest
+        ):
+            raise ValueError("coordinator schema sha256 is invalid")
+        phases = _string_list(command.payload, "phases")
+        if phases != list(self.contract.phases):
+            raise ValueError("coordinator schema phases do not match the run")
+        segments = command.payload.get("segments")
+        if not isinstance(segments, list) or not segments:
+            raise ValueError("coordinator schema segments must be non-empty")
+        covered: list[str] = []
+        normalized = []
+        seen_ids: set[str] = set()
+        for item in segments:
+            if not isinstance(item, Mapping):
+                raise ValueError("coordinator schema segments must be objects")
+            segment_id = _payload_text(item, "id", "coordinator segment")
+            if segment_id in seen_ids:
+                raise ValueError("coordinator segment ids must be unique")
+            seen_ids.add(segment_id)
+            segment_phases = _string_list(item, "phases")
+            max_attempts = item.get("max_attempts")
+            if (
+                not isinstance(max_attempts, int)
+                or isinstance(max_attempts, bool)
+                or max_attempts < 1
+            ):
+                raise ValueError(
+                    "coordinator segment max_attempts must be positive"
+                )
+            covered.extend(segment_phases)
+            normalized.append(
+                {
+                    "id": segment_id,
+                    "phases": segment_phases,
+                    "max_attempts": max_attempts,
+                }
+            )
+        if covered != list(self.contract.phases):
+            raise ValueError(
+                "coordinator segments must exactly cover run phases in order"
+            )
+        existing = self._state["coordinator_dispatch"]["schema"]
+        if existing is not None and existing.get("sha256") != digest:
+            raise ValueError("a different coordinator schema is already registered")
+        schema = {
+            "protocol": protocol,
+            "schema_id": schema_id,
+            "sha256": digest,
+            "phases": phases,
+            "segments": normalized,
+        }
+        return [("coordinator.schema_registered", {"schema": schema})], (
+            f"coordinator-schema:{schema_id}",
+        )
+
+    def _coordinator_session_start(
+        self,
+        command: CommandEnvelope,
+    ) -> tuple[list[tuple[str, dict[str, Any]]], tuple[str, ...]]:
+        dispatch = self._state["coordinator_dispatch"]
+        if dispatch["schema"] is None:
+            raise ValueError("coordinator schema is not registered")
+        if dispatch["active_session"] is not None:
+            raise ValueError("a coordinator session is already active")
+        session_id = _payload_text(
+            command.payload,
+            "session_id",
+            "coordinator session",
+        )
+        segment_id = _payload_text(
+            command.payload,
+            "segment_id",
+            "coordinator session",
+        )
+        attempt = command.payload.get("attempt")
+        if (
+            not isinstance(attempt, int)
+            or isinstance(attempt, bool)
+            or attempt < 1
+        ):
+            raise ValueError("coordinator session attempt must be positive")
+        segment = next(
+            (
+                item
+                for item in dispatch["schema"]["segments"]
+                if item["id"] == segment_id
+            ),
+            None,
+        )
+        if segment is None:
+            raise ValueError("coordinator session segment is unknown")
+        if self._state["phase"] not in segment["phases"]:
+            raise ValueError("coordinator segment does not own the current phase")
+        prior_attempts = sum(
+            1
+            for item in dispatch["sessions"]
+            if item["segment_id"] == segment_id
+        )
+        if attempt != prior_attempts + 1:
+            raise ValueError("coordinator session attempt is not sequential")
+        if attempt > segment["max_attempts"]:
+            raise ValueError("coordinator session exceeds segment attempts")
+        value = {
+            "session_id": session_id,
+            "segment_id": segment_id,
+            "attempt": attempt,
+            "starting_phase": self._state["phase"],
+            "backend_id": str(command.payload.get("backend_id", "unspecified")),
+        }
+        return [("coordinator.session_started", value)], (
+            f"coordinator-session:{session_id}",
+        )
+
+    def _coordinator_session_end(
+        self,
+        command: CommandEnvelope,
+    ) -> tuple[list[tuple[str, dict[str, Any]]], tuple[str, ...]]:
+        dispatch = self._state["coordinator_dispatch"]
+        active = dispatch["active_session"]
+        if not isinstance(active, Mapping):
+            raise ValueError("no coordinator session is active")
+        session_id = _payload_text(
+            command.payload,
+            "session_id",
+            "coordinator session",
+        )
+        if session_id != active["session_id"]:
+            raise ValueError("coordinator session identity does not match")
+        outcome = _payload_text(
+            command.payload,
+            "outcome",
+            "coordinator session",
+        )
+        if outcome not in {
+            "boundary",
+            "terminal",
+            "recoverable_failure",
+            "blocked",
+        }:
+            raise ValueError("coordinator session outcome is invalid")
+        value = {
+            **copy.deepcopy(dict(active)),
+            "outcome": outcome,
+            "ending_phase": self._state["phase"],
+            "run_status": self._state["status"],
+            "result_status": str(command.payload.get("result_status", "")),
+            "reason": str(command.payload.get("reason", "")),
+        }
+        return [("coordinator.session_ended", value)], (
+            f"coordinator-session:{session_id}",
+        )
 
     def _criterion_propose(
         self,
@@ -442,8 +641,8 @@ class ControllerKernel:
             raise ValueError("task.dispatch max_parallelism must be positive")
         if max_parallelism > self.contract.limits.max_parallelism:
             raise ValueError("task.dispatch exceeds max_parallelism")
-        if len(tasks) > self.contract.limits.max_fan_out:
-            raise ValueError("task.dispatch exceeds max_fan_out")
+        if len(tasks) > self.contract.limits.max_subagents:
+            raise ValueError("task.dispatch exceeds max_subagents")
         if len(self._state["tasks"]) + len(tasks) > self.contract.limits.max_tasks:
             raise ValueError("task.dispatch exceeds max_tasks")
         normalized: list[dict[str, Any]] = []
@@ -487,8 +686,11 @@ class ControllerKernel:
                 for prior in self._state["tasks"].values()
                 if (prior["parent_task_id"] or "<root>") == sibling_key
             )
-            if existing + sibling_counts[sibling_key] > self.contract.limits.max_fan_out:
-                raise ValueError("task.dispatch exceeds parent fan-out")
+            if (
+                existing + sibling_counts[sibling_key]
+                > self.contract.limits.max_subagents
+            ):
+                raise ValueError("task.dispatch exceeds parent max_subagents")
             for dependency in task["dependencies"]:
                 dependency_task = self._state["tasks"].get(dependency)
                 if dependency_task is None or dependency_task["status"] != "succeeded":
@@ -898,6 +1100,19 @@ class ControllerKernel:
             self._state["status"] = "cancelled"
         elif event_type == "budget.changed":
             self._state["budgets"][payload["name"]] = payload["value"]
+        elif event_type == "coordinator.schema_registered":
+            self._state["coordinator_dispatch"]["schema"] = copy.deepcopy(
+                payload["schema"]
+            )
+        elif event_type == "coordinator.session_started":
+            self._state["coordinator_dispatch"]["active_session"] = (
+                copy.deepcopy(dict(payload))
+            )
+        elif event_type == "coordinator.session_ended":
+            self._state["coordinator_dispatch"]["sessions"].append(
+                copy.deepcopy(dict(payload))
+            )
+            self._state["coordinator_dispatch"]["active_session"] = None
         elif event_type in {"retry.request", "replan.request"}:
             self._state["anomalies"].append(
                 {"type": event_type, **copy.deepcopy(dict(payload))}

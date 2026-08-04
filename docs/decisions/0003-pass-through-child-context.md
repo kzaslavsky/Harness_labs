@@ -22,7 +22,7 @@ context.
 
 The controller currently performs only structural type validation. It does not
 select, rewrite, authorize, summarize, resolve, or enrich the context. Existing
-role, capability, depth, fan-out, backend, and workspace controls remain
+role, capability, depth, subagent-count, backend, and workspace controls remain
 separate and continue to apply.
 
 The exact string is retained in the child-dispatch audit artifact and its

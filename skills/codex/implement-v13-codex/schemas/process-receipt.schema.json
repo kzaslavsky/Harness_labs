@@ -1,0 +1,143 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["protocol", "receipt_id", "status", "model", "reasoning", "sandbox", "cwd", "state_revision"],
+  "properties": {
+    "protocol": {"type": "string", "enum": ["implement-v13-codex/process-receipt/1", "implement-v13-codex/process-receipt/2", "implement-v13-codex/process-receipt/3"]},
+    "reasoning": {"type": "string", "enum": ["low", "medium", "high"]},
+    "status": {"type": "string", "enum": ["prepared", "spawned_unconfirmed", "released", "running", "succeeded", "failed", "orphaned"]},
+    "state_revision": {"type": "integer", "minimum": 0},
+    "prompt_source_path": {"type": "string", "minLength": 1},
+    "prompt_source_sha256": {"$ref": "#/$defs/sha256"},
+    "schema_source_path": {"type": "string", "minLength": 1},
+    "schema_source_sha256": {"$ref": "#/$defs/sha256"},
+    "schema_transport_sha256": {"$ref": "#/$defs/sha256"},
+    "schema_compiler_version": {"type": "string", "const": "implement-v13-codex/response-schema-compiler/1"},
+    "controller_package_digest": {"$ref": "#/$defs/sha256"},
+    "controller_package_version": {"type": "string", "const": "1"},
+    "controller_package_path": {"type": "string", "minLength": 1},
+    "capability_manifest_path": {"type": ["string", "null"]},
+    "capability_manifest_sha256": {
+      "anyOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]
+    },
+    "ephemeral_scratch": {"type": ["string", "null"]},
+    "ephemeral_scratch_contents_sha256": {
+      "anyOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]
+    },
+    "ephemeral_scratch_removed": {"type": "boolean"},
+    "terminal_cause": {
+      "type": "object",
+      "required": ["class", "retryable", "provider_code", "http_status", "message"],
+      "properties": {
+        "class": {"type": "string", "enum": ["none", "response_schema_transport_rejected", "provider_auth_rejected", "provider_rate_limited", "wall_timeout", "child_process_failure", "terminal_protocol_failure", "output_validation_failure", "controller_interrupted"]},
+        "retryable": {"type": "boolean"},
+        "provider_code": {"type": ["string", "null"]},
+        "http_status": {"type": ["integer", "null"]},
+        "message": {"type": "string"}
+      },
+      "additionalProperties": false
+    },
+    "diagnostics": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["source", "message"],
+        "properties": {"source": {"type": "string"}, "message": {"type": "string"}},
+        "additionalProperties": false
+      }
+    },
+    "provider_usage": {"$ref": "#/$defs/provider_usage"},
+    "interruption": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["marker", "termination_status", "supervisor_reaped", "available_artifact_sha256"],
+      "properties": {
+        "marker": {"type": "boolean", "const": true},
+        "termination_status": {
+          "type": "string",
+          "enum": ["verified", "unverified"]
+        },
+        "supervisor_reaped": {"type": "boolean"},
+        "owned_group_termination_requested": {"type": "boolean"},
+        "available_artifact_sha256": {"type": "object", "additionalProperties": {"$ref": "#/$defs/sha256"}}
+      }
+    },
+    "expected_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "timed_out": {"type": "boolean"},
+    "validation_errors": {"type": "array", "items": {"type": "string"}},
+    "artifact_sha256": {
+      "type": "object",
+      "required": ["prompt", "schema", "codex_executable", "stdout", "stderr", "output", "child_spec", "exit"],
+      "additionalProperties": false,
+      "properties": {
+        "prompt": {"$ref": "#/$defs/sha256"}, "schema": {"$ref": "#/$defs/sha256"},
+        "codex_executable": {"$ref": "#/$defs/sha256"}, "stdout": {"$ref": "#/$defs/sha256"},
+        "stderr": {"$ref": "#/$defs/sha256"}, "output": {"$ref": "#/$defs/sha256"},
+        "child_spec": {"$ref": "#/$defs/sha256"}, "exit": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "revalidated_at": {"type": "string", "format": "date-time"},
+    "revalidation_history": {"type": "array", "minItems": 1}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"protocol": {"const": "implement-v13-codex/process-receipt/2"}}, "required": ["protocol"]},
+      "then": {"required": ["schema_source_path", "schema_source_sha256", "schema_transport_sha256", "schema_compiler_version", "controller_package_digest", "controller_package_version", "controller_package_path", "capability_manifest_path", "capability_manifest_sha256", "ephemeral_scratch", "ephemeral_scratch_contents_sha256", "ephemeral_scratch_removed", "terminal_cause", "diagnostics"]}
+    },
+    {
+      "if": {"properties": {"protocol": {"const": "implement-v13-codex/process-receipt/3"}}, "required": ["protocol"]},
+      "then": {"required": ["schema_source_path", "schema_source_sha256", "schema_transport_sha256", "schema_compiler_version", "controller_package_digest", "controller_package_version", "controller_package_path", "capability_manifest_path", "capability_manifest_sha256", "ephemeral_scratch", "ephemeral_scratch_contents_sha256", "ephemeral_scratch_removed", "terminal_cause", "diagnostics", "provider_usage"]}
+    },
+    {
+      "if": {
+        "anyOf": [
+          {"properties": {"phase": {"const": "IMPLEMENTING"}, "role": {"const": "implementation_worker"}}, "required": ["phase", "role"]},
+          {"properties": {"phase": {"const": "REVIEWING"}, "role": {"const": "code_fixer"}}, "required": ["phase", "role"]}
+        ]
+      },
+      "then": {
+        "required": ["model", "reasoning"],
+        "properties": {"model": {"const": "gpt-5.6-terra"}, "reasoning": {"const": "medium"}}
+      }
+    },
+    {
+      "if": {"properties": {"reasoning": {"const": "high"}}, "required": ["reasoning"]},
+      "then": false
+    },
+    {
+      "if": {"required": ["revalidated_at"]},
+      "then": {
+        "required": ["artifact_sha256", "expected_sha256", "validation_errors", "revalidation_history"],
+        "properties": {"status": {"const": "succeeded"}, "validation_errors": {"maxItems": 0}}
+      }
+    }
+  ],
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "provider_usage": {
+      "oneOf": [
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["status", "input_tokens", "cached_input_tokens", "output_tokens"],
+          "properties": {
+            "status": {"type": "string", "const": "recorded"},
+            "input_tokens": {"type": "integer", "minimum": 0},
+            "cached_input_tokens": {"type": "integer", "minimum": 0},
+            "output_tokens": {"type": "integer", "minimum": 0}
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["status", "input_tokens", "cached_input_tokens", "output_tokens"],
+          "properties": {
+            "status": {"type": "string", "const": "unknown"},
+            "input_tokens": {"type": "null"},
+            "cached_input_tokens": {"type": "null"},
+            "output_tokens": {"type": "null"}
+          }
+        }
+      ]
+    }
+  },
+  "additionalProperties": true
+}

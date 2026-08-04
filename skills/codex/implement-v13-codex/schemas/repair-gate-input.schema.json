@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol",
+    "feature_run_id",
+    "batch_sha256",
+    "forbidden_access",
+    "output_bound",
+    "process_evidence",
+    "production_sandbox",
+    "dependency_regression"
+  ],
+  "properties": {
+    "protocol": {"const": "implement-v13-codex/repair-gate-input/1"},
+    "feature_run_id": {"type": "string", "minLength": 1},
+    "batch_sha256": {"$ref": "#/$defs/sha256"},
+    "forbidden_access": {"type": "object"},
+    "output_bound": {"type": "object"},
+    "process_evidence": {"type": "object"},
+    "production_sandbox": {"type": "object"},
+    "dependency_regression": {"type": "object"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

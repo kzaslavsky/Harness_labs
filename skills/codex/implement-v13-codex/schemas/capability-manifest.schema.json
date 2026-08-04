@@ -1,0 +1,123 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol",
+    "feature_run_id",
+    "repository_root",
+    "repository_identity",
+    "controller_package_digest",
+    "sandbox_owner",
+    "broker",
+    "broker_path",
+    "broker_sha256",
+    "probe_policy_sha256",
+    "execution_path",
+    "certification_runtime",
+    "simulation_only",
+    "status",
+    "scratch_contract",
+    "probes",
+    "checked_at"
+  ],
+  "properties": {
+    "protocol": {
+      "type": "string",
+      "const": "implement-v13-codex/capability-manifest/2"
+    },
+    "feature_run_id": {"type": "string", "minLength": 1},
+    "repository_root": {"type": "string", "minLength": 1},
+    "repository_identity": {"$ref": "#/$defs/sha256"},
+    "controller_package_digest": {"$ref": "#/$defs/sha256"},
+    "sandbox_owner": {
+      "type": "string",
+      "enum": ["controller_host_broker", "external_host_broker"]
+    },
+    "broker": {"type": "string", "minLength": 1},
+    "broker_path": {"type": "string"},
+    "broker_sha256": {"$ref": "#/$defs/sha256"},
+    "probe_policy_sha256": {"$ref": "#/$defs/sha256"},
+    "execution_path": {"type": "string", "minLength": 1},
+    "certification_runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["interpreter_path", "interpreter_sha256", "python_version", "pytest_version", "pytest_module_path", "dependency_fingerprint_sha256"],
+      "properties": {
+        "interpreter_path": {"type": "string", "minLength": 1},
+        "interpreter_sha256": {"$ref": "#/$defs/sha256"},
+        "python_version": {"type": "string", "minLength": 1},
+        "pytest_version": {"type": "string", "minLength": 1},
+        "pytest_module_path": {"type": "string", "minLength": 1},
+        "dependency_fingerprint_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "simulation_only": {"type": "boolean"},
+    "status": {
+      "type": "string",
+      "enum": ["ready", "external_capability_unavailable"]
+    },
+    "scratch_contract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "controller_created",
+        "per_invocation",
+        "outside_repository_authority",
+        "empty_at_launch",
+        "contents_hashed_before_removal",
+        "removed_after_terminal"
+      ],
+      "properties": {
+        "controller_created": {"type": "boolean", "const": true},
+        "per_invocation": {"type": "boolean", "const": true},
+        "outside_repository_authority": {"type": "boolean", "const": true},
+        "empty_at_launch": {"type": "boolean", "const": true},
+        "contents_hashed_before_removal": {"type": "boolean", "const": true},
+        "removed_after_terminal": {"type": "boolean", "const": true}
+      }
+    },
+    "probes": {
+      "type": "array",
+      "minItems": 3,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "probe_id",
+          "capability",
+          "production_real",
+          "command",
+          "rc",
+          "passed",
+          "evidence_sha256"
+        ],
+        "properties": {
+          "probe_id": {"type": "string", "minLength": 1},
+          "capability": {
+            "type": "string",
+            "enum": [
+              "repository_read",
+              "repository_write_denied",
+              "ephemeral_scratch_write",
+              "test_runner_scratch"
+            ]
+          },
+          "production_real": {"type": "boolean"},
+          "command": {
+            "type": "array",
+            "minItems": 1,
+            "items": {"type": "string", "minLength": 1}
+          },
+          "rc": {"type": "integer"},
+          "passed": {"type": "boolean"},
+          "evidence_sha256": {"$ref": "#/$defs/sha256"}
+        }
+      }
+    },
+    "checked_at": {"type": "string", "format": "date-time"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

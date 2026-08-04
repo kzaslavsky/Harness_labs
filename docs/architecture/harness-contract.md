@@ -34,6 +34,54 @@ assemble context, schedule independent tasks, retry recoverable failures, and
 request review. Each action MUST remain within static policy, be attributable to
 an actor and parent task, and emit sufficient state to resume or audit the run.
 
+## Execution-first invariant
+
+A harness MUST implement one executable production path through the complete
+lifecycle before adding generalized recovery, replay, optimization, or synthetic
+certification. Starting from the production entrypoint, one accountable run owner
+MUST advance the run without another operator message until completion or a
+genuine blocker.
+
+Every nonterminal checkpoint MUST identify the component responsible for its next
+transition. A coordinator identifier MUST resolve to a live process, task, or
+resumable durable controller; an arbitrary label is not ownership proof. A
+dispatcher MUST NOT enter passive waiting unless another owner has been verified
+alive. Returning from the parent while the run is nonterminal and no successor is
+alive is a conformance failure.
+
+The durable checkpoint is the sole authority for phase identity. A foreground
+shell or controller process proves liveness only and MUST NOT be reported as
+evidence that its original phase is still active. A chained controller SHOULD
+emit a flushed structured phase event after each observed checkpoint transition;
+after one unexplained observation interval, its parent MUST take a zero-timeout
+durable-state snapshot before naming the phase.
+
+Synthetic, debug, and component flows MAY supplement production testing, but
+MUST NOT substitute for the production lifecycle path or be reported as feature
+completion.
+The production lifecycle test MUST invoke the shipped dispatch and startup CLI
+entrypoints as subprocesses. A test that calls planning and feature-driving
+functions separately is nonconforming because it can supply a missing handoff.
+
+### Failure-class repair guardrail
+
+A request to diagnose or investigate a failed production harness run authorizes
+the run owner to implement and test the smallest in-scope harness repair for the
+demonstrated failure class in the same task. Stop after diagnosis only when the
+operator explicitly requests diagnosis-only work or the repair needs new
+authority outside the harness scope.
+
+A corrective change MUST remove the demonstrated failure class, not only the
+observed instance. If the current architecture cannot satisfy the stated
+acceptance criterion, replacing that architecture is in scope; a smaller patch
+MUST NOT be substituted merely because it is easier to unit test. Before claiming
+the correction, identify every lifecycle decision that still depends on prompt
+interpretation or an agent remembering to act. Required progress and terminal
+settlement MUST be controller-owned and executable. Do not claim success until a
+real dispatch reaches terminal queue state without operator intervention; mocks,
+static contract tests, synthetic flows, and direct state fabrication are
+insufficient.
+
 ## Hierarchy
 
 Every run has exactly one run owner. The minimum logical roles are:
@@ -52,9 +100,11 @@ state the role combination. Material changes SHOULD keep implementation and
 review logically independent. A child result is advisory until its parent
 validates it.
 
-The harness MUST bound hierarchy depth, fan-out, retries, runtime, and resource
-consumption. Workers with overlapping writable paths MUST be serialized or have
-an explicit conflict-resolution owner.
+The harness MUST bound hierarchy depth, subagent count, retries, runtime, and
+resource consumption. `max_subagents` limits the number of direct children
+under one parent over the task tree; `max_parallelism` separately limits how
+many tasks may execute concurrently. Workers with overlapping writable paths
+MUST be serialized or have an explicit conflict-resolution owner.
 
 ## Required contracts
 
@@ -76,6 +126,14 @@ Defines the exact sources supplied to an agent, why each source is relevant,
 its revision or content hash, precedence, exclusions, and token budget. See
 [`context-engineering.md`](context-engineering.md).
 
+### Coordinator dispatch contract
+
+Defines ordered coordinator segments, their exact phase coverage, coordinator
+profile, instructions, handoff artifact selection and requirements, attempt
+limit, and tool-call budget. The dispatcher MUST create a fresh session at every
+segment boundary and the controller MUST record schema identity and session
+outcomes. See [`coordinator-dispatch.md`](coordinator-dispatch.md).
+
 ### Result contract
 
 Defines status, claims, files changed, artifacts, commands executed, verification
@@ -93,6 +151,19 @@ repository identity or referenced commit no longer matches reality.
 
 Defines the candidate commit, target base branch and observed head, required
 checks, review status, merge strategy, conflict policy, and post-merge proof.
+
+## Complexity admission
+
+A new schema, receipt type, recovery mechanism, abstraction, or telemetry stream
+MUST identify:
+
+1. the demonstrated production-lifecycle failure it prevents;
+2. the production component that consumes it; and
+3. the end-to-end assertion it supports.
+
+If no such failure, consumer, and assertion exist, the mechanism MUST be deferred.
+Supporting machinery MUST NOT mature ahead of the executable production path it
+supports.
 
 ## Lifecycle
 
@@ -129,10 +200,22 @@ hypothesis, input, or method; repeating the same failed action does not count as
 progress. Recovery resumes from durable verified state and emits a new attempt
 identity linked to the prior failure.
 
+Repository documentation gates MUST require an archived implementation plan to
+link its recorded decision file. Historical broken links that predate the
+harness MAY be repaired only after the normal link gate fails and a task-keyed
+archive search identifies exactly one target; ambiguity remains a blocker.
+
 ## Acceptance
 
 A harness implementation conforms only when automated tests demonstrate:
 
+- one uninterrupted run from the real production dispatch entrypoint through
+  `orient -> plan -> implement -> verify -> review -> integrate -> report`, using
+  deterministic stub model responses but the real controller, worktree, prompts,
+  checkpoints, receipts, and queue;
+- no additional operator message is required after dispatch, every nonterminal
+  checkpoint has a verified live owner, and the run reaches its production result
+  and queue acknowledgment;
 - schema-valid run, task, context, result, checkpoint, event, and decision data;
 - enforced hierarchy, scope, budget, and retry bounds;
 - crash-safe checkpoint and resume behavior;
@@ -141,3 +224,8 @@ A harness implementation conforms only when automated tests demonstrate:
 - post-merge verification against the intended base;
 - complete structured telemetry without secrets;
 - repeatable metrics on a versioned evaluation suite.
+
+Synthetic marker traversal, direct state-transition calls, and fabricated feature
+results, transactions, merge receipts, or acknowledgments do not satisfy the
+production lifecycle requirement. Recovery certification begins only after the
+uninterrupted production path passes.

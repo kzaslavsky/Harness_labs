@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["protocol", "queue_run_id", "feature_run_id", "role", "review_kind", "lens_id", "diff_sha256", "verdict", "findings"],
+  "properties": {
+    "protocol": {"type": "string", "const": "implement-v13-codex/code-review/1"},
+    "queue_run_id": {"type": "string"},
+    "feature_run_id": {"type": "string"},
+    "role": {"type": "string"},
+    "review_kind": {"type": "string", "enum": ["lens", "terminal_integration"]},
+    "lens_id": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"},
+    "diff_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "verdict": {"type": "string", "enum": ["pass", "fix", "blocked"]},
+    "findings": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["id", "fingerprint", "file", "line", "category", "severity", "scenario", "evidence", "correction"], "properties": {"id": {"type": "string"}, "fingerprint": {"type": "string"}, "file": {"type": "string"}, "line": {"type": "integer", "minimum": 1}, "category": {"type": "string"}, "severity": {"type": "string", "enum": ["critical", "medium", "low"]}, "scenario": {"type": "string"}, "evidence": {"type": "array", "items": {"type": "string"}}, "correction": {"type": "string"}}}}
+  }
+}

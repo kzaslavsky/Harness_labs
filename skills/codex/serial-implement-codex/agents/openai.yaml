@@ -1,0 +1,4 @@
+interface:
+  display_name: "Serial Implement Codex"
+  short_description: "Run a durable Codex feature queue"
+  default_prompt: "Use $serial-implement-codex to run or resume this feature queue safely."

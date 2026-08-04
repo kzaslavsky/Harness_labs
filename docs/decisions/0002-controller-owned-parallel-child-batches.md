@@ -52,7 +52,7 @@ automatically reconciled on recovery and recorded by a new audit event.
 
 ## Consequences
 
-Batch size, parallelism, fan-out, depth, role authority, and executor selection
+Batch size, parallelism, subagent count, depth, role authority, and executor selection
 remain controller policy. Completion order is observable in events, while result
 order is deterministic. A batch can consume resources much faster than serial
 dispatch, so callers must set explicit caps. Retained child conversations remain

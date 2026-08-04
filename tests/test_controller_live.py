@@ -16,6 +16,24 @@ from harness_labs.controller_results import validate_semantic_result
 
 
 class CodexSemanticTaskExecutorTests(unittest.TestCase):
+    def test_repository_change_policy_requires_writable_sandbox(self) -> None:
+        with self.assertRaisesRegex(ValueError, "workspace-write"):
+            CodexSemanticTaskExecutor(
+                {},
+                Path("."),
+                EvidenceCatalog(),
+                "Build.",
+                require_repository_change=True,
+            )
+        with self.assertRaisesRegex(ValueError, "preflight"):
+            CodexSemanticTaskExecutor(
+                {},
+                Path("."),
+                EvidenceCatalog(),
+                "Verify.",
+                require_preflight_success=True,
+            )
+
     def test_preflight_and_model_output_become_hashed_semantic_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             repository = Path(temporary) / "repo"
@@ -102,6 +120,63 @@ class CodexSemanticTaskExecutorTests(unittest.TestCase):
             self.assertIn("CHECK PASSED", prompts[0])
             for ref in result.evidence[:2]:
                 self.assertTrue(evidence.contains(ref))
+
+    def test_writable_worker_uses_workspace_sandbox_and_requires_a_change(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repository = Path(temporary) / "repo"
+            repository.mkdir()
+            (repository / ".git").write_text("gitdir: elsewhere\n", encoding="utf-8")
+            task = {
+                "id": "build",
+                "objective": "Build the feature",
+                "context": json.dumps({"artifact_kind": "implementation-summary"}),
+                "details_schema": "implementation-details/1",
+                "acceptance_criteria": ["built"],
+                "required_capabilities": ["repo.write"],
+            }
+            raw = {
+                "summary": "Built.",
+                "deliverable_markdown": "# Build\nComplete.",
+                "details_json": json.dumps({"files": ["index.html"]}),
+                "claims": [],
+                "findings": [],
+                "recommendations": [],
+                "unresolved_questions": [],
+                "satisfied_criteria": ["built"],
+            }
+            statuses = iter(["", "?? index.html\n"])
+
+            def run(argv, **kwargs):
+                if argv[:2] == ["git", "status"]:
+                    return subprocess.CompletedProcess(
+                        argv, 0, stdout=next(statuses), stderr=""
+                    )
+                self.assertEqual(argv[argv.index("--sandbox") + 1], "workspace-write")
+                output = Path(argv[argv.index("-o") + 1])
+                output.write_text(json.dumps(raw), encoding="utf-8")
+                return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+            executor = CodexSemanticTaskExecutor(
+                task,
+                repository,
+                EvidenceCatalog(),
+                "Build precisely.",
+                sandbox="workspace-write",
+                require_repository_change=True,
+            )
+            with (
+                patch("harness_labs.controller_live.shutil.which", return_value="codex"),
+                patch("harness_labs.controller_live.subprocess.run", side_effect=run),
+            ):
+                result = executor.execute(
+                    TaskAttempt(
+                        "build/attempt-1",
+                        "task:build",
+                        "context:build",
+                        "profile:builder",
+                    )
+                )
+            self.assertEqual(result.status, "succeeded", result.payload)
 
 
 if __name__ == "__main__":

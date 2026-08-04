@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["protocol", "queue_run_id", "feature_run_id", "phase", "phase_detail", "role", "status", "summary", "changed_paths", "tests", "decisions", "parked_decisions"],
+  "properties": {
+    "protocol": {"type": "string", "const": "implement-v13-codex/role-result/1"},
+    "queue_run_id": {"type": "string"}, "feature_run_id": {"type": "string"}, "phase": {"type": "string"}, "phase_detail": {"type": "string"}, "role": {"type": "string"},
+    "status": {"type": "string", "enum": ["passed", "failed", "blocked"]}, "summary": {"type": "string"},
+    "changed_paths": {"type": "array", "items": {"type": "string"}},
+    "tests": {"type": "array", "items": {"$ref": "#/$defs/test_result"}},
+    "decisions": {"type": "array", "items": {"$ref": "#/$defs/decision"}},
+    "parked_decisions": {"type": "array", "items": {"$ref": "#/$defs/parked_decision"}}
+  },
+  "$defs": {
+    "test_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["command", "status", "evidence"],
+      "properties": {
+        "command": {"type": "string"},
+        "status": {"type": "string", "enum": ["passed", "failed", "skipped"]},
+        "evidence": {"type": "string"}
+      }
+    },
+    "decision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "decision", "rationale", "evidence"],
+      "properties": {
+        "id": {"type": "string"},
+        "decision": {"type": "string"},
+        "rationale": {"type": "string"},
+        "evidence": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "parked_decision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "question", "reason", "owner", "evidence"],
+      "properties": {
+        "id": {"type": "string"},
+        "question": {"type": "string"},
+        "reason": {"type": "string"},
+        "owner": {"type": "string"},
+        "evidence": {"type": "array", "items": {"type": "string"}}
+      }
+    }
+  }
+}

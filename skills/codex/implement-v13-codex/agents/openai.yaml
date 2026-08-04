@@ -1,0 +1,4 @@
+interface:
+  display_name: "Implement v13 Codex"
+  short_description: "Implement one feature with Codex phases"
+  default_prompt: "Use $implement-v13-codex to implement this feature through the full verified phase machine."

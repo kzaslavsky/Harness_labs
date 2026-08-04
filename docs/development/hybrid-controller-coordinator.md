@@ -28,7 +28,7 @@ projections in tool results.
 The scheduler supports repeated role profiles because each attempt receives a
 fresh executor. Required capabilities are matched before any task in a batch
 starts. A schema-valid worker result may request subchildren when its task grant
-allows delegation; the same run-level depth, fan-out, task, and concurrency
+allows delegation; the same run-level depth, subagent-count, task, and concurrency
 limits apply.
 
 ## Flexibility suite

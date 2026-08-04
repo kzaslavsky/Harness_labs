@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["protocol", "status", "summary", "blocker", "resume_token", "invocation_spec_path", "judgment_reason", "rollover_ack", "metrics"],
+  "properties": {
+    "protocol": {"type": "string", "const": "implement-v13-codex/coordinator-turn/2"},
+    "status": {"type": "string", "enum": ["continue", "invoke", "blocked", "done"]},
+    "summary": {"type": "string"},
+    "blocker": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["blocker_class", "reason", "resume_condition"],
+      "properties": {
+        "blocker_class": {"type": "string"},
+        "reason": {"type": "string"},
+        "resume_condition": {"type": "string"}
+      }
+    },
+    "resume_token": {"type": "string"},
+    "invocation_spec_path": {"type": "string"},
+    "judgment_reason": {
+      "type": ["string", "null"],
+      "enum": [
+        "novel_contract_choice",
+        "ambiguous_dependency_decomposition",
+        "semantic_conflict_resolution",
+        "integration_risk_judgment",
+        null
+      ]
+    },
+    "rollover_ack": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": [
+        "summary_sha256",
+        "controller_package_digest",
+        "checkpoint_sha256",
+        "closure_ledger_sha256",
+        "dependency_graph_sha256"
+      ],
+      "properties": {
+        "summary_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "controller_package_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "checkpoint_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "closure_ledger_sha256": {
+          "anyOf": [
+            {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            {"type": "null"}
+          ]
+        },
+        "dependency_graph_sha256": {
+          "anyOf": [
+            {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            {"type": "null"}
+          ]
+        }
+      }
+    },
+    "metrics": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["coordinator_turns_avoided"],
+      "properties": {
+        "coordinator_turns_avoided": {"type": "integer", "minimum": 0}
+      }
+    }
+  }
+}

@@ -1,0 +1,9 @@
+Perform exactly one file operation.
+
+Use apply_patch to create `markers/identity.json`. The `markers` directory
+already exists. Write exactly the JSON object below followed by one newline.
+Do not inspect, list, search, or read any file. Do not run a shell command. Do
+not call another tool. Return the identical JSON object as the entire final
+answer without Markdown.
+
+__IDENTITY_JSON__

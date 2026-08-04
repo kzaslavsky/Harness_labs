@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["protocol", "queue_run_id", "feature_run_id", "phase", "phase_detail", "role", "status", "approved", "effect_contract", "evidence"],
+  "properties": {
+    "protocol": {"type": "string"}, "queue_run_id": {"type": "string"}, "feature_run_id": {"type": "string"},
+    "phase": {"type": "string"}, "phase_detail": {"type": "string"}, "role": {"type": "string"},
+    "status": {"type": "string", "enum": ["passed", "blocked"]},
+    "approved": {"type": "boolean"},
+    "effect_contract": {"$ref": "#/$defs/effect_contract"},
+    "evidence": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}
+  },
+  "$defs": {
+    "effect_contract": {
+      "type": "object", "additionalProperties": false,
+      "required": ["protocol", "must_persist", "must_remain_absent", "must_remain_unchanged"],
+      "properties": {
+        "protocol": {"type": "string", "const": "implement-v13-codex/repair-effect-contract/1"},
+        "must_persist": {"type": "array", "items": {"$ref": "#/$defs/effect"}},
+        "must_remain_absent": {"type": "array", "items": {"$ref": "#/$defs/effect"}},
+        "must_remain_unchanged": {"type": "array", "items": {"$ref": "#/$defs/effect"}}
+      }
+    },
+    "effect": {
+      "type": "string", "enum": ["failure_checkpoint", "blocked_queue", "failure_summary", "failure_event", "success_result", "success_receipt", "integration_artifact", "dispatcher_acknowledgement", "base_git_state"]
+    }
+  }
+}

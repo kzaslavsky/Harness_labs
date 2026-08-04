@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["protocol", "status", "states", "screenshots", "logs", "failures"],
+  "properties": {
+    "protocol": {"type": "string", "const": "implement-v13-codex/ui-walk-result/1"},
+    "status": {"type": "string", "enum": ["passed", "failed", "blocked"]},
+    "states": {"type": "array", "items": {"$ref": "#/$defs/state_result"}},
+    "screenshots": {"type": "array", "items": {"$ref": "#/$defs/artifact"}},
+    "logs": {"type": "array", "items": {"$ref": "#/$defs/artifact"}},
+    "failures": {"type": "array", "items": {"$ref": "#/$defs/failure"}}
+  },
+  "$defs": {
+    "state_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state_id", "status", "observation", "evidence"],
+      "properties": {
+        "state_id": {"type": "string"},
+        "status": {"type": "string", "enum": ["passed", "failed", "blocked"]},
+        "observation": {"type": "string"},
+        "evidence": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": {"type": "string"},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
+    "failure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state_id", "criterion", "evidence"],
+      "properties": {
+        "state_id": {"type": "string"},
+        "criterion": {"type": "string"},
+        "evidence": {"type": "array", "items": {"type": "string"}}
+      }
+    }
+  }
+}

@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://harness-labs.local/schemas/debug-result.schema.json",
+  "title": "Orchestration-only debug result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol", "status", "mode", "certification_scope", "flow_id", "run_id",
+    "flow_spec_sha256", "catalog_sha256", "units_validated", "distinct_thread_ids",
+    "command_executions", "document_reads", "repository_mutated", "git_operations",
+    "receipt_paths", "receipt_sha256", "completed_at"
+  ],
+  "properties": {
+    "protocol": { "const": "codex-phase-flow/debug-result/1" },
+    "status": { "const": "done" },
+    "mode": { "const": "debug" },
+    "certification_scope": { "const": "orchestration_only" },
+    "flow_id": { "type": "string", "minLength": 1 },
+    "run_id": { "type": "string", "minLength": 1 },
+    "flow_spec_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "catalog_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "units_validated": { "type": "integer", "minimum": 1 },
+    "distinct_thread_ids": { "type": "integer", "minimum": 1 },
+    "command_executions": { "const": 0 },
+    "document_reads": { "const": 0 },
+    "repository_mutated": { "const": false },
+    "git_operations": { "const": 0 },
+    "receipt_paths": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+    "receipt_sha256": {
+      "type": "object",
+      "additionalProperties": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+    },
+    "completed_at": { "type": "string", "format": "date-time" }
+  }
+}

@@ -84,7 +84,7 @@ Version a portable policy package with:
   integration, and queue schemas;
 - acceptance criteria and the gates that discharge each criterion;
 - permission profiles and capability requirements;
-- retry, escalation, timeout, fan-out, depth, and cost limits;
+- retry, escalation, timeout, subagent-count, depth, and cost limits;
 - Git isolation, commit, merge, conflict, and base-advancement policy;
 - redaction, artifact retention, and logging policy;
 - provider-selection constraints expressed as capabilities rather than model
@@ -124,7 +124,7 @@ Dependencies, writable paths, and role-separation requirements determine which
 tasks may run concurrently. The scheduler must:
 
 - serialize overlapping write sets unless an explicit integration owner exists;
-- cap hierarchy depth, fan-out, retries, wall time, tokens, and tool calls;
+- cap hierarchy depth, subagent count, retries, wall time, tokens, and tool calls;
 - issue unique attempt and lease identifiers;
 - distinguish task readiness from executor liveness;
 - retry only after recording a changed hypothesis, input, provider, or method;
