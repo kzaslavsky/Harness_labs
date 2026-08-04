@@ -1,0 +1,119 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://harness-labs.local/schemas/controller-run-view.schema.json",
+  "title": "Hybrid controller coordinator projection",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol",
+    "run_id",
+    "objective",
+    "revision",
+    "status",
+    "phase",
+    "limits",
+    "criteria",
+    "tasks",
+    "decisions",
+    "claims",
+    "findings",
+    "artifacts",
+    "completion_failures",
+    "anomalies",
+    "operator_questions",
+    "allowed_commands",
+    "event_cursor"
+  ],
+  "properties": {
+    "protocol": {
+      "const": "controller-run-view/1"
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "objective": {
+      "type": "string",
+      "minLength": 1
+    },
+    "revision": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "status": {
+      "type": "string",
+      "minLength": 1
+    },
+    "phase": {
+      "type": "string",
+      "minLength": 1
+    },
+    "limits": {
+      "type": "object"
+    },
+    "criteria": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "tasks": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "decisions": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "claims": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "completion_failures": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "anomalies": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "operator_questions": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "allowed_commands": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "event_cursor": {
+      "type": "integer",
+      "minimum": 0
+    }
+  }
+}

@@ -68,6 +68,18 @@ the child works. The oMLX session translates the same logical tool exchange into
 two structured text completions because its adapter does not use a native tool
 transport.
 
+The analysis-and-planning prototype now includes a
+[`ControllerKernel`](harness_labs/controller_kernel.py) surrounded by a resident
+[`CoordinatorLoop`](harness_labs/controller_coordinator.py). Models submit a
+fixed command language; the kernel owns revisions, idempotency, tasks, bounds,
+criteria, findings, completion, checkpoints, and audit receipts. A generic
+capability scheduler creates a fresh executor for every parallel attempt, so the
+coordinator may choose repeated roles and bounded subchildren. The coordinator
+sees a compact deterministic `RunView` and opens full artifacts only by
+reference. See the
+[`hybrid controller status`](docs/development/hybrid-controller-coordinator.md)
+and [architectural decision](docs/decisions/0004-hybrid-controller-command-kernel.md).
+
 A complete deterministic poem attempt is available in
 [`examples/run_poem_attempt.py`](examples/run_poem_attempt.py). Scheduling,
 persistence, external capability enforcement, and lifecycle control remain future
@@ -149,3 +161,16 @@ python3 -m unittest discover -s tests -v
 
 The first implementation milestone is defined in
 [`docs/development/NEXT_STEPS.md`](docs/development/NEXT_STEPS.md).
+
+Run the live hybrid-controller flexibility suite against an explicitly selected
+clean repository worktree:
+
+```sh
+python3 -m harness_labs.controller_live_scenarios \
+  --repository /absolute/path/to/repository-worktree \
+  --scenario all
+```
+
+The live runner uses one resident, tool-only Codex coordinator, fresh read-only
+Codex semantic workers, hashed evidence artifacts, and controller-owned fixed
+commands for capabilities such as an isolated Playwright verification walk.

@@ -4,10 +4,12 @@ Status: proposed
 
 ## Current prototype slice
 
-The composition layer now carries task-specific text directly from a parent
-`ChildRequest` to the child `TaskAttempt`. The controller intentionally performs
-no content selection or authorization yet. See
-[`pass-through-child-context-plan.md`](pass-through-child-context-plan.md).
+The repository now has a deterministic command kernel, resident model
+coordinator loop, selective `RunView`, content-addressed evidence catalog,
+capability scheduler, repeated-role parallelism, bounded worker delegation, and
+durable restart. Three materially different analysis/planning scenarios exercise
+the same controller without scenario-specific kernel branches. See
+[`hybrid-controller-coordinator.md`](hybrid-controller-coordinator.md).
 
 ## Milestone 1 — minimal conforming harness
 
@@ -16,16 +18,15 @@ context, event, decision, checkpoint, Git isolation, and integration contracts.
 
 ### Required slices
 
-1. Define the remaining machine-readable run, task, context, result, checkpoint,
-   and integration schemas.
-2. Implement a deterministic controller with bounded lifecycle transitions and
-   atomic checkpoints.
+1. Bind live coordinator and worker backend configurations to the generic
+   capability scheduler, including browser/UI-graph executors.
+2. Extend the working analysis/planning controller through the full feature
+   lifecycle without introducing prompt-owned transitions.
 3. Implement isolated worktree and feature-branch creation, guarded commits, and
    verified merge-back to a recorded base branch.
-4. Implement bounded planner, worker, verifier, reviewer, and integrator roles
-   with validated parent/child messages.
-5. Emit schema-valid run events, decisions, artifact hashes, and final metrics.
-6. Add crash/resume, failed-gate, stale-base, conflict, scope, and budget tests.
+4. Add writable-path, network, browser, and external-effect capability brokers.
+5. Expand metrics and budgets to tokens, agent time, tool calls, and cost.
+6. Add failed-gate, stale-base, conflict, scope, and integration recovery tests.
 7. Create a small versioned feature benchmark and establish an accuracy and cost
    baseline before optimization.
 

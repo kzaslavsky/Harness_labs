@@ -13,6 +13,8 @@ Status: active
   [`parallel-child-dispatch-plan.md`](parallel-child-dispatch-plan.md)
 - Pass-through child context:
   [`pass-through-child-context-plan.md`](pass-through-child-context-plan.md)
+- Hybrid controller and coordinator:
+  [`hybrid-controller-coordinator.md`](hybrid-controller-coordinator.md)
 
 ## Seed implementation records
 

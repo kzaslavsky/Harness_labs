@@ -48,6 +48,48 @@ from .text_executor import (
     TextBackendError,
     TextExecutor,
 )
+from .controller_commands import (
+    COMMAND_PROTOCOL,
+    RECEIPT_PROTOCOL,
+    CommandActor,
+    CommandEnvelope,
+    CommandProvenance,
+    CommandReceipt,
+    KernelEvent,
+)
+from .controller_coordinator import CoordinatorLoop
+from .controller_evidence import (
+    EvidenceCatalog,
+    EvidenceError,
+    EvidenceRecord,
+)
+from .controller_kernel import (
+    ControllerKernel,
+    KernelError,
+    RunContract,
+    RunLimits,
+)
+from .controller_live import CodexSemanticTaskExecutor, LiveExecutionError
+from .controller_projection import ControllerQueries, project_run_view
+from .controller_results import (
+    SEMANTIC_RESULT_PROTOCOL,
+    SemanticResultError,
+    SemanticTaskResult,
+    semantic_payload,
+    validate_semantic_result,
+)
+from .controller_run import (
+    ControllerRunResult,
+    resume_controller,
+    run_controller,
+    run_fixture_spec,
+)
+from .controller_scheduler import (
+    CapabilityScheduler,
+    RoleProfile,
+    ScheduledOutcome,
+    SchedulingError,
+)
 
 __all__ = [
     "AttemptRunner",
@@ -72,6 +114,7 @@ __all__ = [
     "CodexReadOnlyWorktreeExecutor",
     "CodexAppServerSession",
     "CodexSessionError",
+    "CodexSemanticTaskExecutor",
     "Executor",
     "InvalidAttempt",
     "InvalidResult",
@@ -94,4 +137,35 @@ __all__ = [
     "ToolResult",
     "ToolSpec",
     "Usage",
+    "COMMAND_PROTOCOL",
+    "RECEIPT_PROTOCOL",
+    "SEMANTIC_RESULT_PROTOCOL",
+    "CapabilityScheduler",
+    "CommandActor",
+    "CommandEnvelope",
+    "CommandProvenance",
+    "CommandReceipt",
+    "ControllerKernel",
+    "ControllerQueries",
+    "ControllerRunResult",
+    "CoordinatorLoop",
+    "EvidenceCatalog",
+    "EvidenceError",
+    "EvidenceRecord",
+    "KernelError",
+    "KernelEvent",
+    "LiveExecutionError",
+    "RoleProfile",
+    "RunContract",
+    "RunLimits",
+    "ScheduledOutcome",
+    "SchedulingError",
+    "SemanticResultError",
+    "SemanticTaskResult",
+    "project_run_view",
+    "run_controller",
+    "run_fixture_spec",
+    "resume_controller",
+    "semantic_payload",
+    "validate_semantic_result",
 ]
