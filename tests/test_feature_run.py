@@ -12,7 +12,7 @@ from harness_labs.audit import AuditJournal
 from harness_labs.controller_kernel import RunContract
 from harness_labs.controller_results import semantic_payload
 from harness_labs.controller_scheduler import RoleProfile
-from harness_labs.feature_run import run_feature_worktree
+from harness_labs.feature_run import ReviewFixPolicy, run_feature_worktree
 from harness_labs.coordinator_schema import (
     CoordinatorDispatchSchema,
     CoordinatorSegment,
@@ -64,6 +64,19 @@ class _BuildExecutor:
                 ),
             ),
             evidence=(artifact.ref,),
+        )
+
+
+class _ClearReviewExecutor:
+    def execute(self, attempt) -> TaskResult:
+        return TaskResult(
+            attempt.attempt_id,
+            "succeeded",
+            semantic_payload(
+                summary="Independent review found no issues.",
+                details_schema="review-fix-review/1",
+                details={},
+            ),
         )
 
 
@@ -157,10 +170,16 @@ class FeatureRunTests(unittest.TestCase):
                 allowed_paths=("feature.txt",),
                 commit_message="Build feature",
                 merge=False,
+                review_fix_executor_factory=lambda stage, attempt: (
+                    _ClearReviewExecutor()
+                ),
+                review_fix_policy=ReviewFixPolicy(),
                 evidence_classification="component",
             )
 
             self.assertEqual(result.status, "succeeded")
+            self.assertIsNotNone(result.review_fix)
+            self.assertEqual(result.review_fix.cycles, 1)
             self.assertEqual(
                 [receipt["operation"] for receipt in result.git_receipts],
                 ["create", "commit", "integrate"],

@@ -194,11 +194,39 @@ declared allowed paths, and records content-addressed receipts for creation,
 candidate commit, and integration. Merge is optional and defaults off.
 
 A workspace-write executor requires an explicit non-empty writable-path grant.
-It starts from a clean candidate worktree, records HEAD and branch, and rejects
-HEAD changes, branch changes, or changed paths outside the grant. Its
-`workspace-change-receipt/1` records allowed and observed paths plus hashes of
-the resulting file states. This is controller verification after execution,
-not an OS-level filesystem sandbox.
+It normally starts from a clean candidate worktree. A review fixer MAY opt into
+a dirty baseline because it follows the builder in the same candidate tree. In
+that mode the controller compares before/after file states and applies the grant
+to the fixer's delta, not to unchanged builder edits. It always rejects HEAD or
+branch changes. Its `workspace-change-receipt/2` records the baseline state,
+final state, and worker-only changed paths. This is controller verification
+after execution, not an OS-level filesystem sandbox.
+
+### Review/fix gate
+
+FeatureRun MAY enable its controller-owned review/fix gate after the coordinator
+has completed and before the integration owner commits. The gate consumes normal
+Task Attempts for `review`, `fix`, and `verify`; model/backend selection remains
+an executor concern.
+
+When enabled, the gate MUST persist a `review-ledger/1` artifact after each
+material transition. Finding identity is `(file, subject)`. The ledger records
+every occurrence, cycle seen, score, normative protection, fix cost, disposition,
+fix attempt, verification state, and reopening. A required or contract-violating
+finding MUST NOT disappear at a cycle or yield limit. It blocks unless an
+operator explicitly enabled required-finding conversion to technical debt.
+
+The policy independently switches ledgering, duplicate collapse, re-raise
+suppression, normative-citation checks, scope-expansion screening, targeted
+verification, regression re-review, risk-tiered cycle limits, no-progress and
+marginal-yield exits, and the technical-debt sink. Disabling one mechanism MUST
+not implicitly disable another. The exact resolved policy is part of every
+ledger artifact.
+
+The default enabled policy uses deterministic risk routing: uncertain or
+security/schema/storage/web/UI changes are `sensitive` (five review cycles);
+other changes are `mechanical` (three). The final allowed cycle is review-only:
+the controller does not apply a fix it cannot independently re-review.
 
 Repository policy authorizes the integration owner to commit scoped work and
 merge it into the recorded base branch after all gates pass. Before merging, the

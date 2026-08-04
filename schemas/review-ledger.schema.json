@@ -1,0 +1,104 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://harness-labs.local/schemas/review-ledger.schema.json",
+  "title": "FeatureRun review ledger",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["protocol", "policy", "risk_tier", "findings", "cycles"],
+  "properties": {
+    "protocol": { "const": "review-ledger/1" },
+    "policy": {
+      "type": "object",
+      "additionalProperties": {
+        "type": ["boolean", "integer", "number"]
+      }
+    },
+    "risk_tier": { "enum": ["mechanical", "sensitive"] },
+    "findings": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/finding" }
+    },
+    "cycles": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["cycle", "review_attempt_id", "distinct_findings", "fix_keys"],
+        "properties": {
+          "cycle": { "type": "integer", "minimum": 1 },
+          "review_attempt_id": { "type": "string", "minLength": 1 },
+          "distinct_findings": { "type": "integer", "minimum": 0 },
+          "fix_keys": {
+            "type": "array",
+            "items": { "type": "string", "minLength": 1 }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "finding": {
+      "type": "object",
+      "required": [
+        "key",
+        "file",
+        "subject",
+        "statement",
+        "category",
+        "severity",
+        "score",
+        "fix_cost",
+        "protects",
+        "requires_disposition",
+        "contract_violation",
+        "scope_expanding",
+        "outcome",
+        "cycles_seen",
+        "occurrences",
+        "source_finding_ids",
+        "evidence_refs",
+        "fix_attempts",
+        "reopened_count"
+      ],
+      "properties": {
+        "key": { "type": "string", "minLength": 1 },
+        "file": { "type": "string" },
+        "subject": { "type": "string", "minLength": 1 },
+        "statement": { "type": "string", "minLength": 1 },
+        "category": { "type": "string", "minLength": 1 },
+        "severity": { "enum": ["critical", "major", "minor", "info"] },
+        "score": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "fix_cost": { "type": "string", "minLength": 1 },
+        "protects": { "type": "string" },
+        "requires_disposition": { "type": "boolean" },
+        "contract_violation": { "type": "boolean" },
+        "scope_expanding": { "type": "boolean" },
+        "outcome": {
+          "enum": [
+            "open",
+            "pending_review",
+            "fixed",
+            "note",
+            "scope_screened",
+            "debt"
+          ]
+        },
+        "outcome_reason": { "type": "string" },
+        "cycles_seen": {
+          "type": "array",
+          "items": { "type": "integer", "minimum": 1 }
+        },
+        "occurrences": { "type": "integer", "minimum": 1 },
+        "source_finding_ids": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "evidence_refs": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "fix_attempts": { "type": "array", "items": { "type": "object" } },
+        "reopened_count": { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}

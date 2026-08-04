@@ -106,7 +106,9 @@ class CodexSemanticTaskExecutorTests(unittest.TestCase):
                 preflight_argv=("safe-check",),
             )
             with (
-                patch("harness_labs.controller_live.shutil.which", return_value="codex"),
+                patch(
+                    "harness_labs.controller_live.shutil.which", return_value="codex"
+                ),
                 patch("harness_labs.controller_live.subprocess.run", side_effect=run),
             ):
                 result = executor.execute(attempt)
@@ -152,6 +154,7 @@ class CodexSemanticTaskExecutorTests(unittest.TestCase):
                 "unresolved_questions": [],
                 "satisfied_criteria": ["built"],
             }
+
             def run(argv, **kwargs):
                 self.assertEqual(argv[argv.index("--sandbox") + 1], "workspace-write")
                 output = Path(argv[argv.index("-o") + 1])
@@ -189,7 +192,9 @@ class CodexSemanticTaskExecutorTests(unittest.TestCase):
                 },
             )
             with (
-                patch("harness_labs.controller_live.shutil.which", return_value="codex"),
+                patch(
+                    "harness_labs.controller_live.shutil.which", return_value="codex"
+                ),
                 patch("harness_labs.controller_live.subprocess.run", side_effect=run),
                 patch(
                     "harness_labs.controller_live.workspace_snapshot",
@@ -275,6 +280,102 @@ class CodexSemanticTaskExecutorTests(unittest.TestCase):
             )
         self.assertEqual(result.status, "failed")
         self.assertIn("outside its grant", result.payload["error"])
+
+    def test_fixer_can_use_dirty_baseline_and_receipt_records_only_its_delta(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            repository = Path(temporary) / "repo"
+            repository.mkdir()
+            (repository / ".git").write_text("gitdir: elsewhere\n", encoding="utf-8")
+            task = {
+                "id": "fix",
+                "objective": "Fix the reviewed finding",
+                "context": "{}",
+                "details_schema": "review-fix-fix/1",
+                "acceptance_criteria": [],
+                "required_capabilities": ["repo.write"],
+            }
+            raw = {
+                "summary": "Fixed.",
+                "deliverable_markdown": "Fixed the requested finding.",
+                "details_json": json.dumps(
+                    {"addressed_finding_keys": ["feature.txt:wrong-value"]}
+                ),
+                "claims": [],
+                "findings": [],
+                "recommendations": [],
+                "unresolved_questions": [],
+                "satisfied_criteria": [],
+            }
+            before = {
+                "head": "abc",
+                "branch": "feature",
+                "changed_paths": ["feature.txt", "other.txt"],
+                "files": {
+                    "feature.txt": {"kind": "file", "sha256": "before"},
+                    "other.txt": {"kind": "file", "sha256": "unchanged"},
+                },
+            }
+            after = {
+                "head": "abc",
+                "branch": "feature",
+                "changed_paths": ["feature.txt", "other.txt"],
+                "files": {
+                    "feature.txt": {"kind": "file", "sha256": "after"},
+                    "other.txt": {"kind": "file", "sha256": "unchanged"},
+                },
+            }
+
+            def run(argv, **kwargs):
+                output = Path(argv[argv.index("-o") + 1])
+                output.write_text(json.dumps(raw), encoding="utf-8")
+                return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+            evidence = EvidenceCatalog()
+            executor = CodexSemanticTaskExecutor(
+                task,
+                repository,
+                evidence,
+                "Fix only the ledger item.",
+                sandbox="workspace-write",
+                require_repository_change=True,
+                writable_paths=("feature.txt",),
+                allow_dirty_baseline=True,
+            )
+            with (
+                patch(
+                    "harness_labs.controller_live.shutil.which", return_value="codex"
+                ),
+                patch("harness_labs.controller_live.subprocess.run", side_effect=run),
+                patch(
+                    "harness_labs.controller_live.workspace_snapshot",
+                    side_effect=(before, after),
+                ),
+            ):
+                result = executor.execute(
+                    TaskAttempt(
+                        "fix/attempt-1",
+                        "task:fix",
+                        "context:fix",
+                        "profile:fixer",
+                    )
+                )
+
+            self.assertEqual(result.status, "succeeded", result.payload)
+            semantic = validate_semantic_result(
+                result,
+                expected_details_schema="review-fix-fix/1",
+            )
+            receipt = next(
+                item
+                for item in semantic.artifacts
+                if item["kind"] == "workspace-change-receipt"
+            )
+            content = json.loads(evidence.open(receipt["ref"]))
+            self.assertEqual(content["worker_changed_paths"], ["feature.txt"])
+            self.assertEqual(
+                content["baseline_changed_paths"],
+                ["feature.txt", "other.txt"],
+            )
 
 
 if __name__ == "__main__":

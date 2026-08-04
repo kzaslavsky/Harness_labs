@@ -106,6 +106,16 @@ from .controller_scheduler import (
     SchedulingError,
 )
 from .feature_run import FeatureRunResult, run_feature_worktree
+from .review_fix import (
+    REVIEW_FIX_RESULT_PROTOCOL,
+    REVIEW_LEDGER_PROTOCOL,
+    ReviewFixError,
+    ReviewFixExecutorFactory,
+    ReviewFixLoop,
+    ReviewFixPolicy,
+    ReviewFixResult,
+    ReviewLedger,
+)
 from .git_transaction import (
     GitTransactionError,
     GitWorktreeTransaction,
@@ -189,6 +199,14 @@ __all__ = [
     "GitTransactionError",
     "GitWorktreeTransaction",
     "FeatureRunResult",
+    "REVIEW_FIX_RESULT_PROTOCOL",
+    "REVIEW_LEDGER_PROTOCOL",
+    "ReviewFixError",
+    "ReviewFixExecutorFactory",
+    "ReviewFixLoop",
+    "ReviewFixPolicy",
+    "ReviewFixResult",
+    "ReviewLedger",
     "LiveExecutionError",
     "RoleProfile",
     "RunContract",

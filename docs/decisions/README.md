@@ -16,3 +16,4 @@ is immutable after acceptance except for status and links to superseding records
 - [`0002 — Controller-owned parallel child batches`](0002-controller-owned-parallel-child-batches.md)
 - [`0003 — Pass-through child context`](0003-pass-through-child-context.md)
 - [`0004 — Hybrid controller command kernel`](0004-hybrid-controller-command-kernel.md)
+- [`0005 — Ledger-backed review/fix gate`](0005-ledger-backed-review-fix.md)

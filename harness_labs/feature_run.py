@@ -22,6 +22,13 @@ from .coordinator_schema import CoordinatorDispatchSchema
 from .git_transaction import (
     GitTransactionError,
     GitWorktreeTransaction,
+    workspace_snapshot,
+)
+from .review_fix import (
+    ReviewFixExecutorFactory,
+    ReviewFixLoop,
+    ReviewFixPolicy,
+    ReviewFixResult,
 )
 
 
@@ -51,6 +58,7 @@ class FeatureRunResult:
     manifest: Mapping[str, object]
     run_dir: Path
     worktree_path: Path
+    review_fix: ReviewFixResult | None = None
 
 
 def run_feature_worktree(
@@ -67,10 +75,14 @@ def run_feature_worktree(
     allowed_paths: tuple[str, ...],
     commit_message: str,
     merge: bool = False,
+    review_fix_executor_factory: ReviewFixExecutorFactory | None = None,
+    review_fix_policy: ReviewFixPolicy = ReviewFixPolicy(enabled=False),
     evidence_classification: str = "production_lifecycle",
 ) -> FeatureRunResult:
     """Create, execute, commit, and optionally merge one isolated FeatureRun."""
 
+    if review_fix_policy.enabled and review_fix_executor_factory is None:
+        raise ValueError("enabled review_fix_policy requires an executor factory")
     transaction = GitWorktreeTransaction.create(
         base_repository=base_repository,
         base_branch=base_branch,
@@ -116,6 +128,23 @@ def run_feature_worktree(
     ).run()
     receipts: list[Mapping[str, object]] = [creation]
     status = dispatch.result.status
+    review_fix_result = None
+    if status == "succeeded" and project_run_view(kernel)["status"] == "succeeded":
+        if review_fix_policy.enabled:
+            assert review_fix_executor_factory is not None
+            snapshot = workspace_snapshot(transaction.worktree_path)
+            review_fix_result = ReviewFixLoop(
+                run_id=contract.run_id,
+                objective=contract.objective,
+                acceptance_criteria=contract.criteria,
+                allowed_paths=allowed_paths,
+                changed_paths=tuple(snapshot["changed_paths"]),
+                executor_factory=review_fix_executor_factory,
+                evidence=evidence,
+                audit=audit,
+                policy=review_fix_policy,
+            ).run()
+            status = review_fix_result.status
     if status == "succeeded" and project_run_view(kernel)["status"] == "succeeded":
         try:
             commit = transaction.commit_candidate(
@@ -152,8 +181,11 @@ def run_feature_worktree(
         "succeeded"
         if status == "succeeded" and view["status"] == "succeeded"
         else "blocked"
-        if view["status"] == "blocked"
+        if status == "blocked" or view["status"] == "blocked"
         else "failed"
+    )
+    review_fix_payload = (
+        review_fix_result.as_dict() if review_fix_result is not None else None
     )
     manifest = audit.finalize(
         terminal_status,
@@ -166,8 +198,12 @@ def run_feature_worktree(
             "run_view": view,
             "state_digest": kernel.state_digest(),
             "git_receipts": list(receipts),
+            "review_fix": review_fix_payload,
         },
-        state={"controller": kernel.snapshot()},
+        state={
+            "controller": kernel.snapshot(),
+            "review_fix": review_fix_payload,
+        },
     )
     return FeatureRunResult(
         terminal_status,
@@ -178,6 +214,7 @@ def run_feature_worktree(
         manifest,
         run_dir,
         transaction.worktree_path,
+        review_fix_result,
     )
 
 
@@ -227,5 +264,6 @@ __all__ = [
     "FeatureProfileBuilder",
     "FeatureRunResult",
     "FeatureSessionFactory",
+    "ReviewFixPolicy",
     "run_feature_worktree",
 ]

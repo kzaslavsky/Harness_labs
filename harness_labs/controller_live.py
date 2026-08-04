@@ -79,6 +79,26 @@ _RAW_OUTPUT_SCHEMA: dict[str, Any] = {
                         "enum": ["critical", "major", "minor", "info"],
                     },
                     "requires_disposition": {"type": "boolean"},
+                    "file": {"type": "string"},
+                    "subject": {"type": "string"},
+                    "score": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 100,
+                    },
+                    "fix_cost": {
+                        "type": "string",
+                        "enum": [
+                            "one-line",
+                            "local",
+                            "structural",
+                            "surface-growing",
+                        ],
+                    },
+                    "protects": {"type": "string"},
+                    "scope_expanding": {"type": "boolean"},
+                    "contract_violation": {"type": "boolean"},
+                    "new_evidence": {"type": "string"},
                 },
             },
         },
@@ -116,6 +136,7 @@ class CodexSemanticTaskExecutor:
     sandbox: str = "read-only"
     require_repository_change: bool = False
     writable_paths: tuple[str, ...] = ()
+    allow_dirty_baseline: bool = False
     audit: AuditJournal | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
@@ -127,16 +148,16 @@ class CodexSemanticTaskExecutor:
             )
         if self.sandbox == "workspace-write":
             if not self.writable_paths:
-                raise ValueError(
-                    "workspace-write requires explicit writable_paths"
-                )
+                raise ValueError("workspace-write requires explicit writable_paths")
             normalize_allowed_paths(self.writable_paths)
         elif self.writable_paths:
             raise ValueError("writable_paths require the workspace-write sandbox")
-        if self.require_preflight_success and not self.preflight_argv:
+        if self.allow_dirty_baseline and self.sandbox != "workspace-write":
             raise ValueError(
-                "require_preflight_success requires a preflight command"
+                "allow_dirty_baseline requires the workspace-write sandbox"
             )
+        if self.require_preflight_success and not self.preflight_argv:
+            raise ValueError("require_preflight_success requires a preflight command")
 
     def execute(self, attempt: TaskAttempt) -> TaskResult:
         try:
@@ -176,6 +197,7 @@ class CodexSemanticTaskExecutor:
         if (
             initial_workspace is not None
             and initial_workspace["changed_paths"]
+            and not self.allow_dirty_baseline
         ):
             raise LiveExecutionError(
                 "writable worker requires a clean repository baseline"
@@ -278,33 +300,33 @@ class CodexSemanticTaskExecutor:
                 raise LiveExecutionError("writable worker changed repository HEAD")
             if final_workspace["branch"] != initial_workspace["branch"]:
                 raise LiveExecutionError("writable worker changed repository branch")
-            outside = paths_outside_scope(
-                final_workspace["changed_paths"],
-                self.writable_paths,
+            worker_changed_paths = _snapshot_delta_paths(
+                initial_workspace,
+                final_workspace,
             )
+            outside = paths_outside_scope(worker_changed_paths, self.writable_paths)
             if outside:
                 raise LiveExecutionError(
                     "writable worker changed paths outside its grant: "
                     + ", ".join(outside)
                 )
-            if (
-                self.require_repository_change
-                and not final_workspace["changed_paths"]
-            ):
+            if self.require_repository_change and not worker_changed_paths:
                 raise LiveExecutionError(
                     "writable worker completed without changing the repository"
                 )
             workspace_artifact = self.evidence.add(
                 kind="workspace-change-receipt",
                 content={
-                    "protocol": "workspace-change-receipt/1",
+                    "protocol": "workspace-change-receipt/2",
                     "repository": str(repository),
                     "baseline_head": initial_workspace["head"],
                     "branch": initial_workspace["branch"],
-                    "allowed_paths": list(
-                        normalize_allowed_paths(self.writable_paths)
-                    ),
+                    "dirty_baseline_allowed": self.allow_dirty_baseline,
+                    "baseline_changed_paths": initial_workspace["changed_paths"],
+                    "allowed_paths": list(normalize_allowed_paths(self.writable_paths)),
                     "changed_paths": final_workspace["changed_paths"],
+                    "worker_changed_paths": worker_changed_paths,
+                    "baseline_files": initial_workspace["files"],
                     "files": final_workspace["files"],
                 },
                 media_type="application/json",
@@ -421,9 +443,7 @@ class CodexSemanticTaskExecutor:
             )
             self.audit.append(
                 "verified_command_completed",
-                status=(
-                    "succeeded" if completed.returncode == 0 else "failed"
-                ),
+                status=("succeeded" if completed.returncode == 0 else "failed"),
                 payload={
                     "argv": list(self.preflight_argv),
                     "cwd": str(repository),
@@ -479,9 +499,8 @@ class CodexSemanticTaskExecutor:
                 "reasoning": self.reasoning,
                 "sandbox": self.sandbox,
                 "writable_paths": list(self.writable_paths),
-                "prompt_sha256": hashlib.sha256(
-                    prompt.encode("utf-8")
-                ).hexdigest(),
+                "allow_dirty_baseline": self.allow_dirty_baseline,
+                "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
             },
             actor=AuditActor(
                 attempt.attempt_id,
@@ -494,6 +513,29 @@ class CodexSemanticTaskExecutor:
             duration_ms=duration_ms,
             artifacts=(prompt_artifact, stdout_artifact, stderr_artifact),
         )
+
+
+def _snapshot_delta_paths(
+    before: Mapping[str, Any],
+    after: Mapping[str, Any],
+) -> list[str]:
+    """Return paths whose tracked workspace state changed during one executor."""
+
+    before_files = before.get("files", {})
+    after_files = after.get("files", {})
+    if not isinstance(before_files, Mapping) or not isinstance(after_files, Mapping):
+        raise LiveExecutionError("workspace snapshot files must be objects")
+    before_changed = set(before.get("changed_paths", ()))
+    after_changed = set(after.get("changed_paths", ()))
+    candidates = before_changed | after_changed | set(before_files) | set(after_files)
+    return sorted(
+        path
+        for path in candidates
+        if (
+            (path in before_changed) != (path in after_changed)
+            or before_files.get(path) != after_files.get(path)
+        )
+    )
 
 
 def _parse_context(value: str) -> dict[str, Any]:
@@ -518,8 +560,7 @@ def _worker_prompt(
         "Keep all writes bounded to the assigned objective. "
         if task.get("required_capabilities")
         and "repo.write" in task.get("required_capabilities", ())
-        else
-        "Inspect the repository with shell commands, but do not edit it. "
+        else "Inspect the repository with shell commands, but do not edit it. "
     )
     return (
         "You are one bounded worker in an audited controller run. "

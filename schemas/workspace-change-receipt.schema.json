@@ -9,22 +9,34 @@
     "repository",
     "baseline_head",
     "branch",
+    "dirty_baseline_allowed",
+    "baseline_changed_paths",
     "allowed_paths",
     "changed_paths",
+    "worker_changed_paths",
+    "baseline_files",
     "files"
   ],
   "properties": {
-    "protocol": { "const": "workspace-change-receipt/1" },
+    "protocol": { "const": "workspace-change-receipt/2" },
     "repository": { "type": "string", "minLength": 1 },
     "baseline_head": { "type": "string", "minLength": 1 },
     "branch": { "type": "string", "minLength": 1 },
+    "dirty_baseline_allowed": { "type": "boolean" },
+    "baseline_changed_paths": { "$ref": "#/$defs/paths" },
     "allowed_paths": {
-      "type": "array",
-      "minItems": 1,
-      "uniqueItems": true,
-      "items": { "type": "string", "minLength": 1 }
+      "allOf": [
+        { "$ref": "#/$defs/paths" },
+        { "minItems": 1 }
+      ]
     },
-    "changed_paths": {
+    "changed_paths": { "$ref": "#/$defs/paths" },
+    "worker_changed_paths": { "$ref": "#/$defs/paths" },
+    "baseline_files": { "$ref": "#/$defs/files" },
+    "files": { "$ref": "#/$defs/files" }
+  },
+  "$defs": {
+    "paths": {
       "type": "array",
       "uniqueItems": true,
       "items": { "type": "string", "minLength": 1 }
