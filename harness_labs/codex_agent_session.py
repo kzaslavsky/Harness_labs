@@ -70,6 +70,7 @@ class CodexAppServerSession:
     executable: str = "codex"
     timeout_seconds: float = 180.0
     persistent_rollout: bool = True
+    base_instructions: str | None = None
     audit: AuditJournal | None = field(default=None, repr=False)
     _process: subprocess.Popen[str] | None = field(default=None, init=False, repr=False)
     _workspace: tempfile.TemporaryDirectory[str] | None = field(
@@ -182,7 +183,7 @@ class CodexAppServerSession:
                     "approvalPolicy": "never",
                     "sandbox": "read-only",
                     "ephemeral": not self.persistent_rollout,
-                    "baseInstructions": (
+                    "baseInstructions": self.base_instructions or (
                         "You are a bounded parent task attempt. You cannot read files "
                         "or run commands. Use only controller-provided child tools when "
                         "the task requires delegated access. Use spawn_children once "

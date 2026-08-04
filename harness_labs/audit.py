@@ -33,6 +33,21 @@ _EVIDENCE_CLASSES = frozenset(
     {"production_lifecycle", "component", "synthetic", "fabricated_fixture"}
 )
 _SAFE_NAME = re.compile(r"[^a-zA-Z0-9_.-]+")
+_MEDIA_TYPE_SUFFIXES = {
+    "application/json": "json",
+    "application/ld+json": "json",
+    "application/octet-stream": "bin",
+    "application/pdf": "pdf",
+    "application/x-ndjson": "jsonl",
+    "image/jpeg": "jpg",
+    "image/png": "png",
+    "image/svg+xml": "svg",
+    "text/csv": "csv",
+    "text/html": "html",
+    "text/markdown": "md",
+    "text/plain": "txt",
+    "text/tab-separated-values": "tsv",
+}
 
 
 def _synchronized(method):
@@ -227,15 +242,20 @@ class AuditJournal:
         self._ensure_writable()
         if isinstance(content, Mapping) or isinstance(content, list):
             raw = (_canonical(content) + "\n").encode("utf-8")
-            suffix = "json"
+            fallback_suffix = "json"
         elif isinstance(content, str):
             raw = content.encode("utf-8")
-            suffix = "txt"
+            fallback_suffix = "txt"
         elif isinstance(content, bytes):
             raw = content
-            suffix = "bin"
+            fallback_suffix = "bin"
         else:
             raise TypeError("audit artifact content has an unsupported type")
+        normalized_media_type = media_type.partition(";")[0].strip().lower()
+        suffix = _MEDIA_TYPE_SUFFIXES.get(
+            normalized_media_type,
+            fallback_suffix,
+        )
         self._artifact_number += 1
         safe_kind = _SAFE_NAME.sub("-", kind).strip("-") or "artifact"
         name = f"{self._artifact_number:06d}-{safe_kind}.{suffix}"
@@ -369,6 +389,7 @@ class AuditJournal:
         status: str,
         *,
         result: Mapping[str, Any],
+        state: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         self._ensure_writable()
         if status not in _TERMINAL:
@@ -382,7 +403,11 @@ class AuditJournal:
         )
         checkpoint = self.checkpoint(
             status,
-            {"active_children": [], "active_sessions": []},
+            {
+                **({} if state is None else dict(state)),
+                "active_children": [],
+                "active_sessions": [],
+            },
         )
         checkpoint_raw = self.checkpoint_path.read_bytes()
         artifacts = _artifact_inventory(

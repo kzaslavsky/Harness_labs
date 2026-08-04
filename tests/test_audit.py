@@ -12,6 +12,35 @@ from harness_labs.audit import AuditActor, AuditError, AuditJournal
 
 
 class AuditJournalTests(unittest.TestCase):
+    def test_artifact_suffix_follows_declared_media_type(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            journal = AuditJournal(
+                Path(temporary) / "media-types",
+                "media-types",
+                actor=AuditActor("controller-1", "controller"),
+                evidence_classification="fabricated_fixture",
+            )
+
+            markdown = journal.write_artifact(
+                "report",
+                b"# Report\n",
+                media_type="text/markdown; charset=utf-8",
+            )
+            ndjson = journal.write_artifact(
+                "events",
+                b'{"ok":true}\n',
+                media_type="application/x-ndjson",
+            )
+            png = journal.write_artifact(
+                "screenshot",
+                b"\x89PNG\r\n\x1a\n",
+                media_type="image/png",
+            )
+
+            self.assertTrue(markdown.path.endswith(".md"))
+            self.assertTrue(ndjson.path.endswith(".jsonl"))
+            self.assertTrue(png.path.endswith(".png"))
+
     def test_finalized_journal_verifies_hash_chain_and_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             run_dir = Path(temporary) / "run-1"

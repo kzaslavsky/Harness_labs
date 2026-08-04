@@ -14,3 +14,4 @@ Accepted records:
 
 - [`0002-controller-owned-parallel-child-batches.md`](0002-controller-owned-parallel-child-batches.md)
 - [`0003-pass-through-child-context.md`](0003-pass-through-child-context.md)
+- [`0004-hybrid-controller-command-kernel.md`](0004-hybrid-controller-command-kernel.md)
