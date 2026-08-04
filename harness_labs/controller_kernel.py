@@ -63,21 +63,24 @@ class KernelError(RuntimeError):
 
 @dataclass(frozen=True)
 class RunLimits:
-    max_depth: int = 2
-    max_subagents: int = 8
-    max_parallelism: int = 4
-    max_tasks: int = 32
+    max_depth: int = 5
+    max_subagents: int = 5
+    max_parallelism: int | None = None
+    max_tasks: int | None = None
 
     def __post_init__(self) -> None:
-        if min(
-            self.max_depth,
-            self.max_subagents,
-            self.max_parallelism,
-            self.max_tasks,
-        ) < 1:
-            raise ValueError("all run limits must be positive")
+        if self.max_depth < 1 or self.max_subagents < 1:
+            raise ValueError("depth and subagent limits must be positive")
+        for name in ("max_parallelism", "max_tasks"):
+            value = getattr(self, name)
+            if value is not None and (
+                not isinstance(value, int)
+                or isinstance(value, bool)
+                or value < 1
+            ):
+                raise ValueError(f"{name} must be positive or unbounded")
 
-    def as_dict(self) -> dict[str, int]:
+    def as_dict(self) -> dict[str, int | None]:
         return {
             "max_depth": self.max_depth,
             "max_subagents": self.max_subagents,
@@ -487,13 +490,13 @@ class ControllerKernel:
             seen_ids.add(segment_id)
             segment_phases = _string_list(item, "phases")
             max_attempts = item.get("max_attempts")
-            if (
+            if max_attempts is not None and (
                 not isinstance(max_attempts, int)
                 or isinstance(max_attempts, bool)
                 or max_attempts < 1
             ):
                 raise ValueError(
-                    "coordinator segment max_attempts must be positive"
+                    "coordinator segment max_attempts must be positive or unbounded"
                 )
             covered.extend(segment_phases)
             normalized.append(
@@ -566,7 +569,10 @@ class ControllerKernel:
         )
         if attempt != prior_attempts + 1:
             raise ValueError("coordinator session attempt is not sequential")
-        if attempt > segment["max_attempts"]:
+        if (
+            segment["max_attempts"] is not None
+            and attempt > segment["max_attempts"]
+        ):
             raise ValueError("coordinator session exceeds segment attempts")
         value = {
             "session_id": session_id,
@@ -604,6 +610,7 @@ class ControllerKernel:
             "terminal",
             "recoverable_failure",
             "blocked",
+            "interrupted",
         }:
             raise ValueError("coordinator session outcome is invalid")
         value = {
@@ -639,11 +646,18 @@ class ControllerKernel:
         max_parallelism = command.payload.get("max_parallelism", 1)
         if not isinstance(max_parallelism, int) or max_parallelism < 1:
             raise ValueError("task.dispatch max_parallelism must be positive")
-        if max_parallelism > self.contract.limits.max_parallelism:
+        if (
+            self.contract.limits.max_parallelism is not None
+            and max_parallelism > self.contract.limits.max_parallelism
+        ):
             raise ValueError("task.dispatch exceeds max_parallelism")
         if len(tasks) > self.contract.limits.max_subagents:
             raise ValueError("task.dispatch exceeds max_subagents")
-        if len(self._state["tasks"]) + len(tasks) > self.contract.limits.max_tasks:
+        if (
+            self.contract.limits.max_tasks is not None
+            and len(self._state["tasks"]) + len(tasks)
+            > self.contract.limits.max_tasks
+        ):
             raise ValueError("task.dispatch exceeds max_tasks")
         normalized: list[dict[str, Any]] = []
         supplied_ids: set[str] = set()

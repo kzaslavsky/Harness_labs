@@ -16,6 +16,7 @@ from harness_labs.agent_sessions import (
 from harness_labs.coordinator_dispatcher import (
     CoordinatorDispatcher,
     CoordinatorLaunch,
+    resume_dispatched_controller,
     run_dispatched_controller,
 )
 from harness_labs.audit import AuditJournal
@@ -58,16 +59,27 @@ class _FailingSession:
         self.closed = True
 
 
+class _InterruptingSession(_FailingSession):
+    def step(
+        self,
+        session_id: str,
+        tool_result: ToolResult | None = None,
+    ):
+        raise KeyboardInterrupt("simulated dispatcher process death")
+
+
 def _scheduler() -> CapabilityScheduler:
-    return CapabilityScheduler(
-        (
-            RoleProfile(
-                "unused",
-                "unused",
-                frozenset(),
-                lambda task: _UnusedExecutor(),
-            ),
-        )
+    return CapabilityScheduler(_profiles())
+
+
+def _profiles() -> tuple[RoleProfile, ...]:
+    return (
+        RoleProfile(
+            "unused",
+            "unused",
+            frozenset(),
+            lambda task: _UnusedExecutor(),
+        ),
     )
 
 
@@ -104,6 +116,66 @@ def _segment(
 
 
 class CoordinatorDispatcherTests(unittest.TestCase):
+    def test_segment_limits_are_unbounded_when_omitted(self) -> None:
+        segment = _schema(
+            {"segments": [{
+                "id": "active",
+                "phases": ["active"],
+                "instructions": "Finish.",
+                "coordinator_profile": "default",
+                "context": {
+                    "artifact_kinds": [],
+                    "required_artifact_kinds": [],
+                },
+            }]}
+        ).segments[0]
+        self.assertIsNone(segment.max_attempts)
+        self.assertIsNone(segment.max_tool_calls)
+
+    def test_resume_closes_interrupted_session_and_continues_same_run(self) -> None:
+        contract = RunContract(
+            run_id="dispatcher-resume",
+            objective="Complete after process death.",
+            phases=("active",),
+        )
+        schema = _schema(
+            {"segments": [_segment("active", ["active"], max_attempts=2)]}
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            run_dir = Path(temporary) / "run"
+            with self.assertRaises(KeyboardInterrupt):
+                run_dispatched_controller(
+                    contract,
+                    schema=schema,
+                    session_factory=lambda launch, evidence: _InterruptingSession(
+                        "dead-provider-session"
+                    ),
+                    profile_builder=lambda evidence: _profiles(),
+                    run_dir=run_dir,
+                    evidence_classification="component",
+                )
+
+            resumed = resume_dispatched_controller(
+                contract,
+                schema=schema,
+                session_factory=lambda launch, evidence: ScriptedCoordinatorSession(
+                    [("run_complete_request", {})],
+                    final="Recovered.",
+                ),
+                profile_builder=lambda evidence: _profiles(),
+                run_dir=run_dir,
+            )
+
+            self.assertEqual(resumed.run_view["status"], "succeeded")
+            sessions = resumed.run_view["coordinator_dispatch"]["sessions"]
+            self.assertEqual(
+                [item["outcome"] for item in sessions],
+                ["interrupted", "terminal"],
+            )
+            self.assertEqual(sessions[1]["attempt"], 2)
+            self.assertEqual(resumed.manifest["status"], "succeeded")
+            AuditJournal.verify(run_dir)
+
     def test_spawns_one_fresh_coordinator_per_schema_segment(self) -> None:
         contract = RunContract(
             run_id="segmented",

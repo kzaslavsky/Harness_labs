@@ -1,6 +1,6 @@
 # Coordinator Dispatch Contract
 
-Status: implemented prototype
+Status: implemented
 
 ## Purpose
 
@@ -73,7 +73,7 @@ For each nonterminal controller snapshot, the dispatcher:
 
 1. resolves the segment containing the authoritative current phase;
 2. verifies required handoff artifact kinds;
-3. computes the next bounded attempt;
+3. computes the next attempt, enforcing a limit when the schema declares one;
 4. constructs a segment context with schema identity, instructions, artifact
    descriptors, and prior coordinator-session outcomes;
 5. asks the session factory for a fresh backend session;
@@ -109,15 +109,21 @@ The primary contracts are:
 - `CoordinatorDispatcher`; and
 - `run_dispatched_controller(...)`.
 
-`run_dispatched_controller(...)` is the production-shaped fresh-run entrypoint.
-It creates the audit journal, evidence catalog, kernel, scheduler, and
-dispatcher, then finalizes a manifest containing the coordinator launches and
-authoritative final state.
+`run_dispatched_controller(...)` is the fresh-run entrypoint.
+`resume_dispatched_controller(...)` restores the hash-verified checkpoint and
+evidence catalog from the same run directory, verifies that the coordinator
+schema identity and hash match, and continues that run.
 
-## Current boundary
+On resume, the dispatcher deterministically:
 
-The prototype supports bounded in-run coordinator replacement. Durable restart
-of the dispatcher process itself is not yet exposed as a public resume
-entrypoint. The controller records enough schema and session history to support
-that next step, but recovery must not be claimed until a killed dispatcher is
-resumed through the real production entrypoint.
+- closes a checkpointed active coordinator session as `interrupted`;
+- refuses to replay a task checkpointed as `running`, because its external
+  effects are not known to be idempotent;
+- dispatches checkpointed `ready` tasks before asking a coordinator to make new
+  decisions; and
+- allocates the next coordinator attempt from durable session history.
+
+The terminal manifest records whether the entrypoint was a fresh run or a
+resume. A resume test interrupts a real dispatcher between coordinator
+sessions, restores the same run, proves that the original task is not repeated,
+and verifies the resulting audit chain.

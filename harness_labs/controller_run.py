@@ -45,7 +45,7 @@ def run_controller(
     session_builder: SessionBuilder,
     profile_builder: ProfileBuilder,
     run_dir: Path,
-    max_tool_calls: int = 128,
+    max_tool_calls: int | None = None,
     evidence_classification: str = "production_lifecycle",
 ) -> ControllerRunResult:
     """Execute one run through the real kernel, scheduler, session, and journal."""
@@ -105,38 +105,11 @@ def resume_controller(
     session_builder: SessionBuilder,
     profile_builder: ProfileBuilder,
     run_dir: Path,
-    max_tool_calls: int = 128,
+    max_tool_calls: int | None = None,
 ) -> ControllerRunResult:
     """Resume a nonterminal run from its durable checkpoint and evidence."""
 
-    audit = AuditJournal.open_existing(
-        run_dir,
-        actor=AuditActor("kernel", "controller_kernel"),
-    )
-    checkpoint = json.loads(audit.checkpoint_path.read_text(encoding="utf-8"))
-    if checkpoint.get("status") in {
-        "succeeded",
-        "failed",
-        "blocked",
-        "interrupted",
-    }:
-        raise ValueError("terminal controller run cannot be resumed")
-    stored_state = checkpoint.get("state", {}).get("controller")
-    if not isinstance(stored_state, Mapping):
-        raise ValueError("run checkpoint has no controller state")
-    state = copy.deepcopy(dict(stored_state))
-    state.setdefault("receipts", {}).update(
-        _load_receipt_state(audit.events_path)
-    )
-    evidence = EvidenceCatalog(audit=audit)
-    _restore_evidence(evidence, run_dir, state)
-    kernel = ControllerKernel.from_snapshot(
-        contract,
-        evidence=evidence,
-        snapshot=state,
-        audit=audit,
-        events=_load_kernel_events(audit.events_path),
-    )
+    audit, evidence, kernel = restore_controller_checkpoint(contract, run_dir)
     session = session_builder(evidence)
     scheduler = CapabilityScheduler(profile_builder(evidence))
     result = CoordinatorLoop(
@@ -171,6 +144,43 @@ def resume_controller(
         state={"controller": kernel.snapshot()},
     )
     return ControllerRunResult(result, view, manifest, run_dir)
+
+
+def restore_controller_checkpoint(
+    contract: RunContract,
+    run_dir: Path,
+) -> tuple[AuditJournal, EvidenceCatalog, ControllerKernel]:
+    """Restore one nonterminal controller checkpoint without starting a model."""
+
+    audit = AuditJournal.open_existing(
+        run_dir,
+        actor=AuditActor("kernel", "controller_kernel"),
+    )
+    checkpoint = json.loads(audit.checkpoint_path.read_text(encoding="utf-8"))
+    if checkpoint.get("status") in {
+        "succeeded",
+        "failed",
+        "blocked",
+        "interrupted",
+    }:
+        raise ValueError("terminal controller run cannot be resumed")
+    stored_state = checkpoint.get("state", {}).get("controller")
+    if not isinstance(stored_state, Mapping):
+        raise ValueError("run checkpoint has no controller state")
+    state = copy.deepcopy(dict(stored_state))
+    state.setdefault("receipts", {}).update(
+        _load_receipt_state(audit.events_path)
+    )
+    evidence = EvidenceCatalog(audit=audit)
+    _restore_evidence(evidence, run_dir, state)
+    kernel = ControllerKernel.from_snapshot(
+        contract,
+        evidence=evidence,
+        snapshot=state,
+        audit=audit,
+        events=_load_kernel_events(audit.events_path),
+    )
+    return audit, evidence, kernel
 
 
 class _FixtureSession:
@@ -220,6 +230,14 @@ class _FixtureExecutor:
         )
 
 
+def _optional_positive_int(value: Any, name: str) -> int | None:
+    if value is None:
+        return None
+    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+        raise ValueError(f"fixture limit {name} must be positive or null")
+    return value
+
+
 def run_fixture_spec(spec: Mapping[str, Any], *, run_dir: Path) -> ControllerRunResult:
     """Run a JSON fixture through the same production-shaped entrypoint."""
 
@@ -242,10 +260,16 @@ def run_fixture_spec(spec: Mapping[str, Any], *, run_dir: Path) -> ControllerRun
             contract_value.get("terminal_artifact_kinds", ())
         ),
         limits=RunLimits(
-            max_depth=int(limits_value.get("max_depth", 2)),
-            max_subagents=int(limits_value.get("max_subagents", 8)),
-            max_parallelism=int(limits_value.get("max_parallelism", 4)),
-            max_tasks=int(limits_value.get("max_tasks", 32)),
+            max_depth=int(limits_value.get("max_depth", 5)),
+            max_subagents=int(limits_value.get("max_subagents", 5)),
+            max_parallelism=_optional_positive_int(
+                limits_value.get("max_parallelism"),
+                "max_parallelism",
+            ),
+            max_tasks=_optional_positive_int(
+                limits_value.get("max_tasks"),
+                "max_tasks",
+            ),
         ),
         repository=dict(contract_value.get("repository", {})),
     )

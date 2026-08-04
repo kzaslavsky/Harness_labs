@@ -34,9 +34,7 @@
         "phases",
         "instructions",
         "coordinator_profile",
-        "context",
-        "max_attempts",
-        "max_tool_calls"
+        "context"
       ],
       "properties": {
         "id": {
@@ -87,11 +85,11 @@
           }
         },
         "max_attempts": {
-          "type": "integer",
+          "type": ["integer", "null"],
           "minimum": 1
         },
         "max_tool_calls": {
-          "type": "integer",
+          "type": ["integer", "null"],
           "minimum": 1
         }
       }

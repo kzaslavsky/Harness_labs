@@ -16,6 +16,12 @@ from .attempts import TaskAttempt, TaskResult
 from .audit import AuditActor, AuditJournal
 from .controller_evidence import EvidenceCatalog
 from .controller_results import semantic_payload, validate_semantic_result
+from .git_transaction import (
+    GitTransactionError,
+    normalize_allowed_paths,
+    paths_outside_scope,
+    workspace_snapshot,
+)
 
 
 class LiveExecutionError(RuntimeError):
@@ -103,12 +109,13 @@ class CodexSemanticTaskExecutor:
     model: str = "gpt-5.6-terra"
     reasoning: str = "medium"
     executable: str = "codex"
-    timeout_seconds: float = 900.0
+    timeout_seconds: float | None = None
     preflight_argv: tuple[str, ...] = ()
-    preflight_timeout_seconds: float = 300.0
+    preflight_timeout_seconds: float | None = None
     require_preflight_success: bool = False
     sandbox: str = "read-only"
     require_repository_change: bool = False
+    writable_paths: tuple[str, ...] = ()
     audit: AuditJournal | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
@@ -118,6 +125,14 @@ class CodexSemanticTaskExecutor:
             raise ValueError(
                 "require_repository_change requires the workspace-write sandbox"
             )
+        if self.sandbox == "workspace-write":
+            if not self.writable_paths:
+                raise ValueError(
+                    "workspace-write requires explicit writable_paths"
+                )
+            normalize_allowed_paths(self.writable_paths)
+        elif self.writable_paths:
+            raise ValueError("writable_paths require the workspace-write sandbox")
         if self.require_preflight_success and not self.preflight_argv:
             raise ValueError(
                 "require_preflight_success requires a preflight command"
@@ -126,7 +141,13 @@ class CodexSemanticTaskExecutor:
     def execute(self, attempt: TaskAttempt) -> TaskResult:
         try:
             return self._execute(attempt)
-        except (LiveExecutionError, OSError, ValueError, json.JSONDecodeError) as exc:
+        except (
+            GitTransactionError,
+            LiveExecutionError,
+            OSError,
+            ValueError,
+            json.JSONDecodeError,
+        ) as exc:
             return TaskResult(
                 attempt_id=attempt.attempt_id,
                 status="failed",
@@ -143,11 +164,22 @@ class CodexSemanticTaskExecutor:
             raise LiveExecutionError(f"Codex executable not found: {self.executable}")
 
         context = _parse_context(str(self.task.get("context", "")))
-        initial_worktree = (
-            _git_worktree_status(repository)
-            if self.require_repository_change
+        if self.sandbox == "workspace-write":
+            context["controller_writable_paths"] = list(
+                normalize_allowed_paths(self.writable_paths)
+            )
+        initial_workspace = (
+            workspace_snapshot(repository)
+            if self.sandbox == "workspace-write"
             else None
         )
+        if (
+            initial_workspace is not None
+            and initial_workspace["changed_paths"]
+        ):
+            raise LiveExecutionError(
+                "writable worker requires a clean repository baseline"
+            )
         artifact_kind = context.pop("artifact_kind", None)
         if not isinstance(artifact_kind, str) or not artifact_kind.strip():
             artifact_kind = f"{self.task['details_schema']}-report"
@@ -239,12 +271,45 @@ class CodexSemanticTaskExecutor:
                 raise LiveExecutionError("Codex did not write a semantic result")
             raw = json.loads(output_path.read_text(encoding="utf-8"))
 
-        if initial_worktree is not None:
-            final_worktree = _git_worktree_status(repository)
-            if final_worktree == initial_worktree:
+        workspace_artifact = None
+        if initial_workspace is not None:
+            final_workspace = workspace_snapshot(repository)
+            if final_workspace["head"] != initial_workspace["head"]:
+                raise LiveExecutionError("writable worker changed repository HEAD")
+            if final_workspace["branch"] != initial_workspace["branch"]:
+                raise LiveExecutionError("writable worker changed repository branch")
+            outside = paths_outside_scope(
+                final_workspace["changed_paths"],
+                self.writable_paths,
+            )
+            if outside:
+                raise LiveExecutionError(
+                    "writable worker changed paths outside its grant: "
+                    + ", ".join(outside)
+                )
+            if (
+                self.require_repository_change
+                and not final_workspace["changed_paths"]
+            ):
                 raise LiveExecutionError(
                     "writable worker completed without changing the repository"
                 )
+            workspace_artifact = self.evidence.add(
+                kind="workspace-change-receipt",
+                content={
+                    "protocol": "workspace-change-receipt/1",
+                    "repository": str(repository),
+                    "baseline_head": initial_workspace["head"],
+                    "branch": initial_workspace["branch"],
+                    "allowed_paths": list(
+                        normalize_allowed_paths(self.writable_paths)
+                    ),
+                    "changed_paths": final_workspace["changed_paths"],
+                    "files": final_workspace["files"],
+                },
+                media_type="application/json",
+                producer_task_id=str(self.task["id"]),
+            )
 
         deliverable = raw.get("deliverable_markdown")
         if not isinstance(deliverable, str) or not deliverable.strip():
@@ -265,6 +330,9 @@ class CodexSemanticTaskExecutor:
         if preflight_artifact is not None:
             evidence_refs.append(preflight_artifact.ref)
             artifacts.append(preflight_artifact.as_dict())
+        if workspace_artifact is not None:
+            evidence_refs.append(workspace_artifact.ref)
+            artifacts.append(workspace_artifact.as_dict())
         accepted_criteria = set(self.task.get("acceptance_criteria", ()))
         satisfied = raw.get("satisfied_criteria", [])
         if not isinstance(satisfied, list):
@@ -410,6 +478,7 @@ class CodexSemanticTaskExecutor:
                 "model": self.model,
                 "reasoning": self.reasoning,
                 "sandbox": self.sandbox,
+                "writable_paths": list(self.writable_paths),
                 "prompt_sha256": hashlib.sha256(
                     prompt.encode("utf-8")
                 ).hexdigest(),
@@ -470,22 +539,6 @@ def _worker_prompt(
         f"Result detail schema identity: {task['details_schema']}\n"
         f"Controller-supplied context:\n{json.dumps(context, sort_keys=True)}\n"
     )
-
-
-def _git_worktree_status(repository: Path) -> str:
-    completed = subprocess.run(
-        ["git", "status", "--porcelain=v1", "--untracked-files=all"],
-        cwd=repository,
-        text=True,
-        capture_output=True,
-        timeout=30,
-        check=False,
-    )
-    if completed.returncode != 0:
-        raise LiveExecutionError(
-            f"cannot inspect repository changes: {completed.stderr.strip()}"
-        )
-    return completed.stdout
 
 
 __all__ = ["CodexSemanticTaskExecutor", "LiveExecutionError"]

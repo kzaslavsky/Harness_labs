@@ -1,0 +1,87 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://harness-labs.local/schemas/git-worktree-transaction.schema.json",
+  "title": "Git worktree transaction receipt",
+  "type": "object",
+  "required": ["protocol", "operation"],
+  "properties": {
+    "protocol": { "const": "git-worktree-transaction/1" },
+    "operation": { "enum": ["create", "commit", "integrate"] }
+  },
+  "oneOf": [
+    {
+      "additionalProperties": false,
+      "required": [
+        "protocol",
+        "operation",
+        "base_repository",
+        "base_branch",
+        "feature_branch",
+        "worktree_path",
+        "base_commit",
+        "verified_head"
+      ],
+      "properties": {
+        "protocol": { "const": "git-worktree-transaction/1" },
+        "operation": { "const": "create" },
+        "base_repository": { "type": "string", "minLength": 1 },
+        "base_branch": { "type": "string", "minLength": 1 },
+        "feature_branch": { "type": "string", "minLength": 1 },
+        "worktree_path": { "type": "string", "minLength": 1 },
+        "base_commit": { "type": "string", "minLength": 1 },
+        "verified_head": { "type": "string", "minLength": 1 }
+      }
+    },
+    {
+      "additionalProperties": false,
+      "required": [
+        "protocol",
+        "operation",
+        "base_commit",
+        "candidate_commit",
+        "changed_paths",
+        "allowed_paths",
+        "precommit_snapshot"
+      ],
+      "properties": {
+        "protocol": { "const": "git-worktree-transaction/1" },
+        "operation": { "const": "commit" },
+        "base_commit": { "type": "string", "minLength": 1 },
+        "candidate_commit": { "type": "string", "minLength": 1 },
+        "changed_paths": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "allowed_paths": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "precommit_snapshot": { "type": "object" }
+      }
+    },
+    {
+      "additionalProperties": false,
+      "required": [
+        "protocol",
+        "operation",
+        "status",
+        "base_commit",
+        "candidate_commit",
+        "merge_commit"
+      ],
+      "properties": {
+        "protocol": { "const": "git-worktree-transaction/1" },
+        "operation": { "const": "integrate" },
+        "status": { "enum": ["ready_not_merged", "merged"] },
+        "base_commit": { "type": "string", "minLength": 1 },
+        "candidate_commit": { "type": "string", "minLength": 1 },
+        "merge_commit": { "type": ["string", "null"] },
+        "verified_base_head": { "type": "string", "minLength": 1 }
+      }
+    }
+  ]
+}

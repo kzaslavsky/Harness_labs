@@ -100,11 +100,15 @@ state the role combination. Material changes SHOULD keep implementation and
 review logically independent. A child result is advisory until its parent
 validates it.
 
-The harness MUST bound hierarchy depth, subagent count, retries, runtime, and
-resource consumption. `max_subagents` limits the number of direct children
-under one parent over the task tree; `max_parallelism` separately limits how
-many tasks may execute concurrently. Workers with overlapping writable paths
-MUST be serialized or have an explicit conflict-resolution owner.
+The current engine defaults `max_depth` and `max_subagents` to `5`.
+`max_subagents` limits the number of direct children under one parent over the
+task tree; it is not a concurrency limit. `max_parallelism`, total task count,
+coordinator attempts, and coordinator tool calls default to unbounded (`null`)
+until empirical runs establish useful limits. Any of those limits may still be
+set explicitly by a run or coordinator schema. A production profile MUST
+eventually bound retries, runtime, and resource consumption before unattended
+use. Workers with overlapping writable paths MUST be serialized or have an
+explicit conflict-resolution owner.
 
 ## Required contracts
 
@@ -183,6 +187,19 @@ Each feature run MUST operate in a dedicated worktree on a dedicated feature
 branch. It MUST record the base branch and base commit before edits. A harness
 MUST NOT rely on the user's primary checkout as disposable execution space.
 
+`run_feature_worktree(...)` owns this transaction. It rejects a dirty or
+misidentified base, creates the feature branch and worktree at the recorded base
+commit, requires the run contract to bind those exact identities, stages only
+declared allowed paths, and records content-addressed receipts for creation,
+candidate commit, and integration. Merge is optional and defaults off.
+
+A workspace-write executor requires an explicit non-empty writable-path grant.
+It starts from a clean candidate worktree, records HEAD and branch, and rejects
+HEAD changes, branch changes, or changed paths outside the grant. Its
+`workspace-change-receipt/1` records allowed and observed paths plus hashes of
+the resulting file states. This is controller verification after execution,
+not an OS-level filesystem sandbox.
+
 Repository policy authorizes the integration owner to commit scoped work and
 merge it into the recorded base branch after all gates pass. Before merging, the
 integrator MUST read the current base head, reconcile advancement, inspect the
@@ -199,6 +216,12 @@ budget, external blocker, or terminal quality failure. Retries require a changed
 hypothesis, input, or method; repeating the same failed action does not count as
 progress. Recovery resumes from durable verified state and emits a new attempt
 identity linked to the prior failure.
+
+The dispatcher treats a durable `running` task as uncertain external state and
+blocks instead of replaying it. A checkpointed active coordinator session can
+be closed as interrupted because session lifecycle itself is controller-owned;
+checkpointed `ready` tasks may then be dispatched without repeating completed
+tasks.
 
 Repository documentation gates MUST require an archived implementation plan to
 link its recorded decision file. Historical broken links that predate the

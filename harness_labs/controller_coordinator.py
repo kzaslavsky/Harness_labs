@@ -57,15 +57,15 @@ class CoordinatorLoop:
     queries: ControllerQueries
     scheduler: CapabilityScheduler
     session: AgentSession
-    max_tool_calls: int = 128
+    max_tool_calls: int | None = None
     actor_id: str = "coordinator-1"
     phase_scope: tuple[str, ...] = ()
     task_override: str | None = None
     initial_context: Mapping[str, Any] = field(default_factory=dict)
 
     def run(self) -> TaskResult:
-        if self.max_tool_calls < 1:
-            raise ValueError("max_tool_calls must be positive")
+        if self.max_tool_calls is not None and self.max_tool_calls < 1:
+            raise ValueError("max_tool_calls must be positive or unbounded")
         if self.phase_scope:
             unknown = set(self.phase_scope) - set(self.kernel.contract.phases)
             if unknown:
@@ -104,12 +104,15 @@ class CoordinatorLoop:
         tool_result: ToolResult | None = None
         tool_calls = 0
         try:
-            while tool_calls <= self.max_tool_calls:
+            while self.max_tool_calls is None or tool_calls <= self.max_tool_calls:
                 event = self.session.step(session_id, tool_result)
                 tool_result = None
                 if isinstance(event, ToolCall):
                     tool_calls += 1
-                    if tool_calls > self.max_tool_calls:
+                    if (
+                        self.max_tool_calls is not None
+                        and tool_calls > self.max_tool_calls
+                    ):
                         return self._blocked(
                             "coordinator exceeded max_tool_calls",
                             session_id,

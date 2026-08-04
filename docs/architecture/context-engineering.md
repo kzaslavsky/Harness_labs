@@ -53,6 +53,9 @@ A context packet records:
 A parent may summarize broader context but remains accountable for omissions.
 A child may gather additional context through its separately granted tools;
 supplied bootstrap context does not restrict those capabilities.
+A write-capable child additionally receives the controller-normalized writable
+paths in its context. That grant is verified against the Git worktree after the
+child exits; prose instructions alone are not treated as enforcement.
 A child MUST report missing or contradictory context instead of silently
 inventing requirements. Child output returns through the result contract; it
 does not become trusted shared context until validated and promoted by the

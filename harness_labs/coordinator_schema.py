@@ -21,8 +21,8 @@ class CoordinatorSegment:
     coordinator_profile: str = "default"
     context_artifact_kinds: tuple[str, ...] = ()
     required_artifact_kinds: tuple[str, ...] = ()
-    max_attempts: int = 1
-    max_tool_calls: int = 128
+    max_attempts: int | None = None
+    max_tool_calls: int | None = None
 
     def __post_init__(self) -> None:
         for name in ("id", "instructions", "coordinator_profile"):
@@ -49,8 +49,16 @@ class CoordinatorSegment:
             raise ValueError(
                 "required artifact kinds must also be included in segment context"
             )
-        if self.max_attempts < 1 or self.max_tool_calls < 1:
-            raise ValueError("coordinator segment limits must be positive")
+        for name in ("max_attempts", "max_tool_calls"):
+            value = getattr(self, name)
+            if value is not None and (
+                not isinstance(value, int)
+                or isinstance(value, bool)
+                or value < 1
+            ):
+                raise ValueError(
+                    f"coordinator segment {name} must be positive or unbounded"
+                )
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> CoordinatorSegment:
@@ -82,8 +90,8 @@ class CoordinatorSegment:
                     required=False,
                 )
             ),
-            max_attempts=_positive_int(value, "max_attempts", default=1),
-            max_tool_calls=_positive_int(value, "max_tool_calls", default=128),
+            max_attempts=_optional_positive_int(value, "max_attempts"),
+            max_tool_calls=_optional_positive_int(value, "max_tool_calls"),
         )
 
     def as_dict(self) -> dict[str, Any]:
@@ -198,15 +206,17 @@ def _text_list(
     return list(item)
 
 
-def _positive_int(
+def _optional_positive_int(
     value: Mapping[str, Any],
     name: str,
-    *,
-    default: int,
-) -> int:
-    item = value.get(name, default)
+) -> int | None:
+    item = value.get(name)
+    if item is None:
+        return None
     if not isinstance(item, int) or isinstance(item, bool) or item < 1:
-        raise ValueError(f"coordinator segment {name} must be positive")
+        raise ValueError(
+            f"coordinator segment {name} must be positive or null"
+        )
     return item
 
 
