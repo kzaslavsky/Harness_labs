@@ -88,6 +88,16 @@ class CodexSemanticTaskExecutorTests(unittest.TestCase):
                         stdout="CHECK PASSED\n",
                         stderr="",
                     )
+                schema = json.loads(
+                    Path(argv[argv.index("--output-schema") + 1]).read_text(
+                        encoding="utf-8"
+                    )
+                )
+                finding_schema = schema["properties"]["findings"]["items"]
+                self.assertEqual(
+                    set(finding_schema["required"]),
+                    set(finding_schema["properties"]),
+                )
                 prompts.append(kwargs["input"])
                 output = Path(argv[argv.index("-o") + 1])
                 output.write_text(json.dumps(raw), encoding="utf-8")
