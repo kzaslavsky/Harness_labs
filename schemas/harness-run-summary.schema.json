@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://harness-labs.local/schemas/harness-run-summary.schema.json",
+  "title": "Harness run metrics summary",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["protocol", "status", "started_at", "finished_at", "usage"],
+  "properties": {
+    "protocol": {"const": "harness-run-summary/1"},
+    "status": {"enum": ["succeeded", "failed", "blocked", "interrupted"]},
+    "started_at": {"type": "string"},
+    "finished_at": {"type": "string"},
+    "usage": {
+      "type": "object",
+      "required": [
+        "input_tokens", "cached_input_tokens", "output_tokens", "wall_clock_ms",
+        "summed_event_duration_ms", "tool_calls", "cost_usd",
+        "priced_usage_records", "unpriced_usage_records",
+        "missing_usage_records", "cost_complete", "records", "by_backend",
+        "collection_method"
+      ]
+    }
+  }
+}

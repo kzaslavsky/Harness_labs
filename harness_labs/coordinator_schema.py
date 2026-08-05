@@ -7,6 +7,7 @@ import json
 from dataclasses import dataclass
 from typing import Any, Mapping
 
+from .development_policy import DevelopmentPolicy
 
 COORDINATOR_SCHEMA_PROTOCOL = "coordinator-dispatch-schema/1"
 
@@ -21,6 +22,8 @@ class CoordinatorSegment:
     coordinator_profile: str = "default"
     context_artifact_kinds: tuple[str, ...] = ()
     required_artifact_kinds: tuple[str, ...] = ()
+    exit_artifact_kinds: tuple[str, ...] = ()
+    development_policy: DevelopmentPolicy | None = None
     max_attempts: int | None = None
     max_tool_calls: int | None = None
 
@@ -35,7 +38,11 @@ class CoordinatorSegment:
             raise ValueError("coordinator segment phases must be non-empty strings")
         if len(set(self.phases)) != len(self.phases):
             raise ValueError("coordinator segment phases must be unique")
-        for name in ("context_artifact_kinds", "required_artifact_kinds"):
+        for name in (
+            "context_artifact_kinds",
+            "required_artifact_kinds",
+            "exit_artifact_kinds",
+        ):
             values = getattr(self, name)
             if not all(
                 isinstance(value, str) and value.strip() for value in values
@@ -65,6 +72,11 @@ class CoordinatorSegment:
         context = value.get("context", {})
         if not isinstance(context, Mapping):
             raise ValueError("coordinator segment context must be an object")
+        raw_policy = value.get("development_policy")
+        if raw_policy is not None and not isinstance(raw_policy, Mapping):
+            raise ValueError(
+                "coordinator segment development_policy must be an object or null"
+            )
         return cls(
             id=_text(value, "id", "coordinator segment"),
             phases=tuple(_text_list(value, "phases", "coordinator segment")),
@@ -90,6 +102,19 @@ class CoordinatorSegment:
                     required=False,
                 )
             ),
+            exit_artifact_kinds=tuple(
+                _text_list(
+                    value,
+                    "exit_artifact_kinds",
+                    "coordinator segment",
+                    required=False,
+                )
+            ),
+            development_policy=(
+                DevelopmentPolicy.from_mapping(raw_policy)
+                if isinstance(raw_policy, Mapping)
+                else None
+            ),
             max_attempts=_optional_positive_int(value, "max_attempts"),
             max_tool_calls=_optional_positive_int(value, "max_tool_calls"),
         )
@@ -106,6 +131,12 @@ class CoordinatorSegment:
                     self.required_artifact_kinds
                 ),
             },
+            "exit_artifact_kinds": list(self.exit_artifact_kinds),
+            "development_policy": (
+                self.development_policy.as_dict()
+                if self.development_policy is not None
+                else None
+            ),
             "max_attempts": self.max_attempts,
             "max_tool_calls": self.max_tool_calls,
         }

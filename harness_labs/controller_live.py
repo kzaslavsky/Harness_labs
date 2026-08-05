@@ -22,6 +22,7 @@ from .git_transaction import (
     paths_outside_scope,
     workspace_snapshot,
 )
+from .usage import ModelPrice, parse_codex_jsonl_usage, usage_payload
 
 
 class LiveExecutionError(RuntimeError):
@@ -146,6 +147,7 @@ class CodexSemanticTaskExecutor:
     writable_paths: tuple[str, ...] = ()
     allow_dirty_baseline: bool = False
     audit: AuditJournal | None = field(default=None, repr=False)
+    pricing: ModelPrice | None = None
 
     def __post_init__(self) -> None:
         if self.sandbox not in {"read-only", "workspace-write"}:
@@ -509,6 +511,18 @@ class CodexSemanticTaskExecutor:
                 "writable_paths": list(self.writable_paths),
                 "allow_dirty_baseline": self.allow_dirty_baseline,
                 "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+                "usage": (
+                    usage_payload(
+                        model=self.model,
+                        pricing=self.pricing,
+                        **parsed_usage,
+                    )
+                    if (
+                        parsed_usage := parse_codex_jsonl_usage(completed.stdout)
+                    )
+                    is not None
+                    else None
+                ),
             },
             actor=AuditActor(
                 attempt.attempt_id,

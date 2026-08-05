@@ -9,6 +9,10 @@ Status: active
 - Context contract: [`../architecture/context-engineering.md`](../architecture/context-engineering.md)
 - Coordinator dispatch contract:
   [`../architecture/coordinator-dispatch.md`](../architecture/coordinator-dispatch.md)
+- Portable development policy:
+  [`../architecture/development-policy.md`](../architecture/development-policy.md)
+- Capability brokers:
+  [`../architecture/capability-brokers.md`](../architecture/capability-brokers.md)
 - Observability contract: [`../observability/logging-and-metrics.md`](../observability/logging-and-metrics.md)
 - Durable decisions: [`../decisions/README.md`](../decisions/README.md)
 - Execution-first lifecycle decision:

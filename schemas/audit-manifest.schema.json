@@ -41,6 +41,7 @@
       "pattern": "^[a-f0-9]{64}$"
     },
     "checkpoint_revision": { "type": "integer", "minimum": 1 },
+    "summary_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
     "artifacts": {
       "type": "array",
       "items": { "$ref": "audit-event.schema.json#/$defs/artifact" }

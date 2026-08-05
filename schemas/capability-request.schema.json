@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://harness-labs.local/schemas/capability-request.schema.json",
+  "title": "Controller capability request",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol", "request_id", "kind", "operation", "target",
+    "payload", "idempotency_key", "authorization_ref"
+  ],
+  "properties": {
+    "protocol": {"const": "capability-request/1"},
+    "request_id": {"type": "string", "minLength": 1},
+    "kind": {"enum": ["browser", "network", "external_effect"]},
+    "operation": {"type": "string", "minLength": 1},
+    "target": {"type": "string", "minLength": 1},
+    "payload": {"type": "object"},
+    "idempotency_key": {"type": "string", "minLength": 1},
+    "authorization_ref": {"type": ["string", "null"]}
+  }
+}

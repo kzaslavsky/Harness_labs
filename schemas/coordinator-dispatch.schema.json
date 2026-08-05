@@ -91,6 +91,17 @@
         "max_tool_calls": {
           "type": ["integer", "null"],
           "minimum": 1
+        },
+        "exit_artifact_kinds": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "development_policy": {
+          "oneOf": [
+            {"$ref": "development-policy.schema.json"},
+            {"type": "null"}
+          ]
         }
       }
     }

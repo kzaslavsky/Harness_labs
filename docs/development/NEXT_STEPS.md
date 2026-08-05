@@ -64,8 +64,14 @@ remain outstanding.
 
 Still outstanding from the slices above are a shipped uninterrupted live
 FeatureRun certification, failed-gate integration tests at the full entrypoint,
-network/browser/external-effect brokers, complete cost telemetry, and benchmark
-baselines.
+production handler bindings for the capability-broker contract, an authoritative
+price catalog for every selected backend, and benchmark baselines.
+
+The portable development-policy contract now supplies source-bound planning,
+FRAME/NECESSITY/MECHANISM refutation, curated build handoff, and risk-shaped
+review assignments. Segment exit-artifact gates make these enforceable
+deliverables. Finalized runs write a hashed `summary.json`; missing backend
+pricing remains explicitly unpriced rather than silently counted as zero cost.
 
 ### Exit criteria
 

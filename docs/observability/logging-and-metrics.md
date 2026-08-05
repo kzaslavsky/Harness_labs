@@ -91,6 +91,13 @@ and events for review, fix, verification, stopping, and terminal disposition.
 These artifacts are content-addressed evidence referenced by the corresponding
 audit event.
 
+Every finalized run writes `summary.json` using `harness-run-summary/1`. Token
+counts come from authoritative backend completion events, not model-authored
+prose, and cached input remains separate. Cost is calculated only from an
+explicit `ModelPrice` and recorded source; absent pricing creates an unpriced
+usage record and makes `cost_complete=false`. Capability-broker executions
+contribute duration and tool-call counts without inventing model-token usage.
+
 Do not log credentials, access tokens, private keys, sensitive personal data,
 full environment dumps, or unredacted third-party content. Raw model reasoning
 is not a contract artifact; store concise decisions, inputs, outputs, and

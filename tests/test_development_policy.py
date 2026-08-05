@@ -1,0 +1,57 @@
+from __future__ import annotations
+
+import unittest
+
+from harness_labs.coordinator_schema import CoordinatorDispatchSchema
+from harness_labs.development_policy import (
+    DevelopmentPolicy,
+    implement_v13_development_policy,
+    implement_v13_dispatch_schema,
+)
+
+
+class DevelopmentPolicyTests(unittest.TestCase):
+    def test_policy_round_trip_and_risk_panel_construction(self) -> None:
+        policy = implement_v13_development_policy()
+        restored = DevelopmentPolicy.from_mapping(policy.as_dict())
+        self.assertEqual(restored.sha256(), policy.sha256())
+        roles = {
+            item.role
+            for item in policy.review_assignments(
+                ("src/auth/session.ts", "templates/login.html")
+            )
+        }
+        self.assertEqual(
+            roles,
+            {
+                "adversarial-reviewer",
+                "correctness-reviewer",
+                "security-reviewer",
+                "ui-runtime-reviewer",
+            },
+        )
+
+    def test_portable_schema_carries_policy_and_exit_gates(self) -> None:
+        schema = implement_v13_dispatch_schema()
+        schema.validate_phases(
+            (
+                "orient",
+                "plan",
+                "implement",
+                "verify",
+                "review",
+                "integrate",
+                "report",
+            )
+        )
+        restored = CoordinatorDispatchSchema.from_mapping(schema.as_dict())
+        self.assertEqual(restored.sha256(), schema.sha256())
+        planning = restored.segments[0]
+        self.assertIn("source-binding-report", planning.exit_artifact_kinds)
+        self.assertIsNotNone(planning.development_policy)
+        review = restored.segments[2]
+        self.assertIn("review-ledger", review.exit_artifact_kinds)
+
+
+if __name__ == "__main__":
+    unittest.main()
