@@ -16,6 +16,8 @@ from typing import Any, Literal, Mapping
 from urllib.parse import urlparse
 
 from .audit import AuditActor, AuditJournal
+from .agent_sessions import Usage
+from .usage import ModelPrice, usage_payload
 from .text_executor import TextBackendError
 
 
@@ -197,6 +199,10 @@ class OmlxBackend:
     max_tokens: int = 256
     temperature: float = 0.2
     audit: AuditJournal | None = field(default=None, compare=False, repr=False)
+    pricing: ModelPrice | None = field(default=None, compare=False, repr=False)
+    _last_usage: Usage | None = field(
+        default=None, init=False, compare=False, repr=False
+    )
 
     def __post_init__(self) -> None:
         parsed = urlparse(self.endpoint)
@@ -216,6 +222,7 @@ class OmlxBackend:
             raise ValueError("oMLX max_tokens must be positive")
 
     def generate(self, task: str, context: Mapping[str, Any]) -> str:
+        object.__setattr__(self, "_last_usage", None)
         try:
             context_json = json.dumps(context, sort_keys=True)
         except (TypeError, ValueError) as exc:
@@ -306,11 +313,17 @@ class OmlxBackend:
         try:
             payload = json.loads(response_body)
             text = payload["choices"][0]["message"]["content"].strip()
+            normalized_usage = _openai_usage(payload.get("usage"))
+            object.__setattr__(self, "_last_usage", normalized_usage)
         except (json.JSONDecodeError, KeyError, IndexError, TypeError, AttributeError) as exc:
             raise TextBackendError("oMLX returned an invalid chat completion") from exc
         if not text:
             raise TextBackendError("oMLX returned an empty chat completion")
         return text
+
+    @property
+    def last_usage(self) -> Usage | None:
+        return self._last_usage
 
     def _record_transport(
         self,
@@ -328,6 +341,16 @@ class OmlxBackend:
             response_body,
             media_type="application/json",
         )
+        parsed_payload = None
+        try:
+            parsed_payload = json.loads(response_body)
+        except (json.JSONDecodeError, TypeError):
+            pass
+        normalized_usage = (
+            _openai_usage(parsed_payload.get("usage"))
+            if isinstance(parsed_payload, Mapping)
+            else None
+        )
         self.audit.append(
             "backend_transport",
             status=status,
@@ -340,12 +363,45 @@ class OmlxBackend:
                 "timeout_seconds": self.timeout_seconds,
                 "http_status": status_code,
                 "headers_recorded": ["Content-Type"],
+                "usage": (
+                    usage_payload(
+                        model=self.model,
+                        input_tokens=normalized_usage.input_tokens,
+                        cached_input_tokens=normalized_usage.cached_input_tokens,
+                        output_tokens=normalized_usage.output_tokens,
+                        pricing=self.pricing,
+                    )
+                    if normalized_usage is not None
+                    else None
+                ),
             },
             actor=AuditActor("omlx", "backend"),
             backend_id="omlx",
             duration_ms=duration_ms,
             artifacts=(request_artifact, response_artifact),
         )
+
+
+def _openai_usage(value: Any) -> Usage | None:
+    if not isinstance(value, Mapping):
+        return None
+    details = value.get("prompt_tokens_details", {})
+    cached = details.get("cached_tokens", 0) if isinstance(details, Mapping) else 0
+    try:
+        usage = Usage(
+            input_tokens=int(value["prompt_tokens"]),
+            cached_input_tokens=int(cached),
+            output_tokens=int(value["completion_tokens"]),
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+    if min(
+        usage.input_tokens,
+        usage.cached_input_tokens,
+        usage.output_tokens,
+    ) < 0 or usage.cached_input_tokens > usage.input_tokens:
+        return None
+    return usage
 
 
 def _file_sha256(path: Path) -> str:

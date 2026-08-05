@@ -83,15 +83,21 @@ class BackendTests(unittest.TestCase):
                 self.close()
 
         urlopen_mock.return_value = Response(
-            b'{"choices":[{"message":{"content":"A local poem."}}]}'
+            b'{"choices":[{"message":{"content":"A local poem."}}],'
+            b'"usage":{"prompt_tokens":120,"completion_tokens":8,'
+            b'"prompt_tokens_details":{"cached_tokens":64}}}'
         )
 
-        text = OmlxBackend().generate(
+        backend = OmlxBackend()
+        text = backend.generate(
             "write a poem about the operator",
             {"subject": "the operator"},
         )
 
         self.assertEqual(text, "A local poem.")
+        self.assertEqual(backend.last_usage.input_tokens, 120)
+        self.assertEqual(backend.last_usage.cached_input_tokens, 64)
+        self.assertEqual(backend.last_usage.output_tokens, 8)
         request = urlopen_mock.call_args.args[0]
         body = json.loads(request.data)
         self.assertEqual(body["model"], "Qwen3.5-4B-MLX-4bit")

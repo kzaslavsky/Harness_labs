@@ -14,6 +14,7 @@ from .agent_sessions import (
     ModelRequest,
     ToolCall,
     ToolResult,
+    Usage,
 )
 from .backends import OmlxBackend
 from .text_executor import TextBackendError
@@ -34,6 +35,9 @@ class OmlxAgentSession:
         default_factory=list, init=False, repr=False
     )
     _session_id: str = field(default="omlx:single-turn", init=False, repr=False)
+    _usage: Usage = field(
+        default_factory=lambda: Usage(0, 0, 0), init=False, repr=False
+    )
 
     @property
     def capabilities(self) -> BackendCapabilities:
@@ -55,6 +59,7 @@ class OmlxAgentSession:
         self._pending_call_id = None
         self._pending_tool_name = None
         self._tool_results.clear()
+        self._usage = Usage(0, 0, 0)
         return self._session_id
 
     def step(
@@ -95,7 +100,7 @@ class OmlxAgentSession:
             f"Follow-up child result:\n{json.dumps(child_payload, sort_keys=True)}"
         )
         try:
-            text = self.backend.generate(task, self._request.context).strip()
+            text = self._generate(task, self._request.context).strip()
         except TextBackendError as exc:
             return BackendFailure(str(exc))
         expected = self._tool_results[0].get("payload", {}).get("text")
@@ -108,13 +113,14 @@ class OmlxAgentSession:
                 f"{expected}"
             )
             try:
-                text = self.backend.generate(correction, {}).strip()
+                text = self._generate(correction, {}).strip()
             except TextBackendError as exc:
                 return BackendFailure(str(exc))
         if text != expected:
             return BackendFailure("oMLX did not faithfully return the child result")
         return FinalOutput(
             text,
+            usage=self._usage,
             evidence=("omlx-transport:openai-compatible-http",),
         )
 
@@ -126,6 +132,7 @@ class OmlxAgentSession:
         self._pending_call_id = None
         self._pending_tool_name = None
         self._tool_results.clear()
+        self._usage = Usage(0, 0, 0)
 
     def _request_child(self) -> ModelEvent:
         assert self._request is not None
@@ -146,7 +153,7 @@ class OmlxAgentSession:
             f"Tool schema:\n{json.dumps(dict(tool.input_schema), sort_keys=True)}"
         )
         try:
-            text = self.backend.generate(task, self._request.context).strip()
+            text = self._generate(task, self._request.context).strip()
             payload: Any = json.loads(text)
         except TextBackendError as exc:
             return BackendFailure(str(exc))
@@ -192,7 +199,7 @@ class OmlxAgentSession:
             f"Tool schema:\n{json.dumps(dict(tool.input_schema), sort_keys=True)}"
         )
         try:
-            text = self.backend.generate(task, self._request.context).strip()
+            text = self._generate(task, self._request.context).strip()
             payload: Any = json.loads(text)
         except TextBackendError as exc:
             return BackendFailure(str(exc))
@@ -259,13 +266,14 @@ class OmlxAgentSession:
             f"Child batch result:\n{json.dumps(child_payload, sort_keys=True)}"
         )
         try:
-            text = self.backend.generate(task, self._request.context).strip()
+            text = self._generate(task, self._request.context).strip()
         except TextBackendError as exc:
             return BackendFailure(str(exc))
         if not text:
             return BackendFailure("oMLX returned no batch collation")
         return FinalOutput(
             text,
+            usage=self._usage,
             evidence=("omlx-transport:openai-compatible-http",),
         )
 
@@ -287,7 +295,7 @@ class OmlxAgentSession:
             f"Tool schema:\n{json.dumps(dict(tool.input_schema), sort_keys=True)}"
         )
         try:
-            text = self.backend.generate(task, self._request.context).strip()
+            text = self._generate(task, self._request.context).strip()
             payload: Any = json.loads(text)
         except TextBackendError as exc:
             return BackendFailure(str(exc))
@@ -309,3 +317,14 @@ class OmlxAgentSession:
                 "message": expected_message,
             },
         )
+
+    def _generate(self, task: str, context: dict[str, Any] | Any) -> str:
+        text = self.backend.generate(task, context)
+        usage = getattr(self.backend, "last_usage", None)
+        if usage is not None:
+            self._usage = Usage(
+                self._usage.input_tokens + usage.input_tokens,
+                self._usage.cached_input_tokens + usage.cached_input_tokens,
+                self._usage.output_tokens + usage.output_tokens,
+            )
+        return text
