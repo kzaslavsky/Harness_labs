@@ -27,6 +27,7 @@ from .agent_sessions import (
     Usage,
     tool_result_json,
 )
+from .usage import ModelPrice
 
 
 class CodexSessionError(RuntimeError):
@@ -72,6 +73,7 @@ class CodexAppServerSession:
     persistent_rollout: bool = True
     base_instructions: str | None = None
     audit: AuditJournal | None = field(default=None, repr=False)
+    pricing: ModelPrice | None = None
     _process: subprocess.Popen[str] | None = field(default=None, init=False, repr=False)
     _workspace: tempfile.TemporaryDirectory[str] | None = field(
         default=None, init=False, repr=False

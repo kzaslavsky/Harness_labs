@@ -100,6 +100,7 @@ def _segment(
     *,
     max_attempts: int = 1,
     required: list[str] | None = None,
+    exit_artifacts: list[str] | None = None,
 ) -> dict:
     return {
         "id": segment_id,
@@ -112,10 +113,45 @@ def _segment(
         },
         "max_attempts": max_attempts,
         "max_tool_calls": 16,
+        "exit_artifact_kinds": exit_artifacts or [],
     }
 
 
 class CoordinatorDispatcherTests(unittest.TestCase):
+    def test_missing_exit_artifact_blocks_after_phase_boundary(self) -> None:
+        contract = RunContract(
+            run_id="exit-artifact-gate",
+            objective="Do not cross without the plan.",
+            phases=("plan", "build"),
+        )
+        evidence = EvidenceCatalog()
+        kernel = ControllerKernel(contract, evidence=evidence)
+        schema = _schema(
+            {
+                "segments": [
+                    _segment(
+                        "plan",
+                        ["plan"],
+                        exit_artifacts=["engineering-plan"],
+                    ),
+                    _segment("build", ["build"]),
+                ]
+            }
+        )
+        result = CoordinatorDispatcher(
+            kernel,
+            evidence,
+            _scheduler(),
+            schema,
+            lambda launch, catalog: ScriptedCoordinatorSession(
+                [("phase_advance_request", {"target": "build"})],
+                final="claimed complete",
+            ),
+        ).run()
+        self.assertEqual(result.result.status, "blocked")
+        self.assertEqual(kernel.snapshot()["phase"], "plan")
+        self.assertNotEqual(kernel.snapshot()["status"], "succeeded")
+
     def test_segment_limits_are_unbounded_when_omitted(self) -> None:
         segment = _schema(
             {"segments": [{

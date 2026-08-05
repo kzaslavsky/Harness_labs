@@ -14,6 +14,8 @@ from pathlib import Path
 from time import monotonic_ns, sleep
 from typing import Any, Mapping
 
+from .usage import build_run_summary
+
 try:
     import fcntl
 except ImportError:  # pragma: no cover - exercised on Windows
@@ -109,6 +111,7 @@ class AuditJournal:
         self.events_path = self.run_dir / "events.jsonl"
         self.checkpoint_path = self.run_dir / "checkpoint.json"
         self.manifest_path = self.run_dir / "manifest.json"
+        self.summary_path = self.run_dir / "summary.json"
         self.artifacts_dir = self.run_dir / "artifacts"
         self._lock_path = self.run_dir / ".audit.lock"
         self._sequence = 0
@@ -209,6 +212,7 @@ class AuditJournal:
         instance.events_path = run_dir / "events.jsonl"
         instance.checkpoint_path = run_dir / "checkpoint.json"
         instance.manifest_path = run_dir / "manifest.json"
+        instance.summary_path = run_dir / "summary.json"
         instance.artifacts_dir = run_dir / "artifacts"
         instance._lock_path = run_dir / ".audit.lock"
         instance._sequence = verification["event_count"]
@@ -427,6 +431,20 @@ class AuditJournal:
             "checkpoint_revision": checkpoint["revision"],
             "artifacts": artifacts,
         }
+        summary = build_run_summary(
+            self.events_path,
+            status=status,
+            started_at=self._started_at,
+            finished_at=manifest["finished_at"],
+        )
+        _atomic_write(
+            self.summary_path,
+            (_canonical(summary) + "\n").encode("utf-8"),
+            mode=0o600,
+        )
+        manifest["summary_sha256"] = hashlib.sha256(
+            self.summary_path.read_bytes()
+        ).hexdigest()
         manifest_hash = hashlib.sha256(
             _canonical(manifest).encode("utf-8")
         ).hexdigest()
@@ -527,6 +545,14 @@ class AuditJournal:
             ).hexdigest()
             if manifest.get("checkpoint_sha256") != checkpoint_digest:
                 raise AuditError("audit manifest checkpoint hash does not match")
+            if "summary_sha256" in manifest:
+                summary_path = run_dir / "summary.json"
+                if not summary_path.is_file():
+                    raise AuditError("audit manifest summary is missing")
+                if manifest.get("summary_sha256") != hashlib.sha256(
+                    summary_path.read_bytes()
+                ).hexdigest():
+                    raise AuditError("audit manifest summary hash does not match")
             for artifact in manifest.get("artifacts", []):
                 _verify_artifact(run_dir, artifact)
             if manifest.get("artifacts") != _artifact_inventory(
@@ -840,8 +866,9 @@ def _validate_manifest(manifest: Mapping[str, Any]) -> None:
         "artifacts",
         "manifest_hash",
     }
+    supplied = frozenset(manifest)
     if (
-        set(manifest) != required
+        supplied not in {frozenset(required), frozenset(required | {"summary_sha256"})}
         or manifest["protocol"] != MANIFEST_PROTOCOL
         or not isinstance(manifest["run_id"], str)
         or not manifest["run_id"]
@@ -853,6 +880,10 @@ def _validate_manifest(manifest: Mapping[str, Any]) -> None:
         or not _is_sha256(manifest["checkpoint_sha256"])
         or not isinstance(manifest["checkpoint_revision"], int)
         or manifest["checkpoint_revision"] < 1
+        or (
+            "summary_sha256" in manifest
+            and not _is_sha256(manifest["summary_sha256"])
+        )
         or not isinstance(manifest["artifacts"], list)
         or not _is_sha256(manifest["manifest_hash"])
     ):

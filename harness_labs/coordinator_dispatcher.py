@@ -172,6 +172,15 @@ class CoordinatorDispatcher:
                 return self._result(last_result)
 
             outcome = self._classify_outcome(segment, last_result)
+            if outcome == "boundary":
+                missing_exit = self._missing_exit_artifacts(segment)
+                if missing_exit:
+                    self._block(
+                        f"coordinator segment {segment.id} crossed its boundary "
+                        "without required exit artifacts: "
+                        + ", ".join(missing_exit)
+                    )
+                    outcome = "blocked"
             self._session_ended(
                 tracked.audit_session_id,
                 outcome,
@@ -246,6 +255,14 @@ class CoordinatorDispatcher:
             },
             "handoff_artifacts": selected,
             "prior_coordinator_sessions": history,
+            "development_policy": (
+                segment.development_policy.as_dict()
+                if segment.development_policy is not None
+                else None
+            ),
+            "required_exit_artifact_kinds": list(
+                segment.exit_artifact_kinds
+            ),
         }
         return CoordinatorLaunch(
             schema_id=self.schema.schema_id,
@@ -270,6 +287,18 @@ class CoordinatorDispatcher:
             kind
             for kind in segment.required_artifact_kinds
             if kind not in kinds
+        )
+
+    def _missing_exit_artifacts(
+        self,
+        segment: CoordinatorSegment,
+    ) -> tuple[str, ...]:
+        kinds = {
+            record["kind"]
+            for record in self.kernel.snapshot()["artifacts"].values()
+        }
+        return tuple(
+            kind for kind in segment.exit_artifact_kinds if kind not in kinds
         )
 
     def _next_attempt(self, segment_id: str) -> int:

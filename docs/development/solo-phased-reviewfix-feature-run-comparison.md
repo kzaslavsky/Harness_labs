@@ -218,14 +218,14 @@ technical-debt sink.
 
 ### What FeatureRun does
 
-FeatureRun provides one generic independent reviewer, typed findings, explicit
-finding dispositions, a writable remediator, controller-owned verification, and
-the ability to re-review. The kernel will not leave review while a
-disposition-required finding remains open.
+FeatureRun now provides a versioned risk classifier and reviewer-construction
+policy, typed findings, a durable deduplicating re-raise ledger, fix-cost and
+scope screening, a writable remediator, targeted controller-owned verification,
+regression re-review, 3/5-cycle risk budgets, and marginal-yield/no-progress
+stopping. Required findings cannot become technical debt by default.
 
-It does not yet provide a risk classifier, reviewer-construction policy,
-finding deduplication, fix-cost accounting, re-raise ledger, mutation policy,
-targeted-test constructor, cycle budget, or marginal-yield rule.
+Claude still has richer domain-specific panel and gate policies, including
+disclosure attacks, mutation testing, and prescribed final browser walks.
 
 ### Assessment
 

@@ -16,6 +16,7 @@ from .agent_sessions import (
     ToolSpec,
 )
 from .attempts import TaskResult
+from .audit import AuditActor
 from .controller_commands import (
     CommandActor,
     CommandEnvelope,
@@ -24,6 +25,7 @@ from .controller_commands import (
 from .controller_kernel import ControllerKernel
 from .controller_projection import ControllerQueries, project_run_view
 from .controller_scheduler import CapabilityScheduler, SchedulingError
+from .usage import usage_payload
 
 
 QUERY_TOOL_MAP = {
@@ -138,6 +140,41 @@ class CoordinatorLoop:
                         if state["status"] == "succeeded"
                         else "blocked"
                     )
+                    if self.kernel.audit is not None:
+                        model = str(getattr(self.session, "model", "unknown"))
+                        self.kernel.audit.append(
+                            "backend_usage",
+                            status="succeeded",
+                            payload={
+                                "tool_calls": tool_calls,
+                                "usage": (
+                                    usage_payload(
+                                        model=model,
+                                        input_tokens=event.usage.input_tokens,
+                                        cached_input_tokens=(
+                                            event.usage.cached_input_tokens
+                                        ),
+                                        output_tokens=event.usage.output_tokens,
+                                        pricing=getattr(
+                                            self.session, "pricing", None
+                                        ),
+                                    )
+                                    if event.usage is not None
+                                    else None
+                                ),
+                            },
+                            actor=AuditActor(
+                                self.actor_id, "run_coordinator"
+                            ),
+                            session_id=session_id,
+                            backend_id=str(
+                                getattr(
+                                    self.session,
+                                    "backend_id",
+                                    type(self.session).__name__,
+                                )
+                            ),
+                        )
                     return TaskResult(
                         attempt_id=f"{self.kernel.contract.run_id}/coordinator",
                         status=status,
@@ -169,6 +206,27 @@ class CoordinatorLoop:
             command_type = COMMAND_TOOL_MAP.get(call.name)
             if command_type is None:
                 raise ValueError(f"unknown coordinator tool: {call.name}")
+            if command_type in {
+                "phase.advance_request",
+                "run.complete_request",
+            }:
+                required = self.initial_context.get(
+                    "required_exit_artifact_kinds", ()
+                )
+                if not isinstance(required, (list, tuple)):
+                    raise ValueError(
+                        "segment required exit artifacts must be a list"
+                    )
+                present = {
+                    item["kind"]
+                    for item in self.kernel.snapshot()["artifacts"].values()
+                }
+                missing = [kind for kind in required if kind not in present]
+                if missing:
+                    raise ValueError(
+                        "segment cannot cross its boundary without exit "
+                        "artifacts: " + ", ".join(missing)
+                    )
             arguments = dict(call.arguments)
             evidence_refs = arguments.pop("evidence_refs", [])
             if (

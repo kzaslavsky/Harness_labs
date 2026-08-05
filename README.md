@@ -39,10 +39,8 @@ Machine-readable schemas live in [`schemas/`](schemas/). Runtime logs belong in
 
 ## Current implementation
 
-The repository was seeded with a dependency-free project initializer. Its
-launcher, templates, assets, portable skills, and contract tests remain under
-`bin/`, `templates/`, `assets/`, `skills/`, and `tests/`. They are the initial
-bootstrap utility, not the complete Harness Labs runtime.
+The repository now contains a production-shaped FeatureRun runtime in addition
+to the original dependency-free initializer.
 
 The first runtime primitive is the dependency-free
 [`TaskAttempt` runner](harness_labs/attempts.py). It invokes one replaceable
@@ -80,10 +78,23 @@ reference. See the
 [`hybrid controller status`](docs/development/hybrid-controller-coordinator.md)
 and [architectural decision](docs/decisions/0004-hybrid-controller-command-kernel.md).
 
+A schema-defined dispatcher replaces coordinators at declared context
+boundaries while the kernel remains authoritative. `run_feature_worktree(...)`
+creates an isolated branch/worktree, executes the schema, optionally runs the
+ledger-backed review/fix loop, commits only declared paths, and either leaves a
+merge-ready candidate or performs a guarded merge.
+
+The portable implement-v13 policy adds source binding, FRAME/NECESSITY/MECHANISM
+plan refutation, build-handoff, and risk-shaped review obligations. Required
+segment exit artifacts make them deterministic gates rather than prompt-only
+requests. Browser, network, and external-effect access shares a deny-by-default
+capability broker with target allowlists, authorization, idempotency, injected
+handlers, and durable receipts. Finalized runs write `summary.json` with
+duration, tokens, cache reads, tool calls, and explicitly sourced costs.
+
 A complete deterministic poem attempt is available in
-[`examples/run_poem_attempt.py`](examples/run_poem_attempt.py). Scheduling,
-persistence, external capability enforcement, and lifecycle control remain future
-vertical slices.
+[`examples/run_poem_attempt.py`](examples/run_poem_attempt.py). It remains a
+small executor example rather than a production FeatureRun.
 
 Run the example from the repository root:
 

@@ -49,6 +49,12 @@ One segment defines:
 - artifact kinds required before the coordinator may start;
 - a maximum number of fresh coordinator attempts; and
 - a per-attempt tool-call limit.
+- optional required exit-artifact kinds; and
+- an optional versioned portable development policy.
+
+Exit artifacts are checked before the coordinator may advance beyond its phase
+scope or complete the run, then checked again by the dispatcher at a phase
+boundary. The policy and exit gates are included in the dispatch-schema hash.
 
 The dispatcher passes artifact descriptors, not artifact contents. A coordinator
 opens only the evidence it needs through the existing bounded artifact query.

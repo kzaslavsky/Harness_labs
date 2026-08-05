@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://harness-labs.local/schemas/capability-receipt.schema.json",
+  "title": "Controller capability receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol", "request_id", "kind", "operation", "target", "status",
+    "duration_ms", "authorization_ref", "replayed", "result"
+  ],
+  "properties": {
+    "protocol": {"const": "capability-receipt/1"},
+    "request_id": {"type": "string", "minLength": 1},
+    "kind": {"enum": ["browser", "network", "external_effect"]},
+    "operation": {"type": "string", "minLength": 1},
+    "target": {"type": "string", "minLength": 1},
+    "status": {"enum": ["succeeded", "failed"]},
+    "duration_ms": {"type": "integer", "minimum": 0},
+    "authorization_ref": {"type": ["string", "null"]},
+    "replayed": {"type": "boolean"},
+    "result": {"type": "object"}
+  }
+}

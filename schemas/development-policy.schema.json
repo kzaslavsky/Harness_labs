@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://harness-labs.local/schemas/development-policy.schema.json",
+  "title": "Provider-neutral feature development policy",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["protocol", "policy_id", "planning", "review"],
+  "properties": {
+    "protocol": {"const": "development-policy/1"},
+    "policy_id": {"type": "string", "minLength": 1},
+    "planning": {
+      "type": "object",
+      "required": [
+        "required_source_binding_fields",
+        "required_plan_sections",
+        "refutation_lenses",
+        "independent_review_rounds",
+        "required_handoff_sections"
+      ]
+    },
+    "review": {
+      "type": "object",
+      "required": [
+        "finding_fields",
+        "base_panel",
+        "risk_rules",
+        "mechanical_cycle_limit",
+        "sensitive_cycle_limit",
+        "required_final_checks"
+      ]
+    }
+  }
+}
