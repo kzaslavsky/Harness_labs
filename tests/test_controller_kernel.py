@@ -58,6 +58,13 @@ class ControllerKernelTests(unittest.TestCase):
         self.assertEqual(limits["max_parallelism"], 2)
         self.assertNotIn("max_fan_out", limits)
 
+    def test_default_limits_only_bound_depth_and_direct_subagents(self) -> None:
+        limits = RunLimits().as_dict()
+        self.assertEqual(limits["max_depth"], 5)
+        self.assertEqual(limits["max_subagents"], 5)
+        self.assertIsNone(limits["max_parallelism"])
+        self.assertIsNone(limits["max_tasks"])
+
     def test_dispatch_rejects_more_than_max_subagents(self) -> None:
         tasks = [
             {

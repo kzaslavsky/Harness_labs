@@ -64,6 +64,7 @@ from .coordinator_dispatcher import (
     CoordinatorLaunch,
     CoordinatorSessionFactory,
     DispatchedControllerRunResult,
+    resume_dispatched_controller,
     run_dispatched_controller,
 )
 from .coordinator_schema import (
@@ -93,6 +94,7 @@ from .controller_results import (
 )
 from .controller_run import (
     ControllerRunResult,
+    restore_controller_checkpoint,
     resume_controller,
     run_controller,
     run_fixture_spec,
@@ -102,6 +104,25 @@ from .controller_scheduler import (
     RoleProfile,
     ScheduledOutcome,
     SchedulingError,
+)
+from .feature_run import FeatureRunResult, run_feature_worktree
+from .review_fix import (
+    REVIEW_FIX_RESULT_PROTOCOL,
+    REVIEW_LEDGER_PROTOCOL,
+    ReviewFixError,
+    ReviewFixExecutorFactory,
+    ReviewFixLoop,
+    ReviewFixPolicy,
+    ReviewFixResult,
+    ReviewLedger,
+)
+from .git_transaction import (
+    GitTransactionError,
+    GitWorktreeTransaction,
+    changed_paths,
+    normalize_allowed_paths,
+    paths_outside_scope,
+    workspace_snapshot,
 )
 
 __all__ = [
@@ -175,6 +196,17 @@ __all__ = [
     "EvidenceRecord",
     "KernelError",
     "KernelEvent",
+    "GitTransactionError",
+    "GitWorktreeTransaction",
+    "FeatureRunResult",
+    "REVIEW_FIX_RESULT_PROTOCOL",
+    "REVIEW_LEDGER_PROTOCOL",
+    "ReviewFixError",
+    "ReviewFixExecutorFactory",
+    "ReviewFixLoop",
+    "ReviewFixPolicy",
+    "ReviewFixResult",
+    "ReviewLedger",
     "LiveExecutionError",
     "RoleProfile",
     "RunContract",
@@ -184,10 +216,17 @@ __all__ = [
     "SemanticResultError",
     "SemanticTaskResult",
     "project_run_view",
+    "changed_paths",
+    "normalize_allowed_paths",
+    "paths_outside_scope",
+    "restore_controller_checkpoint",
     "run_controller",
     "run_dispatched_controller",
+    "resume_dispatched_controller",
+    "run_feature_worktree",
     "run_fixture_spec",
     "resume_controller",
     "semantic_payload",
     "validate_semantic_result",
+    "workspace_snapshot",
 ]

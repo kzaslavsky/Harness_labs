@@ -82,6 +82,15 @@ Log state transitions, dispatches, results, verification, retries, failures,
 budget changes, Git operations, and integration proof. Record actor, task,
 phase, status, duration, evidence references, and relevant resource usage.
 
+Feature runs record `git-worktree-transaction/1` receipts for worktree creation,
+candidate commit, and optional integration. Write-capable workers record a
+`workspace-change-receipt/2` containing the baseline commit, branch, declared
+writable paths, baseline/final changed paths, worker-only delta, and file-state
+hashes. Review/fix runs persist content-addressed `review-ledger/1` snapshots
+and events for review, fix, verification, stopping, and terminal disposition.
+These artifacts are content-addressed evidence referenced by the corresponding
+audit event.
+
 Do not log credentials, access tokens, private keys, sensitive personal data,
 full environment dumps, or unredacted third-party content. Raw model reasoning
 is not a contract artifact; store concise decisions, inputs, outputs, and

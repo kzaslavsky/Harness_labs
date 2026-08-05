@@ -1,6 +1,6 @@
 # Next Steps
 
-Status: proposed
+Status: active
 
 ## Current prototype slice
 
@@ -49,6 +49,23 @@ remain outstanding.
    conflict, scope, and budget tests.
 8. Create a small versioned feature benchmark and establish an accuracy and cost
    baseline before optimization.
+
+### Implemented hardening
+
+- Durable dispatcher restart restores and validates the existing checkpoint,
+  schema hash, evidence, and session history without replaying completed work.
+- `run_feature_worktree(...)` owns isolated branch/worktree creation, scoped
+  candidate commits, optional guarded merge, and read-back receipts.
+- Live write workers require explicit writable paths and produce verified
+  workspace-change receipts.
+- Default hierarchy limits are depth `5` and direct subagents `5`. Other
+  controller and coordinator limits are intentionally unbounded by default
+  while representative runs are measured.
+
+Still outstanding from the slices above are a shipped uninterrupted live
+FeatureRun certification, failed-gate integration tests at the full entrypoint,
+network/browser/external-effect brokers, complete cost telemetry, and benchmark
+baselines.
 
 ### Exit criteria
 

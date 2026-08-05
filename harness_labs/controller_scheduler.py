@@ -109,7 +109,10 @@ class CapabilityScheduler:
             raise SchedulingError("dispatch requires at least one task")
         if max_parallelism < 1:
             raise SchedulingError("max_parallelism must be positive")
-        if max_parallelism > kernel.contract.limits.max_parallelism:
+        if (
+            kernel.contract.limits.max_parallelism is not None
+            and max_parallelism > kernel.contract.limits.max_parallelism
+        ):
             raise SchedulingError("dispatch exceeds run max_parallelism")
 
         prepared = []

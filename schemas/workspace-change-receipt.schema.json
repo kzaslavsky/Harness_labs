@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://harness-labs.local/schemas/workspace-change-receipt.schema.json",
+  "title": "Workspace change receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol",
+    "repository",
+    "baseline_head",
+    "branch",
+    "dirty_baseline_allowed",
+    "baseline_changed_paths",
+    "allowed_paths",
+    "changed_paths",
+    "worker_changed_paths",
+    "baseline_files",
+    "files"
+  ],
+  "properties": {
+    "protocol": { "const": "workspace-change-receipt/2" },
+    "repository": { "type": "string", "minLength": 1 },
+    "baseline_head": { "type": "string", "minLength": 1 },
+    "branch": { "type": "string", "minLength": 1 },
+    "dirty_baseline_allowed": { "type": "boolean" },
+    "baseline_changed_paths": { "$ref": "#/$defs/paths" },
+    "allowed_paths": {
+      "allOf": [
+        { "$ref": "#/$defs/paths" },
+        { "minItems": 1 }
+      ]
+    },
+    "changed_paths": { "$ref": "#/$defs/paths" },
+    "worker_changed_paths": { "$ref": "#/$defs/paths" },
+    "baseline_files": { "$ref": "#/$defs/files" },
+    "files": { "$ref": "#/$defs/files" }
+  },
+  "$defs": {
+    "paths": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "files": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "sha256"],
+        "properties": {
+          "kind": {
+            "enum": ["file", "symlink", "directory", "deleted"]
+          },
+          "sha256": {
+            "type": ["string", "null"],
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "size_bytes": { "type": "integer", "minimum": 0 }
+        }
+      }
+    }
+  }
+}

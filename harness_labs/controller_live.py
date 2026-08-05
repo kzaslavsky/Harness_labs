@@ -16,6 +16,12 @@ from .attempts import TaskAttempt, TaskResult
 from .audit import AuditActor, AuditJournal
 from .controller_evidence import EvidenceCatalog
 from .controller_results import semantic_payload, validate_semantic_result
+from .git_transaction import (
+    GitTransactionError,
+    normalize_allowed_paths,
+    paths_outside_scope,
+    workspace_snapshot,
+)
 
 
 class LiveExecutionError(RuntimeError):
@@ -63,6 +69,14 @@ _RAW_OUTPUT_SCHEMA: dict[str, Any] = {
                     "category",
                     "severity",
                     "requires_disposition",
+                    "file",
+                    "subject",
+                    "score",
+                    "fix_cost",
+                    "protects",
+                    "scope_expanding",
+                    "contract_violation",
+                    "new_evidence",
                 ],
                 "properties": {
                     "id": {"type": "string", "minLength": 1},
@@ -73,6 +87,26 @@ _RAW_OUTPUT_SCHEMA: dict[str, Any] = {
                         "enum": ["critical", "major", "minor", "info"],
                     },
                     "requires_disposition": {"type": "boolean"},
+                    "file": {"type": "string"},
+                    "subject": {"type": "string"},
+                    "score": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 100,
+                    },
+                    "fix_cost": {
+                        "type": "string",
+                        "enum": [
+                            "one-line",
+                            "local",
+                            "structural",
+                            "surface-growing",
+                        ],
+                    },
+                    "protects": {"type": "string"},
+                    "scope_expanding": {"type": "boolean"},
+                    "contract_violation": {"type": "boolean"},
+                    "new_evidence": {"type": "string"},
                 },
             },
         },
@@ -103,12 +137,14 @@ class CodexSemanticTaskExecutor:
     model: str = "gpt-5.6-terra"
     reasoning: str = "medium"
     executable: str = "codex"
-    timeout_seconds: float = 900.0
+    timeout_seconds: float | None = None
     preflight_argv: tuple[str, ...] = ()
-    preflight_timeout_seconds: float = 300.0
+    preflight_timeout_seconds: float | None = None
     require_preflight_success: bool = False
     sandbox: str = "read-only"
     require_repository_change: bool = False
+    writable_paths: tuple[str, ...] = ()
+    allow_dirty_baseline: bool = False
     audit: AuditJournal | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
@@ -118,15 +154,29 @@ class CodexSemanticTaskExecutor:
             raise ValueError(
                 "require_repository_change requires the workspace-write sandbox"
             )
-        if self.require_preflight_success and not self.preflight_argv:
+        if self.sandbox == "workspace-write":
+            if not self.writable_paths:
+                raise ValueError("workspace-write requires explicit writable_paths")
+            normalize_allowed_paths(self.writable_paths)
+        elif self.writable_paths:
+            raise ValueError("writable_paths require the workspace-write sandbox")
+        if self.allow_dirty_baseline and self.sandbox != "workspace-write":
             raise ValueError(
-                "require_preflight_success requires a preflight command"
+                "allow_dirty_baseline requires the workspace-write sandbox"
             )
+        if self.require_preflight_success and not self.preflight_argv:
+            raise ValueError("require_preflight_success requires a preflight command")
 
     def execute(self, attempt: TaskAttempt) -> TaskResult:
         try:
             return self._execute(attempt)
-        except (LiveExecutionError, OSError, ValueError, json.JSONDecodeError) as exc:
+        except (
+            GitTransactionError,
+            LiveExecutionError,
+            OSError,
+            ValueError,
+            json.JSONDecodeError,
+        ) as exc:
             return TaskResult(
                 attempt_id=attempt.attempt_id,
                 status="failed",
@@ -143,11 +193,23 @@ class CodexSemanticTaskExecutor:
             raise LiveExecutionError(f"Codex executable not found: {self.executable}")
 
         context = _parse_context(str(self.task.get("context", "")))
-        initial_worktree = (
-            _git_worktree_status(repository)
-            if self.require_repository_change
+        if self.sandbox == "workspace-write":
+            context["controller_writable_paths"] = list(
+                normalize_allowed_paths(self.writable_paths)
+            )
+        initial_workspace = (
+            workspace_snapshot(repository)
+            if self.sandbox == "workspace-write"
             else None
         )
+        if (
+            initial_workspace is not None
+            and initial_workspace["changed_paths"]
+            and not self.allow_dirty_baseline
+        ):
+            raise LiveExecutionError(
+                "writable worker requires a clean repository baseline"
+            )
         artifact_kind = context.pop("artifact_kind", None)
         if not isinstance(artifact_kind, str) or not artifact_kind.strip():
             artifact_kind = f"{self.task['details_schema']}-report"
@@ -239,12 +301,45 @@ class CodexSemanticTaskExecutor:
                 raise LiveExecutionError("Codex did not write a semantic result")
             raw = json.loads(output_path.read_text(encoding="utf-8"))
 
-        if initial_worktree is not None:
-            final_worktree = _git_worktree_status(repository)
-            if final_worktree == initial_worktree:
+        workspace_artifact = None
+        if initial_workspace is not None:
+            final_workspace = workspace_snapshot(repository)
+            if final_workspace["head"] != initial_workspace["head"]:
+                raise LiveExecutionError("writable worker changed repository HEAD")
+            if final_workspace["branch"] != initial_workspace["branch"]:
+                raise LiveExecutionError("writable worker changed repository branch")
+            worker_changed_paths = _snapshot_delta_paths(
+                initial_workspace,
+                final_workspace,
+            )
+            outside = paths_outside_scope(worker_changed_paths, self.writable_paths)
+            if outside:
+                raise LiveExecutionError(
+                    "writable worker changed paths outside its grant: "
+                    + ", ".join(outside)
+                )
+            if self.require_repository_change and not worker_changed_paths:
                 raise LiveExecutionError(
                     "writable worker completed without changing the repository"
                 )
+            workspace_artifact = self.evidence.add(
+                kind="workspace-change-receipt",
+                content={
+                    "protocol": "workspace-change-receipt/2",
+                    "repository": str(repository),
+                    "baseline_head": initial_workspace["head"],
+                    "branch": initial_workspace["branch"],
+                    "dirty_baseline_allowed": self.allow_dirty_baseline,
+                    "baseline_changed_paths": initial_workspace["changed_paths"],
+                    "allowed_paths": list(normalize_allowed_paths(self.writable_paths)),
+                    "changed_paths": final_workspace["changed_paths"],
+                    "worker_changed_paths": worker_changed_paths,
+                    "baseline_files": initial_workspace["files"],
+                    "files": final_workspace["files"],
+                },
+                media_type="application/json",
+                producer_task_id=str(self.task["id"]),
+            )
 
         deliverable = raw.get("deliverable_markdown")
         if not isinstance(deliverable, str) or not deliverable.strip():
@@ -265,6 +360,9 @@ class CodexSemanticTaskExecutor:
         if preflight_artifact is not None:
             evidence_refs.append(preflight_artifact.ref)
             artifacts.append(preflight_artifact.as_dict())
+        if workspace_artifact is not None:
+            evidence_refs.append(workspace_artifact.ref)
+            artifacts.append(workspace_artifact.as_dict())
         accepted_criteria = set(self.task.get("acceptance_criteria", ()))
         satisfied = raw.get("satisfied_criteria", [])
         if not isinstance(satisfied, list):
@@ -353,9 +451,7 @@ class CodexSemanticTaskExecutor:
             )
             self.audit.append(
                 "verified_command_completed",
-                status=(
-                    "succeeded" if completed.returncode == 0 else "failed"
-                ),
+                status=("succeeded" if completed.returncode == 0 else "failed"),
                 payload={
                     "argv": list(self.preflight_argv),
                     "cwd": str(repository),
@@ -410,9 +506,9 @@ class CodexSemanticTaskExecutor:
                 "model": self.model,
                 "reasoning": self.reasoning,
                 "sandbox": self.sandbox,
-                "prompt_sha256": hashlib.sha256(
-                    prompt.encode("utf-8")
-                ).hexdigest(),
+                "writable_paths": list(self.writable_paths),
+                "allow_dirty_baseline": self.allow_dirty_baseline,
+                "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
             },
             actor=AuditActor(
                 attempt.attempt_id,
@@ -425,6 +521,29 @@ class CodexSemanticTaskExecutor:
             duration_ms=duration_ms,
             artifacts=(prompt_artifact, stdout_artifact, stderr_artifact),
         )
+
+
+def _snapshot_delta_paths(
+    before: Mapping[str, Any],
+    after: Mapping[str, Any],
+) -> list[str]:
+    """Return paths whose tracked workspace state changed during one executor."""
+
+    before_files = before.get("files", {})
+    after_files = after.get("files", {})
+    if not isinstance(before_files, Mapping) or not isinstance(after_files, Mapping):
+        raise LiveExecutionError("workspace snapshot files must be objects")
+    before_changed = set(before.get("changed_paths", ()))
+    after_changed = set(after.get("changed_paths", ()))
+    candidates = before_changed | after_changed | set(before_files) | set(after_files)
+    return sorted(
+        path
+        for path in candidates
+        if (
+            (path in before_changed) != (path in after_changed)
+            or before_files.get(path) != after_files.get(path)
+        )
+    )
 
 
 def _parse_context(value: str) -> dict[str, Any]:
@@ -449,8 +568,7 @@ def _worker_prompt(
         "Keep all writes bounded to the assigned objective. "
         if task.get("required_capabilities")
         and "repo.write" in task.get("required_capabilities", ())
-        else
-        "Inspect the repository with shell commands, but do not edit it. "
+        else "Inspect the repository with shell commands, but do not edit it. "
     )
     return (
         "You are one bounded worker in an audited controller run. "
@@ -470,22 +588,6 @@ def _worker_prompt(
         f"Result detail schema identity: {task['details_schema']}\n"
         f"Controller-supplied context:\n{json.dumps(context, sort_keys=True)}\n"
     )
-
-
-def _git_worktree_status(repository: Path) -> str:
-    completed = subprocess.run(
-        ["git", "status", "--porcelain=v1", "--untracked-files=all"],
-        cwd=repository,
-        text=True,
-        capture_output=True,
-        timeout=30,
-        check=False,
-    )
-    if completed.returncode != 0:
-        raise LiveExecutionError(
-            f"cannot inspect repository changes: {completed.stderr.strip()}"
-        )
-    return completed.stdout
 
 
 __all__ = ["CodexSemanticTaskExecutor", "LiveExecutionError"]

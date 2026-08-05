@@ -100,11 +100,15 @@ state the role combination. Material changes SHOULD keep implementation and
 review logically independent. A child result is advisory until its parent
 validates it.
 
-The harness MUST bound hierarchy depth, subagent count, retries, runtime, and
-resource consumption. `max_subagents` limits the number of direct children
-under one parent over the task tree; `max_parallelism` separately limits how
-many tasks may execute concurrently. Workers with overlapping writable paths
-MUST be serialized or have an explicit conflict-resolution owner.
+The current engine defaults `max_depth` and `max_subagents` to `5`.
+`max_subagents` limits the number of direct children under one parent over the
+task tree; it is not a concurrency limit. `max_parallelism`, total task count,
+coordinator attempts, and coordinator tool calls default to unbounded (`null`)
+until empirical runs establish useful limits. Any of those limits may still be
+set explicitly by a run or coordinator schema. A production profile MUST
+eventually bound retries, runtime, and resource consumption before unattended
+use. Workers with overlapping writable paths MUST be serialized or have an
+explicit conflict-resolution owner.
 
 ## Required contracts
 
@@ -183,6 +187,47 @@ Each feature run MUST operate in a dedicated worktree on a dedicated feature
 branch. It MUST record the base branch and base commit before edits. A harness
 MUST NOT rely on the user's primary checkout as disposable execution space.
 
+`run_feature_worktree(...)` owns this transaction. It rejects a dirty or
+misidentified base, creates the feature branch and worktree at the recorded base
+commit, requires the run contract to bind those exact identities, stages only
+declared allowed paths, and records content-addressed receipts for creation,
+candidate commit, and integration. Merge is optional and defaults off.
+
+A workspace-write executor requires an explicit non-empty writable-path grant.
+It normally starts from a clean candidate worktree. A review fixer MAY opt into
+a dirty baseline because it follows the builder in the same candidate tree. In
+that mode the controller compares before/after file states and applies the grant
+to the fixer's delta, not to unchanged builder edits. It always rejects HEAD or
+branch changes. Its `workspace-change-receipt/2` records the baseline state,
+final state, and worker-only changed paths. This is controller verification
+after execution, not an OS-level filesystem sandbox.
+
+### Review/fix gate
+
+FeatureRun MAY enable its controller-owned review/fix gate after the coordinator
+has completed and before the integration owner commits. The gate consumes normal
+Task Attempts for `review`, `fix`, and `verify`; model/backend selection remains
+an executor concern.
+
+When enabled, the gate MUST persist a `review-ledger/1` artifact after each
+material transition. Finding identity is `(file, subject)`. The ledger records
+every occurrence, cycle seen, score, normative protection, fix cost, disposition,
+fix attempt, verification state, and reopening. A required or contract-violating
+finding MUST NOT disappear at a cycle or yield limit. It blocks unless an
+operator explicitly enabled required-finding conversion to technical debt.
+
+The policy independently switches ledgering, duplicate collapse, re-raise
+suppression, normative-citation checks, scope-expansion screening, targeted
+verification, regression re-review, risk-tiered cycle limits, no-progress and
+marginal-yield exits, and the technical-debt sink. Disabling one mechanism MUST
+not implicitly disable another. The exact resolved policy is part of every
+ledger artifact.
+
+The default enabled policy uses deterministic risk routing: uncertain or
+security/schema/storage/web/UI changes are `sensitive` (five review cycles);
+other changes are `mechanical` (three). The final allowed cycle is review-only:
+the controller does not apply a fix it cannot independently re-review.
+
 Repository policy authorizes the integration owner to commit scoped work and
 merge it into the recorded base branch after all gates pass. Before merging, the
 integrator MUST read the current base head, reconcile advancement, inspect the
@@ -199,6 +244,12 @@ budget, external blocker, or terminal quality failure. Retries require a changed
 hypothesis, input, or method; repeating the same failed action does not count as
 progress. Recovery resumes from durable verified state and emits a new attempt
 identity linked to the prior failure.
+
+The dispatcher treats a durable `running` task as uncertain external state and
+blocks instead of replaying it. A checkpointed active coordinator session can
+be closed as interrupted because session lifecycle itself is controller-owned;
+checkpointed `ready` tasks may then be dispatched without repeating completed
+tasks.
 
 Repository documentation gates MUST require an archived implementation plan to
 link its recorded decision file. Historical broken links that predate the

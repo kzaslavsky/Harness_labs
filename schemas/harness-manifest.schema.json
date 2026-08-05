@@ -27,11 +27,14 @@
     "hierarchy_limits": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["max_depth", "max_subagents", "max_retries"],
+      "required": ["max_depth", "max_subagents"],
       "properties": {
         "max_depth": { "type": "integer", "minimum": 1 },
         "max_subagents": { "type": "integer", "minimum": 1 },
-        "max_retries": { "type": "integer", "minimum": 0 }
+        "max_retries": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        }
       }
     },
     "required_gates": {

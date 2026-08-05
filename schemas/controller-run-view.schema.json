@@ -61,8 +61,14 @@
       "properties": {
         "max_depth": { "type": "integer", "minimum": 1 },
         "max_subagents": { "type": "integer", "minimum": 1 },
-        "max_parallelism": { "type": "integer", "minimum": 1 },
-        "max_tasks": { "type": "integer", "minimum": 1 }
+        "max_parallelism": {
+          "type": ["integer", "null"],
+          "minimum": 1
+        },
+        "max_tasks": {
+          "type": ["integer", "null"],
+          "minimum": 1
+        }
       }
     },
     "criteria": {

@@ -15,6 +15,7 @@ from .controller_coordinator import CoordinatorLoop
 from .controller_evidence import EvidenceCatalog
 from .controller_kernel import ControllerKernel, RunContract
 from .controller_projection import ControllerQueries, project_run_view
+from .controller_run import restore_controller_checkpoint
 from .controller_scheduler import CapabilityScheduler, RoleProfile
 from .coordinator_schema import CoordinatorDispatchSchema, CoordinatorSegment
 
@@ -90,7 +91,10 @@ class CoordinatorDispatcher:
                 return self._result(last_result)
             segment = self.schema.segment_for_phase(state["phase"])
             attempt = self._next_attempt(segment.id)
-            if attempt > segment.max_attempts:
+            if (
+                segment.max_attempts is not None
+                and attempt > segment.max_attempts
+            ):
                 self._block(
                     f"coordinator segment {segment.id} exhausted "
                     f"{segment.max_attempts} attempts"
@@ -178,6 +182,16 @@ class CoordinatorDispatcher:
             return self._result(last_result)
 
     def _register_schema(self) -> None:
+        existing = self.kernel.snapshot()["coordinator_dispatch"]["schema"]
+        if existing is not None:
+            if (
+                existing.get("schema_id") != self.schema.schema_id
+                or existing.get("sha256") != self.schema.sha256()
+            ):
+                raise ValueError(
+                    "restored coordinator schema does not match the requested schema"
+                )
+            return
         value = self.schema.as_dict()
         receipt = self.kernel.handle(
             self._command(
@@ -317,6 +331,67 @@ class CoordinatorDispatcher:
             raise ValueError(
                 f"coordinator session end failed: {receipt.message}"
             )
+
+    def recover_interrupted_session(self) -> None:
+        """Close a checkpointed provider session whose process no longer exists."""
+
+        active = self.kernel.snapshot()["coordinator_dispatch"]["active_session"]
+        if not isinstance(active, Mapping):
+            return
+        receipt = self.kernel.handle(
+            self._command(
+                "coordinator.session_end",
+                {
+                    "session_id": active["session_id"],
+                    "outcome": "interrupted",
+                    "result_status": "interrupted",
+                    "reason": (
+                        "dispatcher process restarted; prior provider session "
+                        "cannot be resumed safely"
+                    ),
+                },
+                key=f"session-recovery/{active['session_id']}",
+            )
+        )
+        if not receipt.accepted:
+            raise ValueError(
+                f"interrupted coordinator recovery failed: {receipt.message}"
+            )
+
+    def recover_interrupted_state(self) -> bool:
+        """Reconcile safe checkpointed work before launching a new coordinator."""
+
+        self.recover_interrupted_session()
+        state = self.kernel.snapshot()
+        running = sorted(
+            task_id
+            for task_id, task in state["tasks"].items()
+            if task["status"] == "running"
+        )
+        if running:
+            self._block(
+                "dispatcher resumed with externally unproven running tasks: "
+                + ", ".join(running)
+            )
+            return False
+        ready = tuple(
+            sorted(
+                task_id
+                for task_id, task in state["tasks"].items()
+                if task["status"] == "ready"
+            )
+        )
+        if ready:
+            requested = max(
+                int(state["tasks"][task_id].get("max_parallelism", 1))
+                for task_id in ready
+            )
+            self.scheduler.dispatch(
+                self.kernel,
+                ready,
+                max_parallelism=requested,
+            )
+        return True
 
     def _classify_outcome(
         self,
@@ -463,6 +538,43 @@ def run_dispatched_controller(
         schema,
         session_factory,
     ).run()
+    return _finalize_dispatched_run(audit, kernel, dispatch, run_dir)
+
+
+def resume_dispatched_controller(
+    contract: RunContract,
+    *,
+    schema: CoordinatorDispatchSchema,
+    session_factory: CoordinatorSessionFactory,
+    profile_builder: Callable[[EvidenceCatalog], tuple[RoleProfile, ...]],
+    run_dir: Path,
+) -> DispatchedControllerRunResult:
+    """Resume a nonterminal schema-dispatched run from its verified checkpoint."""
+
+    audit, evidence, kernel = restore_controller_checkpoint(contract, run_dir)
+    scheduler = CapabilityScheduler(profile_builder(evidence))
+    dispatcher = CoordinatorDispatcher(
+        kernel,
+        evidence,
+        scheduler,
+        schema,
+        session_factory,
+    )
+    if dispatcher.recover_interrupted_state():
+        dispatch = dispatcher.run()
+    else:
+        dispatch = dispatcher._result(None)
+    return _finalize_dispatched_run(audit, kernel, dispatch, run_dir, resumed=True)
+
+
+def _finalize_dispatched_run(
+    audit: AuditJournal,
+    kernel: ControllerKernel,
+    dispatch: CoordinatorDispatchResult,
+    run_dir: Path,
+    *,
+    resumed: bool = False,
+) -> DispatchedControllerRunResult:
     view = project_run_view(kernel)
     terminal_status = (
         "succeeded"
@@ -493,6 +605,7 @@ def run_dispatched_controller(
             ],
             "run_view": view,
             "state_digest": kernel.state_digest(),
+            "resumed": resumed,
         },
         state={"controller": kernel.snapshot()},
     )
@@ -505,5 +618,6 @@ __all__ = [
     "CoordinatorLaunch",
     "CoordinatorSessionFactory",
     "DispatchedControllerRunResult",
+    "resume_dispatched_controller",
     "run_dispatched_controller",
 ]
