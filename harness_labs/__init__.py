@@ -105,7 +105,12 @@ from .controller_scheduler import (
     ScheduledOutcome,
     SchedulingError,
 )
-from .feature_run import FeatureRunResult, run_feature_worktree
+from .feature_run import (
+    DeterministicVerificationResult,
+    FeatureRunResult,
+    VerificationRepairExecutorFactory,
+    run_feature_worktree,
+)
 from .review_fix import (
     REVIEW_FIX_RESULT_PROTOCOL,
     REVIEW_LEDGER_PROTOCOL,
@@ -214,6 +219,7 @@ __all__ = [
     "CoordinatorSegment",
     "CoordinatorSessionFactory",
     "DispatchedControllerRunResult",
+    "DeterministicVerificationResult",
     "EvidenceCatalog",
     "EvidenceError",
     "EvidenceRecord",
@@ -252,6 +258,7 @@ __all__ = [
     "resume_controller",
     "semantic_payload",
     "validate_semantic_result",
+    "VerificationRepairExecutorFactory",
     "workspace_snapshot",
     "build_run_summary",
     "implement_v13_development_policy",
