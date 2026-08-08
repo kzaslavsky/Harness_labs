@@ -68,17 +68,65 @@ class _BuildExecutor:
         )
 
 
-class _ClearReviewExecutor:
-    def execute(self, attempt) -> TaskResult:
-        return TaskResult(
-            attempt.attempt_id,
-            "succeeded",
-            semantic_payload(
-                summary="Independent review found no issues.",
-                details_schema="review-fix-review/1",
-                details={},
-            ),
-        )
+class _ReviewRepairFactory:
+    def __init__(self, worktree: Path) -> None:
+        self.worktree = worktree
+        self.review_count = 0
+
+    def __call__(self, stage, attempt):
+        factory = self
+
+        class Executor:
+            def execute(self, current_attempt) -> TaskResult:
+                if stage == "review":
+                    factory.review_count += 1
+                    findings = (
+                        (
+                            {
+                                "id": "review-fix",
+                                "file": "feature.txt",
+                                "subject": "review fix",
+                                "statement": "Record the reviewed candidate.",
+                                "category": "correctness",
+                                "severity": "major",
+                                "score": 90,
+                                "fix_cost": "local",
+                                "protects": "acceptance criterion built",
+                                "requires_disposition": True,
+                            },
+                        )
+                        if factory.review_count == 1
+                        else ()
+                    )
+                    return TaskResult(
+                        current_attempt.attempt_id,
+                        "succeeded",
+                        semantic_payload(
+                            summary="Review complete.",
+                            details_schema="review-fix-review/1",
+                            details={},
+                            findings=findings,
+                        ),
+                    )
+                key = "feature.txt:review-fix"
+                if stage == "fix":
+                    (factory.worktree / "reviewed.txt").write_text(
+                        "reviewed\n", encoding="utf-8"
+                    )
+                    details = {"addressed_finding_keys": [key]}
+                else:
+                    details = {"verified_finding_keys": [key]}
+                return TaskResult(
+                    current_attempt.attempt_id,
+                    "succeeded",
+                    semantic_payload(
+                        summary=f"{stage} complete.",
+                        details_schema=f"review-fix-{stage}/1",
+                        details=details,
+                    ),
+                )
+
+        return Executor()
 
 
 class _VerificationRepairExecutor:
@@ -216,12 +264,10 @@ class FeatureRunTests(unittest.TestCase):
                         lambda task: _BuildExecutor(task, worktree, evidence),
                     ),
                 ),
-                allowed_paths=("feature.txt",),
+                allowed_paths=("feature.txt", "reviewed.txt"),
                 commit_message="Build feature",
                 merge=False,
-                review_fix_executor_factory=lambda stage, attempt: (
-                    _ClearReviewExecutor()
-                ),
+                review_fix_executor_factory=_ReviewRepairFactory(root / "feature"),
                 review_fix_policy=ReviewFixPolicy(),
                 verification_argv=(
                     "python3",
@@ -234,11 +280,23 @@ class FeatureRunTests(unittest.TestCase):
                 evidence_classification="component",
             )
 
-            self.assertEqual(result.status, "succeeded")
+            self.assertEqual(
+                result.status,
+                "succeeded",
+                (
+                    result.review_fix.reason
+                    if result.review_fix
+                    else result.dispatch.result.payload
+                ),
+            )
             self.assertEqual(result.verification.status, "succeeded")
             self.assertEqual(result.verification.repair_attempts, 0)
+            self.assertEqual(
+                [attempt["stage"] for attempt in result.verification.command_attempts],
+                ["post_implementation", "post_review_repair"],
+            )
             self.assertIsNotNone(result.review_fix)
-            self.assertEqual(result.review_fix.cycles, 1)
+            self.assertEqual(result.review_fix.cycles, 2)
             self.assertEqual(
                 [receipt["operation"] for receipt in result.git_receipts],
                 ["create", "commit", "integrate"],

@@ -187,6 +187,7 @@ def run_feature_worktree(
     status = dispatch.result.status
     verification_result = None
     review_fix_result = None
+    pre_review_workspace = None
     if status == "succeeded" and project_run_view(kernel)["status"] == "succeeded":
         if verification_argv:
             assert verification_repair_executor_factory is not None
@@ -208,6 +209,7 @@ def run_feature_worktree(
         if review_fix_policy.enabled:
             assert review_fix_executor_factory is not None
             snapshot = workspace_snapshot(transaction.worktree_path)
+            pre_review_workspace = snapshot
             review_fix_result = ReviewFixLoop(
                 run_id=contract.run_id,
                 objective=contract.objective,
@@ -220,6 +222,33 @@ def run_feature_worktree(
                 policy=review_fix_policy,
             ).run()
             status = review_fix_result.status
+    if (
+        status == "succeeded"
+        and project_run_view(kernel)["status"] == "succeeded"
+        and verification_argv
+        and pre_review_workspace is not None
+        and workspace_snapshot(transaction.worktree_path) != pre_review_workspace
+    ):
+        assert verification_repair_executor_factory is not None
+        post_review = _verify_with_recovery(
+            run_id=contract.run_id,
+            objective=contract.objective,
+            acceptance_criteria=contract.criteria,
+            worktree_path=transaction.worktree_path,
+            allowed_paths=allowed_paths,
+            argv=verification_argv,
+            repair_executor_factory=verification_repair_executor_factory,
+            repair_limit=verification_repair_limit,
+            timeout_seconds=verification_timeout_seconds,
+            evidence=evidence,
+            audit=audit,
+            stage="post_review_repair",
+        )
+        verification_result = _combine_verification_results(
+            verification_result,
+            post_review,
+        )
+        status = post_review.status
     if status == "succeeded" and project_run_view(kernel)["status"] == "succeeded":
         try:
             commit = transaction.commit_candidate(
@@ -312,6 +341,7 @@ def _verify_with_recovery(
     timeout_seconds: float | None,
     evidence: EvidenceCatalog,
     audit: AuditJournal,
+    stage: str = "post_implementation",
 ) -> DeterministicVerificationResult:
     command_attempts: list[Mapping[str, object]] = []
     runner = AttemptRunner()
@@ -323,6 +353,7 @@ def _verify_with_recovery(
             argv,
             timeout_seconds,
             ordinal,
+            stage,
         )
         artifact = evidence.add(
             kind="deterministic-verification-output",
@@ -422,6 +453,7 @@ def _run_verification_command(
     argv: tuple[str, ...],
     timeout_seconds: float | None,
     ordinal: int,
+    stage: str,
 ) -> dict[str, object]:
     started = monotonic_ns()
     try:
@@ -448,6 +480,7 @@ def _run_verification_command(
         stderr = str(exc)
         timed_out = False
     return {
+        "stage": stage,
         "attempt": ordinal,
         "argv": list(argv),
         "cwd": str(worktree_path),
@@ -458,6 +491,20 @@ def _run_verification_command(
         "duration_ms": (monotonic_ns() - started) // 1_000_000,
         "workspace": workspace_snapshot(worktree_path),
     }
+
+
+def _combine_verification_results(
+    first: DeterministicVerificationResult | None,
+    second: DeterministicVerificationResult,
+) -> DeterministicVerificationResult:
+    if first is None:
+        return second
+    return DeterministicVerificationResult(
+        status=second.status,
+        reason=second.reason,
+        command_attempts=first.command_attempts + second.command_attempts,
+        repair_attempts=first.repair_attempts + second.repair_attempts,
+    )
 
 
 def _timeout_text(value: str | bytes | None) -> str:

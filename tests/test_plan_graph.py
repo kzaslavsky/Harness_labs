@@ -2,17 +2,22 @@
 
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 from pathlib import Path
 
 from harness_labs.plan_graph import (
     FeatureRunOutcome,
+    FeatureRunRequest,
     PlanGraph,
     PlanGraphError,
     PlanGraphPlan,
     PlanRun,
+    SubprocessFeatureRunLauncher,
+    plan_from_mapping,
 )
 
 
@@ -30,6 +35,57 @@ def plan(*runs: PlanRun) -> PlanGraphPlan:
 
 
 class PlanGraphTests(unittest.TestCase):
+    @patch("harness_labs.plan_graph.subprocess.run")
+    def test_subprocess_launcher_keeps_one_graph_run_moving(self, run) -> None:
+        commits = iter(("A-commit", "B-commit"))
+
+        def respond(*args, **kwargs):
+            request = json.loads(kwargs["input"])
+            commit = next(commits)
+            self.assertEqual(
+                request["base_commit"],
+                "base" if commit == "A-commit" else "A-commit",
+            )
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps(
+                    {"status": "succeeded", "candidate_commit": commit}
+                ),
+                stderr="",
+            )
+
+        run.side_effect = respond
+        result = PlanGraph(
+            plan(
+                PlanRun("A", "Build A", ("1",), ("AC-1",)),
+                PlanRun("B", "Build B", ("2",), ("AC-2",), ("A",)),
+            ),
+            SubprocessFeatureRunLauncher(("feature-run", "--json")),
+        ).run()
+
+        self.assertEqual(result.status, "succeeded")
+        self.assertEqual(result.candidate_commit, "B-commit")
+        self.assertEqual(run.call_count, 2)
+
+    @patch("harness_labs.plan_graph.subprocess.run")
+    def test_subprocess_launcher_returns_concise_failure_evidence(self, run) -> None:
+        run.return_value = SimpleNamespace(
+            returncode=7,
+            stdout="",
+            stderr="bounded implementation failed",
+        )
+        outcome = SubprocessFeatureRunLauncher(("feature-run",))(
+            FeatureRunRequest(
+                PlanRun("A", "Build A", ("1",), ("AC-1",)),
+                "base",
+                "plan.md",
+            )
+        )
+
+        self.assertEqual(outcome.status, "failed")
+        self.assertEqual(outcome.evidence["exit_code"], 7)
+        self.assertIn("bounded implementation failed", outcome.evidence["stderr"])
+
     def test_dependency_candidate_and_final_test(self) -> None:
         calls = []
         tests = []
@@ -54,6 +110,45 @@ class PlanGraphTests(unittest.TestCase):
         self.assertEqual(result.candidate_commit, "B-commit")
         self.assertEqual(calls, [("A", "base"), ("B", "A-commit")])
         self.assertEqual(tests, [("test final", "B-commit")])
+
+    def test_mapping_carries_run_verification_and_final_functionality(self) -> None:
+        payload = {
+            "plan": "docs/development/APPROVED_PLAN.md",
+            "base_commit": "base",
+            "runs": [
+                {
+                    "id": "A",
+                    "objective": "Build A",
+                    "plan_sections": ["1"],
+                    "criteria": ["AC-1"],
+                    "verification_argv": ["python3", "scripts/ui_walk.py"],
+                }
+            ],
+            "plan_sections": {"1": "Build A. AC-1: A works."},
+            "acceptance_criteria": {"AC-1": "A works."},
+            "functionality_tests": ["python3 scripts/ui_walk.py"],
+        }
+        requests = []
+        final_tests = []
+        graph = PlanGraph(
+            plan_from_mapping(payload),
+            lambda request: (
+                requests.append(request)
+                or FeatureRunOutcome("succeeded", "candidate")
+            ),
+            functionality_test_runner=lambda command, commit: final_tests.append(
+                (command, commit)
+            ),
+        )
+
+        result = graph.run()
+
+        self.assertEqual(result.status, "succeeded")
+        self.assertEqual(
+            requests[0].run.verification_argv,
+            ("python3", "scripts/ui_walk.py"),
+        )
+        self.assertEqual(final_tests, [("python3 scripts/ui_walk.py", "candidate")])
 
     def test_sequential_candidate_includes_multiple_roots_and_dependencies(self) -> None:
         calls = []

@@ -20,6 +20,13 @@ approved plan
 PlanGraph owns only the queue. FeatureRun continues to own implementation,
 verification, frozen-ledger review, repair, and candidate commit creation.
 
+The CLI can load an in-process `module:callable` launcher or invoke a subprocess
+launcher command. For the subprocess form, the controller stays alive, writes
+one `FeatureRunRequest` JSON object to the command's stdin for each ready node,
+requires one `FeatureRunOutcome` JSON object on stdout, checkpoints the returned
+candidate commit, and immediately advances to the next node. The subprocess is
+the narrow backend adapter; backend-specific behavior does not enter PlanGraph.
+
 ## First release
 
 The first release supports one repository and executes FeatureRuns sequentially
@@ -52,9 +59,11 @@ The decomposition result contains only:
       "objective": "Implement the consumer described by plan section 3",
       "plan_sections": ["3"],
       "criteria": ["AC-3"],
-      "depends_on": ["contract"]
+      "depends_on": ["contract"],
+      "verification_argv": ["python3", "scripts/ui_walk.py"]
     }
-  ]
+  ],
+  "functionality_tests": ["python3 scripts/ui_walk.py"]
 }
 ```
 
@@ -72,8 +81,10 @@ second task, capability, review, or recovery contract.
 4. A successful FeatureRun supplies its candidate commit as the base for the
    next dependent FeatureRun.
 5. The controller repeats until every run succeeds.
-6. The final plan test commands run against the resulting candidate.
-7. The controller returns that candidate or stops with the failed FeatureRun and
+6. A FeatureRun with a declared verification command runs it after
+   implementation and again if review repairs change its candidate.
+7. The final plan test commands run against the resulting candidate.
+8. The controller returns that candidate or stops with the failed FeatureRun and
    its existing evidence.
 
 There is no automatic redesign of the decomposition after execution starts. A

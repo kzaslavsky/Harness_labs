@@ -28,6 +28,7 @@ class PlanRun:
     plan_sections: tuple[str, ...]
     criteria: tuple[str, ...]
     depends_on: tuple[str, ...] = ()
+    verification_argv: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -39,6 +40,7 @@ class PlanGraphPlan:
     runs: tuple[PlanRun, ...]
     plan_sections: Mapping[str, str]
     acceptance_criteria: Mapping[str, str]
+    functionality_tests: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -74,6 +76,92 @@ FeatureRunLauncher = Callable[[FeatureRunRequest], FeatureRunOutcome]
 FunctionalityTestRunner = Callable[[str, str], None]
 
 
+class SubprocessFeatureRunLauncher:
+    """Invoke one backend-neutral FeatureRun command for each queued node.
+
+    The controller writes one JSON request to stdin and requires one JSON
+    :class:`FeatureRunOutcome` on stdout.  The child may use any implementation
+    backend; PlanGraph neither selects nor interprets it.
+    """
+
+    def __init__(
+        self,
+        argv: Sequence[str],
+        *,
+        cwd: Path | None = None,
+        timeout_seconds: float | None = None,
+    ) -> None:
+        if not argv or any(not value for value in argv):
+            raise PlanGraphError("launcher command must contain non-empty arguments")
+        if timeout_seconds is not None and timeout_seconds <= 0:
+            raise PlanGraphError("launcher timeout must be positive or None")
+        self.argv = tuple(argv)
+        self.cwd = cwd
+        self.timeout_seconds = timeout_seconds
+
+    def __call__(self, request: FeatureRunRequest) -> FeatureRunOutcome:
+        payload = {
+            "run": {
+                "id": request.run.id,
+                "objective": request.run.objective,
+                "plan_sections": list(request.run.plan_sections),
+                "criteria": list(request.run.criteria),
+                "depends_on": list(request.run.depends_on),
+                "verification_argv": list(request.run.verification_argv),
+            },
+            "base_commit": request.base_commit,
+            "plan": request.plan,
+        }
+        try:
+            completed = subprocess.run(
+                self.argv,
+                input=json.dumps(payload, sort_keys=True) + "\n",
+                cwd=self.cwd,
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=self.timeout_seconds,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return FeatureRunOutcome(
+                "failed",
+                evidence={"error": str(exc), "error_type": type(exc).__name__},
+            )
+        if completed.returncode:
+            return FeatureRunOutcome(
+                "failed",
+                evidence={
+                    "exit_code": completed.returncode,
+                    "stdout": completed.stdout,
+                    "stderr": completed.stderr,
+                },
+            )
+        try:
+            result = json.loads(completed.stdout)
+            if not isinstance(result, dict):
+                raise TypeError("result must be an object")
+            status = result["status"]
+            candidate_commit = result.get("candidate_commit")
+            if status not in {"succeeded", "failed", "blocked"}:
+                raise ValueError(f"invalid status {status!r}")
+            if candidate_commit is not None and not isinstance(candidate_commit, str):
+                raise TypeError("candidate_commit must be a string or null")
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+            return FeatureRunOutcome(
+                "failed",
+                evidence={
+                    "error": f"invalid launcher result: {exc}",
+                    "stdout": completed.stdout,
+                    "stderr": completed.stderr,
+                },
+            )
+        return FeatureRunOutcome(
+            status,
+            candidate_commit,
+            result.get("evidence"),
+        )
+
+
 class PlanGraph:
     """Execute an already approved FeatureRun decomposition in dependency order."""
 
@@ -89,7 +177,9 @@ class PlanGraph:
         self.plan = plan
         self.launcher = launcher
         self.state_path = state_path
-        self.functionality_tests = tuple(functionality_tests)
+        self.functionality_tests = (
+            tuple(plan.functionality_tests) + tuple(functionality_tests)
+        )
         self.functionality_test_runner = (
             functionality_test_runner or _run_functionality_test
         )
@@ -112,6 +202,10 @@ class PlanGraph:
                 raise PlanGraphError(f"run {run.id!r} has an empty objective")
             if not run.plan_sections:
                 raise PlanGraphError(f"run {run.id!r} cites no plan sections")
+            if any(not value for value in run.verification_argv):
+                raise PlanGraphError(
+                    f"run {run.id!r} verification_argv contains an empty value"
+                )
             cited_sections = "\n".join(
                 self.plan.plan_sections[section]
                 for section in run.plan_sections
@@ -153,6 +247,8 @@ class PlanGraph:
                 "acceptance criteria are not assigned to a FeatureRun: "
                 + ", ".join(sorted(missing))
             )
+        if any(not command.strip() for command in self.plan.functionality_tests):
+            raise PlanGraphError("functionality_tests contains an empty command")
         self._ordered_runs()
 
     def run(self) -> PlanGraphResult:
@@ -322,6 +418,9 @@ def plan_from_mapping(payload: Mapping[str, object]) -> PlanGraphPlan:
                 plan_sections=tuple(str(value) for value in item["plan_sections"]),
                 criteria=tuple(str(value) for value in item["criteria"]),
                 depends_on=tuple(str(value) for value in item.get("depends_on", ())),
+                verification_argv=tuple(
+                    str(value) for value in item.get("verification_argv", ())
+                ),
             )
             for item in payload["runs"]  # type: ignore[index]
         )
@@ -333,6 +432,9 @@ def plan_from_mapping(payload: Mapping[str, object]) -> PlanGraphPlan:
             runs=runs,
             plan_sections=sections,
             acceptance_criteria=criteria,
+            functionality_tests=tuple(
+                str(value) for value in payload.get("functionality_tests", ())
+            ),
         )
     except (KeyError, TypeError) as exc:
         raise PlanGraphError(f"invalid PlanGraph decomposition: {exc}") from exc
@@ -346,5 +448,6 @@ __all__ = [
     "PlanGraphPlan",
     "PlanGraphResult",
     "PlanRun",
+    "SubprocessFeatureRunLauncher",
     "plan_from_mapping",
 ]

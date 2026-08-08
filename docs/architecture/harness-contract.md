@@ -210,6 +210,12 @@ the authority for pass or fail: a model report cannot override its exit code.
 The controller records the command, candidate snapshot, exit code, stdout, and
 stderr as durable evidence.
 
+If the review/fix gate changes the candidate, FeatureRun MUST execute that same
+declared command again after review and before commit. The post-review execution
+uses the same bounded recovery path and its receipt identifies the
+`post_review_repair` stage. A review that leaves the candidate byte-identical
+does not cause a duplicate execution.
+
 A failed command MUST enter the bounded same-worktree repair path rather than
 immediately ending the run. The repair attempt receives the exact failed
 command receipt and may change only the declared paths. The controller then

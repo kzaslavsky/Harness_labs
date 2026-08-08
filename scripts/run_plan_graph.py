@@ -12,7 +12,12 @@ from typing import Callable
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from harness_labs.plan_graph import FeatureRunOutcome, PlanGraph, plan_from_mapping
+from harness_labs.plan_graph import (
+    FeatureRunOutcome,
+    PlanGraph,
+    SubprocessFeatureRunLauncher,
+    plan_from_mapping,
+)
 
 
 def _load_callable(reference: str) -> Callable[..., object]:
@@ -28,12 +33,23 @@ def _load_callable(reference: str) -> Callable[..., object]:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("decomposition", type=Path)
-    parser.add_argument("--launcher", required=True)
+    launcher_group = parser.add_mutually_exclusive_group(required=True)
+    launcher_group.add_argument("--launcher")
+    launcher_group.add_argument("--launcher-command", nargs="+")
+    parser.add_argument("--launcher-cwd", type=Path)
+    parser.add_argument("--launcher-timeout", type=float)
     parser.add_argument("--state", type=Path)
     parser.add_argument("--functionality-test", action="append", default=[])
     arguments = parser.parse_args()
     payload = json.loads(arguments.decomposition.read_text(encoding="utf-8"))
-    launcher = _load_callable(arguments.launcher)
+    if arguments.launcher:
+        launcher = _load_callable(arguments.launcher)
+    else:
+        launcher = SubprocessFeatureRunLauncher(
+            arguments.launcher_command,
+            cwd=arguments.launcher_cwd,
+            timeout_seconds=arguments.launcher_timeout,
+        )
 
     def launch(request):
         result = launcher(request)

@@ -119,6 +119,7 @@ from .plan_graph import (
     PlanGraphPlan,
     PlanGraphResult,
     PlanRun,
+    SubprocessFeatureRunLauncher,
     plan_from_mapping,
 )
 from .review_fix import (
@@ -245,6 +246,7 @@ __all__ = [
     "PlanGraphPlan",
     "PlanGraphResult",
     "PlanRun",
+    "SubprocessFeatureRunLauncher",
     "REVIEW_FIX_RESULT_PROTOCOL",
     "REVIEW_LEDGER_PROTOCOL",
     "ReviewFixError",
