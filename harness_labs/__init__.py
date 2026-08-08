@@ -106,6 +106,16 @@ from .controller_scheduler import (
     SchedulingError,
 )
 from .feature_run import FeatureRunResult, run_feature_worktree
+from .plan_graph import (
+    FeatureRunOutcome,
+    FeatureRunRequest,
+    PlanGraph,
+    PlanGraphError,
+    PlanGraphPlan,
+    PlanGraphResult,
+    PlanRun,
+    plan_from_mapping,
+)
 from .review_fix import (
     REVIEW_FIX_RESULT_PROTOCOL,
     REVIEW_LEDGER_PROTOCOL,
@@ -222,6 +232,13 @@ __all__ = [
     "GitTransactionError",
     "GitWorktreeTransaction",
     "FeatureRunResult",
+    "FeatureRunOutcome",
+    "FeatureRunRequest",
+    "PlanGraph",
+    "PlanGraphError",
+    "PlanGraphPlan",
+    "PlanGraphResult",
+    "PlanRun",
     "REVIEW_FIX_RESULT_PROTOCOL",
     "REVIEW_LEDGER_PROTOCOL",
     "ReviewFixError",
@@ -248,6 +265,7 @@ __all__ = [
     "run_dispatched_controller",
     "resume_dispatched_controller",
     "run_feature_worktree",
+    "plan_from_mapping",
     "run_fixture_spec",
     "resume_controller",
     "semantic_payload",
