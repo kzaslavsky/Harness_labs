@@ -30,9 +30,11 @@ set. Later review passes close that set after targeted verification; a new
 finding is recorded as deferred and cannot authorize additional work in the
 current FeatureRun.
 
-Lifecycle verification and adversarial review use separate coordinator
-segments. Verification runs the declared checks and reports observations; it
-does not discover review findings or remediate the candidate.
+Lifecycle verification and adversarial review are separate gates. FeatureRun
+runs the declared verification command itself and treats its exit code as
+authoritative. Failure enters a bounded fixer in the same candidate worktree,
+then the controller reruns the identical command. Adversarial review remains a
+later discovery gate and cannot override verification evidence.
 
 The port adopts these Claude implement-v13 controls as independent switches:
 

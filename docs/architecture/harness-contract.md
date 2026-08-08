@@ -202,6 +202,21 @@ branch changes. Its `workspace-change-receipt/2` records the baseline state,
 final state, and worker-only changed paths. This is controller verification
 after execution, not an OS-level filesystem sandbox.
 
+### Deterministic verification and recovery
+
+Before review or commit, FeatureRun MAY execute one declared verification
+command directly in the candidate worktree. When configured, this command is
+the authority for pass or fail: a model report cannot override its exit code.
+The controller records the command, candidate snapshot, exit code, stdout, and
+stderr as durable evidence.
+
+A failed command MUST enter the bounded same-worktree repair path rather than
+immediately ending the run. The repair attempt receives the exact failed
+command receipt and may change only the declared paths. The controller then
+reruns the same command. Only a failed repair or a still-failing command after
+the repair limit blocks the run; the uncommitted candidate worktree is retained
+for inspection or recovery.
+
 ### Review/fix gate
 
 FeatureRun MAY enable its controller-owned review/fix gate after the coordinator

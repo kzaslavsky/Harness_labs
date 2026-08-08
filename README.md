@@ -80,9 +80,10 @@ and [architectural decision](docs/decisions/0004-hybrid-controller-command-kerne
 
 A schema-defined dispatcher replaces coordinators at declared context
 boundaries while the kernel remains authoritative. `run_feature_worktree(...)`
-creates an isolated branch/worktree, executes the schema, optionally runs the
-ledger-backed review/fix loop, commits only declared paths, and either leaves a
-merge-ready candidate or performs a guarded merge.
+creates an isolated branch/worktree, executes the schema, runs its declared
+verification command with bounded same-worktree repair on failure, optionally
+runs the ledger-backed review/fix loop, commits only declared paths, and either
+leaves a merge-ready candidate or performs a guarded merge.
 
 The portable implement-v13 policy adds source binding, FRAME/NECESSITY/MECHANISM
 plan refutation, build-handoff, and risk-shaped review obligations. Required
