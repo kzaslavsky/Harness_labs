@@ -110,6 +110,7 @@ class ReviewLedger:
         current: set[str] = set()
         duplicates = 0
         ledger_collapses = 0
+        deferred_findings = 0
         for ordinal, finding in enumerate(findings, start=1):
             key = _finding_key(finding)
             if not self.policy.ledger_enabled:
@@ -123,7 +124,14 @@ class ReviewLedger:
             current.add(key)
             existing = self.findings.get(key)
             if existing is None:
-                self.findings[key] = self._new_record(key, finding, cycle)
+                record = self._new_record(key, finding, cycle)
+                if cycle > 1:
+                    record["outcome"] = "deferred"
+                    record["outcome_reason"] = (
+                        "discovery frozen after the first review"
+                    )
+                    deferred_findings += 1
+                self.findings[key] = record
                 continue
             self._merge_occurrence(existing, finding, cycle)
             if (
@@ -181,6 +189,7 @@ class ReviewLedger:
         return fix_keys, {
             "within_cycle_duplicates": duplicates,
             "ledger_collapses": ledger_collapses,
+            "deferred_findings": deferred_findings,
             "fixed_by_re_review": fixed_by_absence,
             "distinct_findings": len(current),
         }
@@ -479,7 +488,8 @@ class ReviewFixLoop:
             "ledger": ledger.as_dict(),
             "output_contract": _stage_output_contract(stage),
             "regression_focus": (
-                "Attack what the preceding fixes broke or enlarged."
+                "Check only whether findings from the first review remain after "
+                "their fixes. Do not discover or authorize new work."
                 if stage == "review"
                 and cycle > 1
                 and self.policy.regression_review_enabled

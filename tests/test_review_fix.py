@@ -133,7 +133,10 @@ class ReviewFixLoopTests(unittest.TestCase):
         ledger = json.loads(evidence.open(outcome.ledger_ref))
         self.assertEqual(ledger["findings"][key]["outcome"], "fixed")
         self.assertEqual(ledger["findings"][key]["cycles_seen"], [1])
-        self.assertIn("Attack what", factory.calls[-1][1]["regression_focus"])
+        self.assertIn(
+            "Do not discover or authorize new work",
+            factory.calls[-1][1]["regression_focus"],
+        )
         audit.finalize("succeeded", result=outcome.as_dict())
         AuditJournal.verify(audit.run_dir)
 
@@ -173,6 +176,75 @@ class ReviewFixLoopTests(unittest.TestCase):
         self.assertEqual(record["outcome"], "scope_screened")
         self.assertEqual(record["occurrences"], 2)
         self.assertEqual(ledger["cycles"][0]["within_cycle_duplicates"], 1)
+
+    def test_later_review_cannot_add_findings_to_frozen_ledger(self):
+        first = {
+            "id": "first",
+            "statement": "The original value is wrong.",
+            "category": "correctness",
+            "severity": "major",
+            "requires_disposition": True,
+            "file": "feature.txt",
+            "subject": "original value",
+            "score": 90,
+            "fix_cost": "local",
+            "protects": "acceptance criterion correct",
+        }
+        late = {
+            "id": "late",
+            "statement": "A later reviewer prefers another redesign.",
+            "category": "review",
+            "severity": "critical",
+            "requires_disposition": True,
+            "file": "feature.txt",
+            "subject": "later redesign",
+            "score": 95,
+            "fix_cost": "local",
+            "protects": "reviewer preference",
+        }
+        first_key = "feature.txt:original-value"
+        late_key = "feature.txt:later-redesign"
+        factory = _Factory(
+            {
+                "review": [
+                    lambda attempt: result(
+                        attempt.attempt_id,
+                        "review-fix-review/1",
+                        findings=(first,),
+                    ),
+                    lambda attempt: result(
+                        attempt.attempt_id,
+                        "review-fix-review/1",
+                        findings=(late,),
+                    ),
+                ],
+                "fix": [
+                    lambda attempt: result(
+                        attempt.attempt_id,
+                        "review-fix-fix/1",
+                        details={"addressed_finding_keys": [first_key]},
+                    )
+                ],
+                "verify": [
+                    lambda attempt: result(
+                        attempt.attempt_id,
+                        "review-fix-verify/1",
+                        details={"verified_finding_keys": [first_key]},
+                    )
+                ],
+            }
+        )
+
+        outcome, _, evidence = self.run_loop(factory)
+
+        self.assertEqual(outcome.status, "succeeded")
+        self.assertEqual([call[0] for call in factory.calls], [
+            "review", "fix", "verify", "review"
+        ])
+        ledger = json.loads(evidence.open(outcome.ledger_ref))
+        self.assertEqual(ledger["findings"][first_key]["outcome"], "fixed")
+        self.assertEqual(ledger["findings"][late_key]["outcome"], "deferred")
+        self.assertEqual(ledger["cycles"][1]["deferred_findings"], 1)
 
     def test_cycle_limit_blocks_required_finding_instead_of_hiding_it_as_debt(self):
         finding = {

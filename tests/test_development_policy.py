@@ -49,7 +49,13 @@ class DevelopmentPolicyTests(unittest.TestCase):
         planning = restored.segments[0]
         self.assertIn("source-binding-report", planning.exit_artifact_kinds)
         self.assertIsNotNone(planning.development_policy)
-        review = restored.segments[2]
+        verify = restored.segments[2]
+        review = restored.segments[3]
+        self.assertEqual(verify.phases, ("verify",))
+        self.assertEqual(verify.coordinator_profile, "verification-coordinator")
+        self.assertIn("verification-report", verify.exit_artifact_kinds)
+        self.assertEqual(review.phases, ("review",))
+        self.assertIn("verification-report", review.required_artifact_kinds)
         self.assertIn("review-ledger", review.exit_artifact_kinds)
 
 

@@ -41,27 +41,46 @@
       "max_tool_calls": 128
     },
     {
-      "id": "verify-review",
+      "id": "verify",
       "phases": [
-        "verify",
-        "review"
+        "verify"
       ],
-      "instructions": "Verify the actual candidate, construct review work proportional to its risk, remediate valid findings, and leave no unresolved required finding.",
-      "coordinator_profile": "review-coordinator",
+      "instructions": "Run the declared acceptance and regression checks against the actual candidate and report observed results. Do not perform adversarial review or remediation.",
+      "coordinator_profile": "verification-coordinator",
       "context": {
         "artifact_kinds": [
           "implementation-plan",
           "implementation-summary",
-          "workspace-change-receipt",
-          "verification-report",
-          "review-report"
+          "workspace-change-receipt"
         ],
         "required_artifact_kinds": [
           "implementation-summary"
         ]
       },
       "max_attempts": 2,
-      "max_tool_calls": 160
+      "max_tool_calls": 80
+    },
+    {
+      "id": "review",
+      "phases": [
+        "review"
+      ],
+      "instructions": "Run one adversarial discovery review of the verified candidate. Freeze the first finding set; later closure passes may only resolve those findings and cannot authorize new work.",
+      "coordinator_profile": "review-coordinator",
+      "context": {
+        "artifact_kinds": [
+          "implementation-plan",
+          "implementation-summary",
+          "workspace-change-receipt",
+          "verification-report"
+        ],
+        "required_artifact_kinds": [
+          "implementation-summary",
+          "verification-report"
+        ]
+      },
+      "max_attempts": 2,
+      "max_tool_calls": 80
     },
     {
       "id": "integrate-report",

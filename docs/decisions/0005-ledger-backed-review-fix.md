@@ -25,6 +25,15 @@ constructs the exact fix list, checks fixer and verifier coverage, and decides
 whether another review cycle is allowed. Reviewers and fixers provide judgment;
 they do not own finding identity or stopping.
 
+The first review is the only discovery pass. The controller freezes its finding
+set. Later review passes close that set after targeted verification; a new
+finding is recorded as deferred and cannot authorize additional work in the
+current FeatureRun.
+
+Lifecycle verification and adversarial review use separate coordinator
+segments. Verification runs the declared checks and reports observations; it
+does not discover review findings or remediate the candidate.
+
 The port adopts these Claude implement-v13 controls as independent switches:
 
 - re-raise ledger and within-cycle duplicate collapse;

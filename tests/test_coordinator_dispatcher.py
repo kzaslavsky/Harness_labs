@@ -535,7 +535,7 @@ class CoordinatorDispatcherTests(unittest.TestCase):
         )
         self.assertEqual(
             [segment.id for segment in schema.segments],
-            ["plan-refute", "build", "verify-review", "integrate-report"],
+            ["plan-refute", "build", "verify", "review", "integrate-report"],
         )
         self.assertEqual(
             schema.as_dict()["protocol"],

@@ -295,13 +295,13 @@ def implement_v13_dispatch_schema():
                 development_policy=policy,
             ),
             CoordinatorSegment(
-                id="verify-review",
-                phases=("verify", "review"),
-                coordinator_profile="review-coordinator",
+                id="verify",
+                phases=("verify",),
+                coordinator_profile="verification-coordinator",
                 instructions=(
-                    "Classify the changed surface, construct every reviewer "
-                    "assignment required by the policy, verify independently, and "
-                    "close the ledger only after regression review."
+                    "Run the declared acceptance and regression checks against "
+                    "the actual candidate and report their observed results. Do "
+                    "not perform adversarial review or remediate the candidate."
                 ),
                 context_artifact_kinds=(
                     "engineering-plan",
@@ -311,7 +311,30 @@ def implement_v13_dispatch_schema():
                     "engineering-plan",
                     "implementation-summary",
                 ),
-                exit_artifact_kinds=("verification-report", "review-ledger"),
+                exit_artifact_kinds=("verification-report",),
+                development_policy=policy,
+            ),
+            CoordinatorSegment(
+                id="review",
+                phases=("review",),
+                coordinator_profile="review-coordinator",
+                instructions=(
+                    "Run one adversarial discovery review of the verified "
+                    "candidate. Freeze that first finding set; later closure "
+                    "passes may only resolve those findings and cannot authorize "
+                    "new work."
+                ),
+                context_artifact_kinds=(
+                    "engineering-plan",
+                    "implementation-summary",
+                    "verification-report",
+                ),
+                required_artifact_kinds=(
+                    "engineering-plan",
+                    "implementation-summary",
+                    "verification-report",
+                ),
+                exit_artifact_kinds=("review-ledger",),
                 development_policy=policy,
             ),
             CoordinatorSegment(
