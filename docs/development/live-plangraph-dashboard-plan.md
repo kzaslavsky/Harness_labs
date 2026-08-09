@@ -41,6 +41,21 @@ Before execution, the integration owner must confirm that the approved plan
 commit remains the intended base and update the decomposition if the branch has
 advanced.
 
+## Execution record
+
+Implementation runs on child branch
+`codex/featurerun-plangraph-dashboard-impl` so the original mockup branch and
+its audit evidence remain unchanged. Fresh dispatch attempt
+`fr_3f40786290c9445aae418f16d9e707d0` stopped before planner launch because the
+repository still tracked a completed checkpoint for an unrelated Initializing
+project. That attempt was durably marked blocked; it is not resumed or treated
+as implementation evidence.
+
+Bootstrap commit `68b10c55b8dc5423c57a7d633900ac210cb49c5f` removes only that obsolete
+checkpoint. The six implementation FeatureRuns start from the descendant plan
+commit containing this execution record and retain sequential candidate
+lineage on the implementation branch.
+
 ## Why this needs runtime work, not only UI wiring
 
 ### FeatureRuns are discoverable but “running” is not yet trustworthy
@@ -469,4 +484,3 @@ gate, ambiguous base, or unverified integration result.
   only after explicit import.
 - Remote aggregation, authentication, run mutation, artifact-content viewing,
   and multi-repository graphs require separate plans backed by observed need.
-
