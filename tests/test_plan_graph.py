@@ -35,6 +35,23 @@ def plan(*runs: PlanRun) -> PlanGraphPlan:
 
 
 class PlanGraphTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._temporary_directory = tempfile.TemporaryDirectory()
+        self._state_counter = 0
+
+    def tearDown(self) -> None:
+        self._temporary_directory.cleanup()
+
+    def _legacy_graph(self, *args, **kwargs) -> PlanGraph:
+        self._state_counter += 1
+        return PlanGraph(
+            *args,
+            state_path=(
+                Path(self._temporary_directory.name) / f"legacy-{self._state_counter}.json"
+            ),
+            **kwargs,
+        )
+
     @patch("harness_labs.plan_graph.subprocess.run")
     def test_subprocess_launcher_keeps_one_graph_run_moving(self, run) -> None:
         commits = iter(("A-commit", "B-commit"))
@@ -55,7 +72,7 @@ class PlanGraphTests(unittest.TestCase):
             )
 
         run.side_effect = respond
-        result = PlanGraph(
+        result = self._legacy_graph(
             plan(
                 PlanRun("A", "Build A", ("1",), ("AC-1",)),
                 PlanRun("B", "Build B", ("2",), ("AC-2",), ("A",)),
@@ -94,7 +111,7 @@ class PlanGraphTests(unittest.TestCase):
             calls.append((request.run.id, request.base_commit))
             return FeatureRunOutcome("succeeded", f"{request.run.id}-commit")
 
-        graph = PlanGraph(
+        graph = self._legacy_graph(
             plan(
                 PlanRun("A", "Build A", ("1",), ("AC-1",)),
                 PlanRun("B", "Build B", ("2",), ("AC-2",), ("A",)),
@@ -130,7 +147,7 @@ class PlanGraphTests(unittest.TestCase):
         }
         requests = []
         final_tests = []
-        graph = PlanGraph(
+        graph = self._legacy_graph(
             plan_from_mapping(payload),
             lambda request: (
                 requests.append(request)
@@ -172,7 +189,7 @@ class PlanGraphTests(unittest.TestCase):
             },
         )
 
-        result = PlanGraph(
+        result = self._legacy_graph(
             queue_plan,
             lambda request: (
                 calls.append((request.run.id, request.base_commit))
@@ -200,7 +217,9 @@ class PlanGraphTests(unittest.TestCase):
         for invalid in invalid_plans:
             with self.subTest(invalid=invalid):
                 with self.assertRaisesRegex(PlanGraphError, "absent from"):
-                    PlanGraph(invalid, lambda request: FeatureRunOutcome("succeeded")).run()
+                    self._legacy_graph(
+                        invalid, lambda request: FeatureRunOutcome("succeeded")
+                    ).run()
 
     @patch("harness_labs.plan_graph.subprocess.run")
     def test_default_functionality_test_uses_candidate_checkout(self, run) -> None:
@@ -226,7 +245,9 @@ class PlanGraphTests(unittest.TestCase):
             with self.subTest(invalid=invalid):
                 calls = []
                 with self.assertRaises(PlanGraphError):
-                    PlanGraph(invalid, lambda request: calls.append(request)).run()
+                    self._legacy_graph(
+                        invalid, lambda request: calls.append(request)
+                    ).run()
                 self.assertEqual(calls, [])
 
     def test_failure_stops_dependents(self) -> None:
@@ -236,7 +257,7 @@ class PlanGraphTests(unittest.TestCase):
             calls.append(request.run.id)
             return FeatureRunOutcome("failed")
 
-        result = PlanGraph(
+        result = self._legacy_graph(
             plan(
                 PlanRun("A", "Build A", ("1",), ("AC-1",)),
                 PlanRun("B", "Build B", ("2",), ("AC-2",), ("A",)),
@@ -282,7 +303,7 @@ class PlanGraphTests(unittest.TestCase):
         queue_plan = plan(PlanRun("A", "Build A", ("1",), ("AC-1",)), PlanRun("B", "Build B", ("2",), ("AC-2",), ("A",)))
         for prefix in ("one", "two"):
             with self.subTest(prefix=prefix):
-                result = PlanGraph(
+                result = self._legacy_graph(
                     queue_plan,
                     lambda request, prefix=prefix: FeatureRunOutcome("succeeded", f"{prefix}-{request.run.id}"),
                 ).run()

@@ -39,6 +39,8 @@ def main() -> int:
     parser.add_argument("--launcher-cwd", type=Path)
     parser.add_argument("--launcher-timeout", type=float)
     parser.add_argument("--state", type=Path)
+    parser.add_argument("--run-root", type=Path)
+    parser.add_argument("--graph-run-id")
     parser.add_argument("--functionality-test", action="append", default=[])
     arguments = parser.parse_args()
     payload = json.loads(arguments.decomposition.read_text(encoding="utf-8"))
@@ -59,13 +61,29 @@ def main() -> int:
             return FeatureRunOutcome(**result)
         raise TypeError("launcher must return FeatureRunOutcome or a mapping")
 
-    result = PlanGraph(
+    graph = PlanGraph(
         plan_from_mapping(payload),
         launch,
         state_path=arguments.state,
+        run_root=(
+            arguments.run_root
+            if arguments.state
+            else (arguments.run_root or Path("logs/runs"))
+        ),
+        graph_run_id=arguments.graph_run_id,
         functionality_tests=arguments.functionality_test,
-    ).run()
-    print(json.dumps({"status": result.status, "candidate_commit": result.candidate_commit, "failed_run_id": result.failed_run_id}))
+    )
+    result = graph.run()
+    print(
+        json.dumps(
+            {
+                "status": result.status,
+                "candidate_commit": result.candidate_commit,
+                "failed_run_id": result.failed_run_id,
+                "graph_run_id": graph.graph_run_id,
+            }
+        )
+    )
     return 0 if result.status == "succeeded" else 1
 
 
