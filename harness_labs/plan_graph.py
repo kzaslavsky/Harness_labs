@@ -13,6 +13,10 @@ from pathlib import Path
 import subprocess
 import tempfile
 from typing import Callable, Mapping, Sequence
+from uuid import uuid4
+
+from .audit import AuditError
+from .plan_graph_audit import PlanGraphAudit
 
 
 class PlanGraphError(ValueError):
@@ -50,6 +54,10 @@ class FeatureRunRequest:
     run: PlanRun
     base_commit: str
     plan: str
+    plan_graph_id: str | None = None
+    plan_node_id: str | None = None
+    feature_run_id: str | None = None
+    run_dir: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -59,6 +67,10 @@ class FeatureRunOutcome:
     status: str
     candidate_commit: str | None = None
     evidence: object | None = None
+    plan_graph_id: str | None = None
+    plan_node_id: str | None = None
+    feature_run_id: str | None = None
+    run_dir: str | None = None
 
 
 @dataclass(frozen=True)
@@ -111,6 +123,10 @@ class SubprocessFeatureRunLauncher:
             },
             "base_commit": request.base_commit,
             "plan": request.plan,
+            "plan_graph_id": request.plan_graph_id,
+            "plan_node_id": request.plan_node_id,
+            "feature_run_id": request.feature_run_id,
+            "run_dir": str(request.run_dir) if request.run_dir is not None else None,
         }
         try:
             completed = subprocess.run(
@@ -146,6 +162,10 @@ class SubprocessFeatureRunLauncher:
                 raise ValueError(f"invalid status {status!r}")
             if candidate_commit is not None and not isinstance(candidate_commit, str):
                 raise TypeError("candidate_commit must be a string or null")
+            for name in ("plan_graph_id", "plan_node_id", "feature_run_id", "run_dir"):
+                value = result.get(name)
+                if value is not None and not isinstance(value, str):
+                    raise TypeError(f"{name} must be a string or null")
         except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
             return FeatureRunOutcome(
                 "failed",
@@ -159,6 +179,10 @@ class SubprocessFeatureRunLauncher:
             status,
             candidate_commit,
             result.get("evidence"),
+            result.get("plan_graph_id"),
+            result.get("plan_node_id"),
+            result.get("feature_run_id"),
+            result.get("run_dir"),
         )
 
 
@@ -171,12 +195,27 @@ class PlanGraph:
         launcher: FeatureRunLauncher,
         *,
         state_path: Path | None = None,
+        run_root: Path | None = None,
+        graph_run_id: str | None = None,
         functionality_tests: Sequence[str] = (),
         functionality_test_runner: FunctionalityTestRunner | None = None,
     ) -> None:
         self.plan = plan
         self.launcher = launcher
         self.state_path = state_path
+        if run_root is None and state_path is None:
+            raise PlanGraphError(
+                "run_root is required; legacy execution requires an explicit state_path"
+            )
+        if graph_run_id is not None and run_root is None:
+            raise PlanGraphError("graph_run_id requires run_root")
+        if run_root is not None and state_path is not None:
+            raise PlanGraphError("run_root and legacy state_path cannot be combined")
+        self.run_root = run_root
+        self.graph_run_id = graph_run_id or (
+            f"plan-graph-{uuid4().hex}" if run_root is not None else None
+        )
+        self._audit: PlanGraphAudit | None = None
         self.functionality_tests = (
             tuple(plan.functionality_tests) + tuple(functionality_tests)
         )
@@ -255,7 +294,14 @@ class PlanGraph:
         """Validate, resume completed nodes, then launch runs sequentially."""
 
         self.validate()
-        completed = self._load_completed()
+        audit = self._audit_for_run()
+        if audit is not None and audit.terminal:
+            return self._result_from_audit(audit)
+        completed = (
+            self._load_audit_completed(audit)
+            if audit is not None
+            else self._load_completed()
+        )
         ordered_runs = self._ordered_runs()
         self._validate_completed_dependencies(ordered_runs, completed)
         candidate_commit = self.plan.base_commit
@@ -263,18 +309,30 @@ class PlanGraph:
             if run.id in completed:
                 candidate_commit = completed[run.id]
                 continue
-            outcome = self.launcher(
-                FeatureRunRequest(
-                    run=run, base_commit=candidate_commit, plan=self.plan.plan
+            request = self._request_for_run(run, candidate_commit)
+            if audit is not None:
+                audit.node_started(run.id)
+            outcome = self.launcher(request)
+            if audit is not None and not self._outcome_matches_reservation(
+                outcome, request
+            ):
+                outcome = FeatureRunOutcome(
+                    "failed",
+                    evidence={
+                        "error": "launcher result does not match reserved child identity"
+                    },
                 )
-            )
             if outcome.status != "succeeded":
-                return PlanGraphResult(
+                result = PlanGraphResult(
                     status=outcome.status if outcome.status == "blocked" else "failed",
                     candidate_commit=None,
                     completed=dict(completed),
                     failed_run_id=run.id,
                 )
+                if audit is not None:
+                    audit.node_failed(run.id, result.status, outcome.evidence)
+                    audit.finalize(result.status, self._result_payload(result))
+                return result
             if not outcome.candidate_commit:
                 raise PlanGraphError(
                     f"successful FeatureRun {run.id!r} did not provide a candidate commit"
@@ -282,18 +340,167 @@ class PlanGraph:
             completed[run.id] = outcome.candidate_commit
             candidate_commit = outcome.candidate_commit
             self._save_completed(completed)
+            if audit is not None:
+                audit.node_completed(run.id, candidate_commit)
 
         for command in self.functionality_tests:
             try:
                 self.functionality_test_runner(command, candidate_commit)
             except Exception as exc:  # final test failures are terminal evidence
-                return PlanGraphResult(
+                result = PlanGraphResult(
                     status="failed",
                     candidate_commit=candidate_commit,
                     completed=dict(completed),
                     functionality_failure=f"{command}: {exc}",
                 )
-        return PlanGraphResult("succeeded", candidate_commit, dict(completed))
+                if audit is not None:
+                    audit.functionality_failed(command, candidate_commit, str(exc))
+                    audit.finalize("failed", self._result_payload(result))
+                return result
+            if audit is not None:
+                audit.functionality_completed(command, candidate_commit)
+        result = PlanGraphResult("succeeded", candidate_commit, dict(completed))
+        if audit is not None:
+            audit.finalize("succeeded", self._result_payload(result))
+        return result
+
+    def _audit_for_run(self) -> PlanGraphAudit | None:
+        if self.run_root is None:
+            return None
+        if self._audit is None:
+            assert self.graph_run_id is not None
+            nodes = {
+                run.id: {
+                    "status": "queued",
+                    "objective": run.objective,
+                    "plan_sections": list(run.plan_sections),
+                    "depends_on": list(run.depends_on),
+                    "criteria": list(run.criteria),
+                    "verification_argv": list(run.verification_argv),
+                    "feature_run_id": self._feature_run_id(run.id),
+                    "run_dir": str(
+                        (self.run_root / self._feature_run_id(run.id)).resolve()
+                    ),
+                    "started_at": None,
+                    "finished_at": None,
+                    "candidate_commit": None,
+                }
+                for run in self._ordered_runs()
+            }
+            try:
+                self._audit = PlanGraphAudit(
+                    run_root=self.run_root,
+                    graph_run_id=self.graph_run_id,
+                    plan=self.plan.plan,
+                    base_commit=self.plan.base_commit,
+                    objective="; ".join(run.objective for run in self.plan.runs),
+                    nodes=nodes,
+                    functionality_tests=self.functionality_tests,
+                )
+            except (AuditError, OSError, ValueError) as exc:
+                raise PlanGraphError(f"could not open PlanGraph audit: {exc}") from exc
+        return self._audit
+
+    @staticmethod
+    def _load_audit_completed(audit: PlanGraphAudit) -> dict[str, str]:
+        nodes = audit.state.get("nodes")
+        if not isinstance(nodes, dict):
+            raise PlanGraphError(
+                "invalid PlanGraph audit checkpoint: nodes must be an object"
+            )
+        completed: dict[str, str] = {}
+        for node_id, node in nodes.items():
+            if not isinstance(node_id, str) or not isinstance(node, dict):
+                raise PlanGraphError("invalid PlanGraph audit checkpoint node")
+            if node.get("status") == "succeeded":
+                candidate = node.get("candidate_commit")
+                if not isinstance(candidate, str):
+                    raise PlanGraphError(
+                        "successful PlanGraph audit node has no candidate commit"
+                    )
+                completed[node_id] = candidate
+        return completed
+
+    def _feature_run_id(self, node_id: str) -> str:
+        assert self.graph_run_id is not None
+        return f"{self.graph_run_id}-{node_id}"
+
+    def _request_for_run(self, run: PlanRun, candidate_commit: str) -> FeatureRunRequest:
+        if self._audit is None:
+            return FeatureRunRequest(
+                run=run, base_commit=candidate_commit, plan=self.plan.plan
+            )
+        feature_run_id = self._feature_run_id(run.id)
+        return FeatureRunRequest(
+            run=run,
+            base_commit=candidate_commit,
+            plan=self.plan.plan,
+            plan_graph_id=self.graph_run_id,
+            plan_node_id=run.id,
+            feature_run_id=feature_run_id,
+            run_dir=(self.run_root / feature_run_id).resolve(),
+        )
+
+    @staticmethod
+    def _outcome_matches_reservation(
+        outcome: FeatureRunOutcome, request: FeatureRunRequest
+    ) -> bool:
+        if outcome.status != "succeeded":
+            return True
+        return (
+            outcome.plan_graph_id == request.plan_graph_id
+            and outcome.plan_node_id == request.plan_node_id
+            and outcome.feature_run_id == request.feature_run_id
+            and outcome.run_dir == str(request.run_dir)
+        )
+
+    @staticmethod
+    def _result_payload(result: PlanGraphResult) -> dict[str, object]:
+        return {
+            "status": result.status,
+            "candidate_commit": result.candidate_commit,
+            "completed": dict(result.completed),
+            "failed_run_id": result.failed_run_id,
+            "functionality_failure": result.functionality_failure,
+        }
+
+    @staticmethod
+    def _result_from_audit(audit: PlanGraphAudit) -> PlanGraphResult:
+        state = audit.state
+        nodes = state.get("nodes", {})
+        completed = {
+            node_id: node["candidate_commit"]
+            for node_id, node in nodes.items()
+            if isinstance(node, dict)
+            and node.get("status") == "succeeded"
+            and isinstance(node.get("candidate_commit"), str)
+        }
+        failed = next(
+            (
+                node_id
+                for node_id, node in nodes.items()
+                if isinstance(node, dict)
+                and node.get("status") in {"failed", "blocked"}
+            ),
+            None,
+        )
+        functionality = state.get("functionality_test", {})
+        return PlanGraphResult(
+            status=str(state.get("terminal_graph_status")),
+            candidate_commit=(
+                state.get("current_candidate_commit")
+                if isinstance(state.get("current_candidate_commit"), str)
+                else None
+            ),
+            completed=completed,
+            failed_run_id=failed,
+            functionality_failure=(
+                functionality.get("error")
+                if isinstance(functionality, dict)
+                and isinstance(functionality.get("error"), str)
+                else None
+            ),
+        )
 
     def _ordered_runs(self) -> tuple[PlanRun, ...]:
         by_id = {run.id: run for run in self.plan.runs}
