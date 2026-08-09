@@ -1,0 +1,31 @@
+{
+  "protocol": "harness-run-catalog-snapshot/1",
+  "revision": "catalog-1",
+  "generated_at": "2026-08-09T12:06:00Z",
+  "source_root": "/workspace/harness-labs/logs/runs",
+  "availability": {"state": "partial", "reason": "one corrupt run was isolated"},
+  "diagnostics": [{"code": "corrupt_run", "message": "descriptor is malformed", "run_id": "corrupt-run-1"}],
+  "plan_graphs": [{
+    "run_id": "graph-1",
+    "status": "running",
+    "liveness": {"state": "live", "reason": null},
+    "evidence": {"state": "available", "reason": null},
+    "nodes": [{"node_id": "catalog-contracts", "status": "succeeded", "feature_run_id": "feature-child-1", "liveness": {"state": "terminal", "reason": null}, "evidence": {"state": "available", "reason": null}}]
+  }],
+  "feature_runs": [{
+    "run_id": "feature-active-1",
+    "kind": "feature_run",
+    "status": "running",
+    "liveness": {"state": "stale", "reason": "heartbeat is outside the freshness window"},
+    "evidence": {"state": "unavailable", "reason": "no terminal manifest exists"},
+    "correlation": {"plan_graph_id": "graph-1", "plan_node_id": "read-model", "parent_run_id": "graph-1"}
+  }],
+  "ungrouped_feature_runs": [{
+    "run_id": "feature-legacy-1",
+    "kind": "legacy_feature_run",
+    "status": "succeeded",
+    "liveness": {"state": "terminal", "reason": null},
+    "evidence": {"state": "partial", "reason": "descriptor was absent for the legacy run"},
+    "correlation": null
+  }]
+}

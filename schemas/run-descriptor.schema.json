@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://harness-labs.local/schemas/run-descriptor.schema.json",
+  "title": "Immutable PlanGraph or FeatureRun descriptor",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["protocol", "run_kind", "run_id", "created_at", "objective", "evidence_classification", "repository", "approved_plan", "parent_correlation"],
+  "properties": {
+    "protocol": {"const": "harness-run-descriptor/1"},
+    "run_kind": {"enum": ["plan_graph", "feature_run"]},
+    "run_id": {"type": "string", "minLength": 1, "pattern": "^[^/]+$"},
+    "created_at": {"type": "string", "format": "date-time"},
+    "objective": {"type": "string", "minLength": 1},
+    "evidence_classification": {"enum": ["production_lifecycle", "component", "synthetic", "fabricated_fixture"]},
+    "repository": {"$ref": "#/$defs/repository"},
+    "approved_plan": {"type": ["null", "object"], "allOf": [{"if": {"type": "object"}, "then": {"$ref": "#/$defs/plan"}}]},
+    "parent_correlation": {"type": ["null", "object"], "allOf": [{"if": {"type": "object"}, "then": {"$ref": "#/$defs/correlation"}}]}
+  },
+  "allOf": [
+    {"if": {"properties": {"run_kind": {"const": "plan_graph"}}}, "then": {"properties": {"approved_plan": {"$ref": "#/$defs/plan"}, "parent_correlation": {"type": "null"}}}},
+    {"if": {"properties": {"run_kind": {"const": "feature_run"}}}, "then": {"properties": {"parent_correlation": {"type": ["null", "object"], "allOf": [{"if": {"type": "object"}, "then": {"$ref": "#/$defs/correlation"}}]}}}}
+  ],
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "git_commit": {"type": "string", "pattern": "^[a-f0-9]{40}$"},
+    "repository": {"type": "object", "additionalProperties": false, "required": ["path", "base_branch", "base_commit"], "properties": {"path": {"type": "string", "minLength": 1}, "base_branch": {"type": "string", "minLength": 1}, "base_commit": {"$ref": "#/$defs/git_commit"}}},
+    "plan": {"type": "object", "additionalProperties": false, "required": ["path", "sha256"], "properties": {"path": {"type": "string", "minLength": 1}, "sha256": {"$ref": "#/$defs/sha256"}}},
+    "correlation": {"type": "object", "additionalProperties": false, "required": ["plan_graph_id", "plan_node_id", "parent_run_id"], "properties": {"plan_graph_id": {"type": "string", "minLength": 1}, "plan_node_id": {"type": "string", "minLength": 1}, "parent_run_id": {"type": "string", "minLength": 1}}}
+  }
+}
