@@ -1,6 +1,6 @@
 {
   "plan": "docs/development/live-plangraph-dashboard-plan.md",
-  "base_commit": "e6cc7b24aa95ecee10669e94dcfd663592d1b4a0",
+  "base_commit": "5e9745f127aedb8a560a9fe1786c69191f0abaa7",
   "plan_sections": {
     "FR-01": "Define closed discovery, descriptor, liveness, and dashboard snapshot contracts. AC-01: Closed JSON schemas distinguish PlanGraphs, FeatureRuns, liveness, and unavailable evidence.",
     "FR-02": "Make PlanGraph executions durable, identifiable, resumable, and correlated with child FeatureRuns. AC-02: Every new PlanGraph writes a canonical audit directory and durable node checkpoint. AC-03: Every launched child is correlated by plan_graph_id, plan_node_id, and feature_run_id.",
