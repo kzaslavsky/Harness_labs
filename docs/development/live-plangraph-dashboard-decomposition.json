@@ -1,0 +1,81 @@
+{
+  "plan": "docs/development/live-plangraph-dashboard-plan.md",
+  "base_commit": "e6cc7b24aa95ecee10669e94dcfd663592d1b4a0",
+  "plan_sections": {
+    "FR-01": "Define closed discovery, descriptor, liveness, and dashboard snapshot contracts. AC-01: Closed JSON schemas distinguish PlanGraphs, FeatureRuns, liveness, and unavailable evidence.",
+    "FR-02": "Make PlanGraph executions durable, identifiable, resumable, and correlated with child FeatureRuns. AC-02: Every new PlanGraph writes a canonical audit directory and durable node checkpoint. AC-03: Every launched child is correlated by plan_graph_id, plan_node_id, and feature_run_id.",
+    "FR-03": "Build the verified read model that discovers historical and live FeatureRuns and PlanGraphs. AC-04: Discovery projects terminal, active, stale, legacy, corrupt, and ungrouped runs without guessing. AC-05: A run is labeled live only when its same-host lease is fresh and its process identity matches. AC-06: One FeatureRun detail projection exposes lifecycle, criteria, tasks, findings, evidence metadata, Git custody, usage, and availability.",
+    "FR-04": "Expose the run catalog through a bounded read-only local dashboard API. AC-07: The local API is read-only, path-contained, deterministic, ETag-enabled, and safe against symlinks and malformed journals.",
+    "FR-05": "Connect the React Flow dashboard to real PlanGraph and FeatureRun data. AC-08: The dashboard renders discovered PlanGraphs and updates the selected FeatureRun inspector from API data. AC-09: Polling preserves selection and distinguishes running, queued, blocked, stale, terminal, and unavailable states.",
+    "FR-06": "Certify the complete discovery-to-inspection workflow and document operation and migration. AC-10: End-to-end tests prove completed and live discovery, stale-run rejection, PlanGraph correlation, UI inspection, and legacy behavior."
+  },
+  "acceptance_criteria": {
+    "AC-01": "Closed JSON schemas distinguish PlanGraphs, FeatureRuns, liveness, and unavailable evidence.",
+    "AC-02": "Every new PlanGraph writes a canonical audit directory and durable node checkpoint.",
+    "AC-03": "Every launched child is correlated by plan_graph_id, plan_node_id, and feature_run_id.",
+    "AC-04": "Discovery projects terminal, active, stale, legacy, corrupt, and ungrouped runs without guessing.",
+    "AC-05": "A run is labeled live only when its same-host lease is fresh and its process identity matches.",
+    "AC-06": "One FeatureRun detail projection exposes lifecycle, criteria, tasks, findings, evidence metadata, Git custody, usage, and availability.",
+    "AC-07": "The local API is read-only, path-contained, deterministic, ETag-enabled, and safe against symlinks and malformed journals.",
+    "AC-08": "The dashboard renders discovered PlanGraphs and updates the selected FeatureRun inspector from API data.",
+    "AC-09": "Polling preserves selection and distinguishes running, queued, blocked, stale, terminal, and unavailable states.",
+    "AC-10": "End-to-end tests prove completed and live discovery, stale-run rejection, PlanGraph correlation, UI inspection, and legacy behavior."
+  },
+  "runs": [
+    {
+      "id": "catalog-contracts",
+      "objective": "Define closed discovery, descriptor, liveness, and dashboard snapshot contracts.",
+      "plan_sections": ["FR-01"],
+      "criteria": ["AC-01"],
+      "depends_on": [],
+      "verification_argv": ["python3", "-m", "unittest", "tests.test_run_catalog_contracts"]
+    },
+    {
+      "id": "plangraph-observability",
+      "objective": "Make PlanGraph executions durable, identifiable, resumable, and correlated with child FeatureRuns.",
+      "plan_sections": ["FR-02"],
+      "criteria": ["AC-02", "AC-03"],
+      "depends_on": ["catalog-contracts"],
+      "verification_argv": ["python3", "-m", "unittest", "tests.test_plan_graph", "tests.test_plan_graph_observability"]
+    },
+    {
+      "id": "verified-run-catalog",
+      "objective": "Build the verified read model that discovers historical and live FeatureRuns and PlanGraphs.",
+      "plan_sections": ["FR-03"],
+      "criteria": ["AC-04", "AC-05", "AC-06"],
+      "depends_on": ["catalog-contracts", "plangraph-observability"],
+      "verification_argv": ["python3", "-m", "unittest", "tests.test_run_metrics", "tests.test_run_catalog"]
+    },
+    {
+      "id": "dashboard-api",
+      "objective": "Expose the run catalog through a bounded read-only local dashboard API.",
+      "plan_sections": ["FR-04"],
+      "criteria": ["AC-07"],
+      "depends_on": ["verified-run-catalog"],
+      "verification_argv": ["python3", "-m", "unittest", "tests.test_dashboard_api"]
+    },
+    {
+      "id": "reactflow-live-data",
+      "objective": "Connect the React Flow dashboard to real PlanGraph and FeatureRun data.",
+      "plan_sections": ["FR-05"],
+      "criteria": ["AC-08", "AC-09"],
+      "depends_on": ["catalog-contracts", "dashboard-api"],
+      "verification_argv": ["npm", "--prefix", "dashboard/plan-graph", "run", "verify"]
+    },
+    {
+      "id": "dashboard-certification",
+      "objective": "Certify the complete discovery-to-inspection workflow and document operation and migration.",
+      "plan_sections": ["FR-06"],
+      "criteria": ["AC-10"],
+      "depends_on": ["plangraph-observability", "verified-run-catalog", "dashboard-api", "reactflow-live-data"],
+      "verification_argv": ["python3", "-m", "unittest", "tests.test_dashboard_e2e"]
+    }
+  ],
+  "functionality_tests": [
+    "python3 -m unittest discover -s tests",
+    "python3 scripts/check_repository_contracts.py",
+    "npm --prefix dashboard/plan-graph run verify",
+    "npm --prefix dashboard/plan-graph run build",
+    "python3 -m unittest tests.test_dashboard_e2e"
+  ]
+}

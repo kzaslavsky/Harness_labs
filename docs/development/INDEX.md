@@ -31,6 +31,8 @@ Status: active
   [`hybrid-controller-coordinator.md`](hybrid-controller-coordinator.md)
 - Claude `solo-phased-reviewfix` and FeatureRun comparison:
   [`solo-phased-reviewfix-feature-run-comparison.md`](solo-phased-reviewfix-feature-run-comparison.md)
+- Live React Flow PlanGraph and FeatureRun dashboard:
+  [`live-plangraph-dashboard-plan.md`](live-plangraph-dashboard-plan.md)
 
 ## Seed implementation records
 
