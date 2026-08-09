@@ -1,0 +1,11 @@
+{
+  "protocol": "harness-controller-liveness/1",
+  "run_id": "feature-active-1",
+  "controller_instance_id": "controller-instance-1",
+  "hostname": "dashboard-host",
+  "pid": 4242,
+  "process_start_token": "boot-12345",
+  "heartbeat_sequence": 7,
+  "heartbeat_at": "2026-08-09T12:05:00Z",
+  "controller_kind": "feature_run"
+}

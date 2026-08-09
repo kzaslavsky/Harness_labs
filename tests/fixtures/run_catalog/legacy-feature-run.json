@@ -1,0 +1,11 @@
+{
+  "protocol": "harness-run-descriptor/1",
+  "run_kind": "feature_run",
+  "run_id": "feature-legacy-1",
+  "created_at": "2026-08-09T12:02:00Z",
+  "objective": "Preserve a legacy FeatureRun",
+  "evidence_classification": "production_lifecycle",
+  "repository": {"path": "/workspace/harness-labs", "base_branch": "main", "base_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+  "approved_plan": null,
+  "parent_correlation": null
+}
