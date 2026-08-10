@@ -8,6 +8,12 @@ function isObject(value) { return value !== null && typeof value === 'object' &&
 function isText(value) { return typeof value === 'string' && value.length > 0; }
 function validAvailability(value) { return isObject(value) && availabilityStates.has(value.state) && (value.reason === null || typeof value.reason === 'string'); }
 function validLiveness(value) { return isObject(value) && livenessStates.has(value.state) && (value.reason === null || typeof value.reason === 'string'); }
+function validMetrics(value) {
+  const breakdowns = ['by_phase', 'by_agent', 'by_agent_type', 'by_model', 'by_effort', 'by_backend'];
+  return isObject(value) && value.protocol === 'harness-run-detail-metrics/1'
+    && isObject(value.totals) && isObject(value.quality) && isObject(value.provenance)
+    && breakdowns.every((key) => Array.isArray(value[key]));
+}
 
 function validFeatureRun(value) {
   return isObject(value) && isText(value.run_id) && ['feature_run', 'legacy_feature_run'].includes(value.kind)
@@ -43,7 +49,7 @@ export function validateRunDetail(value) {
   const arrayFamilies = ['lifecycle', 'evidence_metadata', 'git_custody'];
   const recordFamilies = ['criteria', 'tasks', 'findings', 'decisions'];
   const availabilityFamilies = ['lifecycle', 'criteria', 'tasks', 'findings', 'evidence_metadata', 'git_custody', 'usage'];
-  if (!isObject(value) || !isObject(value.availability) || !isObject(value.timing)
+  if (!isObject(value) || !isObject(value.availability) || !isObject(value.timing) || !validMetrics(value.metrics)
       || !arrayFamilies.every((key) => Array.isArray(value[key]))
       || !recordFamilies.every((key) => Array.isArray(value[key]) || isObject(value[key]))
       || !availabilityFamilies.every((key) => validAvailability(value.availability[key]))) {

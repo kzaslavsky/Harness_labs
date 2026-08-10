@@ -66,6 +66,28 @@ class RunCatalogTests(unittest.TestCase):
         self.assertEqual(detail["availability"]["criteria"]["state"], "available")
         self.assertEqual(detail["availability"]["findings"]["state"], "available")
 
+    def test_detail_projects_reconciled_usage_breakdowns(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); run = self._run(root, "metrics")
+            journal = AuditJournal.open_existing(run, actor=AuditActor("controller", "controller"))
+            usage = {"input_tokens": 100, "cached_input_tokens": 40, "output_tokens": 25, "cost_usd": "0.125000", "model": "gpt-test"}
+            journal.append(
+                "backend_transport", status="succeeded", attempt_id="implement-metrics/attempt-1",
+                actor=AuditActor("implement-metrics/attempt-1", "semantic_worker"), backend_id="codex-exec", duration_ms=2_000,
+                payload={"model": "gpt-test", "reasoning": "high", "usage": usage},
+            )
+            journal.checkpoint("running", {"controller": {"criteria": {"AC-1": {"status": "satisfied"}}, "findings": {}}, "review_fix": {"cycles": 1}})
+            detail = build_run_detail(root, "metrics")
+        projected = detail["metrics"]
+        self.assertEqual(projected["totals"]["total_tokens"], 125)
+        self.assertEqual(projected["totals"]["cached_input_tokens"], 40)
+        self.assertEqual(projected["totals"]["cost"]["usd"], 0.125)
+        self.assertEqual(projected["by_phase"][0]["label"], "implement")
+        self.assertEqual(projected["by_agent"][0]["peak_input_tokens"], 100)
+        self.assertEqual(projected["by_model"][0]["label"], "gpt-test")
+        self.assertEqual(projected["by_effort"][0]["label"], "high")
+        self.assertEqual(projected["quality"]["criteria_satisfied"], 1)
+
     def test_invalid_descriptor_and_unmatched_correlation_are_not_trusted(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

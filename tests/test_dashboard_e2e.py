@@ -208,8 +208,11 @@ class DashboardEndToEndTests(unittest.TestCase):
                 page.wait_for("document.querySelector('.inspector').innerText.includes('Dashboard fixture live-child')")
                 self.assertEqual(
                     page.evaluate("[...document.querySelectorAll('.detail-tabs button')].map((button) => button.innerText)"),
-                    ["Overview", "Activity", "Evidence", "Git Custody"],
+                    ["Overview", "Activity", "Metrics", "Evidence", "Git Custody"],
                 )
+                page.evaluate("[...document.querySelectorAll('.detail-tabs button')].find((button) => button.innerText === 'Metrics').click()")
+                page.wait_for("document.querySelector('.inspector').innerText.includes('Total tokens')")
+                self.assertEqual(page.evaluate("document.querySelectorAll('.inspector pre').length"), 0)
                 self.assertEqual(before, _tree_digest(root), "dashboard reads must not mutate the audit root")
                 advance_live_fixture(root)
                 # The two-second UI polling interval must retain the selection and

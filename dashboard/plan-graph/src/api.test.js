@@ -5,6 +5,7 @@ import { displayState, graphProjection, selectedRunFor, stateLabel, validateCata
 const availability = { state: 'available', reason: null };
 const liveness = (state) => ({ state, reason: null });
 const feature = { run_id: 'run-1', kind: 'feature_run', status: 'running', liveness: liveness('live'), evidence: availability, correlation: null };
+const metrics = { protocol: 'harness-run-detail-metrics/1', totals: {}, quality: {}, provenance: {}, by_phase: [], by_agent: [], by_agent_type: [], by_model: [], by_effort: [], by_backend: [] };
 
 test('runtime validation accepts a catalog with a correlated graph node', () => {
   const catalog = { protocol: 'harness-run-catalog-snapshot/1', revision: 'rev', generated_at: '2026-08-09T00:00:00Z', source_root: '/audit', availability, diagnostics: [], feature_runs: [feature], ungrouped_feature_runs: [], plan_graphs: [{ run_id: 'graph-1', status: 'running', liveness: liveness('live'), evidence: availability, nodes: [{ node_id: 'node-1', status: 'running', feature_run_id: 'run-1', liveness: liveness('live'), evidence: availability }] }] };
@@ -36,7 +37,7 @@ test('FeatureRun detail validation accepts the production availability projectio
   const unavailable = { state: 'unavailable', reason: 'not recorded' };
   const detail = {
     lifecycle: [], criteria: [], tasks: [], findings: [], decisions: [], evidence_metadata: [], git_custody: [],
-    usage: null, timing: {}, availability: {
+    usage: null, metrics, timing: {}, availability: {
       lifecycle: availability, criteria: availability, tasks: unavailable, findings: unavailable,
       evidence_metadata: unavailable, git_custody: availability, usage: unavailable,
     },
@@ -50,7 +51,7 @@ test('FeatureRun detail validation normalizes keyed controller families', () => 
   const detail = {
     lifecycle: [], criteria: { 'AC-1': { id: 'AC-1', status: 'satisfied' } },
     tasks: { task: { id: 'task', status: 'succeeded' } }, findings: {}, decisions: {},
-    evidence_metadata: [], git_custody: [], usage: null, timing: {}, availability: {
+    evidence_metadata: [], git_custody: [], usage: null, metrics, timing: {}, availability: {
       lifecycle: availability, criteria: availability, tasks: availability, findings: availability,
       evidence_metadata: availability, git_custody: availability, usage: availability,
     },

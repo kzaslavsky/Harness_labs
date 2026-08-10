@@ -106,6 +106,15 @@ explicit `ModelPrice` and recorded source; absent pricing creates an unpriced
 usage record and makes `cost_complete=false`. Capability-broker executions
 contribute duration and tool-call counts without inventing model-token usage.
 
+The read-only dashboard projects verified `backend_transport` events into run,
+phase, agent invocation, agent type, model, reasoning-effort, and backend
+breakdowns. Total tokens are input plus output tokens; cached input is reported
+separately and is not added a second time. “Peak observed input” is the maximum
+`input_tokens` value from one backend invocation, not a claim about true context
+window occupancy. Dollar cost is displayed only when every included usage
+record has authoritative pricing; otherwise the UI reports cost as unavailable
+and gives the missing-record count.
+
 Do not log credentials, access tokens, private keys, sensitive personal data,
 full environment dumps, or unredacted third-party content. Raw model reasoning
 is not a contract artifact; store concise decisions, inputs, outputs, and

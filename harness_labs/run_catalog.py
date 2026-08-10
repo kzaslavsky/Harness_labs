@@ -7,6 +7,7 @@ import os
 import socket
 import subprocess
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
@@ -139,7 +140,134 @@ def _detail(metrics: Mapping[str, Any], descriptor: Mapping[str, Any] | None) ->
     git = [event["payload"] for event in events if str(event.get("event_type", "")).startswith("git_")]
     def family_present(key: str, reason: str) -> dict[str, str | None]:
         return availability("available") if key in controller else availability("unavailable", reason)
-    return {"lifecycle": events, "criteria": controller.get("criteria", []), "tasks": controller.get("tasks", []), "findings": controller.get("findings", []), "decisions": controller.get("decisions", []), "evidence_metadata": metrics["manifest"].get("artifacts", []) if metrics["manifest"] else [], "git_custody": git, "usage": metrics["summary"], "timing": {"started_at": metrics["checkpoint"].get("started_at"), "updated_at": metrics["checkpoint"].get("updated_at")}, "availability": {"lifecycle": availability("available"), "criteria": family_present("criteria", "criteria were not recorded"), "tasks": family_present("tasks", "tasks were not recorded"), "findings": family_present("findings", "findings were not recorded"), "evidence_metadata": availability("available") if metrics["manifest"] is not None else availability("unavailable", "manifest is unavailable"), "git_custody": availability("available"), "usage": availability("available") if metrics["summary"] is not None else availability("unavailable", "summary is unavailable")}, "descriptor": descriptor}
+    return {"lifecycle": events, "criteria": controller.get("criteria", []), "tasks": controller.get("tasks", []), "findings": controller.get("findings", []), "decisions": controller.get("decisions", []), "evidence_metadata": metrics["manifest"].get("artifacts", []) if metrics["manifest"] else [], "git_custody": git, "usage": metrics["summary"], "metrics": _detail_metrics(metrics), "timing": {"started_at": metrics["checkpoint"].get("started_at"), "updated_at": metrics["checkpoint"].get("updated_at")}, "availability": {"lifecycle": availability("available"), "criteria": family_present("criteria", "criteria were not recorded"), "tasks": family_present("tasks", "tasks were not recorded"), "findings": family_present("findings", "findings were not recorded"), "evidence_metadata": availability("available") if metrics["manifest"] is not None else availability("unavailable", "manifest is unavailable"), "git_custody": availability("available"), "usage": availability("available") if metrics["summary"] is not None else availability("unavailable", "summary is unavailable")}, "descriptor": descriptor}
+
+
+def _detail_metrics(metrics: Mapping[str, Any]) -> dict[str, Any]:
+    """Project verified transport records into reconciled operator metrics."""
+    records: list[dict[str, Any]] = []
+    for event in metrics.get("events", []):
+        if event.get("event_type") != "backend_transport":
+            continue
+        payload = event.get("payload") if isinstance(event.get("payload"), Mapping) else {}
+        usage = payload.get("usage") if isinstance(payload.get("usage"), Mapping) else {}
+        actor = event.get("actor") if isinstance(event.get("actor"), Mapping) else {}
+        attempt = event.get("attempt_id") or actor.get("id") or "unknown agent"
+        records.append({
+            "agent": str(attempt),
+            "phase": _attempt_phase(str(attempt)),
+            "agent_type": str(actor.get("role") or "unknown"),
+            "model": str(payload.get("model") or usage.get("model") or "unavailable"),
+            "effort": str(payload.get("reasoning") or "unavailable"),
+            "backend": str(event.get("backend_id") or payload.get("transport") or payload.get("backend_id") or "unavailable"),
+            "calls": 1,
+            "input_tokens": _nonnegative_int(usage.get("input_tokens")),
+            "cached_input_tokens": _nonnegative_int(usage.get("cached_input_tokens")),
+            "output_tokens": _nonnegative_int(usage.get("output_tokens")),
+            "duration_ms": _nonnegative_int(event.get("duration_ms")),
+            "cost_usd": _nonnegative_number(usage.get("cost_usd")),
+        })
+    totals = _aggregate_metric_rows(records)
+    summary = metrics.get("summary") if isinstance(metrics.get("summary"), Mapping) else {}
+    summary_usage = summary.get("usage") if isinstance(summary.get("usage"), Mapping) else {}
+    if isinstance(summary_usage.get("wall_clock_ms"), int):
+        totals["wall_clock_ms"] = summary_usage["wall_clock_ms"]
+    else:
+        totals["wall_clock_ms"] = None
+    state = metrics.get("checkpoint", {}).get("state", {})
+    state = state if isinstance(state, Mapping) else {}
+    controller = state.get("controller") if isinstance(state.get("controller"), Mapping) else {}
+    criteria = controller.get("criteria", {})
+    findings = controller.get("findings", {})
+    criteria_values = list(criteria.values()) if isinstance(criteria, Mapping) else criteria if isinstance(criteria, list) else []
+    finding_values = list(findings.values()) if isinstance(findings, Mapping) else findings if isinstance(findings, list) else []
+    review_fix = state.get("review_fix") if isinstance(state.get("review_fix"), Mapping) else {}
+    verification = state.get("verification") if isinstance(state.get("verification"), Mapping) else {}
+    recorded_verification_repairs = len({record["agent"] for record in records if "/verification-repair/" in record["agent"]})
+    checkpoint_repairs = len(verification.get("repair_attempts", [])) if isinstance(verification.get("repair_attempts"), list) else _nonnegative_int(verification.get("repair_attempts"))
+    return {
+        "protocol": "harness-run-detail-metrics/1",
+        "totals": totals,
+        "quality": {
+            "criteria_total": len(criteria_values),
+            "criteria_satisfied": sum(1 for item in criteria_values if isinstance(item, Mapping) and str(item.get("status", "")).lower() in {"satisfied", "passed", "succeeded"}),
+            "findings_total": len(finding_values),
+            "open_findings": sum(1 for item in finding_values if not isinstance(item, Mapping) or str(item.get("status", "open")).lower() not in {"closed", "resolved", "fixed"}),
+            "review_cycles": _nonnegative_int(review_fix.get("cycles")),
+            "verification_repairs": max(recorded_verification_repairs, checkpoint_repairs),
+        },
+        "by_phase": _breakdown(records, "phase"),
+        "by_agent": _breakdown(records, "agent"),
+        "by_agent_type": _breakdown(records, "agent_type"),
+        "by_model": _breakdown(records, "model"),
+        "by_effort": _breakdown(records, "effort"),
+        "by_backend": _breakdown(records, "backend"),
+        "provenance": {
+            "usage_records": len(records),
+            "collection_method": "verified backend_transport journal events",
+            "peak_context_definition": "maximum observed input_tokens in one backend invocation",
+        },
+    }
+
+
+def _attempt_phase(attempt: str) -> str:
+    if "/review-fix/" in attempt and attempt.endswith("/review"):
+        return "review"
+    if attempt.endswith("/verify"):
+        return "verify"
+    if attempt.endswith("/fix") or "/verification-repair/" in attempt:
+        return "repair"
+    if attempt.startswith("implement-") or "/implement" in attempt:
+        return "implement"
+    return "other"
+
+
+def _nonnegative_int(value: Any) -> int:
+    return value if type(value) is int and value >= 0 else 0
+
+
+def _nonnegative_number(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        return None
+    try:
+        parsed = Decimal(str(value))
+    except InvalidOperation:
+        return None
+    return float(parsed) if parsed.is_finite() and parsed >= 0 else None
+
+
+def _aggregate_metric_rows(rows: list[Mapping[str, Any]]) -> dict[str, Any]:
+    missing_cost = sum(1 for row in rows if row["cost_usd"] is None)
+    result = {
+        "calls": sum(row["calls"] for row in rows),
+        "input_tokens": sum(row["input_tokens"] for row in rows),
+        "cached_input_tokens": sum(row["cached_input_tokens"] for row in rows),
+        "output_tokens": sum(row["output_tokens"] for row in rows),
+        "duration_ms": sum(row["duration_ms"] for row in rows),
+        "peak_input_tokens": max((row["input_tokens"] for row in rows), default=0),
+        "cost": {
+            "state": "available" if rows and missing_cost == 0 else "unavailable",
+            "usd": round(sum(row["cost_usd"] or 0 for row in rows), 6) if rows and missing_cost == 0 else None,
+            "reason": None if rows and missing_cost == 0 else (f"{missing_cost} usage record(s) lack authoritative pricing" if rows else "no usage records were recorded"),
+        },
+    }
+    result["total_tokens"] = result["input_tokens"] + result["output_tokens"]
+    return result
+
+
+def _breakdown(records: list[dict[str, Any]], key: str) -> list[dict[str, Any]]:
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for record in records:
+        groups.setdefault(record[key], []).append(record)
+    rows = []
+    for label, grouped in groups.items():
+        row = {"label": label, **_aggregate_metric_rows(grouped)}
+        if key == "agent":
+            for field in ("phase", "agent_type", "model", "effort", "backend"):
+                values = sorted({record[field] for record in grouped})
+                row[field] = ", ".join(values)
+        rows.append(row)
+    return sorted(rows, key=lambda row: (-row["total_tokens"], row["label"]))
 
 
 def _nodes(metrics: Mapping[str, Any], parent_liveness: Mapping[str, Any]) -> list[dict[str, Any]]:
