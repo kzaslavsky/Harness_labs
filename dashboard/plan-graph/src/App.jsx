@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Background, Controls, Handle, MiniMap, Position, ReactFlow, ReactFlowProvider } from '@xyflow/react';
+import { Background, Controls, Handle, Position, ReactFlow, ReactFlowProvider } from '@xyflow/react';
 import { displayState, fetchCatalog, fetchRunDetail, graphProjection, selectedRunFor, stateLabel } from './api.js';
 
 const POLL_MILLISECONDS = 2_000;
@@ -66,7 +66,7 @@ function Dashboard() {
   return <div className="app"><main><header className="top"><div><span className="eyebrow">READ-ONLY OPERATIONS DASHBOARD</span><h1>PlanGraphs</h1><p>{graphCount} discovered PlanGraph{graphCount === 1 ? '' : 's'} · polling every 2 seconds</p></div><div><span className="readonly">Read-only</span><button onClick={() => refresh()} className="refresh">Refresh</button></div></header>
     {error && <p className="error" role="alert">{error}</p>}{!catalog && !error && <p className="loading">Loading catalog…</p>}
     {catalog && <><Availability label="Catalog:" value={catalog.availability} /><section className="graph"><div className="graph-heading"><div><h2>Execution map</h2><p>Dependencies are unavailable from the current read-only API; nodes are intentionally rendered as disconnected rather than inferred.</p></div><div className="legend">{['running', 'queued', 'blocked', 'stale', 'succeeded', 'unavailable'].map((state) => <span key={state} className={`status status--${state}`}><i />{state}</span>)}</div></div>
-      {nodes.length ? <ReactFlow nodes={nodes} edges={edges} nodeTypes={nodeTypes} onNodeClick={onNodeClick} fitView nodesDraggable={false} nodesConnectable={false} deleteKeyCode={null} proOptions={{ hideAttribution: true }}><Background /><Controls showInteractive={false} /><MiniMap nodeColor={(node) => displayState(node.data.record) === 'running' ? '#4ad5e8' : '#64748b'} /></ReactFlow> : <div className="empty-canvas"><h2>No PlanGraphs discovered</h2><p>The configured audit root has no verified PlanGraph records.</p></div>}</section>
+      {nodes.length ? <ReactFlow nodes={nodes} edges={edges} nodeTypes={nodeTypes} onNodeClick={onNodeClick} fitView nodesDraggable={false} nodesConnectable={false} deleteKeyCode={null} proOptions={{ hideAttribution: true }}><Background /><Controls showInteractive={false} /></ReactFlow> : <div className="empty-canvas"><h2>No PlanGraphs discovered</h2><p>The configured audit root has no verified PlanGraph records.</p></div>}</section>
       <section className="runs"><h2>FeatureRuns</h2>{catalog.feature_runs.length ? catalog.feature_runs.map((run) => <button key={run.run_id} onClick={() => setSelectedRunId(run.run_id)}><code>{run.run_id}</code><Status record={run} /><span>{run.correlation ? `${run.correlation.plan_graph_id} / ${run.correlation.plan_node_id}` : 'Ungrouped or legacy'}</span></button>) : <p className="muted">No FeatureRuns discovered.</p>}</section>
     </>}</main><Detail run={selectedRun} detail={detail} loading={detailLoading} error={detailError} onClose={() => setSelectedRunId(null)} /></div>;
 }
