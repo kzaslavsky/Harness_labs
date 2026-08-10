@@ -8,7 +8,7 @@ const feature = { run_id: 'run-1', kind: 'feature_run', status: 'running', liven
 const metrics = { protocol: 'harness-run-detail-metrics/1', totals: {}, quality: {}, provenance: {}, by_phase: [], by_agent: [], by_agent_type: [], by_model: [], by_effort: [], by_backend: [] };
 
 test('runtime validation accepts a catalog with a correlated graph node', () => {
-  const catalog = { protocol: 'harness-run-catalog-snapshot/1', revision: 'rev', generated_at: '2026-08-09T00:00:00Z', source_root: '/audit', availability, diagnostics: [], feature_runs: [feature], ungrouped_feature_runs: [], plan_graphs: [{ run_id: 'graph-1', status: 'running', liveness: liveness('live'), evidence: availability, nodes: [{ node_id: 'node-1', status: 'running', feature_run_id: 'run-1', liveness: liveness('live'), evidence: availability }] }] };
+  const catalog = { protocol: 'harness-run-catalog-snapshot/1', revision: 'rev', generated_at: '2026-08-09T00:00:00Z', source_root: '/audit', source_roots: ['/audit', '/other/audit'], availability, diagnostics: [], feature_runs: [feature], ungrouped_feature_runs: [], plan_graphs: [{ run_id: 'graph-1', status: 'running', liveness: liveness('live'), evidence: availability, nodes: [{ node_id: 'node-1', status: 'running', feature_run_id: 'run-1', liveness: liveness('live'), evidence: availability }] }] };
   assert.equal(validateCatalog(catalog), catalog);
   assert.deepEqual(graphProjection(catalog).map((node) => node.data.runId), ['run-1']);
 });

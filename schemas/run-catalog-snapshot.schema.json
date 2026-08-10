@@ -10,6 +10,7 @@
     "revision": {"type": "string", "minLength": 1},
     "generated_at": {"type": "string", "format": "date-time"},
     "source_root": {"type": "string", "minLength": 1},
+    "source_roots": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
     "availability": {"$ref": "#/$defs/availability"},
     "diagnostics": {"type": "array", "items": {"$ref": "#/$defs/diagnostic"}},
     "plan_graphs": {"type": "array", "items": {"$ref": "#/$defs/planGraph"}},
@@ -18,11 +19,11 @@
   },
   "$defs": {
     "availability": {"type": "object", "additionalProperties": false, "required": ["state", "reason"], "properties": {"state": {"enum": ["available", "partial", "unavailable"]}, "reason": {"type": ["string", "null"]}}},
-    "diagnostic": {"type": "object", "additionalProperties": false, "required": ["code", "message", "run_id"], "properties": {"code": {"type": "string", "minLength": 1}, "message": {"type": "string", "minLength": 1}, "run_id": {"type": ["string", "null"]}}},
+    "diagnostic": {"type": "object", "additionalProperties": false, "required": ["code", "message", "run_id"], "properties": {"code": {"type": "string", "minLength": 1}, "message": {"type": "string", "minLength": 1}, "run_id": {"type": ["string", "null"]}, "source_root": {"type": ["string", "null"]}}},
     "liveness": {"type": "object", "additionalProperties": false, "required": ["state", "reason"], "properties": {"state": {"enum": ["live", "stale", "remote_unverified", "liveness_unavailable", "terminal", "not_applicable"]}, "reason": {"type": ["string", "null"]}}},
     "correlation": {"type": "object", "additionalProperties": false, "required": ["plan_graph_id", "plan_node_id", "parent_run_id"], "properties": {"plan_graph_id": {"type": "string", "minLength": 1}, "plan_node_id": {"type": "string", "minLength": 1}, "parent_run_id": {"type": "string", "minLength": 1}}},
-    "featureRun": {"type": "object", "additionalProperties": false, "required": ["run_id", "kind", "status", "liveness", "evidence", "correlation"], "properties": {"run_id": {"type": "string", "minLength": 1}, "kind": {"enum": ["feature_run", "legacy_feature_run"]}, "status": {"enum": ["queued", "running", "succeeded", "failed", "blocked", "interrupted", "corrupt", "unknown"]}, "liveness": {"$ref": "#/$defs/liveness"}, "evidence": {"$ref": "#/$defs/availability"}, "correlation": {"type": ["null", "object"], "allOf": [{"if": {"type": "object"}, "then": {"$ref": "#/$defs/correlation"}}]}}},
+    "featureRun": {"type": "object", "additionalProperties": false, "required": ["run_id", "kind", "status", "liveness", "evidence", "correlation"], "properties": {"run_id": {"type": "string", "minLength": 1}, "kind": {"enum": ["feature_run", "legacy_feature_run"]}, "status": {"enum": ["queued", "running", "succeeded", "failed", "blocked", "interrupted", "corrupt", "unknown"]}, "liveness": {"$ref": "#/$defs/liveness"}, "evidence": {"$ref": "#/$defs/availability"}, "correlation": {"type": ["null", "object"], "allOf": [{"if": {"type": "object"}, "then": {"$ref": "#/$defs/correlation"}}]}, "source_root": {"type": "string", "minLength": 1}}},
     "planNode": {"type": "object", "additionalProperties": false, "required": ["node_id", "status", "feature_run_id", "liveness", "evidence"], "properties": {"node_id": {"type": "string", "minLength": 1}, "status": {"enum": ["queued", "running", "succeeded", "failed", "blocked"]}, "feature_run_id": {"type": ["string", "null"]}, "liveness": {"$ref": "#/$defs/liveness"}, "evidence": {"$ref": "#/$defs/availability"}}},
-    "planGraph": {"type": "object", "additionalProperties": false, "required": ["run_id", "status", "liveness", "evidence", "nodes"], "properties": {"run_id": {"type": "string", "minLength": 1}, "status": {"enum": ["queued", "running", "succeeded", "failed", "blocked", "interrupted", "corrupt"]}, "liveness": {"$ref": "#/$defs/liveness"}, "evidence": {"$ref": "#/$defs/availability"}, "nodes": {"type": "array", "items": {"$ref": "#/$defs/planNode"}}}}
+    "planGraph": {"type": "object", "additionalProperties": false, "required": ["run_id", "status", "liveness", "evidence", "nodes"], "properties": {"run_id": {"type": "string", "minLength": 1}, "status": {"enum": ["queued", "running", "succeeded", "failed", "blocked", "interrupted", "corrupt"]}, "liveness": {"$ref": "#/$defs/liveness"}, "evidence": {"$ref": "#/$defs/availability"}, "nodes": {"type": "array", "items": {"$ref": "#/$defs/planNode"}}, "source_root": {"type": "string", "minLength": 1}}}
   }
 }

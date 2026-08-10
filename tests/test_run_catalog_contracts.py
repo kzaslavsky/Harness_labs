@@ -116,6 +116,7 @@ class RunCatalogContractTests(unittest.TestCase):
 
     def test_schemas_are_closed_and_well_formed(self) -> None:
         for name in (
+            "dashboard-audit-root-registry.schema.json",
             "run-descriptor.schema.json",
             "controller-liveness.schema.json",
             "run-catalog-snapshot.schema.json",

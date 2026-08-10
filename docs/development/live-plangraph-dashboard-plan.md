@@ -12,7 +12,7 @@ Implementation vehicle: one approved `PlanGraph` executing six dependent
 
 Turn the React Flow mockup into a read-only local operations dashboard that:
 
-1. discovers PlanGraphs and FeatureRuns recorded under a configured audit root;
+1. discovers PlanGraphs and FeatureRuns recorded under configured audit roots;
 2. distinguishes completed, genuinely live, stale, blocked, failed, queued, and
    evidence-unavailable states without guessing;
 3. reconstructs each PlanGraph's dependency graph and candidate lineage;
@@ -210,13 +210,15 @@ inject the clock and process probe; they do not depend on real sleeps or PIDs.
 ### 4. Catalog read model
 
 Add `harness_labs/run_catalog.py` and a closed
-`schemas/run-catalog-snapshot.schema.json`. Discovery starts from one explicit
-root and applies the existing metrics tracker's path-containment, symlink, hash
-chain, manifest, classification, and availability rules.
+`schemas/run-catalog-snapshot.schema.json`. Discovery starts from one or more
+explicit roots and applies the existing metrics tracker's path-containment,
+symlink, hash-chain, manifest, classification, and availability rules to each.
+It then merges verified projections, re-evaluates exact cross-root child
+correlation, and withholds globally ambiguous run IDs.
 
 The snapshot contains:
 
-- catalog revision, generation time, source root, and bounded diagnostics;
+- catalog revision, generation time, source roots, and bounded diagnostics;
 - PlanGraph summaries and detail records;
 - FeatureRun summaries and detail records;
 - ungrouped legacy FeatureRuns;
@@ -247,7 +249,7 @@ Required endpoints:
 The server:
 
 - binds to `127.0.0.1` unless the operator explicitly supplies another host;
-- resolves and contains the configured audit root before discovery;
+- resolves and contains every configured audit root before discovery;
 - serves only schema-projected JSON and built dashboard assets;
 - never serves raw artifact paths or arbitrary files;
 - escapes URL components and rejects ambiguous duplicate run IDs;
@@ -483,5 +485,24 @@ gate, ambiguous base, or unverified integration result.
   allowed to label graphs live.
 - Legacy FeatureRuns appear immediately as ungrouped. Legacy PlanGraphs appear
   only after explicit import.
-- Remote aggregation, authentication, run mutation, artifact-content viewing,
-  and multi-repository graphs require separate plans backed by observed need.
+- Remote aggregation, authentication, run mutation, and artifact-content
+  viewing require separate plans backed by observed need.
+
+## Multi-root extension record
+
+The observed need was confirmed when an audited Retinology PlanGraph could not
+appear in a dashboard configured only for the Harness Labs audit root. The
+bounded extension is implemented on
+`codex/dashboard-multi-root-discovery`, based on
+`ab9d0ad0b8d5b91ae06be3ccf107894cbc48e624`.
+
+Its acceptance contract is:
+
+- `--audit-root` is repeatable and a closed, bounded root registry is supported;
+- up to 16 unique local roots are projected independently before aggregation;
+- a missing or corrupt root cannot hide healthy peers;
+- exact PlanGraph/FeatureRun correlation works across roots;
+- duplicate run IDs are withheld rather than resolved by root order;
+- detail endpoints read only from the verified record's owning root; and
+- the schema, browser UI, operator guide, and end-to-end certification remain
+  synchronized.

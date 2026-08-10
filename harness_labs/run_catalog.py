@@ -6,6 +6,7 @@ import json
 import os
 import socket
 import subprocess
+from copy import deepcopy
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -77,6 +78,126 @@ class RunCatalog:
         return build_run_catalog(self.source_root, **self.options)
     def detail(self, run_id: str) -> dict[str, Any]:
         return build_run_detail(self.source_root, run_id)
+
+
+def merge_run_catalogs(
+    catalogs: list[tuple[Path, Mapping[str, Any]]],
+) -> dict[str, Any]:
+    """Merge verified single-root projections without guessing identity.
+
+    Run IDs are the public API keys and therefore must be globally unique.  If
+    the same ID appears under more than one configured root, every conflicting
+    record is withheld and a diagnostic is emitted rather than selecting a
+    source by configuration order.
+    """
+    if not catalogs:
+        raise ValueError("at least one run catalog is required")
+
+    roots = [str(Path(root).resolve()) for root, _ in catalogs]
+    records_by_id: dict[str, list[tuple[str, dict[str, Any]]]] = {}
+    diagnostics: list[dict[str, str | None]] = []
+    source_states: list[str] = []
+    generated_at: list[str] = []
+
+    for root, catalog in catalogs:
+        source_root = str(Path(root).resolve())
+        source_states.append(str(catalog.get("availability", {}).get("state", "unavailable")))
+        if isinstance(catalog.get("generated_at"), str):
+            generated_at.append(str(catalog["generated_at"]))
+        for item in catalog.get("diagnostics", []):
+            if isinstance(item, Mapping):
+                diagnostic = dict(item)
+                diagnostic["source_root"] = source_root
+                diagnostics.append(diagnostic)
+        for family in ("plan_graphs", "feature_runs"):
+            for item in catalog.get(family, []):
+                if not isinstance(item, Mapping) or not isinstance(item.get("run_id"), str):
+                    continue
+                record = deepcopy(dict(item))
+                record["source_root"] = source_root
+                records_by_id.setdefault(record["run_id"], []).append((family, record))
+
+    ambiguous = {run_id: entries for run_id, entries in records_by_id.items() if len(entries) > 1}
+    for run_id, entries in sorted(ambiguous.items()):
+        locations = sorted({str(record["source_root"]) for _, record in entries})
+        diagnostics.append({
+            "code": "ambiguous_run_id",
+            "message": f"run ID exists in multiple audit roots: {', '.join(locations)}",
+            "run_id": run_id,
+            "source_root": None,
+        })
+
+    accepted = {
+        run_id: entries[0]
+        for run_id, entries in records_by_id.items()
+        if run_id not in ambiguous
+    }
+    graphs = sorted(
+        (record for family, record in accepted.values() if family == "plan_graphs"),
+        key=lambda record: record["run_id"],
+    )
+    features = sorted(
+        (record for family, record in accepted.values() if family == "feature_runs"),
+        key=lambda record: record["run_id"],
+    )
+
+    # A graph and its children may live in different roots.  Re-evaluate the
+    # descriptor correlation after merging because each single-root projector
+    # correctly treated an absent local child as only partial evidence.
+    for graph in graphs:
+        for node in graph.get("nodes", []):
+            if not isinstance(node, dict) or node.get("feature_run_id") is None:
+                continue
+            child = next(
+                (feature for feature in features if _node_matches_child(graph, node, feature)),
+                None,
+            )
+            node["evidence"] = (
+                availability("available")
+                if child is not None
+                else availability("partial", "child correlation is not verified")
+            )
+
+    ungrouped = [
+        feature for feature in features
+        if not any(
+            _node_matches_child(graph, node, feature)
+            for graph in graphs
+            for node in graph.get("nodes", [])
+            if isinstance(node, Mapping)
+        )
+    ]
+    if all(state == "unavailable" for state in source_states) and not graphs and not features:
+        source = availability("unavailable", "all configured audit roots are unavailable")
+    elif diagnostics or any(state != "available" for state in source_states):
+        source = availability("partial", "one or more audit roots or runs are unavailable")
+    else:
+        source = availability("available")
+    revision = hashlib.sha256(json.dumps(
+        {
+            "source_roots": roots,
+            "source_states": source_states,
+            "diagnostics": diagnostics,
+            "plan_graphs": graphs,
+            "feature_runs": features,
+            "ungrouped_feature_runs": ungrouped,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()).hexdigest()
+    return {
+        "protocol": "harness-run-catalog-snapshot/1",
+        "revision": revision,
+        "generated_at": max(generated_at) if generated_at else _timestamp(datetime.now(timezone.utc)),
+        # Retained for older clients; source_roots is authoritative.
+        "source_root": roots[0],
+        "source_roots": roots,
+        "availability": source,
+        "diagnostics": diagnostics,
+        "plan_graphs": graphs,
+        "feature_runs": features,
+        "ungrouped_feature_runs": ungrouped,
+    }
 
 
 def _project_run(directory: Path, root: Path, now: datetime, probe: ProcessProbe, freshness: float) -> dict[str, Any]:

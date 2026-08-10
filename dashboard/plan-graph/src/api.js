@@ -36,7 +36,8 @@ function validGraph(value) {
 export function validateCatalog(value) {
   if (!isObject(value) || value.protocol !== catalogProtocol || !isText(value.revision)
       || !Array.isArray(value.plan_graphs) || !Array.isArray(value.feature_runs)
-      || !Array.isArray(value.ungrouped_feature_runs) || !validAvailability(value.availability)) {
+      || !Array.isArray(value.ungrouped_feature_runs) || !validAvailability(value.availability)
+      || (value.source_roots !== undefined && (!Array.isArray(value.source_roots) || !value.source_roots.every(isText)))) {
     throw new Error('The dashboard received an invalid catalog response.');
   }
   if (!value.plan_graphs.every(validGraph) || !value.feature_runs.every(validFeatureRun) || !value.ungrouped_feature_runs.every(validFeatureRun)) {

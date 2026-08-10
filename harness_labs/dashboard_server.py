@@ -10,11 +10,12 @@ from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from collections.abc import Iterable
 from typing import Any, Mapping
 from urllib.parse import unquote, urlsplit
 
 from .audit import AuditError
-from .run_catalog import RunCatalog, build_run_detail
+from .run_catalog import RunCatalog, build_run_detail, merge_run_catalogs
 
 MAX_RUN_DIRECTORIES = 512
 MAX_FILES_PER_RUN = 128
@@ -22,6 +23,8 @@ MAX_FILE_BYTES = 4 * 1024 * 1024
 MAX_RESPONSE_BYTES = 1024 * 1024
 MAX_DIAGNOSTICS = 100
 MAX_DIAGNOSTIC_TEXT = 512
+MAX_AUDIT_ROOTS = 16
+MAX_ROOT_REGISTRY_BYTES = 64 * 1024
 _RUN_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
 
 
@@ -44,14 +47,16 @@ class DashboardApplication:
 
     def __init__(
         self,
-        audit_root: Path,
+        audit_root: Path | Iterable[Path],
         *,
         assets_root: Path | None = None,
         refresh_seconds: float = 2.0,
     ) -> None:
         if refresh_seconds <= 0:
             raise ValueError("refresh_seconds must be positive")
-        self.audit_root = _contained_root(audit_root)
+        self.audit_roots = _contained_roots(audit_root)
+        # Compatibility for callers that inspect the former single-root field.
+        self.audit_root = self.audit_roots[0]
         self.assets_root = _contained_assets(assets_root) if assets_root is not None else None
         self.refresh_seconds = refresh_seconds
         self._lock = threading.Lock()
@@ -106,8 +111,11 @@ class DashboardApplication:
         return resolved.read_bytes(), media
 
     def _build_snapshot(self) -> _Snapshot:
-        excluded_runs = _validate_audit_tree(self.audit_root)
-        catalog_value = RunCatalog(self.audit_root, excluded_runs=excluded_runs).snapshot()
+        source_catalogs = []
+        for root in self.audit_roots:
+            excluded_runs = _validate_audit_tree(root)
+            source_catalogs.append((root, RunCatalog(root, excluded_runs=excluded_runs).snapshot()))
+        catalog_value = merge_run_catalogs(source_catalogs)
         catalog_value = _cap_diagnostics(catalog_value)
         _ensure_unique_ids(catalog_value)
         graph_details: dict[str, bytes] = {}
@@ -119,7 +127,7 @@ class DashboardApplication:
             if run.get("status") == "corrupt":
                 continue
             try:
-                run_details[run_id] = _json_bytes(build_run_detail(self.audit_root, run_id))
+                run_details[run_id] = _json_bytes(build_run_detail(Path(run["source_root"]), run_id))
             except (AuditError, DashboardError, OSError, ValueError, json.JSONDecodeError):
                 # A catalog summary may safely describe a corrupt detail; it must not
                 # make an arbitrary journal available through the detail endpoint.
@@ -220,6 +228,48 @@ def _contained_root(path: Path) -> Path:
     return supplied.resolve()
 
 
+def _contained_roots(paths: Path | Iterable[Path]) -> tuple[Path, ...]:
+    supplied = [paths] if isinstance(paths, (str, Path)) else list(paths)
+    if not supplied:
+        raise DashboardError("at least one audit root is required")
+    if len(supplied) > MAX_AUDIT_ROOTS:
+        raise DashboardError("audit root count exceeds limit")
+    roots = tuple(_contained_root(Path(path)) for path in supplied)
+    if len(set(roots)) != len(roots):
+        raise DashboardError("configured audit roots must be unique")
+    return roots
+
+
+def load_audit_root_registry(path: Path) -> tuple[Path, ...]:
+    """Read one closed, bounded registry of explicit audit roots."""
+    supplied = Path(path)
+    if supplied.is_symlink() or not supplied.is_file():
+        raise DashboardError("audit root registry must be a file and not a symlink")
+    if supplied.stat().st_size > MAX_ROOT_REGISTRY_BYTES:
+        raise DashboardError("audit root registry exceeds size limit")
+    try:
+        value = json.loads(supplied.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise DashboardError("audit root registry is not valid JSON") from exc
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"protocol", "audit_roots"}
+        or value.get("protocol") != "harness-dashboard-audit-root-registry/1"
+        or not isinstance(value.get("audit_roots"), list)
+        or not value["audit_roots"]
+        or not all(isinstance(item, str) and item for item in value["audit_roots"])
+    ):
+        raise DashboardError("audit root registry is invalid")
+    if len(value["audit_roots"]) > MAX_AUDIT_ROOTS:
+        raise DashboardError("audit root registry exceeds root-count limit")
+    base = supplied.resolve().parent
+    roots = []
+    for item in value["audit_roots"]:
+        candidate = Path(item).expanduser()
+        roots.append(candidate if candidate.is_absolute() else base / candidate)
+    return tuple(roots)
+
+
 def _contained_assets(path: Path) -> Path:
     supplied = Path(path)
     if supplied.is_symlink() or not supplied.is_dir():
@@ -256,7 +306,7 @@ def _cap_diagnostics(value: Mapping[str, Any]) -> dict[str, Any]:
     result = dict(value)
     diagnostics = value.get("diagnostics", [])
     result["diagnostics"] = [
-        {"code": _bounded_text(str(item.get("code", "diagnostic"))), "message": _bounded_text(str(item.get("message", "invalid run"))), "run_id": item.get("run_id") if isinstance(item.get("run_id"), str) else None}
+        {"code": _bounded_text(str(item.get("code", "diagnostic"))), "message": _bounded_text(str(item.get("message", "invalid run"))), "run_id": item.get("run_id") if isinstance(item.get("run_id"), str) else None, "source_root": item.get("source_root") if isinstance(item.get("source_root"), str) else None}
         for item in diagnostics[:MAX_DIAGNOSTICS]
         if isinstance(item, Mapping)
     ]

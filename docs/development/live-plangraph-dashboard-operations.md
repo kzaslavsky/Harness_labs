@@ -2,25 +2,49 @@
 
 Status: active
 
-The PlanGraph dashboard is a local, read-only view of one explicit audit-root
-directory. It derives its catalog from verified journals and never starts,
-stops, retries, imports, edits, or otherwise changes a controller run.
+The PlanGraph dashboard is a local, read-only view of one or more explicit
+audit-root directories. It derives its catalog from verified journals and
+never starts, stops, retries, imports, edits, or otherwise changes a controller
+run.
 
 ## Start the dashboard
 
-Build the UI and start the loopback-only server with the direct parent of the
-run directories as `--audit-root`:
+Build the UI and start the loopback-only server with each direct parent of run
+directories supplied as a repeatable `--audit-root`:
 
 ```sh
 npm --prefix dashboard/plan-graph run build
 python3 scripts/run_dashboard.py \
   --audit-root logs/runs \
+  --audit-root /path/to/another/repository/logs/runs \
   --assets-root dashboard/plan-graph/dist
 ```
 
+For durable configuration, use a closed root registry:
+
+```json
+{
+  "protocol": "harness-dashboard-audit-root-registry/1",
+  "audit_roots": [
+    "/path/to/harness_labs/logs/runs",
+    "/path/to/Retinology/logs/runs"
+  ]
+}
+```
+
+```sh
+python3 scripts/run_dashboard.py \
+  --audit-root-registry /path/to/dashboard-audit-roots.json \
+  --assets-root dashboard/plan-graph/dist
+```
+
+Registry-relative paths resolve from the registry's directory. Direct options
+and registry entries may be combined, up to 16 unique roots.
+
 The default bind address is `127.0.0.1:8000`. Supplying a different host is an
 operator decision; this dashboard provides neither authentication nor remote
-aggregation. The source root must be a real directory, not a symlink. The API
+aggregation. Source roots must not be symlinks. A missing root is reported as
+unavailable without hiding healthy roots. The API
 only exposes the catalog, graph records, FeatureRun detail projections, and
 compiled dashboard assets; it does not serve raw journals or artifacts.
 
@@ -45,6 +69,12 @@ or artifact metadata is shown as unavailable rather than zero.
 Malformed run directories are isolated: valid peers stay visible and the
 catalog shows a bounded diagnostic. A corrupt summary does not make the raw
 run directory downloadable or its detail endpoint available.
+
+Run IDs are global API identities. If the same run ID exists in more than one
+configured root, every copy is withheld as ambiguous and the catalog emits a
+diagnostic naming the conflicting roots. Configuration order never selects a
+winner. A PlanGraph and its explicitly correlated child FeatureRuns may reside
+in different configured roots; correlation is re-evaluated after aggregation.
 
 ## Migration and legacy records
 
@@ -73,7 +103,7 @@ policy.
 ## Deliberate exclusions
 
 This release does not provide remote hosting, authentication, mutation controls,
-artifact-content viewing, prompt or reasoning viewing, multi-repository graphs,
+artifact-content viewing, prompt or reasoning viewing,
 or automatic legacy PlanGraph discovery. It uses polling rather than WebSockets
 and exposes no API action that changes an audit root.
 
@@ -87,11 +117,12 @@ other location):
 DASHBOARD_E2E_CHROME=/path/to/chrome python3 -m unittest tests.test_dashboard_e2e
 ```
 
-It builds a temporary fabricated audit root with completed, live, stale,
+It builds two temporary fabricated audit roots with completed, live, stale,
 legacy, malformed, and correlated records; serves the compiled build, selects
 the live run in the rendered UI, checks its inspector tabs, and confirms a
 polling refresh retains that selection while its status becomes terminal. It
-also checks inspection families, confirms read requests do not modify the
-audit root, and exercises the explicit legacy-import command. The test injects
+also checks cross-root correlation and inspection families, confirms read
+requests do not modify either audit root, and exercises the explicit
+legacy-import command. The test injects
 process identity because test fixtures must not depend on a real controller
 PID.

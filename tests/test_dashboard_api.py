@@ -3,13 +3,20 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 from harness_labs.audit import AuditActor, AuditJournal
-from harness_labs.dashboard_server import DashboardApplication, DashboardError, _DashboardHandler
+from harness_labs.dashboard_server import (
+    DashboardApplication,
+    DashboardError,
+    _DashboardHandler,
+    load_audit_root_registry,
+)
+from scripts.dashboard_fixture_run import create_fixture
 
 
 class DashboardApiTests(unittest.TestCase):
@@ -80,13 +87,70 @@ class DashboardApiTests(unittest.TestCase):
             self.assertEqual(self._request(app, "GET", "/events.jsonl")[0], 404)
             self.assertEqual(self._request(app, "GET", "/api/catalog?ignored=true")[0], 404)
 
-    def test_duplicate_ids_are_not_served(self) -> None:
+    def test_duplicate_ids_are_isolated_and_not_served(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             app = DashboardApplication(root, refresh_seconds=60)
             duplicate = {"protocol": "harness-run-catalog-snapshot/1", "revision": "x", "generated_at": "2026-08-09T00:00:00Z", "source_root": str(root), "availability": {"state": "available", "reason": None}, "diagnostics": [], "plan_graphs": [], "feature_runs": [{"run_id": "same", "kind": "feature_run", "status": "running", "liveness": {"state": "liveness_unavailable", "reason": "none"}, "evidence": {"state": "available", "reason": None}, "correlation": None}, {"run_id": "same", "kind": "feature_run", "status": "running", "liveness": {"state": "liveness_unavailable", "reason": "none"}, "evidence": {"state": "available", "reason": None}, "correlation": None}], "ungrouped_feature_runs": []}
-            with patch("harness_labs.dashboard_server.RunCatalog.snapshot", return_value=duplicate), self.assertRaises(DashboardError):
-                app._build_snapshot()
+            with patch("harness_labs.dashboard_server.RunCatalog.snapshot", return_value=duplicate):
+                snapshot = app._build_snapshot()
+            self.assertEqual(snapshot.catalog_value["feature_runs"], [])
+            self.assertEqual(snapshot.catalog_value["diagnostics"][0]["code"], "ambiguous_run_id")
+            self.assertNotIn("same", snapshot.run_details)
+
+    def test_multiple_roots_merge_and_cross_root_children_remain_inspectable(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root_a = Path(directory) / "root-a"
+            root_b = Path(directory) / "root-b"
+            create_fixture(root_a)
+            root_b.mkdir()
+            shutil.move(str(root_a / "completed-child"), str(root_b / "completed-child"))
+
+            app = DashboardApplication([root_a, root_b], refresh_seconds=60)
+            status, body, _ = self._request(app, "GET", "/api/catalog")
+            self.assertEqual(status, 200)
+            catalog = json.loads(body)
+            self.assertEqual(catalog["source_roots"], [str(root_a.resolve()), str(root_b.resolve())])
+            child = next(run for run in catalog["feature_runs"] if run["run_id"] == "completed-child")
+            self.assertEqual(child["source_root"], str(root_b.resolve()))
+            graph = next(graph for graph in catalog["plan_graphs"] if graph["run_id"] == "completed-graph")
+            self.assertEqual(graph["nodes"][0]["evidence"]["state"], "available")
+            self.assertEqual(self._request(app, "GET", "/api/feature-runs/completed-child")[0], 200)
+
+    def test_duplicate_ids_across_roots_are_withheld_as_ambiguous(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root_a = Path(directory) / "root-a"
+            root_b = Path(directory) / "root-b"
+            root_a.mkdir()
+            root_b.mkdir()
+            self._run(root_a, "same")
+            self._run(root_b, "same")
+
+            app = DashboardApplication([root_a, root_b], refresh_seconds=60)
+            catalog = json.loads(self._request(app, "GET", "/api/catalog")[1])
+            self.assertEqual(catalog["feature_runs"], [])
+            diagnostic = next(item for item in catalog["diagnostics"] if item["code"] == "ambiguous_run_id")
+            self.assertEqual(diagnostic["run_id"], "same")
+            self.assertEqual(self._request(app, "GET", "/api/feature-runs/same")[0], 404)
+
+    def test_root_registry_is_closed_and_resolves_relative_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            registry = Path(directory) / "roots.json"
+            registry.write_text(json.dumps({
+                "protocol": "harness-dashboard-audit-root-registry/1",
+                "audit_roots": ["one/logs/runs", "two/logs/runs"],
+            }), encoding="utf-8")
+            self.assertEqual(load_audit_root_registry(registry), (
+                Path(directory).resolve() / "one/logs/runs",
+                Path(directory).resolve() / "two/logs/runs",
+            ))
+            registry.write_text(json.dumps({
+                "protocol": "harness-dashboard-audit-root-registry/1",
+                "audit_roots": ["one"],
+                "scan_home": True,
+            }), encoding="utf-8")
+            with self.assertRaisesRegex(DashboardError, "registry is invalid"):
+                load_audit_root_registry(registry)
 
     def test_symlinked_audit_root_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -171,11 +172,14 @@ class DashboardEndToEndTests(unittest.TestCase):
             self.skipTest("set DASHBOARD_E2E_CHROME to a Chrome binary to run UI certification")
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "audit-root"
+            second_root = Path(temporary) / "second-audit-root"
             create_fixture(root)
-            before = _tree_digest(root)
+            second_root.mkdir()
+            shutil.move(str(root / "completed-child"), str(second_root / "completed-child"))
+            before = (_tree_digest(root), _tree_digest(second_root))
             assets = Path("dashboard/plan-graph/dist").resolve()
             with patch("harness_labs.dashboard_server.RunCatalog", side_effect=lambda source, **options: RunCatalog(source, process_probe=lambda pid: "fixture-process-token", **options)):
-                app = DashboardApplication(root, assets_root=assets, refresh_seconds=0.001)
+                app = DashboardApplication([root, second_root], assets_root=assets, refresh_seconds=0.001)
                 server = create_dashboard_server(app, port=0)
                 thread = threading.Thread(target=server.serve_forever, daemon=True)
                 thread.start()
@@ -189,6 +193,7 @@ class DashboardEndToEndTests(unittest.TestCase):
                 page.wait_for("document.querySelectorAll('.runs button').length > 0")
                 catalog_bytes = _get(app, "/api/catalog")
                 catalog = json.loads(catalog_bytes)
+                self.assertEqual(len(catalog["source_roots"]), 2)
                 records = {item["run_id"]: item for item in catalog["feature_runs"]}
                 self.assertEqual(records["completed-child"]["liveness"]["state"], "terminal")
                 self.assertEqual(records["live-child"]["liveness"]["state"], "live")
@@ -213,7 +218,7 @@ class DashboardEndToEndTests(unittest.TestCase):
                 page.evaluate("[...document.querySelectorAll('.detail-tabs button')].find((button) => button.innerText === 'Metrics').click()")
                 page.wait_for("document.querySelector('.inspector').innerText.includes('Total tokens')")
                 self.assertEqual(page.evaluate("document.querySelectorAll('.inspector pre').length"), 0)
-                self.assertEqual(before, _tree_digest(root), "dashboard reads must not mutate the audit root")
+                self.assertEqual(before, (_tree_digest(root), _tree_digest(second_root)), "dashboard reads must not mutate audit roots")
                 advance_live_fixture(root)
                 # The two-second UI polling interval must retain the selection and
                 # show the terminal state after the catalog refresh.
