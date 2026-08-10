@@ -86,6 +86,21 @@ class RunCatalogTests(unittest.TestCase):
         snapshot = _snapshot(Path("/runs"), now, [], records)
         self.assertEqual([record["run_id"] for record in snapshot["ungrouped_feature_runs"]], ["child"])
 
+    def test_legacy_graph_node_recovers_unique_child_by_audited_merge_commit(self) -> None:
+        now = datetime(2026, 8, 9, tzinfo=timezone.utc)
+        records = [
+            {"run_id": "graph", "status": "succeeded", "liveness": {"state": "terminal", "reason": None}, "evidence": {"state": "available", "reason": None}, "nodes": [{"node_id": "node", "status": "succeeded", "feature_run_id": "legacy-reservation", "liveness": {"state": "not_applicable", "reason": None}, "evidence": {"state": "available", "reason": None}, "_candidate_commit": "b" * 40}]},
+            {"run_id": "timestamped-child", "kind": "legacy_feature_run", "status": "succeeded", "liveness": {"state": "terminal", "reason": None}, "evidence": {"state": "partial", "reason": "descriptor absent"}, "correlation": None, "_integration_merge_commits": ("b" * 40,)},
+        ]
+
+        snapshot = _snapshot(Path("/runs"), now, [], records)
+
+        node = snapshot["plan_graphs"][0]["nodes"][0]
+        self.assertEqual(node["feature_run_id"], "timestamped-child")
+        self.assertEqual(node["evidence"]["state"], "partial")
+        self.assertNotIn("_candidate_commit", node)
+        self.assertNotIn("_integration_merge_commits", snapshot["feature_runs"][0])
+
 
 if __name__ == "__main__":
     unittest.main()

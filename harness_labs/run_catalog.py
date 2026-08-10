@@ -93,6 +93,7 @@ def _project_run(directory: Path, root: Path, now: datetime, probe: ProcessProbe
         del record["kind"]
     else:
         record["correlation"] = _correlation(descriptor)
+        record["_integration_merge_commits"] = _integration_merge_commits(metrics["events"])
     return record
 
 
@@ -104,12 +105,28 @@ def _snapshot(root: Path, now: datetime, diagnostics: list[dict[str, str | None]
         for node in graph["nodes"]:
             child = next((record for record in features if _node_matches_child(graph, node, record)), None)
             if node["feature_run_id"] is not None and child is None:
-                node["evidence"] = availability("partial", "child correlation is not verified")
+                legacy_matches = [
+                    record for record in features
+                    if node.get("_candidate_commit") in record.get("_integration_merge_commits", ())
+                ]
+                if node.get("_candidate_commit") and len(legacy_matches) == 1:
+                    node["feature_run_id"] = legacy_matches[0]["run_id"]
+                    node["evidence"] = availability(
+                        "partial",
+                        "legacy child recovered from a unique audited integration commit; parent correlation is unavailable",
+                    )
+                else:
+                    node["evidence"] = availability("partial", "child correlation is not verified")
     ungrouped = [
         record for record in features
         if not any(_node_matches_child(graph, node, record) for graph in graphs for node in graph["nodes"])
     ]
     source = availability("unavailable", reason) if reason else availability("partial", "one or more runs are corrupt") if diagnostics else availability("available")
+    for graph in graphs:
+        for node in graph["nodes"]:
+            node.pop("_candidate_commit", None)
+    for feature in features:
+        feature.pop("_integration_merge_commits", None)
     revision = hashlib.sha256(json.dumps({"records": records, "diagnostics": diagnostics}, sort_keys=True).encode()).hexdigest()
     return {"protocol": "harness-run-catalog-snapshot/1", "revision": revision, "generated_at": _timestamp(now), "source_root": str(root), "availability": source, "diagnostics": diagnostics, "plan_graphs": graphs, "feature_runs": features, "ungrouped_feature_runs": ungrouped}
 
@@ -134,7 +151,7 @@ def _nodes(metrics: Mapping[str, Any], parent_liveness: Mapping[str, Any]) -> li
         if not isinstance(node_id, str) or not isinstance(data, Mapping): continue
         status = data.get("status", "queued")
         if status not in {"queued", "running", "succeeded", "failed", "blocked"}: status = "queued"
-        result.append({"node_id": node_id, "status": status, "feature_run_id": data.get("feature_run_id") if isinstance(data.get("feature_run_id"), str) else None, "liveness": dict(parent_liveness) if status == "running" else {"state": "not_applicable", "reason": None}, "evidence": availability("available")})
+        result.append({"node_id": node_id, "status": status, "feature_run_id": data.get("feature_run_id") if isinstance(data.get("feature_run_id"), str) else None, "liveness": dict(parent_liveness) if status == "running" else {"state": "not_applicable", "reason": None}, "evidence": availability("available"), "_candidate_commit": data.get("candidate_commit") if isinstance(data.get("candidate_commit"), str) else None})
     return result
 
 
@@ -157,6 +174,17 @@ def _node_matches_child(graph: Mapping[str, Any], node: Mapping[str, Any], child
         and correlation.get("plan_node_id") == node.get("node_id")
         and correlation.get("parent_run_id") == graph.get("run_id")
     )
+
+def _integration_merge_commits(events: list[Mapping[str, Any]]) -> tuple[str, ...]:
+    commits = {
+        event["payload"]["merge_commit"]
+        for event in events
+        if event.get("event_type") == "git_integrate_completed"
+        and event.get("status") == "succeeded"
+        and isinstance(event.get("payload"), Mapping)
+        and isinstance(event["payload"].get("merge_commit"), str)
+    }
+    return tuple(sorted(commits))
 
 def _corrupt_record(run_id: str, reason: str) -> dict[str, Any]:
     return {"run_id": run_id, "kind": "legacy_feature_run", "status": "corrupt", "liveness": {"state": "liveness_unavailable", "reason": "run is corrupt"}, "evidence": availability("unavailable", reason), "correlation": None}
