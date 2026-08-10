@@ -25,6 +25,8 @@ Status: active
   [`../../harness_labs/attempts.py`](../../harness_labs/attempts.py)
 - Parallel child dispatch:
   [`parallel-child-dispatch-plan.md`](parallel-child-dispatch-plan.md)
+- Parallel PlanGraph execution and Retinology replay:
+  [`parallel-plangraph-execution-replay-plan.md`](parallel-plangraph-execution-replay-plan.md)
 - Pass-through child context:
   [`pass-through-child-context-plan.md`](pass-through-child-context-plan.md)
 - Hybrid controller and coordinator:

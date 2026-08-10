@@ -1,0 +1,98 @@
+{
+  "plan": "docs/development/FLOW_NODE_MOCKUP_PARITY_COMPLETION_PLAN.md",
+  "base_commit": "47931ebc9e5993a0dd7babd00350a766b1977601",
+  "analysis_commit_note": "Residual completion starts from the current codex/flow-node-mockup-parity candidate in a fresh isolated graph worktree. Existing P0-P8 code is the base; only disclosed residuals, certification enforcement, closeout, and integration are new work.",
+  "execution_policy": {
+    "fresh_worktrees": true,
+    "base_branch": "codex/flow-node-mockup-parity",
+    "graph_branch": "codex/flow-node-mockup-parity-plangraph-completion",
+    "isolated_worktree_per_feature_run": true,
+    "primary_checkout_writable": false,
+    "parallel_siblings_share_parent_commit": true,
+    "failed_worktree_retention": "retain_for_inspection",
+    "integration_target": "codex/flow-node-mockup-parity"
+  },
+  "plan_sections": {
+    "BASE": "Reproduce the candidate's declared certification on an isolated copy of 47931eb and freeze the residual acceptance oracle before changing code. AC-BASE: The candidate's focused/full tests, browser walks, P8 selector artifact, known exceptions, environment, and Git identity are reproducible and every unexplained red blocks implementation.",
+    "P8-LOCAL": "Make the local P8 artifact measure every declared selector or carry an explicit per-selector non-applicability ruling, including the run menu and normal-rendering selected state. AC-P8-LOCAL: Light, dark, and system fixtures provide per-selector non-vacuous measurements, direct run-menu coverage, and distinguishable selected-state carriers in normal and forced-colors rendering.",
+    "P8-CI": "Make the browser-measured P8 contract a required post-merge gate rather than a local certification receipt that can silently regress. AC-P8-CI: Required-browser CI executes the complete measured state contract in light, dark, and system modes and fails on missing, stale, partial, inert-theme, below-floor, or non-color-carrier regressions.",
+    "RUN-DATA": "Prove planned_documents, six-state progress, and the positive downstream cone note through the real server route and rendered card using a synthetic read-only upstream fixture. AC-RUN-DATA: A PHI-free immutable upstream fixture drives real route-to-card progress and positive cone behavior without response injection, fabricated success, or upstream writes.",
+    "JOIN": "Integrate the three independent residual closures and prove their combined behavior on one candidate commit. AC-JOIN: The three lane commits are semantically joined and all focused UI, accessibility, responsive, network, topology, console, and UI-graph checks pass together.",
+    "CLOSE": "Certify the joined candidate, close the source plan truthfully, and integrate the completed result back into codex/flow-node-mockup-parity. AC-CLOSE: All owned acceptance criteria and final gates pass on one commit, operator-owned exceptions remain explicit, the plan is archived only when complete, and the integration commit is read back from the base branch."
+  },
+  "acceptance_criteria": {
+    "AC-BASE": "The candidate's focused/full tests, browser walks, P8 selector artifact, known exceptions, environment, and Git identity are reproducible and every unexplained red blocks implementation.",
+    "AC-P8-LOCAL": "Light, dark, and system fixtures provide per-selector non-vacuous measurements, direct run-menu coverage, and distinguishable selected-state carriers in normal and forced-colors rendering.",
+    "AC-P8-CI": "Required-browser CI executes the complete measured state contract in light, dark, and system modes and fails on missing, stale, partial, inert-theme, below-floor, or non-color-carrier regressions.",
+    "AC-RUN-DATA": "A PHI-free immutable upstream fixture drives real route-to-card progress and positive cone behavior without response injection, fabricated success, or upstream writes.",
+    "AC-JOIN": "The three lane commits are semantically joined and all focused UI, accessibility, responsive, network, topology, console, and UI-graph checks pass together.",
+    "AC-CLOSE": "All owned acceptance criteria and final gates pass on one commit, operator-owned exceptions remain explicit, the plan is archived only when complete, and the integration commit is read back from the base branch."
+  },
+  "parallel_groups": {
+    "residual-closure": ["FR-10", "FR-11", "FR-12"]
+  },
+  "runs": [
+    {
+      "id": "FR-00",
+      "objective": "Reproduce the candidate's declared certification on an isolated copy of 47931eb and freeze the residual acceptance oracle before changing code.",
+      "plan_sections": ["BASE"],
+      "criteria": ["AC-BASE"],
+      "depends_on": [],
+      "verification_argv": ["bash", "-lc", ".venv/bin/pytest tests/test_l2_flow_editor.py tests/test_ds5a_flow_editor.py tests/test_l2_dark_mode.py tests/test_flow_parity_oracle.py tests/test_current_ui_graph.py -q && .venv/bin/python scripts/dev/flow_editor_walk.py && .venv/bin/python scripts/dev/ds5a_flow_editor_walk.py && .venv/bin/python scripts/live_walk_minimalist_ui.py --require-browser"]
+    },
+    {
+      "id": "FR-10",
+      "objective": "Make the local P8 artifact measure every declared selector or carry an explicit per-selector non-applicability ruling, including the run menu and normal-rendering selected state.",
+      "plan_sections": ["P8-LOCAL"],
+      "criteria": ["AC-P8-LOCAL"],
+      "depends_on": ["FR-00"],
+      "parallel_group": "residual-closure",
+      "verification_argv": ["bash", "-lc", ".venv/bin/pytest tests/test_flow_parity_oracle.py tests/test_l2_dark_mode.py tests/test_l2_flow_editor.py -q && .venv/bin/python scripts/dev/flow_editor_walk.py"]
+    },
+    {
+      "id": "FR-11",
+      "objective": "Make the browser-measured P8 contract a required post-merge gate rather than a local certification receipt that can silently regress.",
+      "plan_sections": ["P8-CI"],
+      "criteria": ["AC-P8-CI"],
+      "depends_on": ["FR-00"],
+      "parallel_group": "residual-closure",
+      "verification_argv": ["bash", "-lc", ".venv/bin/pytest tests/test_flow_parity_oracle.py tests/test_l2_dark_mode.py tests/test_l2_minimalist_ui.py -q && .venv/bin/python scripts/live_walk_minimalist_ui.py --require-browser"]
+    },
+    {
+      "id": "FR-12",
+      "objective": "Prove planned_documents, six-state progress, and the positive downstream cone note through the real server route and rendered card using a synthetic read-only upstream fixture.",
+      "plan_sections": ["RUN-DATA"],
+      "criteria": ["AC-RUN-DATA"],
+      "depends_on": ["FR-00"],
+      "parallel_group": "residual-closure",
+      "verification_argv": ["bash", "-lc", ".venv/bin/pytest tests/test_l2_run_routes.py tests/test_l2_flow_editor.py -q && .venv/bin/python scripts/dev/run_monitor_walk.py"]
+    },
+    {
+      "id": "FR-20",
+      "objective": "Integrate the three independent residual closures and prove their combined behavior on one candidate commit.",
+      "plan_sections": ["JOIN"],
+      "criteria": ["AC-JOIN"],
+      "depends_on": ["FR-10", "FR-11", "FR-12"],
+      "verification_argv": ["bash", "-lc", ".venv/bin/pytest tests/test_l2_flow_editor.py tests/test_ds5a_flow_editor.py tests/test_l2_dark_mode.py tests/test_flow_parity_oracle.py tests/test_l2_run_routes.py tests/test_current_ui_graph.py -q && .venv/bin/python scripts/dev/flow_editor_walk.py && .venv/bin/python scripts/dev/ds5a_flow_editor_walk.py && .venv/bin/python scripts/dev/run_monitor_walk.py && .venv/bin/python scripts/live_walk_minimalist_ui.py --require-browser"]
+    },
+    {
+      "id": "FR-30",
+      "objective": "Certify the joined candidate, close the source plan truthfully, and integrate the completed result back into codex/flow-node-mockup-parity.",
+      "plan_sections": ["CLOSE"],
+      "criteria": ["AC-CLOSE"],
+      "depends_on": ["FR-20"],
+      "verification_argv": ["bash", "-lc", ".venv/bin/pytest tests/ -q && .venv/bin/python scripts/dev/flow_editor_walk.py && .venv/bin/python scripts/dev/ds5a_flow_editor_walk.py && .venv/bin/python scripts/dev/run_monitor_walk.py && .venv/bin/python scripts/live_walk_minimalist_ui.py --require-browser && python3 scripts/check_current_ui_graph.py && python3 scripts/check_doc_status.py && python3 scripts/check_doc_links.py && bash scripts/scan_export_phi.sh ."]
+    }
+  ],
+  "functionality_tests": [
+    ".venv/bin/pytest tests/ -q",
+    ".venv/bin/python scripts/dev/flow_editor_walk.py",
+    ".venv/bin/python scripts/dev/ds5a_flow_editor_walk.py",
+    ".venv/bin/python scripts/dev/run_monitor_walk.py",
+    ".venv/bin/python scripts/live_walk_minimalist_ui.py --require-browser",
+    "python3 scripts/check_current_ui_graph.py",
+    "python3 scripts/check_doc_status.py",
+    "python3 scripts/check_doc_links.py",
+    "bash scripts/scan_export_phi.sh ."
+  ]
+}
