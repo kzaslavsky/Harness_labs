@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import inspect
 import subprocess
 import tempfile
 import unittest
@@ -21,7 +22,7 @@ from harness_labs.feature_run import (
     run_feature_worktree,
     run_plan_graph_feature_worktree,
 )
-from harness_labs.development_policy import implement_v13_dispatch_schema
+from harness_labs.feature_run_policy import standard_feature_run_dispatch_schema
 from harness_labs.coordinator_schema import (
     CoordinatorDispatchSchema,
     CoordinatorSegment,
@@ -178,7 +179,7 @@ class FeatureRunTests(unittest.TestCase):
             source_binding_report={"claims": ["approved"]},
             build_briefing={"allowed_paths": ["feature.txt"]},
         )
-        normal_schema = implement_v13_dispatch_schema()
+        normal_schema = standard_feature_run_dispatch_schema()
         normal_phases = tuple(
             phase for segment in normal_schema.segments for phase in segment.phases
         )
@@ -241,12 +242,35 @@ class FeatureRunTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "ledger-backed review guards"):
             run_plan_graph_feature_worktree(
                 binding=binding,
-                schema=implement_v13_dispatch_schema(),
+                schema=standard_feature_run_dispatch_schema(),
                 contract_factory=lambda worktree, receipt: None,
                 review_fix_policy=ReviewFixPolicy(ledger_enabled=False),
                 verification_argv=("python3", "-m", "unittest"),
                 verification_repair_executor_factory=lambda attempt: None,
             )
+
+    def test_plan_graph_feature_run_has_no_skill_or_serial_coupling(self) -> None:
+        import harness_labs.feature_run as feature_run_module
+        import harness_labs.feature_run_policy as feature_run_policy_module
+
+        material = "\n".join(
+            (
+                inspect.getsource(feature_run_module),
+                inspect.getsource(feature_run_policy_module),
+                json.dumps(
+                    standard_feature_run_dispatch_schema().as_dict(),
+                    sort_keys=True,
+                ),
+            )
+        )
+        forbidden = (
+            "-".join(("implement", "v13")),
+            "_".join(("implement", "v13")),
+            "-".join(("serial", "implement")),
+            "_".join(("serial", "implement")),
+        )
+        for value in forbidden:
+            self.assertNotIn(value, material)
 
     def test_deterministic_verification_rejects_model_verify_phase(self) -> None:
         schema = CoordinatorDispatchSchema(

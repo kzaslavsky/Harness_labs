@@ -17,5 +17,5 @@ evidence exists.
 
 The policy guides semantic decomposition. The deterministic kernel and
 dispatcher continue to own authority, evidence registration, phase transitions,
-and stopping. `implement_v13_dispatch_schema()` is the reference seven-phase
+and stopping. `standard_feature_run_dispatch_schema()` is the reference seven-phase
 schema.
