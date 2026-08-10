@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -43,14 +45,92 @@ def _success(request, commit: str) -> FeatureRunOutcome:
 
 
 class PlanGraphObservabilityTests(unittest.TestCase):
-    def test_new_graph_requires_a_durable_run_root(self) -> None:
+    def test_plan_graph_rejects_non_audited_construction(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            with self.assertRaisesRegex(PlanGraphError, "run_root is required"):
+            with self.assertRaisesRegex(TypeError, "run_root"):
                 PlanGraph(
                     _plan(root / "plan.md"),
                     lambda request: _success(request, "unused"),
                 )
+            with self.assertRaisesRegex(TypeError, "state_path"):
+                PlanGraph(
+                    _plan(root / "plan.md"),
+                    lambda request: _success(request, "unused"),
+                    state_path=root / "legacy.json",
+                )
+            with self.assertRaisesRegex(PlanGraphError, "audited PlanGraph"):
+                PlanGraph(
+                    _plan(root / "plan.md"),
+                    lambda request: _success(request, "unused"),
+                    run_root=None,
+                )
+
+    def test_normal_cli_launch_always_creates_canonical_graph_journal(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            approved_plan = root / "plan.md"
+            approved_plan.write_text("Build A AC-1\n", encoding="utf-8")
+            decomposition = root / "decomposition.json"
+            decomposition.write_text(
+                json.dumps(
+                    {
+                        "plan": str(approved_plan),
+                        "base_commit": "base",
+                        "runs": [
+                            {
+                                "id": "A",
+                                "objective": "Build A",
+                                "plan_sections": ["1"],
+                                "criteria": ["AC-1"],
+                            }
+                        ],
+                        "plan_sections": {"1": "Build A AC-1"},
+                        "acceptance_criteria": {"AC-1": "AC-1"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            launcher = root / "launcher.py"
+            launcher.write_text(
+                "import json, sys\n"
+                "request = json.load(sys.stdin)\n"
+                "print(json.dumps({\n"
+                "    'status': 'succeeded',\n"
+                "    'candidate_commit': 'candidate',\n"
+                "    'plan_graph_id': request['plan_graph_id'],\n"
+                "    'plan_node_id': request['plan_node_id'],\n"
+                "    'feature_run_id': request['feature_run_id'],\n"
+                "    'run_dir': request['run_dir'],\n"
+                "}))\n",
+                encoding="utf-8",
+            )
+            run_root = root / "logs" / "runs"
+            runner = (
+                Path(__file__).resolve().parents[1] / "scripts" / "run_plan_graph.py"
+            )
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(runner),
+                    str(decomposition),
+                    "--launcher-command",
+                    sys.executable,
+                    str(launcher),
+                    "--graph-run-id",
+                    "normal-launch",
+                ],
+                cwd=root,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            run_dir = run_root / "normal-launch"
+            descriptor = json.loads((run_dir / "descriptor.json").read_text())
+            self.assertEqual(descriptor["run_kind"], "plan_graph")
+            self.assertEqual(AuditJournal.verify(run_dir)["run_id"], "normal-launch")
+            self.assertTrue((run_dir / "events.jsonl").is_file())
 
     def test_graph_id_cannot_resolve_to_the_run_root_or_parent(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

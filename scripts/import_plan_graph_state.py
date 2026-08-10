@@ -14,6 +14,28 @@ from harness_labs.plan_graph import PlanGraph, PlanGraphError, plan_from_mapping
 from harness_labs.plan_graph_audit import PlanGraphAudit
 
 
+def _load_legacy_completed(state_path: Path, run_ids: set[str]) -> dict[str, str]:
+    try:
+        payload = json.loads(state_path.read_text(encoding="utf-8"))
+        completed = payload["completed"]
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise PlanGraphError(f"invalid PlanGraph state: {exc}") from exc
+    if not isinstance(completed, dict) or not all(
+        isinstance(key, str) and isinstance(value, str)
+        for key, value in completed.items()
+    ):
+        raise PlanGraphError(
+            "invalid PlanGraph state: completed must map ids to commits"
+        )
+    unknown = set(completed) - run_ids
+    if unknown:
+        raise PlanGraphError(
+            "PlanGraph state contains unknown completed runs: "
+            + ", ".join(sorted(unknown))
+        )
+    return dict(completed)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Import one explicitly paired decomposition and legacy PlanGraph state."
@@ -25,10 +47,17 @@ def main() -> int:
     arguments = parser.parse_args()
     plan = plan_from_mapping(json.loads(arguments.decomposition.read_text(encoding="utf-8")))
     # Reuse PlanGraph's validation and strict lineage checks; no launcher is ever run.
-    legacy = PlanGraph(plan, lambda request: (_ for _ in ()).throw(AssertionError("import cannot launch")), state_path=arguments.state)
-    legacy.validate()
-    completed = legacy._load_completed()
-    legacy._validate_completed_dependencies(legacy._ordered_runs(), completed)
+    graph = PlanGraph(
+        plan,
+        lambda request: (_ for _ in ()).throw(AssertionError("import cannot launch")),
+        run_root=arguments.run_root,
+        graph_run_id=arguments.graph_run_id,
+    )
+    graph.validate()
+    completed = _load_legacy_completed(
+        arguments.state, {run.id for run in plan.runs}
+    )
+    graph._validate_completed_dependencies(graph._ordered_runs(), completed)
     nodes = {
         run.id: {
             "status": "queued",
@@ -43,7 +72,7 @@ def main() -> int:
             "finished_at": None,
             "candidate_commit": None,
         }
-        for run in legacy._ordered_runs()
+        for run in graph._ordered_runs()
     }
     audit = PlanGraphAudit(
         run_root=arguments.run_root,
@@ -60,7 +89,7 @@ def main() -> int:
         if isinstance(node, dict)
     ):
         raise PlanGraphError("canonical graph run already contains imported state")
-    for run in legacy._ordered_runs():
+    for run in graph._ordered_runs():
         candidate = completed.get(run.id)
         if candidate is None:
             break

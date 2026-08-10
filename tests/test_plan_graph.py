@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import patch
 from pathlib import Path
@@ -37,18 +38,33 @@ def plan(*runs: PlanRun) -> PlanGraphPlan:
 class PlanGraphTests(unittest.TestCase):
     def setUp(self) -> None:
         self._temporary_directory = tempfile.TemporaryDirectory()
-        self._state_counter = 0
+        self._graph_counter = 0
+        self._plan_path = Path(self._temporary_directory.name) / "approved-plan.md"
+        self._plan_path.write_text("approved plan\n", encoding="utf-8")
 
     def tearDown(self) -> None:
         self._temporary_directory.cleanup()
 
-    def _legacy_graph(self, *args, **kwargs) -> PlanGraph:
-        self._state_counter += 1
+    def _graph(self, queue_plan, launcher, **kwargs) -> PlanGraph:
+        self._graph_counter += 1
+
+        def correlated_launcher(request):
+            outcome = launcher(request)
+            if outcome.status != "succeeded":
+                return outcome
+            return replace(
+                outcome,
+                plan_graph_id=request.plan_graph_id,
+                plan_node_id=request.plan_node_id,
+                feature_run_id=request.feature_run_id,
+                run_dir=str(request.run_dir),
+            )
+
         return PlanGraph(
-            *args,
-            state_path=(
-                Path(self._temporary_directory.name) / f"legacy-{self._state_counter}.json"
-            ),
+            replace(queue_plan, plan=str(self._plan_path)),
+            correlated_launcher,
+            run_root=Path(self._temporary_directory.name) / "runs",
+            graph_run_id=f"graph-{self._graph_counter}",
             **kwargs,
         )
 
@@ -72,7 +88,7 @@ class PlanGraphTests(unittest.TestCase):
             )
 
         run.side_effect = respond
-        result = self._legacy_graph(
+        result = self._graph(
             plan(
                 PlanRun("A", "Build A", ("1",), ("AC-1",)),
                 PlanRun("B", "Build B", ("2",), ("AC-2",), ("A",)),
@@ -111,7 +127,7 @@ class PlanGraphTests(unittest.TestCase):
             calls.append((request.run.id, request.base_commit))
             return FeatureRunOutcome("succeeded", f"{request.run.id}-commit")
 
-        graph = self._legacy_graph(
+        graph = self._graph(
             plan(
                 PlanRun("A", "Build A", ("1",), ("AC-1",)),
                 PlanRun("B", "Build B", ("2",), ("AC-2",), ("A",)),
@@ -147,7 +163,7 @@ class PlanGraphTests(unittest.TestCase):
         }
         requests = []
         final_tests = []
-        graph = self._legacy_graph(
+        graph = self._graph(
             plan_from_mapping(payload),
             lambda request: (
                 requests.append(request)
@@ -189,7 +205,7 @@ class PlanGraphTests(unittest.TestCase):
             },
         )
 
-        result = self._legacy_graph(
+        result = self._graph(
             queue_plan,
             lambda request: (
                 calls.append((request.run.id, request.base_commit))
@@ -217,7 +233,7 @@ class PlanGraphTests(unittest.TestCase):
         for invalid in invalid_plans:
             with self.subTest(invalid=invalid):
                 with self.assertRaisesRegex(PlanGraphError, "absent from"):
-                    self._legacy_graph(
+                    self._graph(
                         invalid, lambda request: FeatureRunOutcome("succeeded")
                     ).run()
 
@@ -245,7 +261,7 @@ class PlanGraphTests(unittest.TestCase):
             with self.subTest(invalid=invalid):
                 calls = []
                 with self.assertRaises(PlanGraphError):
-                    self._legacy_graph(
+                    self._graph(
                         invalid, lambda request: calls.append(request)
                     ).run()
                 self.assertEqual(calls, [])
@@ -257,7 +273,7 @@ class PlanGraphTests(unittest.TestCase):
             calls.append(request.run.id)
             return FeatureRunOutcome("failed")
 
-        result = self._legacy_graph(
+        result = self._graph(
             plan(
                 PlanRun("A", "Build A", ("1",), ("AC-1",)),
                 PlanRun("B", "Build B", ("2",), ("AC-2",), ("A",)),
@@ -268,61 +284,26 @@ class PlanGraphTests(unittest.TestCase):
         self.assertEqual(result.failed_run_id, "A")
         self.assertEqual(calls, ["A"])
 
-    def test_restart_skips_completed_run(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            state = Path(temporary) / "plan-state.json"
-            first_calls = []
-
-            def first_launcher(request):
-                first_calls.append(request.run.id)
-                return FeatureRunOutcome(
-                    "succeeded", "A-commit" if request.run.id == "A" else None
-                ) if request.run.id == "A" else FeatureRunOutcome("failed")
-
-            queue_plan = plan(
-                PlanRun("A", "Build A", ("1",), ("AC-1",)),
-                PlanRun("B", "Build B", ("2",), ("AC-2",), ("A",)),
-            )
-            first = PlanGraph(queue_plan, first_launcher, state_path=state).run()
-            self.assertEqual(first.failed_run_id, "B")
-            self.assertEqual(first_calls, ["A", "B"])
-
-            second_calls = []
-            second = PlanGraph(
-                queue_plan,
-                lambda request: (
-                    second_calls.append((request.run.id, request.base_commit))
-                    or FeatureRunOutcome("succeeded", "B-commit")
-                ),
-                state_path=state,
-            ).run()
-            self.assertEqual(second.status, "succeeded")
-            self.assertEqual(second_calls, [("B", "A-commit")])
-
     def test_interchangeable_launchers_need_no_graph_change(self) -> None:
         queue_plan = plan(PlanRun("A", "Build A", ("1",), ("AC-1",)), PlanRun("B", "Build B", ("2",), ("AC-2",), ("A",)))
         for prefix in ("one", "two"):
             with self.subTest(prefix=prefix):
-                result = self._legacy_graph(
+                result = self._graph(
                     queue_plan,
                     lambda request, prefix=prefix: FeatureRunOutcome("succeeded", f"{prefix}-{request.run.id}"),
                 ).run()
                 self.assertEqual(result.candidate_commit, f"{prefix}-B")
 
-    def test_resume_rejects_a_completed_dependent_without_its_dependency(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            state = Path(temporary) / "plan-state.json"
-            state.write_text('{"completed": {"B": "B-commit"}}\n', encoding="utf-8")
-            with self.assertRaises(PlanGraphError):
-                PlanGraph(
-                    plan(
-                        PlanRun("A", "Build A", ("1",), ("AC-1",)),
-                        PlanRun("B", "Build B", ("2",), ("AC-2",), ("A",)),
-                    ),
-                    lambda request: FeatureRunOutcome("succeeded", "unused"),
-                    state_path=state,
-                ).run()
+    def test_legacy_import_rejects_completed_dependent_without_dependency(self) -> None:
+        ordered_runs = plan(
+            PlanRun("A", "Build A", ("1",), ("AC-1",)),
+            PlanRun("B", "Build B", ("2",), ("AC-2",), ("A",)),
+        ).runs
 
+        with self.assertRaisesRegex(PlanGraphError, "sequential candidate lineage"):
+            PlanGraph._validate_completed_dependencies(
+                ordered_runs, {"B": "B-commit"}
+            )
 
 if __name__ == "__main__":
     unittest.main()

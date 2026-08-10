@@ -194,27 +194,17 @@ class PlanGraph:
         plan: PlanGraphPlan,
         launcher: FeatureRunLauncher,
         *,
-        state_path: Path | None = None,
-        run_root: Path | None = None,
+        run_root: Path,
         graph_run_id: str | None = None,
         functionality_tests: Sequence[str] = (),
         functionality_test_runner: FunctionalityTestRunner | None = None,
     ) -> None:
         self.plan = plan
         self.launcher = launcher
-        self.state_path = state_path
-        if run_root is None and state_path is None:
-            raise PlanGraphError(
-                "run_root is required; legacy execution requires an explicit state_path"
-            )
-        if graph_run_id is not None and run_root is None:
-            raise PlanGraphError("graph_run_id requires run_root")
-        if run_root is not None and state_path is not None:
-            raise PlanGraphError("run_root and legacy state_path cannot be combined")
+        if run_root is None:
+            raise PlanGraphError("run_root is required for audited PlanGraph execution")
         self.run_root = run_root
-        self.graph_run_id = graph_run_id or (
-            f"plan-graph-{uuid4().hex}" if run_root is not None else None
-        )
+        self.graph_run_id = graph_run_id or f"plan-graph-{uuid4().hex}"
         self._audit: PlanGraphAudit | None = None
         self.functionality_tests = (
             tuple(plan.functionality_tests) + tuple(functionality_tests)
@@ -295,13 +285,9 @@ class PlanGraph:
 
         self.validate()
         audit = self._audit_for_run()
-        if audit is not None and audit.terminal:
+        if audit.terminal:
             return self._result_from_audit(audit)
-        completed = (
-            self._load_audit_completed(audit)
-            if audit is not None
-            else self._load_completed()
-        )
+        completed = self._load_audit_completed(audit)
         ordered_runs = self._ordered_runs()
         self._validate_completed_dependencies(ordered_runs, completed)
         candidate_commit = self.plan.base_commit
@@ -310,12 +296,9 @@ class PlanGraph:
                 candidate_commit = completed[run.id]
                 continue
             request = self._request_for_run(run, candidate_commit)
-            if audit is not None:
-                audit.node_started(run.id)
+            audit.node_started(run.id)
             outcome = self.launcher(request)
-            if audit is not None and not self._outcome_matches_reservation(
-                outcome, request
-            ):
+            if not self._outcome_matches_reservation(outcome, request):
                 outcome = FeatureRunOutcome(
                     "failed",
                     evidence={
@@ -329,9 +312,8 @@ class PlanGraph:
                     completed=dict(completed),
                     failed_run_id=run.id,
                 )
-                if audit is not None:
-                    audit.node_failed(run.id, result.status, outcome.evidence)
-                    audit.finalize(result.status, self._result_payload(result))
+                audit.node_failed(run.id, result.status, outcome.evidence)
+                audit.finalize(result.status, self._result_payload(result))
                 return result
             if not outcome.candidate_commit:
                 raise PlanGraphError(
@@ -339,9 +321,7 @@ class PlanGraph:
                 )
             completed[run.id] = outcome.candidate_commit
             candidate_commit = outcome.candidate_commit
-            self._save_completed(completed)
-            if audit is not None:
-                audit.node_completed(run.id, candidate_commit)
+            audit.node_completed(run.id, candidate_commit)
 
         for command in self.functionality_tests:
             try:
@@ -353,20 +333,15 @@ class PlanGraph:
                     completed=dict(completed),
                     functionality_failure=f"{command}: {exc}",
                 )
-                if audit is not None:
-                    audit.functionality_failed(command, candidate_commit, str(exc))
-                    audit.finalize("failed", self._result_payload(result))
+                audit.functionality_failed(command, candidate_commit, str(exc))
+                audit.finalize("failed", self._result_payload(result))
                 return result
-            if audit is not None:
-                audit.functionality_completed(command, candidate_commit)
+            audit.functionality_completed(command, candidate_commit)
         result = PlanGraphResult("succeeded", candidate_commit, dict(completed))
-        if audit is not None:
-            audit.finalize("succeeded", self._result_payload(result))
+        audit.finalize("succeeded", self._result_payload(result))
         return result
 
-    def _audit_for_run(self) -> PlanGraphAudit | None:
-        if self.run_root is None:
-            return None
+    def _audit_for_run(self) -> PlanGraphAudit:
         if self._audit is None:
             assert self.graph_run_id is not None
             nodes = {
@@ -524,27 +499,6 @@ class PlanGraph:
             visit(run.id)
         return tuple(ordered)
 
-    def _load_completed(self) -> dict[str, str]:
-        if self.state_path is None or not self.state_path.exists():
-            return {}
-        try:
-            payload = json.loads(self.state_path.read_text(encoding="utf-8"))
-            completed = payload["completed"]
-        except (OSError, ValueError, KeyError, TypeError) as exc:
-            raise PlanGraphError(f"invalid PlanGraph state: {exc}") from exc
-        if not isinstance(completed, dict) or not all(
-            isinstance(key, str) and isinstance(value, str)
-            for key, value in completed.items()
-        ):
-            raise PlanGraphError("invalid PlanGraph state: completed must map ids to commits")
-        unknown = set(completed) - {run.id for run in self.plan.runs}
-        if unknown:
-            raise PlanGraphError(
-                "PlanGraph state contains unknown completed runs: "
-                + ", ".join(sorted(unknown))
-            )
-        return dict(completed)
-
     @staticmethod
     def _validate_completed_dependencies(
         ordered_runs: Sequence[PlanRun], completed: Mapping[str, str]
@@ -564,18 +518,6 @@ class PlanGraph:
                 raise PlanGraphError(
                     f"PlanGraph state marks {run.id!r} complete before its dependency"
                 )
-
-    def _save_completed(self, completed: Mapping[str, str]) -> None:
-        if self.state_path is None:
-            return
-        self.state_path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = self.state_path.with_suffix(self.state_path.suffix + ".tmp")
-        temporary.write_text(
-            json.dumps({"completed": dict(completed)}, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
-        temporary.replace(self.state_path)
-
 
 def _run_functionality_test(command: str, candidate_commit: str) -> None:
     with tempfile.TemporaryDirectory(prefix="plan-graph-") as temporary:

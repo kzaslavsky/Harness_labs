@@ -38,8 +38,7 @@ def main() -> int:
     launcher_group.add_argument("--launcher-command", nargs="+")
     parser.add_argument("--launcher-cwd", type=Path)
     parser.add_argument("--launcher-timeout", type=float)
-    parser.add_argument("--state", type=Path)
-    parser.add_argument("--run-root", type=Path)
+    parser.add_argument("--run-root", type=Path, default=Path("logs/runs"))
     parser.add_argument("--graph-run-id")
     parser.add_argument("--functionality-test", action="append", default=[])
     arguments = parser.parse_args()
@@ -64,12 +63,7 @@ def main() -> int:
     graph = PlanGraph(
         plan_from_mapping(payload),
         launch,
-        state_path=arguments.state,
-        run_root=(
-            arguments.run_root
-            if arguments.state
-            else (arguments.run_root or Path("logs/runs"))
-        ),
+        run_root=arguments.run_root,
         graph_run_id=arguments.graph_run_id,
         functionality_tests=arguments.functionality_test,
     )

@@ -72,20 +72,20 @@ checkpoint, two events, and no terminal manifest. The dashboard must label that
 state `stale` or `liveness unavailable`, never `running`, unless a separate live
 lease is verified.
 
-### PlanGraphs are not currently discoverable
+### Prior PlanGraph discovery limitation
 
-`PlanGraph` optionally persists only:
+Before canonical journaling, `PlanGraph` optionally persisted only:
 
 ```json
 {"completed": {"node-id": "candidate-commit"}}
 ```
 
-The path is supplied by `--state`. There is no canonical graph run directory,
+The path was supplied by `--state`. There was no canonical graph run directory,
 graph ID, plan digest, per-node state, start/finish time, child FeatureRun ID,
 event journal, or terminal manifest. Existing arbitrary state files therefore
 cannot be safely found or correlated by scanning the repository.
 
-Future PlanGraphs need durable identity and audit records. Historical PlanGraph
+New PlanGraphs need durable identity and audit records. Historical PlanGraph
 state can be imported only when an operator supplies the matching decomposition
 and state file; the implementation must not guess associations from names or
 commits.
@@ -177,8 +177,9 @@ reserves these identities before launch; the FeatureRun descriptor and first
 bound event must echo them. A successful launcher result is rejected if its
 identity does not match the reservation.
 
-Keep `--state` compatibility for one release as an explicit legacy import
-input. New runs use `--run-root` and `--graph-run-id`. Add a bounded importer
+Keep legacy state compatibility only in the explicit import command. New runs
+use `--run-root` and `--graph-run-id`; neither the production runner nor the
+`PlanGraph` API accepts a legacy state path. Add a bounded importer
 that requires both the approved decomposition and the old state file, validates
 their existing lineage rules, and produces one canonical graph record. Do not
 scan for arbitrary state JSON.
