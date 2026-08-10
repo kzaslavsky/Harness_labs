@@ -181,6 +181,13 @@ orient -> plan -> implement -> verify -> review -> integrate -> report
 Every transition MUST record the prior state, next state, actor, timestamp,
 reason, and evidence. A phase completes only when its exit criteria are true.
 
+A PlanGraph-associated FeatureRun is the normal FeatureRun with its approved
+PlanGraph packet bound as the planning handoff. It omits only `orient` and
+`plan`; it MUST use the same implementation, verification, ledger-backed
+review/fix, Git transaction, recovery, integration, and reporting machinery.
+A custom child lifecycle or replacement review loop is not a conforming
+PlanGraph-associated FeatureRun.
+
 ## Git isolation and integration
 
 Each feature run MUST operate in a dedicated worktree on a dedicated feature

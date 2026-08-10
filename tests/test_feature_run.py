@@ -7,13 +7,20 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from harness_labs.attempts import TaskResult
 from harness_labs.audit import AuditJournal
 from harness_labs.controller_kernel import RunContract
 from harness_labs.controller_results import semantic_payload
 from harness_labs.controller_scheduler import RoleProfile
-from harness_labs.feature_run import ReviewFixPolicy, run_feature_worktree
+from harness_labs.feature_run import (
+    PlanGraphFeatureRunBinding,
+    ReviewFixPolicy,
+    run_feature_worktree,
+    run_plan_graph_feature_worktree,
+)
+from harness_labs.development_policy import implement_v13_dispatch_schema
 from harness_labs.coordinator_schema import (
     CoordinatorDispatchSchema,
     CoordinatorSegment,
@@ -150,6 +157,92 @@ class _VerificationRepairExecutor:
 
 
 class FeatureRunTests(unittest.TestCase):
+    @patch("harness_labs.feature_run.run_feature_worktree")
+    def test_plan_graph_mode_omits_only_orientation_and_planning(
+        self, run_feature
+    ) -> None:
+        criteria = (
+            {
+                "id": "AC-1",
+                "statement": "The approved feature is implemented.",
+                "source": "approved-plan",
+            },
+        )
+        binding = PlanGraphFeatureRunBinding(
+            plan_graph_id="graph-1",
+            plan_node_id="FR-01",
+            objective="Implement the approved feature.",
+            acceptance_criteria=criteria,
+            approved_plan={"path": "docs/plan.md", "sha256": "a" * 64},
+            source_binding_report={"claims": ["approved"]},
+            build_briefing={"allowed_paths": ["feature.txt"]},
+        )
+        normal_schema = implement_v13_dispatch_schema()
+        normal_phases = tuple(
+            phase for segment in normal_schema.segments for phase in segment.phases
+        )
+
+        def contract_factory(worktree, receipt):
+            return RunContract(
+                run_id="graph-1-FR-01",
+                objective=binding.objective,
+                phases=normal_phases,
+                criteria=criteria,
+                repository={"path": str(worktree), **receipt},
+            )
+
+        sentinel = object()
+        run_feature.return_value = sentinel
+        result = run_plan_graph_feature_worktree(
+            binding=binding,
+            schema=normal_schema,
+            contract_factory=contract_factory,
+            review_fix_policy=ReviewFixPolicy(),
+            base_repository=Path("repository"),
+        )
+
+        self.assertIs(result, sentinel)
+        options = run_feature.call_args.kwargs
+        bound_phases = tuple(
+            phase for segment in options["schema"].segments for phase in segment.phases
+        )
+        self.assertEqual(
+            bound_phases,
+            ("implement", "verify", "review", "integrate", "report"),
+        )
+        self.assertEqual(
+            [artifact.kind for artifact in options["initial_evidence"]],
+            ["engineering-plan", "source-binding-report", "build-briefing"],
+        )
+        handoff = options["initial_evidence"][0].content
+        self.assertEqual(handoff["plan_graph_id"], "graph-1")
+        self.assertEqual(handoff["plan_node_id"], "FR-01")
+        bound_contract = options["contract_factory"](
+            Path("worktree"),
+            {"feature_branch": "feature", "base_branch": "main", "base_commit": "b" * 40},
+        )
+        self.assertEqual(bound_contract.phases, bound_phases)
+        self.assertEqual(bound_contract.criteria, criteria)
+
+    def test_plan_graph_mode_refuses_disabled_review_ledger(self) -> None:
+        criteria = ({"id": "AC-1", "statement": "Works", "source": "plan"},)
+        binding = PlanGraphFeatureRunBinding(
+            "graph-1",
+            "FR-01",
+            "Build it",
+            criteria,
+            {"path": "plan.md"},
+            {"claims": ["bound"]},
+            {"allowed_paths": ["feature.txt"]},
+        )
+        with self.assertRaisesRegex(ValueError, "ledger-backed review guards"):
+            run_plan_graph_feature_worktree(
+                binding=binding,
+                schema=implement_v13_dispatch_schema(),
+                contract_factory=lambda worktree, receipt: None,
+                review_fix_policy=ReviewFixPolicy(ledger_enabled=False),
+            )
+
     def test_deterministic_verification_rejects_model_verify_phase(self) -> None:
         schema = CoordinatorDispatchSchema(
             "invalid-double-verification/1",

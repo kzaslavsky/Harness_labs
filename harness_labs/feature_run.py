@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from time import monotonic_ns
 from typing import Callable, Mapping, Protocol
@@ -48,6 +48,83 @@ FeatureProfileBuilder = Callable[
     [Path, EvidenceCatalog],
     tuple[RoleProfile, ...],
 ]
+
+
+_NORMAL_FEATURE_PHASES = (
+    "orient",
+    "plan",
+    "implement",
+    "verify",
+    "review",
+    "integrate",
+    "report",
+)
+
+
+@dataclass(frozen=True)
+class FeatureRunHandoffArtifact:
+    """One controller-owned artifact available before coordinator dispatch."""
+
+    kind: str
+    content: object
+    media_type: str = "application/json"
+    producer_task_id: str = "plan-graph"
+
+    def __post_init__(self) -> None:
+        if not all(
+            isinstance(value, str) and value.strip()
+            for value in (self.kind, self.media_type, self.producer_task_id)
+        ):
+            raise ValueError("handoff artifact metadata must be non-empty")
+
+
+@dataclass(frozen=True)
+class PlanGraphFeatureRunBinding:
+    """Approved PlanGraph handoff replacing only FeatureRun orient and plan."""
+
+    plan_graph_id: str
+    plan_node_id: str
+    objective: str
+    acceptance_criteria: tuple[Mapping[str, object], ...]
+    approved_plan: Mapping[str, object]
+    source_binding_report: Mapping[str, object]
+    build_briefing: Mapping[str, object]
+
+    def __post_init__(self) -> None:
+        if not all(
+            isinstance(value, str) and value.strip()
+            for value in (self.plan_graph_id, self.plan_node_id, self.objective)
+        ):
+            raise ValueError("PlanGraph FeatureRun binding identity must be non-empty")
+        if not self.acceptance_criteria:
+            raise ValueError("PlanGraph FeatureRun binding requires acceptance criteria")
+        for name in ("approved_plan", "source_binding_report", "build_briefing"):
+            value = getattr(self, name)
+            if not isinstance(value, Mapping) or not value:
+                raise ValueError(f"PlanGraph FeatureRun binding {name} must be non-empty")
+
+    def handoff_artifacts(self) -> tuple[FeatureRunHandoffArtifact, ...]:
+        def envelope(content: Mapping[str, object]) -> dict[str, object]:
+            return {
+                "protocol": "plan-graph-feature-handoff/1",
+                "plan_graph_id": self.plan_graph_id,
+                "plan_node_id": self.plan_node_id,
+                "objective": self.objective,
+                "acceptance_criteria": [dict(item) for item in self.acceptance_criteria],
+                "content": dict(content),
+            }
+
+        return (
+            FeatureRunHandoffArtifact(
+                "engineering-plan", envelope(self.approved_plan)
+            ),
+            FeatureRunHandoffArtifact(
+                "source-binding-report", envelope(self.source_binding_report)
+            ),
+            FeatureRunHandoffArtifact(
+                "build-briefing", envelope(self.build_briefing)
+            ),
+        )
 
 
 class VerificationRepairExecutorFactory(Protocol):
@@ -114,6 +191,7 @@ def run_feature_worktree(
     verification_repair_limit: int = 1,
     verification_timeout_seconds: float | None = 1200,
     evidence_classification: str = "production_lifecycle",
+    initial_evidence: tuple[FeatureRunHandoffArtifact, ...] = (),
 ) -> FeatureRunResult:
     """Create, execute, commit, and optionally merge one isolated FeatureRun."""
 
@@ -140,6 +218,9 @@ def run_feature_worktree(
             raise ValueError("verification_timeout_seconds must be positive or None")
     elif verification_repair_executor_factory is not None:
         raise ValueError("verification repair requires verification_argv")
+    handoff_kinds = [artifact.kind for artifact in initial_evidence]
+    if len(set(handoff_kinds)) != len(handoff_kinds):
+        raise ValueError("handoff artifact kinds must be unique")
     transaction = GitWorktreeTransaction.create(
         base_repository=base_repository,
         base_branch=base_branch,
@@ -156,6 +237,19 @@ def run_feature_worktree(
         evidence_classification=evidence_classification,
     )
     evidence = EvidenceCatalog(audit=audit)
+    for handoff in initial_evidence:
+        record = evidence.add(
+            kind=handoff.kind,
+            content=handoff.content,
+            media_type=handoff.media_type,
+            producer_task_id=handoff.producer_task_id,
+        )
+        audit.append(
+            "feature_run_handoff_bound",
+            status="succeeded",
+            payload={"kind": handoff.kind, "evidence_ref": record.ref},
+            actor=AuditActor("plan-graph", "parent_controller"),
+        )
     creation_artifact = evidence.add(
         kind="git-worktree-receipt",
         content=creation,
@@ -325,6 +419,82 @@ def run_feature_worktree(
         transaction.worktree_path,
         review_fix_result,
         verification_result,
+    )
+
+
+def run_plan_graph_feature_worktree(
+    *,
+    binding: PlanGraphFeatureRunBinding,
+    schema: CoordinatorDispatchSchema,
+    contract_factory: FeatureContractFactory,
+    review_fix_policy: ReviewFixPolicy,
+    **feature_run_options: object,
+) -> FeatureRunResult:
+    """Run normal FeatureRun machinery with only orient and plan pre-satisfied.
+
+    This is a launch profile over :func:`run_feature_worktree`, not a second
+    lifecycle engine.  The approved PlanGraph packet becomes the normal planning
+    handoff, while verification, ledger-backed review/fix, Git custody, recovery,
+    and reporting continue through the existing FeatureRun implementation.
+    """
+
+    phases = tuple(phase for segment in schema.segments for phase in segment.phases)
+    if phases != _NORMAL_FEATURE_PHASES:
+        raise ValueError(
+            "PlanGraph-bound FeatureRun requires the normal seven-phase schema"
+        )
+    if schema.segments[0].phases != ("orient", "plan"):
+        raise ValueError(
+            "PlanGraph-bound FeatureRun may omit only the orient-plan segment"
+        )
+    required_review_guards = (
+        review_fix_policy.enabled,
+        review_fix_policy.ledger_enabled,
+        review_fix_policy.scope_expansion_guard_enabled,
+        review_fix_policy.targeted_verification_enabled,
+        review_fix_policy.regression_review_enabled,
+        review_fix_policy.cycle_limit_enabled,
+    )
+    if not all(required_review_guards):
+        raise ValueError(
+            "PlanGraph-bound FeatureRun requires the normal ledger-backed review guards"
+        )
+    reserved = {"schema", "contract_factory", "review_fix_policy", "initial_evidence"}
+    overlap = sorted(reserved.intersection(feature_run_options))
+    if overlap:
+        raise ValueError(
+            "PlanGraph-bound FeatureRun options override controller-owned values: "
+            + ", ".join(overlap)
+        )
+
+    bound_schema = CoordinatorDispatchSchema(
+        schema_id=f"{schema.schema_id}/plan-graph-bound",
+        segments=schema.segments[1:],
+    )
+    bound_phases = _NORMAL_FEATURE_PHASES[2:]
+
+    def bound_contract_factory(
+        worktree: Path, creation: Mapping[str, object]
+    ) -> RunContract:
+        contract = contract_factory(worktree, creation)
+        if contract.phases != _NORMAL_FEATURE_PHASES:
+            raise ValueError(
+                "PlanGraph-bound FeatureRun contract must start as a normal FeatureRun"
+            )
+        if contract.objective != binding.objective:
+            raise ValueError("PlanGraph binding objective does not match FeatureRun")
+        if contract.criteria != binding.acceptance_criteria:
+            raise ValueError(
+                "PlanGraph binding acceptance criteria do not match FeatureRun"
+            )
+        return replace(contract, phases=bound_phases)
+
+    return run_feature_worktree(
+        schema=bound_schema,
+        contract_factory=bound_contract_factory,
+        review_fix_policy=review_fix_policy,
+        initial_evidence=binding.handoff_artifacts(),
+        **feature_run_options,
     )
 
 

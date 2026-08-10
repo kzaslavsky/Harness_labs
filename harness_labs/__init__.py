@@ -107,8 +107,11 @@ from .controller_scheduler import (
 )
 from .feature_run import (
     DeterministicVerificationResult,
+    FeatureRunHandoffArtifact,
     FeatureRunResult,
+    PlanGraphFeatureRunBinding,
     VerificationRepairExecutorFactory,
+    run_plan_graph_feature_worktree,
     run_feature_worktree,
 )
 from .plan_graph import (
@@ -231,6 +234,7 @@ __all__ = [
     "CoordinatorSessionFactory",
     "DispatchedControllerRunResult",
     "DeterministicVerificationResult",
+    "FeatureRunHandoffArtifact",
     "EvidenceCatalog",
     "EvidenceError",
     "EvidenceRecord",
@@ -239,6 +243,7 @@ __all__ = [
     "GitTransactionError",
     "GitWorktreeTransaction",
     "FeatureRunResult",
+    "PlanGraphFeatureRunBinding",
     "FeatureRunOutcome",
     "FeatureRunRequest",
     "PlanGraph",
@@ -273,6 +278,7 @@ __all__ = [
     "run_dispatched_controller",
     "resume_dispatched_controller",
     "run_feature_worktree",
+    "run_plan_graph_feature_worktree",
     "plan_from_mapping",
     "run_fixture_spec",
     "resume_controller",
