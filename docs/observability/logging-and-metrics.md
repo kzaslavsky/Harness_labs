@@ -73,6 +73,14 @@ event on each durable checkpoint transition. The event identifies the checkpoint
 as phase authority and process state as liveness-only evidence; parent monitors
 must not infer phase from an open shell session.
 
+The local PlanGraph dashboard may read a colocated `liveness.json` lease to
+classify a nonterminal controller as live. That lease is ephemeral operational
+state, not an event, artifact, checkpoint field, manifest input, or summary
+metric. A dashboard may call a run live only after confirming a fresh local
+heartbeat and matching process-start identity; an absent, remote, stale, or
+PID-reused lease is respectively unavailable, remote-unverified, or stale.
+Dashboard reads never repair, terminalize, or otherwise mutate a journal.
+
 Runtime logs are ignored by Git. Accepted decisions with durable architectural
 impact are promoted to `docs/decisions/` through a normal reviewed change.
 
