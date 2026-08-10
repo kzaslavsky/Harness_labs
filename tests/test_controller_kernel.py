@@ -156,6 +156,100 @@ class ControllerKernelTests(unittest.TestCase):
         self.assertEqual(stale.error_code, "stale_revision")
         self.assertEqual(self.kernel.state_digest(), digest)
 
+    def test_successful_changed_method_successor_supersedes_failed_task(self) -> None:
+        original = {
+            "id": "verify",
+            "role": "worker",
+            "objective": "Verify the result",
+            "details_schema": "verification/1",
+            "required_capabilities": [],
+            "acceptance_criteria": [],
+            "dependencies": [],
+        }
+        dispatched = self.kernel.handle(
+            self.command(
+                "task.dispatch",
+                {"tasks": [original]},
+                command_id="dispatch-verify",
+            )
+        )
+        self.assertTrue(dispatched.accepted)
+        self.kernel.mark_tasks_running(("verify",))
+        self.kernel.record_task_results(
+            (
+                (
+                    "verify",
+                    TaskResult(
+                        attempt_id="verify/attempt-1",
+                        status="failed",
+                        payload={"error": "changed method required"},
+                    ),
+                ),
+            )
+        )
+
+        widened = self.kernel.handle(
+            self.command(
+                "task.dispatch",
+                {
+                    "tasks": [
+                        {
+                            **original,
+                            "id": "verify-widened",
+                            "role": "privileged-worker",
+                            "supersedes_task_id": "verify",
+                        }
+                    ]
+                },
+                command_id="dispatch-widened-successor",
+            )
+        )
+        self.assertFalse(widened.accepted)
+        self.assertIn("changes frozen authority: role", widened.message)
+
+        successor = self.kernel.handle(
+            self.command(
+                "task.dispatch",
+                {
+                    "tasks": [
+                        {
+                            **original,
+                            "id": "verify-r2",
+                            "objective": "Verify with a changed method",
+                            "supersedes_task_id": "verify",
+                        }
+                    ]
+                },
+                command_id="dispatch-successor",
+            )
+        )
+        self.assertTrue(successor.accepted)
+        self.kernel.mark_tasks_running(("verify-r2",))
+        self.kernel.record_task_results(
+            (
+                (
+                    "verify-r2",
+                    TaskResult(
+                        attempt_id="verify-r2/attempt-1",
+                        status="succeeded",
+                        payload=semantic_payload(
+                            summary="Verification passed with the changed method.",
+                            details_schema="verification/1",
+                            details={},
+                        ),
+                    ),
+                ),
+            )
+        )
+
+        self.assertNotIn(
+            "required task did not succeed: verify",
+            self.kernel.completion_failures(),
+        )
+        tasks = {task["id"]: task for task in project_run_view(self.kernel)["tasks"]}
+        self.assertEqual(tasks["verify"]["status"], "failed")
+        self.assertEqual(tasks["verify-r2"]["supersedes_task_id"], "verify")
+
     def test_task_result_promotes_evidence_and_satisfies_completion(self) -> None:
         report = self.evidence.add(
             kind="final-report",

@@ -33,6 +33,7 @@ def project_run_view(kernel: ControllerKernel) -> dict[str, Any]:
             {
                 "id": task["id"],
                 "parent_task_id": task["parent_task_id"],
+                "supersedes_task_id": task.get("supersedes_task_id"),
                 "depth": task["depth"],
                 "role": task["role"],
                 "objective": task["objective"],

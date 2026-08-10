@@ -465,6 +465,12 @@ def _tool_specs() -> tuple[ToolSpec, ...]:
                             "parent_task_id": {
                                 "type": ["string", "null"],
                             },
+                            "supersedes_task_id": {
+                                "type": ["string", "null"],
+                                "description": (
+                                    "Failed task replaced by this changed-method retry."
+                                ),
+                            },
                             "optional": {"type": "boolean"},
                             "may_delegate": {"type": "boolean"},
                         },
