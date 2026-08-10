@@ -1,6 +1,7 @@
 # Harness_labs
-Experimenting to make reliable coding harness for implementation of large complex tasks autonomously
-Everything is a work-in-progress
+Experimenting to make reliable coding harnesses for implementation of large complex tasks autonomously.
+
+Everything is a work-in-progress.
 
 The motivation behind this is twofold:
 1) enable auditable cross-platform development
