@@ -124,6 +124,7 @@ class ControllerKernel:
         *,
         evidence: EvidenceCatalog,
         audit: AuditJournal | None = None,
+        initial_artifacts: Iterable[Mapping[str, Any]] = (),
     ) -> None:
         self.contract = contract
         self.evidence = evidence
@@ -137,6 +138,15 @@ class ControllerKernel:
             if criterion["id"] in criteria:
                 raise ValueError(f"duplicate run criterion: {criterion['id']}")
             criteria[criterion["id"]] = criterion
+        artifacts: dict[str, dict[str, Any]] = {}
+        for item in initial_artifacts:
+            ref = str(item.get("ref", ""))
+            if not ref or not evidence.contains(ref):
+                raise KernelError("initial artifact references unknown evidence")
+            record = evidence.metadata(ref).as_dict()
+            if dict(item) != record:
+                raise KernelError("initial artifact metadata does not match evidence")
+            artifacts[ref] = record
         self._state: dict[str, Any] = {
             "protocol": "controller-state/1",
             "run_id": contract.run_id,
@@ -152,7 +162,7 @@ class ControllerKernel:
             "tasks": {},
             "decisions": {},
             "findings": {},
-            "artifacts": {},
+            "artifacts": artifacts,
             "operator_questions": [],
             "anomalies": [],
             "budgets": {},

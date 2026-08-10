@@ -237,6 +237,7 @@ def run_feature_worktree(
         evidence_classification=evidence_classification,
     )
     evidence = EvidenceCatalog(audit=audit)
+    handoff_records = []
     for handoff in initial_evidence:
         record = evidence.add(
             kind=handoff.kind,
@@ -250,6 +251,7 @@ def run_feature_worktree(
             payload={"kind": handoff.kind, "evidence_ref": record.ref},
             actor=AuditActor("plan-graph", "parent_controller"),
         )
+        handoff_records.append(record.as_dict())
     creation_artifact = evidence.add(
         kind="git-worktree-receipt",
         content=creation,
@@ -262,7 +264,12 @@ def run_feature_worktree(
         payload={**creation, "evidence_ref": creation_artifact.ref},
         actor=AuditActor("integration-owner", "integration_owner"),
     )
-    kernel = ControllerKernel(contract, evidence=evidence, audit=audit)
+    kernel = ControllerKernel(
+        contract,
+        evidence=evidence,
+        audit=audit,
+        initial_artifacts=handoff_records,
+    )
     scheduler = CapabilityScheduler(
         profile_builder(transaction.worktree_path, evidence)
     )

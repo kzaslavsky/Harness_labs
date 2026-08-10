@@ -15,6 +15,7 @@ from harness_labs.controller_kernel import RunContract
 from harness_labs.controller_results import semantic_payload
 from harness_labs.controller_scheduler import RoleProfile
 from harness_labs.feature_run import (
+    FeatureRunHandoffArtifact,
     PlanGraphFeatureRunBinding,
     ReviewFixPolicy,
     run_feature_worktree,
@@ -294,9 +295,12 @@ class FeatureRunTests(unittest.TestCase):
                         id="active",
                         phases=("active",),
                         instructions="Build and complete.",
+                        required_artifact_kinds=("engineering-plan",),
+                        context_artifact_kinds=("engineering-plan",),
                     ),
                 ),
             )
+            launches = []
 
             def contract_factory(worktree, receipt):
                 return RunContract(
@@ -320,6 +324,7 @@ class FeatureRunTests(unittest.TestCase):
                 )
 
             def session_factory(worktree, launch, evidence):
+                launches.append(launch)
                 return ScriptedCoordinatorSession(
                     [
                         (
@@ -375,6 +380,12 @@ class FeatureRunTests(unittest.TestCase):
                     "repair must not run when deterministic verification passes"
                 ),
                 evidence_classification="component",
+                initial_evidence=(
+                    FeatureRunHandoffArtifact(
+                        "engineering-plan",
+                        {"objective": "Build a file."},
+                    ),
+                ),
             )
 
             self.assertEqual(
@@ -387,6 +398,13 @@ class FeatureRunTests(unittest.TestCase):
                 ),
             )
             self.assertEqual(result.verification.status, "succeeded")
+            self.assertEqual(
+                [
+                    item["kind"]
+                    for item in launches[0].context["handoff_artifacts"]
+                ],
+                ["engineering-plan"],
+            )
             self.assertEqual(result.verification.repair_attempts, 0)
             self.assertEqual(
                 [attempt["stage"] for attempt in result.verification.command_attempts],
