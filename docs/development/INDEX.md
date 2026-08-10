@@ -37,6 +37,8 @@ Status: active
   [`live-plangraph-dashboard-plan.md`](live-plangraph-dashboard-plan.md)
 - Live dashboard startup, liveness, and legacy migration:
   [`live-plangraph-dashboard-operations.md`](live-plangraph-dashboard-operations.md)
+- PlanGraph and FeatureRun projection design:
+  [`plan-projection-design.md`](plan-projection-design.md)
 
 ## Seed implementation records
 

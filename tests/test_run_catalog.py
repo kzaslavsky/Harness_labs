@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from harness_labs.audit import AuditActor, AuditJournal
+from harness_labs.plan_graph_audit import PlanGraphAudit
 from harness_labs.run_catalog import _detail_metrics, _snapshot, build_run_catalog, build_run_detail
 
 
@@ -139,6 +140,31 @@ class RunCatalogTests(unittest.TestCase):
         self.assertEqual(node["evidence"]["state"], "partial")
         self.assertNotIn("_candidate_commit", node)
         self.assertNotIn("_integration_merge_commits", snapshot["feature_runs"][0])
+
+    def test_plan_graph_projection_preserves_logical_identity_and_dependencies(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            plan = root / "plan.md"
+            plan.write_text("approved plan\n", encoding="utf-8")
+            PlanGraphAudit(
+                run_root=root,
+                graph_run_id="graph-attempt",
+                plan=str(plan),
+                base_commit="a" * 40,
+                objective="test graph",
+                nodes={
+                    "root": {"status": "queued", "feature_run_id": "child-root", "depends_on": []},
+                    "join": {"status": "queued", "feature_run_id": "child-join", "depends_on": ["root"]},
+                },
+                functionality_tests=(),
+            )
+            graph = build_run_catalog(root)["plan_graphs"][0]
+
+        self.assertEqual(graph["plan_path"], str(plan))
+        self.assertEqual(len(graph["plan_digest"]), 64)
+        self.assertEqual(len(graph["plan_graph_digest"]), 64)
+        self.assertEqual([node["node_id"] for node in graph["nodes"]], ["root", "join"])
+        self.assertEqual(graph["nodes"][1]["depends_on"], ["root"])
 
 
 if __name__ == "__main__":

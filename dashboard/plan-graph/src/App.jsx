@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Background, Controls, Handle, Position, ReactFlow, ReactFlowProvider } from '@xyflow/react';
-import { displayState, fetchCatalog, fetchRunDetail, graphProjection, selectedRunFor, stateLabel } from './api.js';
+import { defaultGraphAttempt, displayState, fetchCatalog, fetchRunDetail, graphProjection, planGraphGroups, selectedRunFor, stateLabel } from './api.js';
 
 const POLL_MILLISECONDS = 2_000;
 const number = new Intl.NumberFormat('en-US');
@@ -26,13 +26,20 @@ function FlowNode({ data, selected }) {
 }
 const nodeTypes = { featureRun: FlowNode };
 
-function Detail({ run, detail, loading, error, onClose }) {
-  const [tab, setTab] = useState('overview');
-  if (!run) return <aside className="inspector empty"><h2>Select a FeatureRun</h2><p>Select a correlated PlanGraph node to inspect verified detail.</p></aside>;
+function NodeSummary({ node }) {
+  if (!node) return null;
+  const record = node.nodeRecord;
+  return <section><h3>PlanGraph node</h3><Definition values={{ Graph: node.graphId, Node: node.nodeId, 'Planned FeatureRun': node.plannedRunId, Status: stateLabel(record), Liveness: record.liveness?.state, Dependencies: record.depends_on }} /><Availability label="Node evidence:" value={record.evidence} /></section>;
+}
+
+function Detail({ run, node, detail, loading, error, onClose, tab, onTabChange }) {
+  if (!run && !node) return <aside className="inspector empty"><h2>Select a FeatureRun</h2><p>Select a PlanGraph node or FeatureRun to inspect verified detail.</p></aside>;
+  if (!run) return <aside className="inspector" aria-label={`${node.graphId}:${node.nodeId} PlanGraph node details`}><header><div><Status record={node.nodeRecord} /><code>{node.graphId} / {node.nodeId}</code></div><button onClick={onClose} aria-label="Close inspector">×</button></header><h2>{node.nodeId}</h2><div className="details"><NodeSummary node={node} /><section><h3>Metrics</h3><p className="muted">Verified FeatureRun metrics are unavailable because {node.plannedRunId ? `the planned run ${node.plannedRunId} is not present in the catalog` : 'this node has no correlated FeatureRun'}.</p></section></div></aside>;
   return <aside className="inspector" aria-label={`${run.run_id} FeatureRun details`}><header><div><Status record={run} /><code>{run.run_id}</code></div><button onClick={onClose} aria-label="Close inspector">×</button></header><h2>{detail?.descriptor?.objective || run.run_id}</h2><Availability label="Catalog evidence:" value={run.evidence} />
+    <NodeSummary node={node} />
     {loading && <p>Loading verified FeatureRun detail…</p>}{error && <p className="error">{error}</p>}
     {detail && <div className="details">
-      <nav className="detail-tabs" aria-label="FeatureRun detail tabs">{['overview', 'activity', 'metrics', 'evidence', 'git custody'].map((name) => <button key={name} className={tab === name ? 'active' : ''} onClick={() => setTab(name)}>{name}</button>)}</nav>
+      <nav className="detail-tabs" aria-label="FeatureRun detail tabs">{['overview', 'activity', 'metrics', 'evidence', 'git custody'].map((name) => <button key={name} className={tab === name ? 'active' : ''} onClick={() => onTabChange(name)}>{name}</button>)}</nav>
       {tab === 'overview' && <><section><h3>Acceptance criteria</h3><Availability label="Availability:" value={detail.availability.criteria} /><ReadableList values={detail.criteria} empty="Criteria were not recorded." /></section><section><h3>Tasks</h3><Availability label="Availability:" value={detail.availability.tasks} /><ReadableList values={detail.tasks} empty="Tasks were not recorded." /></section><section><h3>Findings</h3><Availability label="Availability:" value={detail.availability.findings} /><ReadableList values={detail.findings} empty="Findings were not recorded." /></section></>}
       {tab === 'activity' && <Activity events={detail.lifecycle} availability={detail.availability.lifecycle} />}
       {tab === 'metrics' && <Metrics metrics={detail.metrics} />}
@@ -85,6 +92,9 @@ function Metrics({ metrics }) {
 function Dashboard() {
   const [catalog, setCatalog] = useState(null); const [error, setError] = useState(); const etag = useRef();
   const [selectedRunId, setSelectedRunId] = useState(null); const [detail, setDetail] = useState(null); const [detailError, setDetailError] = useState(); const [detailLoading, setDetailLoading] = useState(false);
+  const [detailTab, setDetailTab] = useState('overview');
+  const [selectedNodeKey, setSelectedNodeKey] = useState(null);
+  const [selectedPlanKey, setSelectedPlanKey] = useState(null); const [selectedGraphId, setSelectedGraphId] = useState(null);
   const refresh = useCallback(async (signal) => { try { const result = await fetchCatalog({ etag: etag.current, signal }); if (result.catalog) { etag.current = result.etag; setCatalog(result.catalog); } setError(undefined); } catch (reason) { if (reason.name !== 'AbortError') setError(reason.message); } }, []);
   useEffect(() => { const controller = new AbortController(); const refreshWhileVisible = () => { if (document.visibilityState === 'visible') refresh(controller.signal); }; refreshWhileVisible(); const timer = window.setInterval(refreshWhileVisible, POLL_MILLISECONDS); document.addEventListener('visibilitychange', refreshWhileVisible); return () => { controller.abort(); window.clearInterval(timer); document.removeEventListener('visibilitychange', refreshWhileVisible); }; }, [refresh]);
   const selectedRun = useMemo(() => selectedRunFor(catalog, selectedRunId), [catalog, selectedRunId]);
@@ -112,16 +122,28 @@ function Dashboard() {
     document.addEventListener('visibilitychange', refreshDetail);
     return () => { active = false; requestController?.abort(); window.clearInterval(timer); document.removeEventListener('visibilitychange', refreshDetail); };
   }, [selectedRunId, selectedRun]);
-  const nodes = useMemo(() => catalog ? graphProjection(catalog) : [], [catalog]);
-  const edges = useMemo(() => [], []);
-  const onNodeClick = useCallback((_, node) => { if (node.data.runId) setSelectedRunId(node.data.runId); }, []);
-  const graphCount = catalog?.plan_graphs.length || 0;
+  const graphGroups = useMemo(() => catalog ? planGraphGroups(catalog) : [], [catalog]);
+  const selectedGroup = graphGroups.find((group) => group.key === selectedPlanKey) || graphGroups[0] || null;
+  const selectedGraph = selectedGroup?.attempts.find((graph) => graph.run_id === selectedGraphId) || defaultGraphAttempt(selectedGroup);
+  const projection = useMemo(() => catalog ? graphProjection(catalog, selectedGraph) : { nodes: [], edges: [] }, [catalog, selectedGraph]);
+  const { nodes, edges } = projection;
+  const selectedNode = nodes.find((node) => node.id === selectedNodeKey)?.data || null;
+  const onNodeClick = useCallback((_, node) => {
+    setDetailTab('metrics');
+    setSelectedNodeKey(node.id);
+    setSelectedRunId(node.data.runId);
+  }, []);
+  const graphCount = graphGroups.length;
+  const attemptCount = catalog?.plan_graphs.length || 0;
   const rootCount = catalog?.source_roots?.length || (catalog?.source_root ? 1 : 0);
-  return <div className="app"><main><header className="top"><div><span className="eyebrow">READ-ONLY OPERATIONS DASHBOARD</span><h1>PlanGraphs</h1><p>{graphCount} discovered PlanGraph{graphCount === 1 ? '' : 's'} across {rootCount} audit root{rootCount === 1 ? '' : 's'} · polling every 2 seconds</p></div><div><span className="readonly">Read-only</span><button onClick={() => refresh()} className="refresh">Refresh</button></div></header>
+  return <div className="app"><main><header className="top"><div><span className="eyebrow">READ-ONLY OPERATIONS DASHBOARD</span><h1>PlanGraphs</h1><p>{graphCount} logical PlanGraph{graphCount === 1 ? '' : 's'} · {attemptCount} execution attempt{attemptCount === 1 ? '' : 's'} across {rootCount} audit root{rootCount === 1 ? '' : 's'} · polling every 2 seconds</p></div><div><span className="readonly">Read-only</span><button onClick={() => refresh()} className="refresh">Refresh</button></div></header>
     {error && <p className="error" role="alert">{error}</p>}{!catalog && !error && <p className="loading">Loading catalog…</p>}
-    {catalog && <><Availability label="Catalog:" value={catalog.availability} /><section className="graph"><div className="graph-heading"><div><h2>Execution map</h2><p>Dependencies are unavailable from the current read-only API; nodes are intentionally rendered as disconnected rather than inferred.</p></div><div className="legend">{['running', 'queued', 'blocked', 'stale', 'succeeded', 'unavailable'].map((state) => <span key={state} className={`status status--${state}`}><i />{state}</span>)}</div></div>
+    {catalog && <><Availability label="Catalog:" value={catalog.availability} /><section className="graph"><div className="graph-heading"><div><h2>Execution map</h2><p>{selectedGraph ? `${selectedGraph.plan_path} · audited dependencies · ${selectedGroup.attempts.length} attempt${selectedGroup.attempts.length === 1 ? '' : 's'}` : 'Select a discovered PlanGraph.'}</p></div><div className="graph-selectors">
+        {graphGroups.length > 1 && <label>Plan<select value={selectedGroup?.key || ''} onChange={(event) => { const group = graphGroups.find((item) => item.key === event.target.value); setSelectedPlanKey(event.target.value); setSelectedGraphId(defaultGraphAttempt(group)?.run_id || null); }}><option value="" disabled>Select plan</option>{graphGroups.map((group) => <option key={group.key} value={group.key}>{group.planPath}</option>)}</select></label>}
+        {selectedGroup?.attempts.length > 1 && <label>Attempt<select value={selectedGraph?.run_id || ''} onChange={(event) => setSelectedGraphId(event.target.value)}>{selectedGroup.attempts.map((graph) => <option key={graph.run_id} value={graph.run_id}>{graph.created_at} · {graph.status}</option>)}</select></label>}
+      </div><div className="legend">{['running', 'queued', 'blocked', 'stale', 'succeeded', 'unavailable'].map((state) => <span key={state} className={`status status--${state}`}><i />{state}</span>)}</div></div>
       {nodes.length ? <ReactFlow nodes={nodes} edges={edges} nodeTypes={nodeTypes} onNodeClick={onNodeClick} fitView nodesDraggable={false} nodesConnectable={false} deleteKeyCode={null} proOptions={{ hideAttribution: true }}><Background /><Controls showInteractive={false} /></ReactFlow> : <div className="empty-canvas"><h2>No PlanGraphs discovered</h2><p>The configured audit roots have no verified PlanGraph records.</p></div>}</section>
-      <section className="runs"><h2>FeatureRuns</h2>{catalog.feature_runs.length ? catalog.feature_runs.map((run) => <button key={run.run_id} onClick={() => setSelectedRunId(run.run_id)}><code>{run.run_id}</code><Status record={run} /><span>{run.correlation ? `${run.correlation.plan_graph_id} / ${run.correlation.plan_node_id}` : 'Ungrouped or legacy'}</span></button>) : <p className="muted">No FeatureRuns discovered.</p>}</section>
-    </>}</main><Detail run={selectedRun} detail={detail} loading={detailLoading} error={detailError} onClose={() => setSelectedRunId(null)} /></div>;
+      <section className="runs"><h2>FeatureRuns</h2>{catalog.feature_runs.length ? catalog.feature_runs.map((run) => <button key={run.run_id} onClick={() => { setDetailTab('overview'); setSelectedNodeKey(null); setSelectedRunId(run.run_id); }}><code>{run.run_id}</code><Status record={run} /><span>{run.correlation ? `${run.correlation.plan_graph_id} / ${run.correlation.plan_node_id}` : 'Ungrouped or legacy'}</span></button>) : <p className="muted">No FeatureRuns discovered.</p>}</section>
+    </>}</main><Detail run={selectedRun} node={selectedNode} detail={detail} loading={detailLoading} error={detailError} onClose={() => { setSelectedNodeKey(null); setSelectedRunId(null); }} tab={detailTab} onTabChange={setDetailTab} /></div>;
 }
 export default function App() { return <ReactFlowProvider><Dashboard /></ReactFlowProvider>; }

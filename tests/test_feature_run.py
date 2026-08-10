@@ -18,6 +18,7 @@ from harness_labs.controller_scheduler import RoleProfile
 from harness_labs.feature_run import (
     FeatureRunHandoffArtifact,
     PlanGraphFeatureRunBinding,
+    RecoveryDecision,
     ReviewFixPolicy,
     run_feature_worktree,
     run_plan_graph_feature_worktree,
@@ -156,6 +157,59 @@ class _VerificationRepairExecutor:
             "succeeded",
             {"summary": "Applied bounded verification repair."},
         )
+
+
+class _VerificationRecoveryAgent:
+    def __init__(self, worktree: Path) -> None:
+        self.worktree = worktree
+        self.contexts = []
+
+    def __call__(self, context):
+        self.contexts.append(context)
+        (self.worktree / "verified.txt").write_text(
+            "recovered\n",
+            encoding="utf-8",
+        )
+        return RecoveryDecision(
+            "adjust_plan",
+            "Verification showed that the plan omitted the recovery marker.",
+            {"add_step": "Create and verify the recovery marker."},
+        )
+
+
+class _FailOnceReviewFactory:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def __call__(self, stage, attempt):
+        factory = self
+
+        class Executor:
+            def execute(self, current_attempt):
+                factory.calls += 1
+                if factory.calls == 1:
+                    return TaskResult(
+                        current_attempt.attempt_id,
+                        "failed",
+                        {"error": "transient reviewer failure"},
+                    )
+                return TaskResult(
+                    current_attempt.attempt_id,
+                    "succeeded",
+                    semantic_payload(
+                        summary="Review cleared after recovery.",
+                        details_schema="review-fix-review/1",
+                        details={},
+                        findings=(),
+                    ),
+                )
+
+        return Executor()
+
+
+class _InterruptedRepairExecutor:
+    def execute(self, attempt):
+        raise InterruptedError("repair worker connection dropped")
 
 
 class FeatureRunTests(unittest.TestCase):
@@ -516,7 +570,166 @@ class FeatureRunTests(unittest.TestCase):
             self.assertTrue(result.worktree_path.exists())
             AuditJournal.verify(root / "run")
 
-    def _run_verification_recovery_case(self, root, repair_factory):
+    def test_blocked_verification_uses_bounded_recovery_and_records_plan_change(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            seen_contexts = []
+            recovery_agent = _VerificationRecoveryAgent(root / "feature")
+            result = self._run_verification_recovery_case(
+                root,
+                lambda worktree, attempt: _VerificationRepairExecutor(
+                    worktree,
+                    seen_contexts,
+                    repair=False,
+                ),
+                recovery_agent=recovery_agent,
+                recovery_limit=1,
+            )
+
+            self.assertEqual(result.status, "succeeded")
+            self.assertEqual(
+                [item["exit_code"] for item in result.verification.command_attempts],
+                [7, 7, 0],
+            )
+            self.assertEqual(len(recovery_agent.contexts), 1)
+            context = recovery_agent.contexts[0]
+            self.assertEqual(context.stage, "verification")
+            self.assertEqual(context.condition, "blocked")
+            self.assertEqual(context.checkpoint["status"], "recovering")
+            self.assertEqual(
+                context.acceptance_criteria[0]["id"],
+                "built",
+            )
+            checkpoint = json.loads(
+                (root / "run" / "checkpoint.json").read_text(encoding="utf-8")
+            )
+            decision = checkpoint["state"]["recovery"]["decisions"][0]
+            self.assertEqual(decision["action"], "adjust_plan")
+            self.assertEqual(
+                decision["plan_adjustment"]["add_step"],
+                "Create and verify the recovery marker.",
+            )
+            events = [
+                json.loads(line)
+                for line in (root / "run" / "events.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ]
+            recovery_events = [
+                event
+                for event in events
+                if event["event_type"] == "recovery_decision"
+            ]
+            self.assertEqual(len(recovery_events), 1)
+            self.assertEqual(recovery_events[0]["status"], "succeeded")
+            AuditJournal.verify(root / "run")
+
+    def test_recovery_limit_stops_repeated_abnormal_outcomes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            recovery_contexts = []
+
+            def recovery_agent(context):
+                recovery_contexts.append(context)
+                return RecoveryDecision(
+                    "retry",
+                    "Retry verification after refreshing transient state.",
+                )
+
+            result = self._run_verification_recovery_case(
+                root,
+                lambda worktree, attempt: _VerificationRepairExecutor(
+                    worktree,
+                    [],
+                    repair=False,
+                ),
+                recovery_agent=recovery_agent,
+                recovery_limit=1,
+            )
+
+            self.assertEqual(result.status, "blocked")
+            self.assertEqual(len(recovery_contexts), 1)
+            checkpoint = json.loads(
+                (root / "run" / "checkpoint.json").read_text(encoding="utf-8")
+            )
+            decisions = checkpoint["state"]["recovery"]["decisions"]
+            self.assertEqual([item["action"] for item in decisions], ["retry", "stop"])
+            self.assertIn("limit of 1 exhausted", decisions[-1]["reason"])
+            AuditJournal.verify(root / "run")
+
+    def test_failed_review_is_retried_after_recovery_decision(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            recovery_contexts = []
+            review_factory = _FailOnceReviewFactory()
+
+            def recovery_agent(context):
+                recovery_contexts.append(context)
+                return RecoveryDecision(
+                    "retry",
+                    "Retry with a fresh reviewer after the transient failure.",
+                )
+
+            result = self._run_verification_recovery_case(
+                root,
+                lambda worktree, attempt: _VerificationRepairExecutor(
+                    worktree,
+                    [],
+                ),
+                recovery_agent=recovery_agent,
+                recovery_limit=1,
+                review_fix_executor_factory=review_factory,
+                review_fix_policy=ReviewFixPolicy(),
+            )
+
+            self.assertEqual(result.status, "succeeded")
+            self.assertEqual(review_factory.calls, 2)
+            self.assertEqual(len(recovery_contexts), 1)
+            self.assertEqual(recovery_contexts[0].stage, "review")
+            self.assertEqual(recovery_contexts[0].condition, "failed")
+            AuditJournal.verify(root / "run")
+
+    def test_interrupted_repair_raises_recovery_agent(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            recovery_contexts = []
+
+            def recovery_agent(context):
+                recovery_contexts.append(context)
+                (root / "feature" / "verified.txt").write_text(
+                    "recovered after interruption\n",
+                    encoding="utf-8",
+                )
+                return RecoveryDecision(
+                    "retry",
+                    "Resume verification after replacing the interrupted worker.",
+                )
+
+            result = self._run_verification_recovery_case(
+                root,
+                lambda worktree, attempt: _InterruptedRepairExecutor(),
+                recovery_agent=recovery_agent,
+                recovery_limit=1,
+            )
+
+            self.assertEqual(result.status, "succeeded")
+            self.assertEqual(len(recovery_contexts), 1)
+            self.assertEqual(recovery_contexts[0].condition, "interrupted")
+            self.assertEqual(recovery_contexts[0].stage, "verification")
+            self.assertEqual(
+                [item["exit_code"] for item in result.verification.command_attempts],
+                [7, 0],
+            )
+            AuditJournal.verify(root / "run")
+
+    def _run_verification_recovery_case(
+        self,
+        root,
+        repair_factory,
+        **recovery_options,
+    ):
         base = root / "base"
         base.mkdir()
         git(base, "init", "-b", "main")
@@ -618,6 +831,7 @@ class FeatureRunTests(unittest.TestCase):
             ),
             verification_repair_limit=1,
             evidence_classification="component",
+            **recovery_options,
         )
 
 

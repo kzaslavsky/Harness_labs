@@ -202,20 +202,23 @@ class DashboardEndToEndTests(unittest.TestCase):
                 self.assertIn("legacy-child", [item["run_id"] for item in catalog["ungrouped_feature_runs"]])
                 self.assertIn("malformed-run", [item["run_id"] for item in catalog["diagnostics"]])
                 graph = next(item for item in catalog["plan_graphs"] if item["run_id"] == "active-graph")
-                self.assertEqual({node["feature_run_id"] for node in graph["nodes"]}, {"live-child", "stale-child"})
+                self.assertEqual({node["feature_run_id"] for node in graph["nodes"]}, {"live-child", "stale-child", "planned-child"})
                 detail = json.loads(_get(app, "/api/feature-runs/live-child"))
                 for family in ("lifecycle", "criteria", "tasks", "findings", "evidence_metadata", "git_custody", "usage"):
                     self.assertIn(family, detail["availability"])
-                # Select through the rendered dashboard.  This proves the React
-                # event handler, inspector request, and visible tab controls.
-                page.evaluate("[...document.querySelectorAll('.runs button')].find((button) => button.innerText.includes('live-child')).click()")
+                # A planned node without a verified child still has inspectable
+                # graph detail and an explicit metrics-availability explanation.
+                page.evaluate("[...document.querySelectorAll('.react-flow__node')].find((node) => node.innerText.includes('planned')).click()")
+                page.wait_for("document.querySelector('aside[aria-label=\\\"active-graph:planned PlanGraph node details\\\"]') !== null")
+                page.wait_for("document.querySelector('.inspector').innerText.includes('Verified FeatureRun metrics are unavailable')")
+                # A correlated node opens its verified run directly on metrics.
+                page.evaluate("[...document.querySelectorAll('.react-flow__node')].find((node) => node.innerText.includes('live-child')).click()")
                 page.wait_for("document.querySelector('aside[aria-label=\\\"live-child FeatureRun details\\\"]') !== null")
                 page.wait_for("document.querySelector('.inspector').innerText.includes('Dashboard fixture live-child')")
                 self.assertEqual(
                     page.evaluate("[...document.querySelectorAll('.detail-tabs button')].map((button) => button.innerText)"),
                     ["Overview", "Activity", "Metrics", "Evidence", "Git Custody"],
                 )
-                page.evaluate("[...document.querySelectorAll('.detail-tabs button')].find((button) => button.innerText === 'Metrics').click()")
                 page.wait_for("document.querySelector('.inspector').innerText.includes('Total tokens')")
                 self.assertEqual(page.evaluate("document.querySelectorAll('.inspector pre').length"), 0)
                 self.assertEqual(before, (_tree_digest(root), _tree_digest(second_root)), "dashboard reads must not mutate audit roots")

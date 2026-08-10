@@ -51,6 +51,18 @@ compiled dashboard assets; it does not serve raw journals or artifacts.
 The browser polls `/api/catalog` every two seconds while visible and uses the
 catalog ETag. A `304 Not Modified` response leaves the current selection and
 view unchanged. Use the Refresh control for an immediate catalog request.
+Selecting a correlated node on the execution map opens that FeatureRun's
+metrics directly; selecting the same run from the FeatureRuns list opens its
+overview. A node whose planned FeatureRun is not present in the verified
+catalog still opens a node inspector with its recorded status, dependencies,
+liveness, and evidence, while marking FeatureRun metrics unavailable.
+
+Repeated executions of the same approved plan are grouped by its durable plan
+digest; each attempt retains its exact PlanGraph digest. The canvas defaults to the newest live or otherwise running
+attempt and retains older attempts in an explicit selector. It renders only the
+selected attempt. Node positions and edges are derived from the checkpoint's
+recorded `depends_on` relationships; the dashboard does not parse or infer a DAG
+from Markdown or Mermaid files.
 
 ## Interpreting state and evidence
 

@@ -458,6 +458,19 @@ class ReviewFixLoop:
                         cycle,
                         "marginal yield stop",
                     )
+        except InterruptedError as exc:
+            self.audit.append(
+                "review_fix_failed",
+                status="interrupted",
+                payload={"error": str(exc), "cycle": cycle},
+                actor=AuditActor("review-fix-controller", "controller"),
+            )
+            return self._finish(
+                ledger,
+                "interrupted",
+                str(exc) or "review-fix interrupted",
+                cycle,
+            )
         except Exception as exc:
             self.audit.append(
                 "review_fix_failed",

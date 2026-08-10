@@ -112,6 +112,8 @@ class CoordinatorDispatcher:
             self._launches.append(launch)
             try:
                 session = self.session_factory(launch, self.evidence)
+            except InterruptedError:
+                raise
             except Exception as exc:
                 self._block(
                     f"coordinator segment {segment.id} session factory failed: "
@@ -153,6 +155,8 @@ class CoordinatorDispatcher:
             )
             try:
                 last_result = loop.run()
+            except InterruptedError:
+                raise
             except Exception as exc:
                 last_result = TaskResult(
                     attempt_id=(

@@ -217,6 +217,18 @@ def _project_run(directory: Path, root: Path, now: datetime, probe: ProcessProbe
         evidence = availability("partial", "descriptor was absent for the legacy run")
     record: dict[str, Any] = {"run_id": metrics["run_id"], "kind": kind or "legacy_feature_run", "status": status, "liveness": liveness, "evidence": evidence}
     if kind == "plan_graph":
+        state = metrics["checkpoint"].get("state", {})
+        state = state if isinstance(state, Mapping) else {}
+        approved_plan = descriptor.get("approved_plan", {})
+        approved_plan = approved_plan if isinstance(approved_plan, Mapping) else {}
+        plan_digest = approved_plan.get("sha256")
+        graph_digest = state.get("plan_graph_digest") or plan_digest
+        record.update({
+            "created_at": descriptor["created_at"],
+            "plan_path": approved_plan.get("path"),
+            "plan_digest": plan_digest,
+            "plan_graph_digest": graph_digest,
+        })
         record["nodes"] = _nodes(metrics, liveness)
         del record["kind"]
     else:
@@ -443,11 +455,18 @@ def _nodes(metrics: Mapping[str, Any], parent_liveness: Mapping[str, Any]) -> li
     nodes = state.get("nodes", {}) if isinstance(state, Mapping) else {}
     if not isinstance(nodes, Mapping): return []
     result = []
-    for node_id, data in sorted(nodes.items()):
+    ordered = state.get("ordered_node_ids", ()) if isinstance(state, Mapping) else ()
+    node_ids = [value for value in ordered if isinstance(value, str) and value in nodes]
+    node_ids.extend(sorted(value for value in nodes if value not in node_ids))
+    for node_id in node_ids:
+        data = nodes[node_id]
         if not isinstance(node_id, str) or not isinstance(data, Mapping): continue
         status = data.get("status", "queued")
         if status not in {"queued", "running", "succeeded", "failed", "blocked"}: status = "queued"
-        result.append({"node_id": node_id, "status": status, "feature_run_id": data.get("feature_run_id") if isinstance(data.get("feature_run_id"), str) else None, "liveness": dict(parent_liveness) if status == "running" else {"state": "not_applicable", "reason": None}, "evidence": availability("available"), "_candidate_commit": data.get("candidate_commit") if isinstance(data.get("candidate_commit"), str) else None})
+        dependencies = data.get("depends_on", ())
+        if not isinstance(dependencies, (list, tuple)):
+            dependencies = ()
+        result.append({"node_id": node_id, "status": status, "feature_run_id": data.get("feature_run_id") if isinstance(data.get("feature_run_id"), str) else None, "depends_on": [value for value in dependencies if isinstance(value, str)], "liveness": dict(parent_liveness) if status == "running" else {"state": "not_applicable", "reason": None}, "evidence": availability("available"), "_candidate_commit": data.get("candidate_commit") if isinstance(data.get("candidate_commit"), str) else None})
     return result
 
 

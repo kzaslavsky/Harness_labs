@@ -4,14 +4,15 @@ from __future__ import annotations
 
 import json
 import subprocess
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from time import monotonic_ns
-from typing import Callable, Mapping, Protocol
+from typing import Callable, Literal, Mapping, Protocol
 
 from .agent_sessions import AgentSession
 from .attempts import AttemptRunner, Executor, TaskAttempt, TaskResult
 from .audit import AuditActor, AuditJournal
+from .controller_commands import CommandActor, CommandEnvelope
 from .controller_evidence import EvidenceCatalog
 from .controller_kernel import ControllerKernel, RunContract
 from .controller_projection import project_run_view
@@ -48,6 +49,7 @@ FeatureProfileBuilder = Callable[
     [Path, EvidenceCatalog],
     tuple[RoleProfile, ...],
 ]
+RecoveryCondition = Literal["blocked", "failed", "interrupted"]
 
 
 _NORMAL_FEATURE_PHASES = (
@@ -135,6 +137,69 @@ class VerificationRepairExecutorFactory(Protocol):
 
 
 @dataclass(frozen=True)
+class RecoveryContext:
+    """Bounded context supplied after an abnormal FeatureRun stage outcome."""
+
+    run_id: str
+    stage: str
+    condition: RecoveryCondition
+    reason: str
+    attempt: int
+    checkpoint: Mapping[str, object]
+    objective: str
+    acceptance_criteria: tuple[Mapping[str, object], ...]
+    worktree_path: str
+    allowed_paths: tuple[str, ...]
+    workspace: Mapping[str, object]
+    prior_decisions: tuple[Mapping[str, object], ...]
+    plan_adjustments: tuple[Mapping[str, object], ...]
+
+
+@dataclass(frozen=True)
+class RecoveryDecision:
+    """One recovery-agent decision understood by the FeatureRun controller."""
+
+    action: Literal["retry", "adjust_plan", "stop"]
+    reason: str
+    plan_adjustment: Mapping[str, object] | None = None
+
+    def __post_init__(self) -> None:
+        if self.action not in {"retry", "adjust_plan", "stop"}:
+            raise ValueError("recovery action must be retry, adjust_plan, or stop")
+        if not isinstance(self.reason, str) or not self.reason.strip():
+            raise ValueError("recovery decision reason must be non-empty")
+        if self.action == "adjust_plan":
+            if not isinstance(self.plan_adjustment, Mapping) or not self.plan_adjustment:
+                raise ValueError("adjust_plan requires a non-empty plan adjustment")
+        elif self.plan_adjustment is not None:
+            raise ValueError("plan adjustment is allowed only for adjust_plan")
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "action": self.action,
+            "reason": self.reason,
+            "plan_adjustment": (
+                dict(self.plan_adjustment)
+                if self.plan_adjustment is not None
+                else None
+            ),
+        }
+
+
+class RecoveryAgent(Protocol):
+    """Return one bounded decision after inspecting an abnormal run outcome."""
+
+    def __call__(self, context: RecoveryContext) -> RecoveryDecision:
+        """Perform any authorized recovery work and select the next action."""
+
+
+@dataclass
+class _RecoveryState:
+    limit: int
+    decisions: list[Mapping[str, object]] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
 class DeterministicVerificationResult:
     """Controller-observed command attempts and bounded recovery outcome."""
 
@@ -190,6 +255,8 @@ def run_feature_worktree(
     ) = None,
     verification_repair_limit: int = 1,
     verification_timeout_seconds: float | None = 1200,
+    recovery_agent: RecoveryAgent | None = None,
+    recovery_limit: int = 3,
     evidence_classification: str = "production_lifecycle",
     initial_evidence: tuple[FeatureRunHandoffArtifact, ...] = (),
 ) -> FeatureRunResult:
@@ -218,6 +285,8 @@ def run_feature_worktree(
             raise ValueError("verification_timeout_seconds must be positive or None")
     elif verification_repair_executor_factory is not None:
         raise ValueError("verification repair requires verification_argv")
+    if recovery_limit < 1:
+        raise ValueError("recovery_limit must be positive")
     handoff_kinds = [artifact.kind for artifact in initial_evidence]
     if len(set(handoff_kinds)) != len(handoff_kinds):
         raise ValueError("handoff artifact kinds must be unique")
@@ -237,6 +306,7 @@ def run_feature_worktree(
         evidence_classification=evidence_classification,
     )
     evidence = EvidenceCatalog(audit=audit)
+    recovery = _RecoveryState(recovery_limit)
     handoff_records = []
     for handoff in initial_evidence:
         record = evidence.add(
@@ -273,7 +343,7 @@ def run_feature_worktree(
     scheduler = CapabilityScheduler(
         profile_builder(transaction.worktree_path, evidence)
     )
-    dispatch = CoordinatorDispatcher(
+    dispatcher = CoordinatorDispatcher(
         kernel,
         evidence,
         scheduler,
@@ -283,7 +353,44 @@ def run_feature_worktree(
             launch,
             catalog,
         ),
-    ).run()
+    )
+    while True:
+        try:
+            dispatch = dispatcher.run()
+        except InterruptedError as exc:
+            if not _recover_abnormal(
+                agent=recovery_agent,
+                recovery=recovery,
+                audit=audit,
+                contract=contract,
+                worktree_path=transaction.worktree_path,
+                allowed_paths=allowed_paths,
+                stage="dispatch",
+                condition="interrupted",
+                reason=str(exc) or "coordinator dispatch interrupted",
+            ):
+                dispatch = dispatcher._result(None)
+                break
+            if not dispatcher.recover_interrupted_state():
+                dispatch = dispatcher._result(None)
+                break
+            continue
+        if dispatch.result.status not in {"blocked", "failed", "interrupted"}:
+            break
+        if not _recover_abnormal(
+            agent=recovery_agent,
+            recovery=recovery,
+            audit=audit,
+            contract=contract,
+            worktree_path=transaction.worktree_path,
+            allowed_paths=allowed_paths,
+            stage="dispatch",
+            condition=dispatch.result.status,
+            reason=_dispatch_reason(dispatch, kernel),
+        ):
+            break
+        if project_run_view(kernel)["status"] == "blocked":
+            _resume_kernel_after_recovery(kernel, recovery.decisions[-1])
     receipts: list[Mapping[str, object]] = [creation]
     status = dispatch.result.status
     verification_result = None
@@ -306,6 +413,38 @@ def run_feature_worktree(
                 audit=audit,
             )
             status = verification_result.status
+            while status in {"blocked", "failed", "interrupted"}:
+                if not _recover_abnormal(
+                    agent=recovery_agent,
+                    recovery=recovery,
+                    audit=audit,
+                    contract=contract,
+                    worktree_path=transaction.worktree_path,
+                    allowed_paths=allowed_paths,
+                    stage="verification",
+                    condition=status,
+                    reason=verification_result.reason,
+                ):
+                    break
+                retried_verification = _verify_with_recovery(
+                    run_id=contract.run_id,
+                    objective=contract.objective,
+                    acceptance_criteria=contract.criteria,
+                    worktree_path=transaction.worktree_path,
+                    allowed_paths=allowed_paths,
+                    argv=verification_argv,
+                    repair_executor_factory=verification_repair_executor_factory,
+                    repair_limit=verification_repair_limit,
+                    timeout_seconds=verification_timeout_seconds,
+                    evidence=evidence,
+                    audit=audit,
+                    stage="recovery",
+                )
+                verification_result = _combine_verification_results(
+                    verification_result,
+                    retried_verification,
+                )
+                status = retried_verification.status
     if status == "succeeded" and project_run_view(kernel)["status"] == "succeeded":
         if review_fix_policy.enabled:
             assert review_fix_executor_factory is not None
@@ -323,6 +462,33 @@ def run_feature_worktree(
                 policy=review_fix_policy,
             ).run()
             status = review_fix_result.status
+            while status in {"blocked", "failed", "interrupted"}:
+                if not _recover_abnormal(
+                    agent=recovery_agent,
+                    recovery=recovery,
+                    audit=audit,
+                    contract=contract,
+                    worktree_path=transaction.worktree_path,
+                    allowed_paths=allowed_paths,
+                    stage="review",
+                    condition=status,
+                    reason=review_fix_result.reason,
+                ):
+                    break
+                review_fix_result = ReviewFixLoop(
+                    run_id=contract.run_id,
+                    objective=contract.objective,
+                    acceptance_criteria=contract.criteria,
+                    allowed_paths=allowed_paths,
+                    changed_paths=tuple(
+                        workspace_snapshot(transaction.worktree_path)["changed_paths"]
+                    ),
+                    executor_factory=review_fix_executor_factory,
+                    evidence=evidence,
+                    audit=audit,
+                    policy=review_fix_policy,
+                ).run()
+                status = review_fix_result.status
     if (
         status == "succeeded"
         and project_run_view(kernel)["status"] == "succeeded"
@@ -350,36 +516,89 @@ def run_feature_worktree(
             post_review,
         )
         status = post_review.status
-    if status == "succeeded" and project_run_view(kernel)["status"] == "succeeded":
-        try:
-            commit = transaction.commit_candidate(
+        while status in {"blocked", "failed", "interrupted"}:
+            if not _recover_abnormal(
+                agent=recovery_agent,
+                recovery=recovery,
+                audit=audit,
+                contract=contract,
+                worktree_path=transaction.worktree_path,
                 allowed_paths=allowed_paths,
-                message=commit_message,
+                stage="post_review_verification",
+                condition=status,
+                reason=post_review.reason,
+            ):
+                break
+            retried_post_review = _verify_with_recovery(
+                run_id=contract.run_id,
+                objective=contract.objective,
+                acceptance_criteria=contract.criteria,
+                worktree_path=transaction.worktree_path,
+                allowed_paths=allowed_paths,
+                argv=verification_argv,
+                repair_executor_factory=verification_repair_executor_factory,
+                repair_limit=verification_repair_limit,
+                timeout_seconds=verification_timeout_seconds,
+                evidence=evidence,
+                audit=audit,
+                stage="post_review_recovery",
             )
-            receipts.append(commit)
-            _record_git_receipt(audit, evidence, commit)
-            integration = transaction.integrate(merge=merge)
-            receipts.append(integration)
-            _record_git_receipt(audit, evidence, integration)
-        except GitTransactionError as exc:
-            status = "failed"
-            dispatch = CoordinatorDispatchResult(
-                TaskResult(
-                    attempt_id=f"{contract.run_id}/integration-owner",
-                    status="failed",
-                    payload={
-                        "error": str(exc),
-                        "error_type": type(exc).__name__,
-                    },
-                ),
-                dispatch.launches,
+            verification_result = _combine_verification_results(
+                verification_result,
+                retried_post_review,
             )
-            audit.append(
-                "git_transaction_failed",
-                status="failed",
-                payload={"error": str(exc)},
-                actor=AuditActor("integration-owner", "integration_owner"),
-            )
+            post_review = retried_post_review
+            status = post_review.status
+    if status == "succeeded" and project_run_view(kernel)["status"] == "succeeded":
+        while True:
+            try:
+                if transaction.candidate_commit is None:
+                    commit = transaction.commit_candidate(
+                        allowed_paths=allowed_paths,
+                        message=commit_message,
+                    )
+                    receipts.append(commit)
+                    _record_git_receipt(audit, evidence, commit)
+                integration = transaction.integrate(merge=merge)
+                receipts.append(integration)
+                _record_git_receipt(audit, evidence, integration)
+                break
+            except (GitTransactionError, InterruptedError) as exc:
+                condition = (
+                    "interrupted" if isinstance(exc, InterruptedError) else "failed"
+                )
+                status = condition
+                audit.append(
+                    "git_transaction_failed",
+                    status=condition,
+                    payload={"error": str(exc)},
+                    actor=AuditActor("integration-owner", "integration_owner"),
+                )
+                if _recover_abnormal(
+                    agent=recovery_agent,
+                    recovery=recovery,
+                    audit=audit,
+                    contract=contract,
+                    worktree_path=transaction.worktree_path,
+                    allowed_paths=allowed_paths,
+                    stage="integration",
+                    condition=condition,
+                    reason=str(exc),
+                ):
+                    status = "succeeded"
+                    continue
+                dispatch = CoordinatorDispatchResult(
+                    TaskResult(
+                        attempt_id=f"{contract.run_id}/integration-owner",
+                        status="failed",
+                        payload={
+                            "error": str(exc),
+                            "error_type": type(exc).__name__,
+                        },
+                    ),
+                    dispatch.launches,
+                )
+                break
 
     view = project_run_view(kernel)
     terminal_status = (
@@ -408,11 +627,15 @@ def run_feature_worktree(
             "git_receipts": list(receipts),
             "verification": verification_payload,
             "review_fix": review_fix_payload,
+            "recovery_decisions": list(recovery.decisions),
         },
         state={
             "controller": kernel.snapshot(),
             "verification": verification_payload,
             "review_fix": review_fix_payload,
+            "recovery": {
+                "decisions": list(recovery.decisions),
+            },
         },
     )
     return FeatureRunResult(
@@ -522,6 +745,164 @@ def run_plan_graph_feature_worktree(
     )
 
 
+def _recover_abnormal(
+    *,
+    agent: RecoveryAgent | None,
+    recovery: _RecoveryState,
+    audit: AuditJournal,
+    contract: RunContract,
+    worktree_path: Path,
+    allowed_paths: tuple[str, ...],
+    stage: str,
+    condition: RecoveryCondition,
+    reason: str,
+) -> bool:
+    """Ask for one bounded recovery decision and record the disposition."""
+
+    if agent is None:
+        return False
+    attempt = len(recovery.decisions) + 1
+    workspace = _safe_workspace_snapshot(worktree_path)
+    checkpoint = audit.merge_checkpoint(
+        status="recovering",
+        updates={
+            "recovery": {
+                "stage": stage,
+                "condition": condition,
+                "reason": reason,
+                "attempt": attempt,
+                "decisions": list(recovery.decisions),
+                "workspace": workspace,
+            }
+        },
+    )
+    base_record: dict[str, object] = {
+        "attempt": attempt,
+        "stage": stage,
+        "condition": condition,
+        "blocked_reason": reason,
+        "checkpoint_revision": checkpoint["revision"],
+        "checkpoint_head_hash": checkpoint["head_hash"],
+    }
+    actor = AuditActor("recovery-agent", "recovery")
+
+    def record(
+        decision: RecoveryDecision,
+        *,
+        status: str | None = None,
+    ) -> bool:
+        value = {**base_record, **decision.as_dict()}
+        recovery.decisions.append(value)
+        audit.append(
+            "recovery_decision",
+            status=status or ("blocked" if decision.action == "stop" else "succeeded"),
+            payload=value,
+            actor=actor,
+        )
+        return decision.action != "stop"
+
+    if len(recovery.decisions) >= recovery.limit:
+        return record(
+            RecoveryDecision(
+                "stop",
+                f"recovery limit of {recovery.limit} exhausted",
+            )
+        )
+
+    context = RecoveryContext(
+        run_id=contract.run_id,
+        stage=stage,
+        condition=condition,
+        reason=reason,
+        attempt=attempt,
+        checkpoint=checkpoint,
+        objective=contract.objective,
+        acceptance_criteria=contract.criteria,
+        worktree_path=str(worktree_path),
+        allowed_paths=allowed_paths,
+        workspace=workspace,
+        prior_decisions=tuple(recovery.decisions),
+        plan_adjustments=tuple(
+            item["plan_adjustment"]
+            for item in recovery.decisions
+            if isinstance(item.get("plan_adjustment"), Mapping)
+        ),
+    )
+    try:
+        decision = agent(context)
+        if not isinstance(decision, RecoveryDecision):
+            raise TypeError("recovery agent must return RecoveryDecision")
+    except Exception as exc:
+        return record(
+            RecoveryDecision(
+                "stop",
+                f"recovery agent failed: {type(exc).__name__}: {exc}",
+            ),
+            status="failed",
+        )
+
+    proposal = decision.as_dict()
+    if recovery.decisions and proposal == {
+        key: recovery.decisions[-1].get(key)
+        for key in ("action", "reason", "plan_adjustment")
+    }:
+        return record(
+            RecoveryDecision(
+                "stop",
+                "recovery proposal repeated an unchanged strategy",
+            )
+        )
+    return record(decision)
+
+
+def _safe_workspace_snapshot(worktree_path: Path) -> Mapping[str, object]:
+    try:
+        return workspace_snapshot(worktree_path)
+    except Exception as exc:
+        return {"error": str(exc), "error_type": type(exc).__name__}
+
+
+def _dispatch_reason(
+    dispatch: CoordinatorDispatchResult,
+    kernel: ControllerKernel,
+) -> str:
+    blocker = project_run_view(kernel).get("blocker")
+    if isinstance(blocker, str) and blocker:
+        return blocker
+    last = dispatch.result.payload.get("last_coordinator_result")
+    if isinstance(last, Mapping):
+        payload = last.get("payload")
+        if isinstance(payload, Mapping):
+            value = payload.get("error") or payload.get("text")
+            if isinstance(value, str) and value:
+                return value
+    return f"dispatcher ended with status {dispatch.result.status}"
+
+
+def _resume_kernel_after_recovery(
+    kernel: ControllerKernel,
+    decision: Mapping[str, object],
+) -> None:
+    attempt = int(decision["attempt"])
+    receipt = kernel.handle(
+        CommandEnvelope(
+            command_id=(
+                f"{kernel.contract.run_id}/recovery-agent/run.resume/{attempt}"
+            ),
+            run_id=kernel.contract.run_id,
+            type="run.resume",
+            actor=CommandActor("recovery-agent", "operator"),
+            expected_revision=kernel.revision,
+            idempotency_key=(
+                f"{kernel.contract.run_id}/recovery-agent/resume/{attempt}"
+            ),
+            payload={"reason": str(decision["reason"])},
+        )
+    )
+    if not receipt.accepted:
+        raise ValueError(f"recovery could not resume run: {receipt.message}")
+
+
 def _verify_with_recovery(
     *,
     run_id: str,
@@ -595,7 +976,26 @@ def _verify_with_recovery(
                 sort_keys=True,
             ),
         )
-        repair = runner.run(attempt, repair_executor_factory(attempt))
+        try:
+            repair = runner.run(attempt, repair_executor_factory(attempt))
+        except InterruptedError as exc:
+            audit.append(
+                "deterministic_verification_repair_completed",
+                status="interrupted",
+                payload={
+                    "repair_attempt": ordinal,
+                    "error": str(exc),
+                    "failed_command_evidence_ref": artifact.ref,
+                },
+                actor=actor,
+                attempt_id=attempt.attempt_id,
+            )
+            return DeterministicVerificationResult(
+                "interrupted",
+                str(exc) or "verification repair interrupted",
+                tuple(command_attempts),
+                ordinal,
+            )
         repaired_workspace = workspace_snapshot(worktree_path)
         prior_workspace = command["workspace"]
         assert isinstance(prior_workspace, Mapping)

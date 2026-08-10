@@ -85,6 +85,7 @@ def create_fixture(root: Path) -> None:
     _graph(root, "active-graph", plan, {
         "live": {"status": "running", "feature_run_id": "live-child"},
         "stale": {"status": "running", "feature_run_id": "stale-child"},
+        "planned": {"status": "queued", "feature_run_id": "planned-child", "depends_on": ["live"]},
     }, terminal=False)
     _feature(root, "legacy-child")
     (root / "legacy-child" / "descriptor.json").unlink()

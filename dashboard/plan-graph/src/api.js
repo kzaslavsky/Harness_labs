@@ -24,11 +24,13 @@ function validFeatureRun(value) {
 function validNode(value) {
   return isObject(value) && isText(value.node_id) && nodeStatuses.has(value.status)
     && (value.feature_run_id === null || isText(value.feature_run_id))
+    && Array.isArray(value.depends_on) && value.depends_on.every(isText)
     && validLiveness(value.liveness) && validAvailability(value.evidence);
 }
 
 function validGraph(value) {
   return isObject(value) && isText(value.run_id) && runStatuses.has(value.status)
+    && isText(value.created_at) && isText(value.plan_path) && isText(value.plan_digest) && isText(value.plan_graph_digest)
     && validLiveness(value.liveness) && validAvailability(value.evidence)
     && Array.isArray(value.nodes) && value.nodes.every(validNode);
 }
@@ -74,18 +76,70 @@ export function stateLabel(record) {
   return state === 'unavailable' ? 'Evidence unavailable' : state.replace(/(^|_)([a-z])/g, (_, prefix, letter) => `${prefix}${letter.toUpperCase()}`);
 }
 
-export function graphProjection(catalog) {
+export function planGraphGroups(catalog) {
+  const groups = new Map();
+  for (const graph of catalog.plan_graphs) {
+    const key = graph.plan_digest;
+    const group = groups.get(key) || { key, planPath: graph.plan_path, planDigest: graph.plan_digest, attempts: [] };
+    group.attempts.push(graph);
+    groups.set(key, group);
+  }
+  for (const group of groups.values()) {
+    group.attempts.sort((left, right) => right.created_at.localeCompare(left.created_at) || right.run_id.localeCompare(left.run_id));
+  }
+  return [...groups.values()].sort((left, right) => right.attempts[0].created_at.localeCompare(left.attempts[0].created_at));
+}
+
+export function defaultGraphAttempt(group) {
+  if (!group) return null;
+  return group.attempts.find((graph) => graph.liveness.state === 'live')
+    || group.attempts.find((graph) => graph.status === 'running' && graph.liveness.state !== 'terminal')
+    || group.attempts[0]
+    || null;
+}
+
+function graphDepths(graph) {
+  const byId = new Map(graph.nodes.map((node) => [node.node_id, node]));
+  const memo = new Map();
+  const visit = (nodeId, active = new Set()) => {
+    if (memo.has(nodeId)) return memo.get(nodeId);
+    if (active.has(nodeId)) return 0;
+    const nextActive = new Set(active).add(nodeId);
+    const dependencies = (byId.get(nodeId)?.depends_on || []).filter((dependency) => byId.has(dependency));
+    const depth = dependencies.length ? 1 + Math.max(...dependencies.map((dependency) => visit(dependency, nextActive))) : 0;
+    memo.set(nodeId, depth);
+    return depth;
+  };
+  graph.nodes.forEach((node) => visit(node.node_id));
+  return memo;
+}
+
+export function graphProjection(catalog, graph) {
+  if (!graph) return { nodes: [], edges: [] };
   const runs = new Map(catalog.feature_runs.map((run) => [run.run_id, run]));
-  return catalog.plan_graphs.flatMap((graph, graphIndex) => graph.nodes.map((node, index) => {
+  const depths = graphDepths(graph);
+  const rows = new Map();
+  const nodes = graph.nodes.map((node) => {
     const run = node.feature_run_id ? runs.get(node.feature_run_id) : null;
     const record = run || node;
+    const depth = depths.get(node.node_id) || 0;
+    const row = rows.get(depth) || 0;
+    rows.set(depth, row + 1);
     return {
       id: `${graph.run_id}:${node.node_id}`,
       type: 'featureRun',
-      position: { x: 40 + index * 270, y: 50 + graphIndex * 220 },
-      data: { graphId: graph.run_id, nodeId: node.node_id, runId: node.feature_run_id, record, title: run?.run_id || node.node_id },
+      position: { x: 40 + depth * 300, y: 40 + row * 150 },
+      data: { graphId: graph.run_id, nodeId: node.node_id, plannedRunId: node.feature_run_id, runId: run?.run_id || null, nodeRecord: node, record, title: run?.run_id || node.node_id },
     };
-  }));
+  });
+  const nodeIds = new Set(graph.nodes.map((node) => node.node_id));
+  const edges = graph.nodes.flatMap((node) => node.depends_on.filter((dependency) => nodeIds.has(dependency)).map((dependency) => ({
+    id: `${graph.run_id}:${dependency}->${node.node_id}`,
+    source: `${graph.run_id}:${dependency}`,
+    target: `${graph.run_id}:${node.node_id}`,
+    animated: node.status === 'running',
+  })));
+  return { nodes, edges };
 }
 
 export function selectedRunFor(catalog, runId) {
