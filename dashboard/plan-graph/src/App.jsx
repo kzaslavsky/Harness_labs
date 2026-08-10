@@ -13,7 +13,7 @@ const duration = (milliseconds) => {
   const hours = Math.floor(milliseconds / 3_600_000); const minutes = Math.floor((milliseconds % 3_600_000) / 60_000); const seconds = Math.floor((milliseconds % 60_000) / 1_000);
   return hours ? `${hours}h ${minutes}m` : `${minutes}m ${seconds}s`;
 };
-const money = (cost) => cost?.state === 'available' ? `$${Number(cost.usd).toFixed(4)}` : 'Unavailable';
+const money = (cost) => cost?.state === 'available' ? `$${Number(cost.usd).toFixed(4)}` : cost?.state === 'estimated' ? `≈$${Number(cost.usd).toFixed(4)}` : 'Unavailable';
 const compactId = (value) => { const parts = String(value || '').split('/'); return parts.length > 1 ? parts.slice(-3).join(' / ') : value; };
 function Status({ record }) { const state = displayState(record); return <span className={`status status--${state}`}><i />{stateLabel(record)}</span>; }
 function Availability({ value, label }) { return <p className={value?.state === 'available' ? 'availability' : 'availability availability--missing'}><strong>{label}</strong> {value?.state || 'unavailable'}{value?.reason ? ` — ${value.reason}` : ''}</p>; }
@@ -68,7 +68,7 @@ function MetricCards({ metrics }) {
     <div><span>Peak observed input</span><strong>{tokens(total.peak_input_tokens)}</strong><small>single agent invocation</small></div>
     <div><span>Agent time</span><strong>{duration(total.duration_ms)}</strong><small>{number.format(total.calls)} backend call{total.calls === 1 ? '' : 's'}</small></div>
     <div><span>Wall time</span><strong>{duration(total.wall_clock_ms)}</strong><small>run elapsed time</small></div>
-    <div><span>Estimated API cost</span><strong>{money(total.cost)}</strong><small>{total.cost.reason || 'audited usage pricing'}</small></div>
+    <div><span>{total.cost.state === 'available' ? 'Recorded API cost' : 'Estimated API cost'}</span><strong>{money(total.cost)}</strong><small>{total.cost.reason || 'audited usage pricing'}</small></div>
     <div><span>Quality</span><strong>{quality.criteria_satisfied}/{quality.criteria_total} criteria</strong><small>{quality.open_findings} open findings · {quality.review_cycles} review cycles · {quality.verification_repairs} repairs</small></div>
   </div>;
 }

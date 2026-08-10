@@ -111,9 +111,12 @@ phase, agent invocation, agent type, model, reasoning-effort, and backend
 breakdowns. Total tokens are input plus output tokens; cached input is reported
 separately and is not added a second time. “Peak observed input” is the maximum
 `input_tokens` value from one backend invocation, not a claim about true context
-window occupancy. Dollar cost is displayed only when every included usage
-record has authoritative pricing; otherwise the UI reports cost as unavailable
-and gives the missing-record count.
+window occupancy. Recorded dollar cost remains authoritative. When it is absent,
+the UI may show a visibly approximate API-equivalent estimate for recognized
+models using published input, cached-input, output, and long-context rates. The
+estimate cites its price pages and excludes unobserved tool fees and cache-write
+premiums. Unknown models remain unavailable rather than receiving an invented
+rate.
 
 Do not log credentials, access tokens, private keys, sensitive personal data,
 full environment dumps, or unredacted third-party content. Raw model reasoning

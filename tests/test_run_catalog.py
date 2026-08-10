@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from harness_labs.audit import AuditActor, AuditJournal
-from harness_labs.run_catalog import _snapshot, build_run_catalog, build_run_detail
+from harness_labs.run_catalog import _detail_metrics, _snapshot, build_run_catalog, build_run_detail
 
 
 class RunCatalogTests(unittest.TestCase):
@@ -87,6 +87,23 @@ class RunCatalogTests(unittest.TestCase):
         self.assertEqual(projected["by_model"][0]["label"], "gpt-test")
         self.assertEqual(projected["by_effort"][0]["label"], "high")
         self.assertEqual(projected["quality"]["criteria_satisfied"], 1)
+
+    def test_detail_infers_api_equivalent_cost_with_long_context_pricing(self) -> None:
+        metrics = _detail_metrics({
+            "events": [{
+                "event_type": "backend_transport", "attempt_id": "implement-cost/attempt-1",
+                "actor": {"id": "worker", "role": "semantic_worker"}, "backend_id": "codex-exec", "duration_ms": 1,
+                "payload": {"model": "gpt-5.6-terra", "reasoning": "medium", "usage": {
+                    "input_tokens": 300_000, "cached_input_tokens": 100_000, "output_tokens": 20_000, "cost_usd": None,
+                }},
+            }],
+            "checkpoint": {"state": {}}, "summary": None,
+        })
+        cost = metrics["totals"]["cost"]
+        self.assertEqual(cost["state"], "estimated")
+        self.assertEqual(cost["usd"], 1.5)
+        self.assertEqual(cost["long_context_records"], 1)
+        self.assertIn("gpt-5.6-terra", cost["sources"][0])
 
     def test_invalid_descriptor_and_unmatched_correlation_are_not_trusted(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

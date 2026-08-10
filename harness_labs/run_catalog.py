@@ -18,6 +18,12 @@ Clock = Callable[[], datetime]
 ProcessProbe = Callable[[int], str | None]
 _DESCRIPTOR_FIELDS = frozenset({"protocol", "run_kind", "run_id", "created_at", "objective", "evidence_classification", "repository", "approved_plan", "parent_correlation"})
 _LEASE_FIELDS = frozenset({"protocol", "run_id", "controller_instance_id", "hostname", "pid", "process_start_token", "heartbeat_sequence", "heartbeat_at", "controller_kind"})
+_ESTIMATED_MODEL_PRICES = {
+    "gpt-5.6-sol": {"input": Decimal("5.00"), "cached_input": Decimal("0.50"), "output": Decimal("30.00"), "source": "https://developers.openai.com/api/docs/models/gpt-5.6-sol"},
+    "gpt-5.6-terra": {"input": Decimal("2.50"), "cached_input": Decimal("0.25"), "output": Decimal("15.00"), "source": "https://developers.openai.com/api/docs/models/gpt-5.6-terra"},
+    "gpt-5.6-luna": {"input": Decimal("1.00"), "cached_input": Decimal("0.10"), "output": Decimal("6.00"), "source": "https://developers.openai.com/api/docs/models/gpt-5.6-luna"},
+}
+_LONG_CONTEXT_THRESHOLD = 272_000
 
 
 def build_run_catalog(source_root: Path, *, clock: Clock | None = None, process_probe: ProcessProbe | None = None, heartbeat_freshness_seconds: float = 30.0, excluded_runs: Mapping[str, str] | None = None) -> dict[str, Any]:
@@ -153,11 +159,14 @@ def _detail_metrics(metrics: Mapping[str, Any]) -> dict[str, Any]:
         usage = payload.get("usage") if isinstance(payload.get("usage"), Mapping) else {}
         actor = event.get("actor") if isinstance(event.get("actor"), Mapping) else {}
         attempt = event.get("attempt_id") or actor.get("id") or "unknown agent"
+        model = str(payload.get("model") or usage.get("model") or "unavailable")
+        recorded_cost = _nonnegative_number(usage.get("cost_usd"))
+        estimated_cost = _estimated_api_cost(model, usage) if recorded_cost is None else None
         records.append({
             "agent": str(attempt),
             "phase": _attempt_phase(str(attempt)),
             "agent_type": str(actor.get("role") or "unknown"),
-            "model": str(payload.get("model") or usage.get("model") or "unavailable"),
+            "model": model,
             "effort": str(payload.get("reasoning") or "unavailable"),
             "backend": str(event.get("backend_id") or payload.get("transport") or payload.get("backend_id") or "unavailable"),
             "calls": 1,
@@ -165,7 +174,10 @@ def _detail_metrics(metrics: Mapping[str, Any]) -> dict[str, Any]:
             "cached_input_tokens": _nonnegative_int(usage.get("cached_input_tokens")),
             "output_tokens": _nonnegative_int(usage.get("output_tokens")),
             "duration_ms": _nonnegative_int(event.get("duration_ms")),
-            "cost_usd": _nonnegative_number(usage.get("cost_usd")),
+            "cost_usd": recorded_cost if recorded_cost is not None else estimated_cost["usd"] if estimated_cost else None,
+            "cost_kind": "authoritative" if recorded_cost is not None else "estimated" if estimated_cost else "unavailable",
+            "cost_source": usage.get("pricing_source") if recorded_cost is not None else estimated_cost["source"] if estimated_cost else None,
+            "long_context_priced": estimated_cost["long_context"] if estimated_cost else False,
         })
     totals = _aggregate_metric_rows(records)
     summary = metrics.get("summary") if isinstance(metrics.get("summary"), Mapping) else {}
@@ -236,8 +248,40 @@ def _nonnegative_number(value: Any) -> float | None:
     return float(parsed) if parsed.is_finite() and parsed >= 0 else None
 
 
+def _estimated_api_cost(model: str, usage: Mapping[str, Any]) -> dict[str, Any] | None:
+    price = _ESTIMATED_MODEL_PRICES.get(model)
+    if price is None:
+        return None
+    input_tokens = _nonnegative_int(usage.get("input_tokens"))
+    cached_tokens = min(input_tokens, _nonnegative_int(usage.get("cached_input_tokens")))
+    output_tokens = _nonnegative_int(usage.get("output_tokens"))
+    uncached_tokens = input_tokens - cached_tokens
+    long_context = input_tokens > _LONG_CONTEXT_THRESHOLD
+    input_multiplier = Decimal("2") if long_context else Decimal("1")
+    output_multiplier = Decimal("1.5") if long_context else Decimal("1")
+    million = Decimal("1000000")
+    cost = (
+        Decimal(uncached_tokens) * price["input"] * input_multiplier
+        + Decimal(cached_tokens) * price["cached_input"] * input_multiplier
+        + Decimal(output_tokens) * price["output"] * output_multiplier
+    ) / million
+    return {"usd": float(cost), "source": price["source"], "long_context": long_context}
+
+
 def _aggregate_metric_rows(rows: list[Mapping[str, Any]]) -> dict[str, Any]:
     missing_cost = sum(1 for row in rows if row["cost_usd"] is None)
+    estimated_cost = sum(1 for row in rows if row["cost_kind"] == "estimated")
+    sources = sorted({str(row["cost_source"]) for row in rows if row["cost_source"]})
+    long_context_records = sum(1 for row in rows if row["long_context_priced"])
+    if rows and missing_cost == 0:
+        cost_state = "estimated" if estimated_cost else "available"
+        cost_reason = (
+            f"API-equivalent estimate from published model rates; long-context pricing applied to {long_context_records} record(s); excludes tool fees and cache-write premiums"
+            if estimated_cost else None
+        )
+    else:
+        cost_state = "unavailable"
+        cost_reason = f"{missing_cost} usage record(s) lack recognized pricing" if rows else "no usage records were recorded"
     result = {
         "calls": sum(row["calls"] for row in rows),
         "input_tokens": sum(row["input_tokens"] for row in rows),
@@ -246,9 +290,12 @@ def _aggregate_metric_rows(rows: list[Mapping[str, Any]]) -> dict[str, Any]:
         "duration_ms": sum(row["duration_ms"] for row in rows),
         "peak_input_tokens": max((row["input_tokens"] for row in rows), default=0),
         "cost": {
-            "state": "available" if rows and missing_cost == 0 else "unavailable",
+            "state": cost_state,
             "usd": round(sum(row["cost_usd"] or 0 for row in rows), 6) if rows and missing_cost == 0 else None,
-            "reason": None if rows and missing_cost == 0 else (f"{missing_cost} usage record(s) lack authoritative pricing" if rows else "no usage records were recorded"),
+            "reason": cost_reason,
+            "sources": sources,
+            "estimated_records": estimated_cost,
+            "long_context_records": long_context_records,
         },
     }
     result["total_tokens"] = result["input_tokens"] + result["output_tokens"]
