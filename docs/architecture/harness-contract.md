@@ -185,6 +185,8 @@ A PlanGraph-associated FeatureRun is the normal FeatureRun with its approved
 PlanGraph packet bound as the planning handoff. It omits only `orient` and
 `plan`; it MUST use the same implementation, verification, ledger-backed
 review/fix, Git transaction, recovery, integration, and reporting machinery.
+A PlanGraph-bound coordinator dispatches the normal `implement` segment; the
+existing FeatureRun controller continues to own every subsequent gate.
 A custom child lifecycle or replacement review loop is not a conforming
 PlanGraph-associated FeatureRun.
 

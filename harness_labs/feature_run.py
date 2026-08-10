@@ -467,11 +467,28 @@ def run_plan_graph_feature_worktree(
             + ", ".join(overlap)
         )
 
+    implementation_segments = tuple(
+        segment for segment in schema.segments if segment.phases == ("implement",)
+    )
+    if len(implementation_segments) != 1:
+        raise ValueError(
+            "PlanGraph-bound FeatureRun requires one normal implement segment"
+        )
+    verification_argv = feature_run_options.get("verification_argv")
+    if not isinstance(verification_argv, tuple) or not verification_argv:
+        raise ValueError(
+            "PlanGraph-bound FeatureRun requires controller-owned verification"
+        )
+    if feature_run_options.get("verification_repair_executor_factory") is None:
+        raise ValueError(
+            "PlanGraph-bound FeatureRun requires normal verification recovery"
+        )
+
     bound_schema = CoordinatorDispatchSchema(
         schema_id=f"{schema.schema_id}/plan-graph-bound",
-        segments=schema.segments[1:],
+        segments=implementation_segments,
     )
-    bound_phases = _NORMAL_FEATURE_PHASES[2:]
+    bound_phases = ("implement",)
 
     def bound_contract_factory(
         worktree: Path, creation: Mapping[str, object]

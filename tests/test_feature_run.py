@@ -199,6 +199,8 @@ class FeatureRunTests(unittest.TestCase):
             contract_factory=contract_factory,
             review_fix_policy=ReviewFixPolicy(),
             base_repository=Path("repository"),
+            verification_argv=("python3", "-m", "unittest"),
+            verification_repair_executor_factory=lambda attempt: None,
         )
 
         self.assertIs(result, sentinel)
@@ -208,7 +210,7 @@ class FeatureRunTests(unittest.TestCase):
         )
         self.assertEqual(
             bound_phases,
-            ("implement", "verify", "review", "integrate", "report"),
+            ("implement",),
         )
         self.assertEqual(
             [artifact.kind for artifact in options["initial_evidence"]],
@@ -241,6 +243,8 @@ class FeatureRunTests(unittest.TestCase):
                 schema=implement_v13_dispatch_schema(),
                 contract_factory=lambda worktree, receipt: None,
                 review_fix_policy=ReviewFixPolicy(ledger_enabled=False),
+                verification_argv=("python3", "-m", "unittest"),
+                verification_repair_executor_factory=lambda attempt: None,
             )
 
     def test_deterministic_verification_rejects_model_verify_phase(self) -> None:
