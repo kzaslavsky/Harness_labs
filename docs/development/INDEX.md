@@ -33,6 +33,8 @@ Status: active
   [`solo-phased-reviewfix-feature-run-comparison.md`](solo-phased-reviewfix-feature-run-comparison.md)
 - Live React Flow PlanGraph and FeatureRun dashboard:
   [`live-plangraph-dashboard-plan.md`](live-plangraph-dashboard-plan.md)
+- Live dashboard startup, liveness, and legacy migration:
+  [`live-plangraph-dashboard-operations.md`](live-plangraph-dashboard-operations.md)
 
 ## Seed implementation records
 
