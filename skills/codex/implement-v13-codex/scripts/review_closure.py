@@ -39,6 +39,8 @@ COMPLEXITIES = {"implementation", "architectural"}
 REPAIR_ACTIONS = {"author_test", "design", "design_review", "fix", "targeted_review"}
 ESCALATION_ACTIONS = {"reassign", "decompose", "operator"}
 ATTEMPTS_BEFORE_ESCALATION = 3
+COLLISION_ATTEMPTS_BEFORE_OPERATOR = 2
+MAX_COLLISION_CLOSURES = 3
 EFFECT_CONTRACT_PROTOCOL = "implement-v13-codex/repair-effect-contract/1"
 REPAIR_EFFECTS = {
     "failure_checkpoint",
@@ -582,6 +584,53 @@ def _save(path: Path, ledger: dict[str, Any]) -> dict[str, Any]:
     ledger["active_closure_id"] = selected["closure_id"] if selected else ""
     atomic_write_json(path, ledger)
     return ledger
+
+
+def _refresh_collision_packet(
+    path: Path,
+    ledger: dict[str, Any],
+    owner: dict[str, Any],
+) -> None:
+    """Persist the small, frozen context needed for one bounded collision repair."""
+    collision = owner.get("active_collision")
+    if not isinstance(collision, dict):
+        raise StateError("collision packet requires active collision state")
+    closure_ids = collision.get("closure_ids")
+    if (
+        not isinstance(closure_ids, list)
+        or not 2 <= len(closure_ids) <= MAX_COLLISION_CLOSURES
+        or len(closure_ids) != len(set(closure_ids))
+    ):
+        raise StateError("collision repair must contain two or three closures")
+    generation = int(collision.get("generation", 0)) + 1
+    packet = {
+        "protocol": "implement-v13-codex/repair-collision/1",
+        "feature_run_id": ledger["feature_run_id"],
+        "owner_closure_id": owner["closure_id"],
+        "closure_ids": closure_ids,
+        "attempt_limit": COLLISION_ATTEMPTS_BEFORE_OPERATOR,
+        "closures": [
+            {
+                "closure_id": item["closure_id"],
+                "origin_reviewer": item["origin_reviewer"],
+                "fingerprints": item["fingerprints"],
+                "acceptance": item["acceptance"],
+                "closure_test": item.get("closure_test"),
+                "attempts": item.get("attempts", []),
+            }
+            for item in ledger["closures"]
+            if item["closure_id"] in closure_ids
+        ],
+        "collision_evidence": collision.get("evidence", []),
+    }
+    packet_name = hashlib.sha256(owner["closure_id"].encode("utf-8")).hexdigest()[:16]
+    packet_path = path.parent / f"repair-collision-{packet_name}-{generation}.v1.json"
+    atomic_write_json(packet_path, packet)
+    collision.update({
+        "generation": generation,
+        "packet_path": str(packet_path.resolve()),
+        "packet_sha256": sha256_file(packet_path),
+    })
 
 
 def cas_save_ledger(
@@ -1388,10 +1437,12 @@ def start_attempt(path: Path, closure_id: str, attempt: dict[str, Any]) -> dict[
     test_receipt = closure["closure_test"]["author_receipt_id"]
     if invocation_id == test_receipt:
         raise StateError("closure-test author cannot be the repair fixer")
-    closure["attempts"].append({
+    fixer_identity = _nonempty(attempt.get("fixer_identity"), "fixer_identity")
+    collision = closure.get("active_collision")
+    entry = {
         "attempt": len(closure["attempts"]) + 1,
         "invocation_id": invocation_id,
-        "fixer_identity": _nonempty(attempt.get("fixer_identity"), "fixer_identity"),
+        "fixer_identity": fixer_identity,
         "strategy_family": family,
         "strategy_summary": _nonempty(attempt.get("strategy_summary"), "strategy_summary"),
         "prior_attempt_history_sha256": current_hash,
@@ -1399,7 +1450,13 @@ def start_attempt(path: Path, closure_id: str, attempt: dict[str, Any]) -> dict[
         "result_path": "",
         "result_sha256": "",
         "rejection_evidence": [],
-    })
+    }
+    if isinstance(collision, dict):
+        entry.update({
+            "collision_packet_path": collision["packet_path"],
+            "collision_packet_sha256": collision["packet_sha256"],
+        })
+    closure["attempts"].append(entry)
     closure["status"] = "fix_running"
     return _save(path, ledger)
 
@@ -1860,9 +1917,68 @@ def record_review(path: Path, closure_id: str, result: dict[str, Any]) -> dict[s
         item for item in closed_others
         if item["closure_id"] in checks and checks[item["closure_id"]] is not True
     ]
-    for item in regressed:
-        item["status"] = "ready_for_fix"
-    if all(value == "fixed" for value in statuses.values()):
+    collision = closure.get("active_collision")
+    collision_satisfied = (
+        isinstance(collision, dict)
+        and not regressed
+        and all(value == "fixed" for value in statuses.values())
+    )
+    if collision_satisfied:
+        current["status"] = "accepted"
+        closure["status"] = "closed"
+        resolved = json.loads(json.dumps(collision))
+        resolved["status"] = "resolved"
+        closure.setdefault("collision_history", []).append(resolved)
+        closure.pop("active_collision", None)
+    elif regressed or isinstance(collision, dict):
+        current["status"] = "rejected"
+        current["rejection_evidence"] = evidence + [
+            "closed closure regression: "
+            + ", ".join(item["closure_id"] for item in regressed)
+        ] if regressed else evidence
+        if not isinstance(collision, dict):
+            closure_ids = [closure_id] + [item["closure_id"] for item in regressed]
+            overflow = closure_ids[MAX_COLLISION_CLOSURES:]
+            collision = {
+                "closure_ids": closure_ids[:MAX_COLLISION_CLOSURES],
+                "expansions": 0,
+                "evidence": list(evidence) + (
+                    ["collision exceeds three closures: " + ", ".join(overflow)]
+                    if overflow else []
+                ),
+            }
+            closure["active_collision"] = collision
+            if overflow:
+                _refresh_collision_packet(path, ledger, closure)
+                closure["status"] = "escalation_required"
+                return _save(path, ledger)
+        else:
+            new_ids = [
+                item["closure_id"] for item in regressed
+                if item["closure_id"] not in collision["closure_ids"]
+            ]
+            if new_ids:
+                if collision.get("expansions", 0) >= 1 or (
+                    len(collision["closure_ids"]) + len(new_ids) > MAX_COLLISION_CLOSURES
+                ):
+                    closure["status"] = "escalation_required"
+                    collision.setdefault("evidence", []).extend(evidence)
+                    _refresh_collision_packet(path, ledger, closure)
+                    return _save(path, ledger)
+                collision["closure_ids"].extend(new_ids)
+                collision["expansions"] = 1
+            collision.setdefault("evidence", []).extend(evidence)
+        _refresh_collision_packet(path, ledger, closure)
+        collision_attempts = sum(
+            item.get("status") == "rejected" and "collision_packet_sha256" in item
+            for item in closure["attempts"]
+        )
+        closure["status"] = (
+            "escalation_required"
+            if collision_attempts >= COLLISION_ATTEMPTS_BEFORE_OPERATOR
+            else "ready_for_fix"
+        )
+    elif all(value == "fixed" for value in statuses.values()):
         current["status"] = "accepted"
         closure["status"] = "closed"
     else:
@@ -1884,6 +2000,8 @@ def record_escalation(path: Path, closure_id: str, result: dict[str, Any]) -> di
     action = result.get("action")
     if action not in ESCALATION_ACTIONS:
         raise StateError("escalation action must be reassign, decompose, or operator")
+    if isinstance(closure.get("active_collision"), dict) and action != "operator":
+        raise StateError("exhausted collision repair requires operator resolution")
     entry = {
         "action": action,
         "reason": _nonempty(result.get("reason"), "reason"),
@@ -1909,7 +2027,7 @@ def next_action(path: Path) -> dict[str, Any]:
     if not active:
         return {"status": "complete", "closure_id": "", "attempt_history_sha256": ""}
     closure = _closure(ledger, active)
-    return {
+    action = {
         "status": closure["status"],
         "closure_id": active,
         "complexity": closure["complexity"],
@@ -1926,6 +2044,15 @@ def next_action(path: Path) -> dict[str, Any]:
         "ready_age": closure.get("ready_age", 0),
         "attempt_history_sha256": attempt_history_sha256(closure),
     }
+    collision = closure.get("active_collision")
+    if isinstance(collision, dict):
+        action["collision"] = {
+            "closure_ids": collision["closure_ids"],
+            "packet_path": collision["packet_path"],
+            "packet_sha256": collision["packet_sha256"],
+            "attempt_limit": COLLISION_ATTEMPTS_BEFORE_OPERATOR,
+        }
+    return action
 
 
 def validate_pre_model_closure(
@@ -2132,6 +2259,19 @@ def validate_invocation_spec(spec: dict[str, Any], artifact_dir: Path) -> None:
             raise StateError("fix invocation strategy does not match the closure ledger")
         if spec.get("closure_attempt_history_sha256") != current["prior_attempt_history_sha256"]:
             raise StateError("fix invocation omits or mismatches prior-attempt history")
+        collision = closure.get("active_collision")
+        if isinstance(collision, dict):
+            if (
+                spec.get("collision_packet_path") != collision.get("packet_path")
+                or spec.get("collision_packet_sha256") != collision.get("packet_sha256")
+            ):
+                raise StateError("collision fixer omits or mismatches the frozen collision packet")
+            prompt = Path(str(spec.get("prompt_path", ""))).read_text(encoding="utf-8")
+            if (
+                f"COLLISION_REPAIR_PACKET_PATH={collision['packet_path']}" not in prompt
+                or f"COLLISION_REPAIR_PACKET_SHA256={collision['packet_sha256']}" not in prompt
+            ):
+                raise StateError("collision fixer prompt omits the frozen collision packet")
 
 
 def _result(path: str) -> dict[str, Any]:
