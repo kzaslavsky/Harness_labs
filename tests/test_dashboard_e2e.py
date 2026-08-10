@@ -174,7 +174,7 @@ class DashboardEndToEndTests(unittest.TestCase):
             create_fixture(root)
             before = _tree_digest(root)
             assets = Path("dashboard/plan-graph/dist").resolve()
-            with patch("harness_labs.dashboard_server.RunCatalog", side_effect=lambda source: RunCatalog(source, process_probe=lambda pid: "fixture-process-token")):
+            with patch("harness_labs.dashboard_server.RunCatalog", side_effect=lambda source, **options: RunCatalog(source, process_probe=lambda pid: "fixture-process-token", **options)):
                 app = DashboardApplication(root, assets_root=assets, refresh_seconds=0.001)
                 server = create_dashboard_server(app, port=0)
                 thread = threading.Thread(target=server.serve_forever, daemon=True)

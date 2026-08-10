@@ -41,7 +41,21 @@ test('FeatureRun detail validation accepts the production availability projectio
       evidence_metadata: unavailable, git_custody: availability, usage: unavailable,
     },
   };
-  assert.equal(validateRunDetail(detail), detail);
+  assert.deepEqual(validateRunDetail(detail), detail);
   delete detail.availability.usage;
   assert.throws(() => validateRunDetail(detail));
+});
+
+test('FeatureRun detail validation normalizes keyed controller families', () => {
+  const detail = {
+    lifecycle: [], criteria: { 'AC-1': { id: 'AC-1', status: 'satisfied' } },
+    tasks: { task: { id: 'task', status: 'succeeded' } }, findings: {}, decisions: {},
+    evidence_metadata: [], git_custody: [], usage: null, timing: {}, availability: {
+      lifecycle: availability, criteria: availability, tasks: availability, findings: availability,
+      evidence_metadata: availability, git_custody: availability, usage: availability,
+    },
+  };
+  const normalized = validateRunDetail(detail);
+  assert.deepEqual(normalized.criteria, [{ id: 'AC-1', status: 'satisfied' }]);
+  assert.deepEqual(normalized.tasks, [{ id: 'task', status: 'succeeded' }]);
 });

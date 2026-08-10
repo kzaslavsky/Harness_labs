@@ -100,6 +100,43 @@ class DashboardApiTests(unittest.TestCase):
             with self.assertRaises(DashboardError):
                 DashboardApplication(link)
 
+    def test_oversized_run_is_isolated_without_hiding_healthy_runs(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._run(root, "healthy-run")
+            oversized = root / "oversized-run"
+            oversized.mkdir()
+            with (oversized / "events.jsonl").open("wb") as stream:
+                stream.truncate(4 * 1024 * 1024 + 1)
+
+            app = DashboardApplication(root, refresh_seconds=60)
+            status, catalog_body, _ = self._request(app, "GET", "/api/catalog")
+
+            self.assertEqual(status, 200)
+            catalog = json.loads(catalog_body)
+            self.assertEqual(catalog["availability"]["state"], "partial")
+            self.assertEqual(
+                [run["run_id"] for run in catalog["feature_runs"]],
+                ["healthy-run", "oversized-run"],
+            )
+            self.assertEqual(catalog["feature_runs"][1]["status"], "corrupt")
+            self.assertEqual(catalog["diagnostics"][0]["run_id"], "oversized-run")
+
+    def test_oversized_detail_does_not_make_catalog_unavailable(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._run(root)
+            with patch(
+                "harness_labs.dashboard_server.build_run_detail",
+                return_value={"blob": "x" * (1024 * 1024)},
+            ):
+                app = DashboardApplication(root, refresh_seconds=60)
+                self.assertEqual(self._request(app, "GET", "/api/catalog")[0], 200)
+                self.assertEqual(
+                    self._request(app, "GET", "/api/feature-runs/run-1")[0],
+                    404,
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

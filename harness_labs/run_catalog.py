@@ -19,7 +19,7 @@ _DESCRIPTOR_FIELDS = frozenset({"protocol", "run_kind", "run_id", "created_at", 
 _LEASE_FIELDS = frozenset({"protocol", "run_id", "controller_instance_id", "hostname", "pid", "process_start_token", "heartbeat_sequence", "heartbeat_at", "controller_kind"})
 
 
-def build_run_catalog(source_root: Path, *, clock: Clock | None = None, process_probe: ProcessProbe | None = None, heartbeat_freshness_seconds: float = 30.0) -> dict[str, Any]:
+def build_run_catalog(source_root: Path, *, clock: Clock | None = None, process_probe: ProcessProbe | None = None, heartbeat_freshness_seconds: float = 30.0, excluded_runs: Mapping[str, str] | None = None) -> dict[str, Any]:
     """Discover direct, non-symlinked run directories under one explicit root."""
     if heartbeat_freshness_seconds <= 0:
         raise ValueError("heartbeat_freshness_seconds must be positive")
@@ -28,10 +28,16 @@ def build_run_catalog(source_root: Path, *, clock: Clock | None = None, process_
     probe = process_probe or _local_process_start_token
     diagnostics: list[dict[str, str | None]] = []
     records: list[dict[str, Any]] = []
+    exclusions = dict(excluded_runs or {})
     if not root.is_dir():
         return _snapshot(root, now, diagnostics, records, "source root is unavailable")
     for entry in sorted(root.iterdir(), key=lambda path: path.name):
         if entry.is_symlink() or not entry.is_dir():
+            continue
+        if entry.name in exclusions:
+            reason = exclusions[entry.name]
+            diagnostics.append(_diagnostic("bounded_run_rejected", reason, entry.name))
+            records.append(_corrupt_record(entry.name, reason))
             continue
         try:
             records.append(_project_run(entry, root, now, probe, heartbeat_freshness_seconds))

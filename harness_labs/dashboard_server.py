@@ -106,8 +106,8 @@ class DashboardApplication:
         return resolved.read_bytes(), media
 
     def _build_snapshot(self) -> _Snapshot:
-        _validate_audit_tree(self.audit_root)
-        catalog_value = RunCatalog(self.audit_root).snapshot()
+        excluded_runs = _validate_audit_tree(self.audit_root)
+        catalog_value = RunCatalog(self.audit_root, excluded_runs=excluded_runs).snapshot()
         catalog_value = _cap_diagnostics(catalog_value)
         _ensure_unique_ids(catalog_value)
         graph_details: dict[str, bytes] = {}
@@ -120,7 +120,7 @@ class DashboardApplication:
                 continue
             try:
                 run_details[run_id] = _json_bytes(build_run_detail(self.audit_root, run_id))
-            except (AuditError, OSError, ValueError, json.JSONDecodeError):
+            except (AuditError, DashboardError, OSError, ValueError, json.JSONDecodeError):
                 # A catalog summary may safely describe a corrupt detail; it must not
                 # make an arbitrary journal available through the detail endpoint.
                 continue
@@ -227,12 +227,13 @@ def _contained_assets(path: Path) -> Path:
     return supplied.resolve()
 
 
-def _validate_audit_tree(root: Path) -> None:
+def _validate_audit_tree(root: Path) -> dict[str, str]:
     if not root.is_dir():
-        return
+        return {}
     entries = list(root.iterdir())
     if len(entries) > MAX_RUN_DIRECTORIES:
         raise DashboardError("audit root exceeds run directory limit")
+    excluded: dict[str, str] = {}
     for entry in entries:
         if entry.is_symlink() or not entry.is_dir():
             continue
@@ -240,11 +241,15 @@ def _validate_audit_tree(root: Path) -> None:
         for child in entry.rglob("*"):
             count += 1
             if count > MAX_FILES_PER_RUN:
-                raise DashboardError("run exceeds file-count limit")
+                excluded[entry.name] = "run exceeds file-count limit"
+                break
             if child.is_symlink():
-                raise DashboardError("run contains a symlink")
+                excluded[entry.name] = "run contains a symlink"
+                break
             if child.is_file() and child.stat().st_size > MAX_FILE_BYTES:
-                raise DashboardError("run contains an oversized file")
+                excluded[entry.name] = "run contains an oversized file"
+                break
+    return excluded
 
 
 def _cap_diagnostics(value: Mapping[str, Any]) -> dict[str, Any]:

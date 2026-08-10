@@ -40,14 +40,18 @@ export function validateCatalog(value) {
 }
 
 export function validateRunDetail(value) {
-  const families = ['lifecycle', 'criteria', 'tasks', 'findings', 'decisions', 'evidence_metadata', 'git_custody'];
+  const arrayFamilies = ['lifecycle', 'evidence_metadata', 'git_custody'];
+  const recordFamilies = ['criteria', 'tasks', 'findings', 'decisions'];
   const availabilityFamilies = ['lifecycle', 'criteria', 'tasks', 'findings', 'evidence_metadata', 'git_custody', 'usage'];
   if (!isObject(value) || !isObject(value.availability) || !isObject(value.timing)
-      || !families.every((key) => Array.isArray(value[key]))
+      || !arrayFamilies.every((key) => Array.isArray(value[key]))
+      || !recordFamilies.every((key) => Array.isArray(value[key]) || isObject(value[key]))
       || !availabilityFamilies.every((key) => validAvailability(value.availability[key]))) {
     throw new Error('The dashboard received an invalid FeatureRun detail response.');
   }
-  return value;
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => (
+    recordFamilies.includes(key) && isObject(item) ? [key, Object.values(item)] : [key, item]
+  )));
 }
 
 export function displayState(record) {
