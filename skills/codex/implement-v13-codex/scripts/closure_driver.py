@@ -474,6 +474,24 @@ def run_closure_program(
         closure_strategy_family=program.get("strategy_family"),
         closure_attempt_history_sha256=history_hash,
     )
+    collision = closure.get("active_collision")
+    if isinstance(collision, dict):
+        fix_spec.update(
+            collision_packet_path=collision["packet_path"],
+            collision_packet_sha256=collision["packet_sha256"],
+        )
+        prompt_path = _path_under(
+            artifact_dir, fix_spec.get("prompt_path"), "collision fixer prompt"
+        )
+        directive = (
+            "\n\nThis is a bounded collision repair. Read the frozen packet and satisfy "
+            "every listed closure simultaneously; do not repair either closure in isolation.\n"
+            f"COLLISION_REPAIR_PACKET_PATH={collision['packet_path']}\n"
+            f"COLLISION_REPAIR_PACKET_SHA256={collision['packet_sha256']}\n"
+        )
+        prompt_text = prompt_path.read_text(encoding="utf-8")
+        if directive not in prompt_text:
+            prompt_path.write_text(prompt_text + directive, encoding="utf-8")
     atomic_write_json(spec_paths["fix"], fix_spec)
     for member in batch_closure_ids:
         member_closure = next(

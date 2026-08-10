@@ -389,8 +389,31 @@ class ReviewClosureTests(unittest.TestCase):
         })
         state = read_json(self.ledger)
         statuses = {item["closure_id"]: item["status"] for item in state["closures"]}
-        self.assertEqual(statuses, {"executor": "ready_for_fix", "cell-authority": "closed"})
-        self.assertEqual(state["active_closure_id"], "executor")
+        self.assertEqual(statuses, {"executor": "closed", "cell-authority": "ready_for_fix"})
+        self.assertEqual(state["active_closure_id"], "cell-authority")
+        collision = next_action(self.ledger)["collision"]
+        self.assertEqual(collision["closure_ids"], ["cell-authority", "executor"])
+        self.assertTrue(Path(collision["packet_path"]).is_file())
+
+        self._start(
+            "cell-authority", "combined-custody", "fix-collision-1", "luna-collision"
+        )
+        self._finish("cell-authority", "collision-1")
+        record_review(self.ledger, "cell-authority", {
+            "reviewer_role": "code_reviewer_durable_orchestration",
+            "reviewer_receipt_id": "review-collision-1",
+            "finding_statuses": {"terminal-without-cell-proof": "fixed"},
+            "regression_checks": {"executor": True},
+            "evidence": ["both immutable closure tests pass together"],
+        })
+        state = read_json(self.ledger)
+        self.assertEqual(
+            {item["closure_id"]: item["status"] for item in state["closures"]},
+            {"executor": "closed", "cell-authority": "closed"},
+        )
+        owner = next(item for item in state["closures"] if item["closure_id"] == "cell-authority")
+        self.assertNotIn("active_collision", owner)
+        self.assertEqual(owner["collision_history"][-1]["status"], "resolved")
 
         with self.assertRaisesRegex(StateError, "active closure group"):
             validate_invocation_spec({
@@ -429,6 +452,7 @@ class ReviewClosureTests(unittest.TestCase):
             policy["design_reviewer"],
             {"model": "gpt-5.6-sol", "reasoning": "medium"},
         )
+
         self.assertEqual(policy["quality_advantage"], "not_established")
         self.assertFalse(policy["benchmark_is_release_gate"])
         expected = {
@@ -463,6 +487,90 @@ class ReviewClosureTests(unittest.TestCase):
         generic = dict(spec, schema_path=str(PACKAGE / "schemas" / "role-result.schema.json"))
         with self.assertRaisesRegex(StateError, "canonical repair-design-result"):
             validate_invocation_spec({**self._capability_spec(), **generic}, self.root)
+
+    def test_collision_repair_allows_two_fresh_attempts_then_requires_operator(self) -> None:
+        self.ledger = self.root / "bounded-collision-ledger.json"
+        create_ledger(
+            self.ledger,
+            feature_run_id="fr_test",
+            groups=[
+                {
+                    "closure_id": "a",
+                    "fingerprints": ["finding-a"],
+                    "origin_reviewer": "code_reviewer_correctness",
+                    "complexity": "implementation",
+                    "acceptance": ["a remains correct"],
+                },
+                {
+                    "closure_id": "b",
+                    "fingerprints": ["finding-b"],
+                    "origin_reviewer": "code_reviewer_durable_orchestration",
+                    "complexity": "implementation",
+                    "acceptance": ["b becomes correct"],
+                },
+            ],
+        )
+        record_test(
+            self.ledger,
+            "a",
+            self._test_result("code_reviewer_correctness", "test-a"),
+        )
+        self._start("a", "fix-a", "fix-a", "fixer-a")
+        self._finish("a", "a")
+        record_review(self.ledger, "a", {
+            "reviewer_role": "code_reviewer_correctness",
+            "reviewer_receipt_id": "review-a",
+            "finding_statuses": {"finding-a": "fixed"},
+            "regression_checks": {},
+            "evidence": ["a passes"],
+        })
+        record_test(
+            self.ledger,
+            "b",
+            self._test_result("code_reviewer_durable_orchestration", "test-b"),
+        )
+        self._start("b", "fix-b", "fix-b", "fixer-b")
+        self._finish("b", "b")
+        record_review(self.ledger, "b", {
+            "reviewer_role": "code_reviewer_durable_orchestration",
+            "reviewer_receipt_id": "review-b",
+            "finding_statuses": {"finding-b": "fixed"},
+            "regression_checks": {"a": False},
+            "evidence": ["b passes but a regressed"],
+        })
+
+        for index in (1, 2):
+            self._start(
+                "b",
+                f"collision-strategy-{index}",
+                f"fix-collision-{index}",
+                f"fresh-fixer-{index}",
+            )
+            self._finish("b", f"collision-{index}")
+            record_review(self.ledger, "b", {
+                "reviewer_role": "code_reviewer_durable_orchestration",
+                "reviewer_receipt_id": f"review-collision-{index}",
+                "finding_statuses": {"finding-b": "not_fixed"},
+                "regression_checks": {"a": True},
+                "evidence": [f"combined strategy {index} failed"],
+            })
+            state = read_json(self.ledger)
+            self.assertEqual(state["closures"][0]["status"], "closed")
+
+        self.assertEqual(next_action(self.ledger)["status"], "escalation_required")
+        with self.assertRaisesRegex(StateError, "requires operator"):
+            record_escalation(self.ledger, "b", {
+                "action": "reassign",
+                "new_fixer_identity": "third-fixer",
+                "reason": "try again",
+                "evidence": ["two collision attempts failed"],
+            })
+        record_escalation(self.ledger, "b", {
+            "action": "operator",
+            "reason": "two bounded collision attempts failed",
+            "evidence": ["complete collision history attached"],
+        })
+        self.assertEqual(read_json(self.ledger)["closures"][1]["status"], "blocked")
 
     def test_targeted_reviewer_uses_boolean_controller_owned_scratch_request(self) -> None:
         record_test(
