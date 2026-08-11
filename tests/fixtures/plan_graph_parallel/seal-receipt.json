@@ -1,0 +1,16 @@
+{
+  "protocol": "harness-plan-graph-parallel-seal-receipt/1",
+  "status": "sealed",
+  "graph_id": "retinology-parallel-replay",
+  "node_id": "FR-10",
+  "logical_attempt": 8,
+  "allocation_id": "alloc-fr-10",
+  "parent_candidate_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "candidate_commit": "1111111111111111111111111111111111111111",
+  "canonical_manifest_ref": "artifact:sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+  "descriptor_ref": "artifact:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "verification_evidence_ref": "artifact:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "candidate_receipt_ref": "artifact:sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "terminal_journal_event_ref": "artifact:sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+  "stdout_artifact_ref": "artifact:sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+}

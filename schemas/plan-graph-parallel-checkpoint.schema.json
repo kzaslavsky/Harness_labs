@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://harness-labs.local/schemas/plan-graph-parallel-checkpoint.schema.json",
+  "title": "Durable parallel PlanGraph frontier checkpoint",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["protocol", "graph_id", "revision", "logical_attempt", "staging_head", "ready", "reserved", "running", "sealed", "blocked", "allocations", "integration_lease"],
+  "properties": {
+    "protocol": {"const": "harness-plan-graph-parallel-checkpoint/1"},
+    "graph_id": {"$ref": "#/$defs/id"},
+    "revision": {"type": "integer", "minimum": 1},
+    "logical_attempt": {"type": "integer", "minimum": 1},
+    "staging_head": {"$ref": "#/$defs/commit"},
+    "ready": {"$ref": "#/$defs/node_ids"},
+    "reserved": {"$ref": "#/$defs/node_ids"},
+    "running": {"$ref": "#/$defs/node_ids"},
+    "sealed": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/sealed"}},
+    "blocked": {"$ref": "#/$defs/node_ids"},
+    "allocations": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/allocation"}},
+    "integration_lease": {"type": ["null", "object"], "allOf": [{"if": {"type": "object"}, "then": {"$ref": "#/$defs/lease"}}]}
+  },
+  "$defs": {
+    "id": {"type": "string", "minLength": 1, "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"},
+    "commit": {"type": "string", "pattern": "^[a-f0-9]{40}$"},
+    "node_ids": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/id"}},
+    "sealed": {"type": "object", "additionalProperties": false, "required": ["node_id", "candidate_commit", "seal_receipt_ref"], "properties": {"node_id": {"$ref": "#/$defs/id"}, "candidate_commit": {"$ref": "#/$defs/commit"}, "seal_receipt_ref": {"type": "string", "minLength": 1}}},
+    "allocation": {"type": "object", "additionalProperties": false, "required": ["node_id", "logical_attempt", "allocation_id", "checkpoint_revision", "expected_staging_head"], "properties": {"node_id": {"$ref": "#/$defs/id"}, "logical_attempt": {"type": "integer", "minimum": 1}, "allocation_id": {"$ref": "#/$defs/id"}, "checkpoint_revision": {"type": "integer", "minimum": 1}, "expected_staging_head": {"$ref": "#/$defs/commit"}}},
+    "lease": {"type": "object", "additionalProperties": false, "required": ["node_id", "lease_id", "expected_staging_head"], "properties": {"node_id": {"$ref": "#/$defs/id"}, "lease_id": {"$ref": "#/$defs/id"}, "expected_staging_head": {"$ref": "#/$defs/commit"}}}
+  }
+}

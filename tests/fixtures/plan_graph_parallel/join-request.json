@@ -1,0 +1,14 @@
+{
+  "protocol": "harness-plan-graph-parallel-child-request/1",
+  "graph_id": "retinology-parallel-replay",
+  "node_id": "FR-20",
+  "allocation": {"batch_id": "batch-2", "logical_attempt": 8, "allocation_id": "alloc-fr-20", "checkpoint_revision": 8, "expected_staging_head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+  "parent_candidate_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "dependency_candidates": [
+    {"node_id": "FR-10", "candidate_commit": "1111111111111111111111111111111111111111", "seal_receipt_ref": "artifact:sha256:1111111111111111111111111111111111111111111111111111111111111111"},
+    {"node_id": "FR-11", "candidate_commit": "2222222222222222222222222222222222222222", "seal_receipt_ref": "artifact:sha256:2222222222222222222222222222222222222222222222222222222222222222"},
+    {"node_id": "FR-12", "candidate_commit": "3333333333333333333333333333333333333333", "seal_receipt_ref": "artifact:sha256:3333333333333333333333333333333333333333333333333333333333333333"}
+  ],
+  "lane": {"branch": "lane/FR-20", "worktree": "/worktrees/FR-20", "may_advance_staging": false},
+  "writable_paths": ["integration"]
+}

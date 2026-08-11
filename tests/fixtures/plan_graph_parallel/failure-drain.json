@@ -1,0 +1,1 @@
+{"scenario":"failure-drain","failed":"FR-10","must_drain":["FR-11","FR-12"],"blocked_dependents":["FR-20","FR-30"]}

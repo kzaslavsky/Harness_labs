@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://harness-labs.local/schemas/plan-graph-parallel-child-request.schema.json",
+  "title": "Reserved parallel PlanGraph child request",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["protocol", "graph_id", "node_id", "allocation", "parent_candidate_commit", "dependency_candidates", "lane", "writable_paths"],
+  "properties": {
+    "protocol": {"const": "harness-plan-graph-parallel-child-request/1"},
+    "graph_id": {"$ref": "#/$defs/id"},
+    "node_id": {"$ref": "#/$defs/id"},
+    "allocation": {"$ref": "#/$defs/allocation"},
+    "parent_candidate_commit": {"$ref": "#/$defs/commit"},
+    "dependency_candidates": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/dependency"}},
+    "lane": {"$ref": "#/$defs/lane"},
+    "writable_paths": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}}
+  },
+  "$defs": {
+    "id": {"type": "string", "minLength": 1, "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"},
+    "commit": {"type": "string", "pattern": "^[a-f0-9]{40}$"},
+    "allocation": {"type": "object", "additionalProperties": false, "required": ["batch_id", "logical_attempt", "allocation_id", "checkpoint_revision", "expected_staging_head"], "properties": {"batch_id": {"$ref": "#/$defs/id"}, "logical_attempt": {"type": "integer", "minimum": 1}, "allocation_id": {"$ref": "#/$defs/id"}, "checkpoint_revision": {"type": "integer", "minimum": 1}, "expected_staging_head": {"$ref": "#/$defs/commit"}}},
+    "dependency": {"type": "object", "additionalProperties": false, "required": ["node_id", "candidate_commit", "seal_receipt_ref"], "properties": {"node_id": {"$ref": "#/$defs/id"}, "candidate_commit": {"$ref": "#/$defs/commit"}, "seal_receipt_ref": {"type": "string", "minLength": 1}}},
+    "lane": {"type": "object", "additionalProperties": false, "required": ["branch", "worktree", "may_advance_staging"], "properties": {"branch": {"type": "string", "minLength": 1}, "worktree": {"type": "string", "minLength": 1}, "may_advance_staging": {"const": false}}}
+  }
+}
