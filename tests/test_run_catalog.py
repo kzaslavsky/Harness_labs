@@ -166,6 +166,77 @@ class RunCatalogTests(unittest.TestCase):
         self.assertEqual([node["node_id"] for node in graph["nodes"]], ["root", "join"])
         self.assertEqual(graph["nodes"][1]["depends_on"], ["root"])
 
+    def test_catalog_accepts_closed_plan_graph_lineage_and_rejects_malformed_descriptors(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            plan = root / "plan.md"
+            plan.write_text("approved plan\n", encoding="utf-8")
+            lineage = PlanGraphAudit(
+                run_root=root, graph_run_id="lineage-graph", plan=str(plan),
+                base_commit="a" * 40, objective="lineage graph",
+                nodes={}, functionality_tests=(),
+            )
+            descriptor_path = lineage.journal.run_dir / "descriptor.json"
+            descriptor = json.loads(descriptor_path.read_text(encoding="utf-8"))
+            descriptor.update({
+                "logical_graph_id": "logical-graph",
+                "graph_attempt_id": "lineage-attempt-2",
+                "predecessor_attempt_id": "lineage-attempt-1",
+            })
+            raw = (json.dumps(descriptor, sort_keys=True, separators=(",", ":")) + "\n").encode()
+            descriptor_path.write_bytes(raw)
+            lineage.journal.append(
+                "run_descriptor_bound", status="succeeded",
+                payload={"descriptor_sha256": hashlib.sha256(raw).hexdigest()},
+            )
+            lineage.journal.checkpoint("running", lineage.state)
+            malformed = PlanGraphAudit(
+                run_root=root, graph_run_id="malformed-graph", plan=str(plan),
+                base_commit="a" * 40, objective="malformed lineage graph",
+                nodes={}, functionality_tests=(),
+            )
+            descriptor_path = malformed.journal.run_dir / "descriptor.json"
+            descriptor = json.loads(descriptor_path.read_text(encoding="utf-8"))
+            descriptor["logical_graph_id"] = "not/path-safe"
+            raw = (json.dumps(descriptor, sort_keys=True, separators=(",", ":")) + "\n").encode()
+            descriptor_path.write_bytes(raw)
+            malformed.journal.append(
+                "run_descriptor_bound", status="succeeded",
+                payload={"descriptor_sha256": hashlib.sha256(raw).hexdigest()},
+            )
+            malformed.journal.checkpoint("running", malformed.state)
+            unknown = PlanGraphAudit(
+                run_root=root, graph_run_id="unknown-field-graph", plan=str(plan),
+                base_commit="a" * 40, objective="unknown descriptor field",
+                nodes={}, functionality_tests=(),
+            )
+            descriptor_path = unknown.journal.run_dir / "descriptor.json"
+            descriptor = json.loads(descriptor_path.read_text(encoding="utf-8"))
+            descriptor["unexpected"] = "not schema-authorized"
+            raw = (json.dumps(descriptor, sort_keys=True, separators=(",", ":")) + "\n").encode()
+            descriptor_path.write_bytes(raw)
+            unknown.journal.append(
+                "run_descriptor_bound", status="succeeded",
+                payload={"descriptor_sha256": hashlib.sha256(raw).hexdigest()},
+            )
+            unknown.journal.checkpoint("running", unknown.state)
+            snapshot = build_run_catalog(root)
+
+        self.assertEqual([graph["run_id"] for graph in snapshot["plan_graphs"]], ["lineage-graph"])
+        graph = snapshot["plan_graphs"][0]
+        self.assertEqual(graph["logical_graph_id"], "logical-graph")
+        self.assertEqual(graph["graph_attempt_id"], "lineage-attempt-2")
+        self.assertEqual(graph["predecessor_attempt_id"], "lineage-attempt-1")
+        self.assertEqual(graph["retention_constraints"], {
+            "state": "unavailable",
+            "reason": "retention constraints were not recorded in the audited descriptor or checkpoint",
+        })
+        diagnostics = {item["run_id"]: item for item in snapshot["diagnostics"]}
+        self.assertEqual(diagnostics["malformed-graph"]["code"], "corrupt_run")
+        self.assertIn("lineage", diagnostics["malformed-graph"]["message"])
+        self.assertEqual(diagnostics["unknown-field-graph"]["code"], "corrupt_run")
+        self.assertIn("does not bind", diagnostics["unknown-field-graph"]["message"])
+
     def test_plan_graph_projection_exposes_recorded_attempts_without_fabricating_parallel_state(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

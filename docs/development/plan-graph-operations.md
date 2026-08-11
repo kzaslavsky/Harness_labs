@@ -33,3 +33,27 @@ Graph-controller liveness is not child liveness. A running node is shown as
 `liveness_unavailable` until a matching FeatureRun is discovered through full
 descriptor correlation; then it shows that child FeatureRun's liveness. This
 ephemeral liveness signal never establishes a sealed candidate or integration.
+
+## PG-06 implementation record
+
+The catalog descriptor binder accepts the closed PlanGraph lineage extension
+(`logical_graph_id`, `graph_attempt_id`, and `predecessor_attempt_id`) as one
+complete field set, while retaining legacy descriptor compatibility. It rejects
+unknown, partial, feature-run, and malformed lineage field sets before catalog
+or dashboard projection. The bounded change is in
+`harness_labs/run_catalog.py`; deterministic discovery coverage is in
+`tests/test_run_catalog.py` and `tests/test_dashboard_api.py`.
+
+The catalog projects graph-attempt lineage at the graph level and groups the
+dashboard by `logical_graph_id`, so separate graphs sharing an approved-plan
+digest are not conflated. It also projects `retention_constraints` as an
+explicit unavailable state until a descriptor or checkpoint records a durable
+retention policy; evidence references are never assumed retained.
+
+Verified with:
+
+```sh
+python3 -m unittest tests.test_run_catalog_contracts tests.test_run_catalog tests.test_dashboard_api
+```
+
+Result: 33 tests passed.

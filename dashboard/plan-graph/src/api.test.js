@@ -8,6 +8,7 @@ const feature = { run_id: 'run-1', kind: 'feature_run', status: 'running', liven
 const metrics = { protocol: 'harness-run-detail-metrics/1', totals: {}, quality: {}, provenance: {}, by_phase: [], by_agent: [], by_agent_type: [], by_model: [], by_effort: [], by_backend: [] };
 const graph = (runId, createdAt, status = 'running', nodes = []) => ({
   run_id: runId, created_at: createdAt, plan_path: 'docs/plan.md', plan_digest: 'a'.repeat(64), plan_graph_digest: 'b'.repeat(64),
+  logical_graph_id: 'logical-graph-1', graph_attempt_id: runId, predecessor_attempt_id: null, retention_constraints: { state: 'unavailable', reason: 'not recorded' },
   status, liveness: liveness(status === 'running' ? 'live' : 'terminal'), evidence: availability, nodes,
 });
 const node = (nodeId, dependsOn = [], runId = null) => ({ node_id: nodeId, status: 'queued', feature_run_id: runId, depends_on: dependsOn, liveness: liveness('not_applicable'), evidence: availability });
@@ -35,7 +36,7 @@ test('runtime validation accepts recorded execution state and rejects incomplete
   assert.throws(() => validateCatalog(catalog));
 });
 
-test('attempts are grouped by approved-plan digest and newest live attempt is selected', () => {
+test('attempts are grouped by logical graph identity and newest live attempt is selected', () => {
   const older = graph('attempt-old', '2026-08-09T00:00:00Z', 'failed', [node('root')]);
   const live = graph('attempt-live', '2026-08-09T00:02:00Z', 'running', [node('root')]);
   const newestTerminal = { ...graph('attempt-terminal', '2026-08-09T00:03:00Z', 'failed', [node('root')]), plan_graph_digest: 'c'.repeat(64) };
@@ -43,6 +44,12 @@ test('attempts are grouped by approved-plan digest and newest live attempt is se
   assert.equal(groups.length, 1);
   assert.deepEqual(groups[0].attempts.map((item) => item.run_id), ['attempt-terminal', 'attempt-live', 'attempt-old']);
   assert.equal(defaultGraphAttempt(groups[0]).run_id, 'attempt-live');
+});
+
+test('graphs with the same plan digest remain distinct when their logical graph IDs differ', () => {
+  const first = graph('attempt-1', '2026-08-09T00:00:00Z');
+  const second = { ...graph('attempt-2', '2026-08-09T00:01:00Z'), logical_graph_id: 'logical-graph-2' };
+  assert.equal(planGraphGroups({ plan_graphs: [first, second] }).length, 2);
 });
 
 test('dependency projection creates layered nodes and audited edges', () => {

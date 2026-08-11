@@ -18,6 +18,7 @@ from .run_metrics import TERMINAL_STATUSES, availability, project_run_metrics
 Clock = Callable[[], datetime]
 ProcessProbe = Callable[[int], str | None]
 _DESCRIPTOR_FIELDS = frozenset({"protocol", "run_kind", "run_id", "created_at", "objective", "evidence_classification", "repository", "approved_plan", "parent_correlation"})
+_PLAN_GRAPH_LINEAGE_FIELDS = frozenset({"logical_graph_id", "graph_attempt_id", "predecessor_attempt_id"})
 _LEASE_FIELDS = frozenset({"protocol", "run_id", "controller_instance_id", "hostname", "pid", "process_start_token", "heartbeat_sequence", "heartbeat_at", "controller_kind"})
 _ESTIMATED_MODEL_PRICES = {
     "gpt-5.6-sol": {"input": Decimal("5.00"), "cached_input": Decimal("0.50"), "output": Decimal("30.00"), "source": "https://developers.openai.com/api/docs/models/gpt-5.6-sol"},
@@ -230,6 +231,19 @@ def _project_run(directory: Path, root: Path, now: datetime, probe: ProcessProbe
             "plan_path": approved_plan.get("path"),
             "plan_digest": plan_digest,
             "plan_graph_digest": graph_digest,
+            # Older audited descriptors predate the lineage extension.  Their
+            # run ID is the only durable graph and attempt identity, so retain
+            # that compatibility without inferring a predecessor.
+            "logical_graph_id": descriptor.get("logical_graph_id", metrics["run_id"]),
+            "graph_attempt_id": descriptor.get("graph_attempt_id", metrics["run_id"]),
+            "predecessor_attempt_id": descriptor.get("predecessor_attempt_id"),
+            # PG-06 does not yet receive a retention policy from an audited
+            # descriptor or checkpoint.  Make that boundary observable rather
+            # than treating references as retained by implication.
+            "retention_constraints": availability(
+                "unavailable",
+                "retention constraints were not recorded in the audited descriptor or checkpoint",
+            ),
         })
         record["nodes"] = _nodes(metrics)
         record["execution"] = _graph_execution(metrics)
@@ -696,7 +710,17 @@ def _liveness(directory: Path, run_id: str, kind: str | None, status: str, now: 
     return {"state": "live", "reason": None}
 
 def _validate_descriptor(value: Mapping[str, Any], run_id: str) -> None:
-    if set(value) != _DESCRIPTOR_FIELDS or value.get("protocol") != "harness-run-descriptor/1" or value.get("run_id") != run_id or value.get("run_kind") not in {"feature_run", "plan_graph"}: raise AuditError("descriptor does not bind this run")
+    fields = set(value)
+    kind = value.get("run_kind")
+    allowed_fields = _DESCRIPTOR_FIELDS | _PLAN_GRAPH_LINEAGE_FIELDS
+    if (
+        fields not in {_DESCRIPTOR_FIELDS, allowed_fields}
+        or kind not in {"feature_run", "plan_graph"}
+        or (fields == allowed_fields and kind != "plan_graph")
+        or value.get("protocol") != "harness-run-descriptor/1"
+        or value.get("run_id") != run_id
+    ):
+        raise AuditError("descriptor does not bind this run")
     repository = value.get("repository")
     if not isinstance(repository, Mapping) or set(repository) != {"path", "base_branch", "base_commit"} or not all(isinstance(repository.get(key), str) and repository[key] for key in repository) or len(repository["base_commit"]) != 40 or any(character not in "0123456789abcdef" for character in repository["base_commit"]): raise AuditError("descriptor repository is invalid")
     if not all(isinstance(value.get(key), str) and value[key] for key in ("created_at", "objective", "evidence_classification")) or value["evidence_classification"] not in {"production_lifecycle", "component", "synthetic", "fabricated_fixture"}: raise AuditError("descriptor fields are invalid")
@@ -712,8 +736,13 @@ def _validate_descriptor(value: Mapping[str, Any], run_id: str) -> None:
     correlation = value.get("parent_correlation")
     if correlation is not None and (not isinstance(correlation, Mapping) or set(correlation) != {"plan_graph_id", "plan_node_id", "parent_run_id"} or not all(isinstance(correlation.get(key), str) and correlation[key] for key in correlation)):
         raise AuditError("descriptor correlation is invalid")
-    if value["run_kind"] == "plan_graph" and (plan is None or correlation is not None):
+    if kind == "plan_graph" and (plan is None or correlation is not None):
         raise AuditError("plan graph descriptor is invalid")
+    if fields == allowed_fields and (
+        not all(isinstance(value.get(key), str) and value[key] and "/" not in value[key] for key in ("logical_graph_id", "graph_attempt_id"))
+        or value["predecessor_attempt_id"] is not None and (not isinstance(value["predecessor_attempt_id"], str) or not value["predecessor_attempt_id"] or "/" in value["predecessor_attempt_id"])
+    ):
+        raise AuditError("plan graph descriptor lineage is invalid")
 
 def _descriptor(path: Path) -> tuple[dict[str, Any] | None, bytes | None]:
     if path.is_symlink(): raise AuditError("descriptor.json must not be a symlink")

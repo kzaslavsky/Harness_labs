@@ -44,7 +44,8 @@ function GraphExecutionSummary({ graph }) {
     parent_candidate_commit: attempt.parent_candidate_commit || 'Unavailable',
   }));
   return <section className="execution-summary"><h3>Execution state</h3>
-    <Definition values={{ 'Logical base': execution.logical_graph.base_commit, 'Active slots': execution.concurrency.active_count, 'Active nodes': execution.concurrency.active_nodes, 'Staging head': execution.integration.staging_head }} />
+    <Definition values={{ 'Logical graph': graph.logical_graph_id, 'Graph attempt': graph.graph_attempt_id, 'Predecessor attempt': graph.predecessor_attempt_id, 'Logical base': execution.logical_graph.base_commit, 'Active slots': execution.concurrency.active_count, 'Active nodes': execution.concurrency.active_nodes, 'Staging head': execution.integration.staging_head }} />
+    <Availability label="Retention constraints:" value={graph.retention_constraints || { state: 'unavailable', reason: 'retention constraints were not recorded in this legacy catalog snapshot' }} />
     <Availability label="Parallelism limit:" value={execution.concurrency.max_parallelism} />
     <Availability label="Integration lease:" value={execution.integration.lease} />
     <ReadableList values={execution.integration.lease_record ? [execution.integration.lease_record] : []} empty="No active integration lease was recorded." />

@@ -75,6 +75,10 @@ function validGraphExecution(value) {
 function validGraph(value) {
   return isObject(value) && isText(value.run_id) && runStatuses.has(value.status)
     && isText(value.created_at) && isText(value.plan_path) && isText(value.plan_digest) && isText(value.plan_graph_digest)
+    && (value.logical_graph_id === undefined || isText(value.logical_graph_id))
+    && (value.graph_attempt_id === undefined || isText(value.graph_attempt_id))
+    && (value.predecessor_attempt_id === undefined || nullableText(value.predecessor_attempt_id))
+    && (value.retention_constraints === undefined || validAvailability(value.retention_constraints))
     && validLiveness(value.liveness) && validAvailability(value.evidence)
     && Array.isArray(value.nodes) && value.nodes.every(validNode)
     && (value.execution === undefined || validGraphExecution(value.execution));
@@ -124,7 +128,7 @@ export function stateLabel(record) {
 export function planGraphGroups(catalog) {
   const groups = new Map();
   for (const graph of catalog.plan_graphs) {
-    const key = graph.plan_digest;
+    const key = graph.logical_graph_id || graph.plan_digest;
     const group = groups.get(key) || { key, planPath: graph.plan_path, planDigest: graph.plan_digest, attempts: [] };
     group.attempts.push(graph);
     groups.set(key, group);
