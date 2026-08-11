@@ -36,6 +36,218 @@ class PlanRun:
 
 
 @dataclass(frozen=True)
+class ReadySetDispatch:
+    """One stable controller-owned unit selected from the ready frontier.
+
+    Barrier verification is deliberately a dispatch unit, rather than a
+    callback on a child completion: it therefore consumes the same bounded
+    capacity as a FeatureRun and has a durable scheduling boundary.
+    """
+
+    node_id: str
+    kind: str
+
+
+class ReadySetScheduler:
+    """Deterministically select runnable nodes under one shared slot budget.
+
+    This component only performs admission.  It never adopts child stdout or
+    moves a staging ref; those actions remain controller-owned custody work.
+    """
+
+    _FEATURE_RUN = "feature_run"
+    _BARRIER_VERIFICATION = "barrier_verification"
+
+    def __init__(
+        self,
+        runs: Sequence[PlanRun],
+        *,
+        max_parallelism: int,
+        barrier_node_ids: Sequence[str] = (),
+    ) -> None:
+        if (
+            isinstance(max_parallelism, bool)
+            or not isinstance(max_parallelism, int)
+            or max_parallelism < 1
+        ):
+            raise PlanGraphError("max_parallelism must be a positive integer")
+        self.runs = tuple(runs)
+        self.max_parallelism = max_parallelism
+        self._by_id = {run.id: run for run in self.runs}
+        if len(self._by_id) != len(self.runs) or any(
+            not run.id for run in self.runs
+        ):
+            raise PlanGraphError("ready-set scheduler requires unique non-empty run ids")
+        unknown = {
+            dependency
+            for run in self.runs
+            for dependency in run.depends_on
+            if dependency not in self._by_id
+        }
+        if unknown:
+            raise PlanGraphError(
+                "ready-set scheduler has unknown dependencies: "
+                + ", ".join(sorted(unknown))
+            )
+        if any(
+            not isinstance(node_id, str) or not node_id
+            for node_id in barrier_node_ids
+        ):
+            raise PlanGraphError(
+                "ready-set scheduler barrier nodes must be non-empty strings"
+            )
+        self._barrier_node_ids = frozenset(barrier_node_ids)
+        unknown_barriers = self._barrier_node_ids - set(self._by_id)
+        if unknown_barriers:
+            raise PlanGraphError(
+                "ready-set scheduler has unknown barrier nodes: "
+                + ", ".join(sorted(unknown_barriers))
+            )
+
+    def select(
+        self,
+        sealed: Mapping[str, str] | Sequence[str],
+        *,
+        active: Sequence[ReadySetDispatch] = (),
+        verified_barriers: Sequence[str] = (),
+    ) -> tuple[ReadySetDispatch, ...]:
+        """Return a stable admission set after validating checkpoint identity."""
+
+        sealed_ids = set(sealed)
+        verified = set(verified_barriers)
+        if any(not isinstance(node_id, str) for node_id in sealed_ids):
+            raise PlanGraphError("sealed nodes must be strings")
+        if any(not isinstance(node_id, str) for node_id in verified):
+            raise PlanGraphError("verified barriers must be strings")
+        unknown_sealed = sealed_ids - set(self._by_id)
+        if unknown_sealed:
+            raise PlanGraphError(
+                "sealed nodes contain unknown ids: "
+                + ", ".join(sorted(unknown_sealed))
+            )
+        incomplete_sealed = {
+            node_id
+            for node_id in sealed_ids
+            if any(
+                dependency not in sealed_ids
+                for dependency in self._by_id[node_id].depends_on
+            )
+        }
+        if incomplete_sealed:
+            raise PlanGraphError(
+                "sealed nodes have unsealed dependencies: "
+                + ", ".join(sorted(incomplete_sealed))
+            )
+        unknown_verified = verified - set(self._by_id)
+        if unknown_verified:
+            raise PlanGraphError(
+                "verified barriers contain unknown nodes: "
+                + ", ".join(sorted(unknown_verified))
+            )
+        invalid_verified = {
+            node_id
+            for node_id in verified
+            if node_id not in sealed_ids or node_id not in self._barrier_node_ids
+        }
+        if invalid_verified:
+            raise PlanGraphError(
+                "verified barriers are not sealed barrier nodes: "
+                + ", ".join(sorted(invalid_verified))
+            )
+
+        active_nodes: set[str] = set()
+        for unit in active:
+            if not isinstance(unit, ReadySetDispatch):
+                raise PlanGraphError("active ready-set unit has an invalid type")
+            if unit.node_id not in self._by_id:
+                raise PlanGraphError(
+                    f"active ready-set unit has unknown node {unit.node_id!r}"
+                )
+            if unit.kind not in {self._FEATURE_RUN, self._BARRIER_VERIFICATION}:
+                raise PlanGraphError(
+                    f"active ready-set unit has invalid kind {unit.kind!r}"
+                )
+            if unit.node_id in active_nodes:
+                raise PlanGraphError(
+                    f"active ready-set units repeat node {unit.node_id!r}"
+                )
+            active_nodes.add(unit.node_id)
+            run = self._by_id[unit.node_id]
+            if unit.kind == self._FEATURE_RUN:
+                if unit.node_id in sealed_ids:
+                    raise PlanGraphError(
+                        f"active feature run is already sealed: {unit.node_id!r}"
+                    )
+                if not all(dependency in sealed_ids for dependency in run.depends_on):
+                    raise PlanGraphError(
+                        f"active feature run has unsealed dependencies: {unit.node_id!r}"
+                    )
+                if any(
+                    dependency in self._barrier_node_ids and dependency not in verified
+                    for dependency in run.depends_on
+                ):
+                    raise PlanGraphError(
+                        f"active feature run has unverified barriers: {unit.node_id!r}"
+                    )
+            else:
+                if unit.node_id not in self._barrier_node_ids:
+                    raise PlanGraphError(
+                        "active barrier verification is not configured: "
+                        f"{unit.node_id!r}"
+                    )
+                if unit.node_id not in sealed_ids:
+                    raise PlanGraphError(
+                        f"active barrier verification is not sealed: {unit.node_id!r}"
+                    )
+                if unit.node_id in verified:
+                    raise PlanGraphError(
+                        "active barrier verification is already verified: "
+                        f"{unit.node_id!r}"
+                    )
+                if not any(
+                    candidate.id not in sealed_ids
+                    and unit.node_id in candidate.depends_on
+                    and all(dependency in sealed_ids for dependency in candidate.depends_on)
+                    for candidate in self.runs
+                ):
+                    raise PlanGraphError(
+                        f"active barrier verification is not dependency-ready: {unit.node_id!r}"
+                    )
+        if len(active) > self.max_parallelism:
+            raise PlanGraphError("active ready-set units exceed max_parallelism")
+
+        selected: list[ReadySetDispatch] = []
+        available = self.max_parallelism - len(active)
+        for run in self.runs:
+            if not available:
+                break
+            if run.id in sealed_ids or run.id in active_nodes:
+                continue
+            if not all(dependency in sealed_ids for dependency in run.depends_on):
+                continue
+            pending_barriers = [
+                dependency
+                for dependency in run.depends_on
+                if dependency in self._barrier_node_ids and dependency not in verified
+            ]
+            if pending_barriers:
+                for dependency in pending_barriers:
+                    if dependency not in active_nodes and not any(
+                        unit.node_id == dependency for unit in selected
+                    ):
+                        selected.append(
+                            ReadySetDispatch(dependency, self._BARRIER_VERIFICATION)
+                        )
+                        available -= 1
+                        if not available:
+                            break
+                continue
+            selected.append(ReadySetDispatch(run.id, self._FEATURE_RUN))
+            available -= 1
+        return tuple(selected)
+
+
+@dataclass(frozen=True)
 class PlanGraphPlan:
     """The approved plan references and its proposed sequential decomposition."""
 
@@ -597,6 +809,8 @@ __all__ = [
     "PlanGraphPlan",
     "PlanGraphResult",
     "PlanRun",
+    "ReadySetDispatch",
+    "ReadySetScheduler",
     "SubprocessFeatureRunLauncher",
     "plan_from_mapping",
 ]

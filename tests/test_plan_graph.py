@@ -17,6 +17,8 @@ from harness_labs.plan_graph import (
     PlanGraphError,
     PlanGraphPlan,
     PlanRun,
+    ReadySetDispatch,
+    ReadySetScheduler,
     SubprocessFeatureRunLauncher,
     plan_from_mapping,
 )
@@ -182,6 +184,48 @@ class PlanGraphTests(unittest.TestCase):
             ("python3", "scripts/ui_walk.py"),
         )
         self.assertEqual(final_tests, [("python3 scripts/ui_walk.py", "candidate")])
+
+    def test_ready_set_is_stable_bounded_and_shares_slots_with_barriers(self) -> None:
+        scheduler = ReadySetScheduler(
+            (
+                PlanRun("join", "Build A", ("1",), ("AC-1",)),
+                PlanRun("after", "Build B", ("2",), ("AC-2",), ("join",)),
+                PlanRun("root", "Build B", ("2",), ("AC-2",)),
+            ),
+            max_parallelism=2,
+            barrier_node_ids=("join",),
+        )
+
+        self.assertEqual(
+            scheduler.select({"join": "join-commit"}),
+            (
+                ReadySetDispatch("join", "barrier_verification"),
+                ReadySetDispatch("root", "feature_run"),
+            ),
+        )
+        self.assertEqual(
+            scheduler.select({"join": "join-commit"}, verified_barriers=("join",)),
+            (
+                ReadySetDispatch("after", "feature_run"),
+                ReadySetDispatch("root", "feature_run"),
+            ),
+        )
+
+    def test_ready_set_fails_closed_on_invalid_checkpoint_state(self) -> None:
+        scheduler = ReadySetScheduler(
+            (
+                PlanRun("A", "Build A", ("1",), ("AC-1",)),
+                PlanRun("B", "Build B", ("2",), ("AC-2",), ("A",)),
+                PlanRun("C", "Build C", ("2",), ("AC-2",), ("B",)),
+            ),
+            max_parallelism=1,
+        )
+        with self.assertRaisesRegex(PlanGraphError, "unknown node"):
+            scheduler.select({}, active=(ReadySetDispatch("missing", "feature_run"),))
+        with self.assertRaisesRegex(PlanGraphError, "not sealed barrier"):
+            scheduler.select({}, verified_barriers=("A",))
+        with self.assertRaisesRegex(PlanGraphError, "sealed nodes have unsealed dependencies: B"):
+            scheduler.select({"B": "B-commit"})
 
     def test_sequential_candidate_includes_multiple_roots_and_dependencies(self) -> None:
         calls = []
