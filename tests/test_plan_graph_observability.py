@@ -9,11 +9,12 @@ import sys
 import tempfile
 import unittest
 
-from harness_labs.audit import AuditActor, AuditJournal
+from harness_labs.audit import AuditActor, AuditConflictError, AuditError, AuditJournal
 from harness_labs.plan_graph import (
     FeatureRunOutcome,
     PlanGraph,
     PlanGraphError,
+    RepairResumeDirective,
     register_plan_graph,
 )
 
@@ -25,6 +26,10 @@ def git(repository: Path, *arguments: str) -> str:
     if completed.returncode:
         raise AssertionError(completed.stderr)
     return completed.stdout.strip()
+
+
+def _success(request, commit: str) -> FeatureRunOutcome:
+    return success(request, commit)
 
 
 def success(request, commit: str) -> FeatureRunOutcome:
@@ -69,6 +74,482 @@ class PlanGraphObservabilityTests(unittest.TestCase):
             decomposition=self.decomposition,
         )
         self.run_root = self.root / "logs" / "runs"
+
+    def register_variant(self, logical_graph_id: str, **overrides):
+        decomposition = {**{key: value for key, value in self.decomposition.items()}, **overrides}
+        return register_plan_graph(
+            repository=self.repository,
+            logical_graph_id=logical_graph_id,
+            decomposition=decomposition,
+        )
+
+    def test_repair_successor_preserves_predecessor_and_reuses_only_outside_frontier(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            predecessor = PlanGraph(
+                self.repository,
+                self.registration,
+                lambda request: _success(request, "c" * 40) if request.run.id == "first"
+                else FeatureRunOutcome("failed", evidence={"error": "repair me"}),
+                run_root=root / "runs", graph_run_id="logical",
+            )
+            self.assertEqual(predecessor.run().status, "failed")
+            before = (root / "runs" / "logical" / "manifest.json").read_bytes()
+            blocker_ref = predecessor._audit_for_run().state["nodes"]["second"]["evidence"]["evidence_ref"]
+            requests = []
+            successor = PlanGraph.resume(
+                self.repository, self.registration,
+                lambda request: requests.append(request) or _success(request, "d" * 40),
+                run_root=root / "runs",
+                directive=RepairResumeDirective("logical", "logical", ("second",), blocker_ref),
+            )
+            self.assertEqual(successor.run().status, "succeeded")
+            self.assertEqual([request.run.id for request in requests], ["second"])
+            self.assertEqual(requests[0].base_commit, "c" * 40)
+            successor_dir = root / "runs" / "logical-attempt-1"
+            self.assertEqual((root / "runs" / "logical" / "manifest.json").read_bytes(), before)
+            state = successor._audit_for_run().state
+            self.assertEqual(state["nodes"]["first"]["reused_from_attempt"], "logical")
+            self.assertEqual(state["nodes"]["second"]["reused_from_attempt"], None)
+            events = (successor_dir / "events.jsonl").read_text(encoding="utf-8")
+            self.assertIn("plan_graph_repair_successor_allocated", events)
+            self.assertIn("plan_graph_node_reused", events)
+            AuditJournal.verify(successor_dir)
+
+    def test_repair_rejects_plan_contract_drift_and_unrecorded_blocker(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            predecessor = PlanGraph(self.repository, self.registration, lambda request: FeatureRunOutcome("failed", evidence={"error": "repair"}), run_root=root / "runs", graph_run_id="logical")
+            self.assertEqual(predecessor.run().status, "failed")
+            blocker = predecessor._audit_for_run().state["nodes"]["first"]["evidence"]["evidence_ref"]
+            with self.assertRaisesRegex(PlanGraphError, "not recorded"):
+                PlanGraph.resume(self.repository, self.registration, lambda request: _success(request, "c" * 40), run_root=root / "runs", directive=RepairResumeDirective("logical", "logical", ("first",), f"artifact:sha256:{'e' * 64}"))
+            changed_runs = [dict(self.decomposition["runs"][0], verification_argv=["changed"]), dict(self.decomposition["runs"][1])]
+            for changed in (
+                self.register_variant("drift-argv", runs=changed_runs),
+                self.register_variant("drift-sections", plan_sections={"1": "First AC-1 altered", "2": "Second AC-2"}),
+                self.register_variant("drift-criteria", acceptance_criteria={"AC-1": "First AC-1", "AC-2": "AC-2"}),
+            ):
+                with self.subTest(changed=changed.logical_graph_id):
+                    with self.assertRaisesRegex(PlanGraphError, "matching failed or blocked"):
+                        PlanGraph.resume(self.repository, changed, lambda request: _success(request, "c" * 40), run_root=root / "runs", directive=RepairResumeDirective("logical", "logical", ("first",), blocker))
+
+    def test_repair_reruns_the_selected_frontier_and_its_descendants(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            registration = self.register_variant(
+                "with-third",
+                runs=[*self.decomposition["runs"], {"id": "third", "objective": "Second", "plan_sections": ["2"], "criteria": ["AC-2"], "depends_on": ["second"]}],
+            )
+            predecessor = PlanGraph(
+                self.repository, registration,
+                lambda request: _success(request, "c" * 40) if request.run.id == "first"
+                else FeatureRunOutcome("failed", evidence={"error": "repair"}),
+                run_root=root / "runs", graph_run_id="logical",
+            )
+            self.assertEqual(predecessor.run().status, "failed")
+            blocker = predecessor._audit_for_run().state["nodes"]["second"]["evidence"]["evidence_ref"]
+            requests = []
+            successor = PlanGraph.resume(
+                self.repository, registration,
+                lambda request: requests.append(request.run.id) or _success(request, "d" * 40),
+                run_root=root / "runs", directive=RepairResumeDirective("logical", "logical", ("second",), blocker),
+            )
+            self.assertEqual(successor.run().status, "succeeded")
+            self.assertEqual(requests, ["second", "third"])
+
+    def _reserved_audit(self, root: Path, graph_id: str):
+        base = self.base
+        graph = PlanGraph(self.repository, self.registration, lambda request: _success(request, "unused"), run_root=root / "runs", graph_run_id=graph_id)
+        audit = graph._audit_for_run()
+        checkpoint = json.loads(audit.journal.checkpoint_path.read_text())
+        audit.reserve_successor_attempt(node_id="first", logical_attempt=1, allocation_id="allocation-first", parent_candidate_commit=base, expected_revision=checkpoint["revision"], expected_staging_head=base)
+        return audit
+
+    def _terminal_child(self, run_dir: Path, run_id: str, *, graph_id: str, attempt: dict[str, object], invalid_request: bool = False) -> dict[str, object]:
+        child = AuditJournal(run_dir, run_id, actor=AuditActor("child", "feature_run"))
+        descriptor = {
+            "protocol": "harness-plan-graph-parallel-child-request/1", "graph_id": graph_id,
+            "node_id": "first", "allocation": {"batch_id": "batch-first", "logical_attempt": 1,
+            "allocation_id": "allocation-first", "checkpoint_revision": attempt["checkpoint_revision"],
+            "expected_staging_head": self.base}, "parent_candidate_commit": self.base,
+            "dependency_candidates": [], "lane": {"branch": "lane-first", "worktree": "/lane-first", "may_advance_staging": False}, "writable_paths": ["harness_labs/plan_graph.py"],
+        }
+        verification = {"exit_code": 0, "command": "test"}
+        candidate = {"operation": "commit", "candidate_commit": "c" * 40}
+        if invalid_request:
+            descriptor["lane"]["may_advance_staging"] = True
+        descriptor_artifact = child.write_artifact("child-descriptor", descriptor)
+        verification_artifact = child.write_artifact("verification", verification)
+        candidate_artifact = child.write_artifact("candidate", candidate)
+        child.finalize("succeeded", result={}, state=child.checkpoint_state())
+        manifest = json.loads((run_dir / "manifest.json").read_text())
+        return {"protocol": "harness-plan-graph-parallel-seal-receipt/1", "status": "sealed", "graph_id": graph_id, "node_id": "first", "logical_attempt": 1, "allocation_id": "allocation-first", "parent_candidate_commit": self.base, "candidate_commit": "c" * 40, "canonical_manifest_ref": f"artifact:sha256:{manifest['manifest_hash']}", "descriptor_ref": f"artifact:sha256:{descriptor_artifact.sha256}", "verification_evidence_ref": f"artifact:sha256:{verification_artifact.sha256}", "candidate_receipt_ref": f"artifact:sha256:{candidate_artifact.sha256}", "terminal_journal_event_ref": f"artifact:sha256:{manifest['head_hash']}"}
+
+    @staticmethod
+    def _liveness(graph_id: str, *, state: str, token: str) -> dict[str, object]:
+        return {"protocol": "harness-plan-graph-parallel-liveness/1", "graph_id": graph_id, "node_id": "first", "logical_attempt": 1, "allocation_id": "allocation-first", "pid": 41, "process_start_token": token, "state": state}
+
+    @staticmethod
+    def _force_evidence(audit) -> str:
+        artifact = audit.journal.write_artifact(
+            "force-reconcile-evidence", {"operator": "recovery controller"}
+        )
+        audit.journal.append(
+            "plan_graph_force_reconcile_evidence_recorded",
+            status="running",
+            payload={},
+            artifacts=(artifact,),
+        )
+        audit.journal.checkpoint("running", audit.state)
+        return f"artifact:sha256:{artifact.sha256}"
+
+    def test_recovery_adopts_dead_child_with_closed_request_and_never_moves_staging(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            audit = self._reserved_audit(Path(temporary), "graph-recovery")
+            node = audit.state["nodes"]["first"]
+            child_dir = Path(node["run_dir"])
+            receipt = self._terminal_child(child_dir, node["feature_run_id"], graph_id="graph-recovery", attempt=audit.state["successor_attempts"][0])
+            (child_dir / "plan-graph-liveness.json").write_text(json.dumps(self._liveness("graph-recovery", state="dead", token="old")))
+            (child_dir / "plan-graph-seal-receipt.json").write_text(json.dumps(receipt))
+            self.assertEqual(audit.reconcile_interrupted_attempts(process_probe=lambda pid: None), {"first": "sealed"})
+            self.assertEqual(audit.state["nodes"]["first"]["candidate_commit"], "c" * 40)
+            self.assertEqual(audit.state["current_candidate_commit"], self.base)
+            self.assertIsNone(audit.state["nodes"]["first"]["integrated_commit"])
+            AuditJournal.verify(audit.run_dir)
+
+    def test_recovery_keeps_matching_live_child_running_and_does_not_adopt_its_seal(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            audit = self._reserved_audit(Path(temporary), "graph-live")
+            node = audit.state["nodes"]["first"]
+            child_dir = Path(node["run_dir"])
+            receipt = self._terminal_child(child_dir, node["feature_run_id"], graph_id="graph-live", attempt=audit.state["successor_attempts"][0])
+            (child_dir / "plan-graph-liveness.json").write_text(json.dumps(self._liveness("graph-live", state="live", token="still-live")))
+            (child_dir / "plan-graph-seal-receipt.json").write_text(json.dumps(receipt))
+            self.assertEqual(audit.reconcile_interrupted_attempts(process_probe=lambda pid: "still-live"), {"first": "running"})
+            self.assertEqual(audit.state["active_node_ids"], ["first"])
+            self.assertIsNone(audit.state["nodes"]["first"]["candidate_commit"])
+
+    def test_recovery_rejects_a_seal_bound_to_an_open_child_request(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            audit = self._reserved_audit(Path(temporary), "graph-open-request")
+            node = audit.state["nodes"]["first"]
+            child_dir = Path(node["run_dir"])
+            receipt = self._terminal_child(child_dir, node["feature_run_id"], graph_id="graph-open-request", attempt=audit.state["successor_attempts"][0], invalid_request=True)
+            (child_dir / "plan-graph-liveness.json").write_text(json.dumps(self._liveness("graph-open-request", state="dead", token="old")))
+            (child_dir / "plan-graph-seal-receipt.json").write_text(json.dumps(receipt))
+            self.assertEqual(audit.reconcile_interrupted_attempts(process_probe=lambda pid: None), {"first": "blocked"})
+
+    def test_force_block_quarantines_late_manifest_and_open_records_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            audit = self._reserved_audit(Path(temporary), "graph-force")
+            node = audit.state["nodes"]["first"]
+            child_dir = Path(node["run_dir"])
+            receipt = self._terminal_child(child_dir, node["feature_run_id"], graph_id="graph-force", attempt=audit.state["successor_attempts"][0])
+            (child_dir / "plan-graph-seal-receipt.json").write_text(json.dumps(receipt))
+            force = {"protocol": "harness-plan-graph-parallel-force-reconcile/1", "graph_id": "graph-force", "node_id": "first", "logical_attempt": 1, "allocation_id": "allocation-first", "disposition": "blocked", "evidence_ref": self._force_evidence(audit)}
+            self.assertEqual(audit.reconcile_interrupted_attempts(process_probe=lambda pid: None, force_records=(force,)), {"first": "blocked"})
+            self.assertIn("plan_graph_late_manifest_quarantined", (audit.run_dir / "events.jsonl").read_text())
+        with tempfile.TemporaryDirectory() as temporary:
+            audit = self._reserved_audit(Path(temporary), "graph-invalid-force")
+            with self.assertRaisesRegex(ValueError, "does not match"):
+                audit.reconcile_interrupted_attempts(process_probe=lambda pid: None, force_records=({"unexpected": True},))
+
+    def test_force_record_rejects_stale_allocation_and_unresolvable_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            audit = self._reserved_audit(Path(temporary), "graph-stale-force")
+            stale = audit.state["successor_attempts"][0]
+            checkpoint = json.loads(audit.journal.checkpoint_path.read_text())
+            audit.invalidate_successor_attempt(
+                allocation_id="allocation-first",
+                reason="replace interrupted allocation",
+                expected_revision=checkpoint["revision"],
+            )
+            checkpoint = json.loads(audit.journal.checkpoint_path.read_text())
+            audit.reserve_successor_attempt(
+                node_id="first",
+                logical_attempt=2,
+                allocation_id="allocation-first-retry",
+                parent_candidate_commit=self.base,
+                expected_revision=checkpoint["revision"],
+                expected_staging_head=self.base,
+            )
+            stale_force = {"protocol": "harness-plan-graph-parallel-force-reconcile/1", "graph_id": "graph-stale-force", "node_id": "first", "logical_attempt": stale["logical_attempt"], "allocation_id": stale["allocation_id"], "disposition": "blocked", "evidence_ref": self._force_evidence(audit)}
+            with self.assertRaisesRegex(ValueError, "does not match"):
+                audit.reconcile_interrupted_attempts(process_probe=lambda pid: None, force_records=(stale_force,))
+
+        with tempfile.TemporaryDirectory() as temporary:
+            audit = self._reserved_audit(Path(temporary), "graph-unresolvable-force")
+            force = {"protocol": "harness-plan-graph-parallel-force-reconcile/1", "graph_id": "graph-unresolvable-force", "node_id": "first", "logical_attempt": 1, "allocation_id": "allocation-first", "disposition": "blocked", "evidence_ref": f"artifact:sha256:{'d' * 64}"}
+            with self.assertRaisesRegex(ValueError, "does not match"):
+                audit.reconcile_interrupted_attempts(process_probe=lambda pid: None, force_records=(force,))
+
+    def test_audit_state_keeps_logical_identity_attempt_lineage_and_retry_records(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            base_commit = self.base
+            audit = PlanGraph(
+                self.repository,
+                self.registration,
+                lambda request: _success(request, "unused"),
+                run_root=root / "runs",
+                graph_run_id="graph-lineage",
+            )._audit_for_run()
+
+            initial = audit.state
+            self.assertEqual(initial["logical_graph"]["logical_graph_id"], "graph-lineage")
+            self.assertEqual(initial["logical_graph"]["plan_digest"], initial["plan_digest"])
+            self.assertEqual(initial["logical_graph"]["base_commit"], base_commit)
+            self.assertEqual(initial["graph_attempt"], {
+                "graph_attempt_id": "graph-lineage",
+                "predecessor_attempt_id": None,
+            })
+            self.assertIsNone(initial["nodes"]["first"]["input_commit"])
+            self.assertIsNone(initial["nodes"]["first"]["integrated_commit"])
+
+            checkpoint = json.loads(audit.journal.checkpoint_path.read_text())
+            audit.reserve_successor_attempt(
+                node_id="first",
+                logical_attempt=1,
+                allocation_id="allocation-first",
+                parent_candidate_commit=base_commit,
+                expected_revision=checkpoint["revision"],
+                expected_staging_head=base_commit,
+            )
+            reserved = audit.state
+            first_lineage = reserved["attempt_lineage"]
+            self.assertEqual(len(first_lineage), 1)
+            self.assertEqual(first_lineage[0]["input_commit"], base_commit)
+            self.assertIsNone(first_lineage[0]["predecessor_attempt_id"])
+            self.assertEqual(reserved["nodes"]["first"]["input_commit"], base_commit)
+
+            checkpoint = json.loads(audit.journal.checkpoint_path.read_text())
+            audit.node_failed("first", "interrupted", {"reason": "controller stopped"})
+            checkpoint = json.loads(audit.journal.checkpoint_path.read_text())
+            invalidated = audit.invalidate_successor_attempt(
+                allocation_id="allocation-first",
+                reason="verified repair required",
+                expected_revision=checkpoint["revision"],
+            )
+            self.assertEqual(invalidated["attempt_id"], first_lineage[0]["attempt_id"])
+            self.assertEqual(audit.state["retry_state"]["invalidations"][0]["allocation_id"], "allocation-first")
+
+            checkpoint = json.loads(audit.journal.checkpoint_path.read_text())
+            audit.reserve_successor_attempt(
+                node_id="first",
+                logical_attempt=2,
+                allocation_id="allocation-first-retry",
+                parent_candidate_commit=base_commit,
+                expected_revision=checkpoint["revision"],
+                expected_staging_head=base_commit,
+            )
+            retried = audit.state
+            self.assertEqual(len(retried["attempt_lineage"]), 2)
+            self.assertEqual(
+                retried["attempt_lineage"][1]["predecessor_attempt_id"],
+                first_lineage[0]["attempt_id"],
+            )
+            self.assertEqual(retried["retry_state"]["reuse"][0]["reused_from_attempt_id"], first_lineage[0]["attempt_id"])
+
+            audit.node_completed("first", "c" * 40)
+            completed = audit.state
+            self.assertEqual(completed["nodes"]["first"]["integrated_commit"], "c" * 40)
+            self.assertEqual(completed["integration_barriers"][0]["input_commit"], base_commit)
+            self.assertNotIn("integration_receipts", completed)
+            AuditJournal.verify(audit.run_dir)
+
+    def test_succeeded_successor_attempt_cannot_be_invalidated(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            base_commit = self.base
+            audit = PlanGraph(
+                self.repository,
+                self.registration,
+                lambda request: _success(request, "unused"),
+                run_root=root / "runs",
+                graph_run_id="graph-succeeded-attempt",
+            )._audit_for_run()
+            checkpoint = json.loads(audit.journal.checkpoint_path.read_text())
+            audit.reserve_successor_attempt(
+                node_id="first",
+                logical_attempt=1,
+                allocation_id="allocation-first",
+                parent_candidate_commit=base_commit,
+                expected_revision=checkpoint["revision"],
+                expected_staging_head=base_commit,
+            )
+            audit.node_completed("first", "c" * 40)
+            checkpoint = json.loads(audit.journal.checkpoint_path.read_text())
+
+            with self.assertRaisesRegex(AuditError, "succeeded attempt"):
+                audit.invalidate_successor_attempt(
+                    allocation_id="allocation-first",
+                    reason="must not retry success",
+                    expected_revision=checkpoint["revision"],
+                )
+
+            self.assertEqual(audit.state["nodes"]["first"]["status"], "succeeded")
+            self.assertEqual(len(audit.state["attempt_lineage"]), 1)
+
+    def test_successor_attempt_batch_is_cas_bound_and_immutable(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            base_commit = self.base
+            graph = PlanGraph(
+                self.repository,
+                self.registration,
+                lambda request: _success(request, "unused"),
+                run_root=root / "runs",
+                graph_run_id="graph-successor-attempt",
+            )
+            audit = graph._audit_for_run()
+            checkpoint = json.loads(audit.journal.checkpoint_path.read_text())
+            receipts = audit.reserve_successor_attempt_batch(
+                allocations=(
+                    {"node_id": "first", "allocation_id": "allocation-first"},
+                    {"node_id": "second", "allocation_id": "allocation-second"},
+                ),
+                logical_attempt=1,
+                parent_candidate_commit=base_commit,
+                expected_revision=checkpoint["revision"],
+                expected_staging_head=base_commit,
+            )
+
+            state = audit.state
+            evidence = state["successor_attempts"]
+            self.assertEqual(len(evidence), 2)
+            self.assertEqual(
+                {item["checkpoint_revision"] for item in evidence}, {checkpoint["revision"]}
+            )
+            self.assertEqual(
+                {item["parent_candidate_commit"] for item in evidence}, {base_commit}
+            )
+            self.assertEqual(
+                {item["logical_attempt"] for item in evidence}, {1}
+            )
+            self.assertEqual(state["nodes"]["first"]["status"], "reserved")
+            self.assertEqual(state["nodes"]["second"]["status"], "reserved")
+            self.assertEqual(state["active_node_ids"], ["first", "second"])
+            self.assertEqual(len({receipt["event_hash"] for receipt in receipts}), 1)
+
+            with self.assertRaisesRegex(AuditConflictError, "revision changed"):
+                audit.reserve_successor_attempt_batch(
+                    allocations=({"node_id": "second", "allocation_id": "allocation-retry"},),
+                    logical_attempt=2,
+                    parent_candidate_commit=base_commit,
+                    expected_revision=checkpoint["revision"],
+                    expected_staging_head=base_commit,
+                )
+            events = [
+                json.loads(line)
+                for line in (audit.run_dir / "events.jsonl").read_text().splitlines()
+            ]
+            reservations = [
+                event for event in events
+                if event["event_type"] == "plan_graph_successor_attempts_reserved"
+            ]
+            self.assertEqual(len(reservations), 1)
+            self.assertEqual(reservations[0]["payload"]["allocations"], evidence)
+            AuditJournal.verify(audit.run_dir)
+
+    def test_successor_attempt_rejects_non_schema_commit_identities(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            audit = PlanGraph(
+                self.repository,
+                self.registration,
+                lambda request: _success(request, "unused"),
+                run_root=root / "runs",
+                graph_run_id="graph-invalid-identity",
+            )._audit_for_run()
+            checkpoint = json.loads(audit.journal.checkpoint_path.read_text())
+            for parent_candidate_commit, expected_staging_head in (
+                ("base", "a" * 40),
+                ("a" * 40, "base"),
+            ):
+                with self.subTest(
+                    parent_candidate_commit=parent_candidate_commit,
+                    expected_staging_head=expected_staging_head,
+                ), self.assertRaisesRegex(ValueError, "full lowercase Git commit"):
+                    audit.reserve_successor_attempt(
+                        node_id="first",
+                        logical_attempt=1,
+                        allocation_id="allocation-first",
+                        parent_candidate_commit=parent_candidate_commit,
+                        expected_revision=checkpoint["revision"],
+                        expected_staging_head=expected_staging_head,
+                    )
+
+    def test_legacy_checkpoint_requires_explicit_migration_record(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            graph = PlanGraph(
+                self.repository,
+                self.registration,
+                lambda request: _success(request, "unused"),
+                run_root=root / "runs",
+                graph_run_id="graph-legacy",
+            )
+            audit = graph._audit_for_run()
+            checkpoint = json.loads(audit.journal.checkpoint_path.read_text())
+            del checkpoint["state"]["audit_state_protocol"]
+            audit.journal.checkpoint_path.write_text(json.dumps(checkpoint), encoding="utf-8")
+            with self.assertRaisesRegex(PlanGraphError, "legacy-incompatible"):
+                PlanGraph(
+                    self.repository,
+                    self.registration,
+                    lambda request: _success(request, "unused"),
+                    run_root=root / "runs",
+                    graph_run_id="graph-legacy",
+                )._audit_for_run()
+
+    def test_prior_audit_protocol_is_explicitly_legacy_incompatible(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            graph = PlanGraph(
+                self.repository,
+                self.registration,
+                lambda request: _success(request, "unused"),
+                run_root=root / "runs",
+                graph_run_id="graph-prior-protocol",
+            )
+            audit = graph._audit_for_run()
+            checkpoint = json.loads(audit.journal.checkpoint_path.read_text())
+            checkpoint["state"]["audit_state_protocol"] = "harness-plan-graph-audit/1"
+            audit.journal.checkpoint_path.write_text(json.dumps(checkpoint), encoding="utf-8")
+
+            with self.assertRaisesRegex(PlanGraphError, "legacy-incompatible"):
+                PlanGraph(
+                    self.repository,
+                    self.registration,
+                    lambda request: _success(request, "unused"),
+                    run_root=root / "runs",
+                    graph_run_id="graph-prior-protocol",
+                )._audit_for_run()
+
+    def test_plan_graph_rejects_non_audited_construction(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with self.assertRaisesRegex(TypeError, "run_root"):
+                PlanGraph(
+                    self.repository,
+                    self.registration,
+                    lambda request: _success(request, "unused"),
+                )
+            with self.assertRaisesRegex(TypeError, "state_path"):
+                PlanGraph(
+                    self.repository,
+                    self.registration,
+                    lambda request: _success(request, "unused"),
+                    state_path=root / "legacy.json",
+                )
+            with self.assertRaisesRegex(PlanGraphError, "audited PlanGraph"):
+                PlanGraph(
+                    self.repository,
+                    self.registration,
+                    lambda request: _success(request, "unused"),
+                    run_root=None,
+                )
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
@@ -178,7 +659,8 @@ class PlanGraphObservabilityTests(unittest.TestCase):
             {
                 "protocol", "run_kind", "run_id", "created_at", "objective",
                 "evidence_classification", "repository", "approved_plan",
-                "parent_correlation",
+                "parent_correlation", "logical_graph_id", "graph_attempt_id",
+                "predecessor_attempt_id",
             },
         )
         self.assertEqual(AuditJournal.verify(self.run_root / "attempt-one")["run_id"], "attempt-one")

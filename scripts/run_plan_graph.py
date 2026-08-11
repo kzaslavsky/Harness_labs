@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from harness_labs.plan_graph import (
     FeatureRunOutcome,
     PlanGraph,
+    RepairResumeDirective,
     SubprocessFeatureRunLauncher,
     load_registration,
     persist_registration,
@@ -57,11 +58,17 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--launcher-cwd", type=Path)
     run.add_argument("--launcher-timeout", type=float)
     run.add_argument("--run-root", type=Path)
+    run.add_argument("--resume", action="store_true")
+    run.add_argument("--logical-graph-id")
+    run.add_argument("--predecessor-attempt-id")
+    run.add_argument("--retry-frontier", action="append", default=[])
+    run.add_argument("--blocker-evidence-ref")
     return parser
 
 
 def main() -> int:
-    arguments = _parser().parse_args()
+    parser = _parser()
+    arguments = parser.parse_args()
     repository = arguments.repository.resolve()
     if arguments.mode == "register":
         payload = json.loads(arguments.decomposition.read_text(encoding="utf-8"))
@@ -119,13 +126,47 @@ def main() -> int:
             return FeatureRunOutcome(**result)
         raise TypeError("launcher must return FeatureRunOutcome or a mapping")
 
-    graph = PlanGraph(
-        repository,
-        registration,
-        launch,
-        run_root=run_root,
-        graph_run_id=arguments.graph_attempt_id,
-    )
+    if arguments.resume:
+        if not all(
+            (
+                arguments.logical_graph_id,
+                arguments.predecessor_attempt_id,
+                arguments.blocker_evidence_ref,
+            )
+        ):
+            parser.error(
+                "--resume requires --logical-graph-id, --predecessor-attempt-id, "
+                "and --blocker-evidence-ref"
+            )
+        graph = PlanGraph.resume(
+            repository,
+            registration,
+            launch,
+            run_root=run_root,
+            directive=RepairResumeDirective(
+                arguments.logical_graph_id,
+                arguments.predecessor_attempt_id,
+                tuple(arguments.retry_frontier),
+                arguments.blocker_evidence_ref,
+            ),
+        )
+    else:
+        if any(
+            (
+                arguments.logical_graph_id,
+                arguments.predecessor_attempt_id,
+                arguments.retry_frontier,
+                arguments.blocker_evidence_ref,
+            )
+        ):
+            parser.error("repair arguments require --resume")
+        graph = PlanGraph(
+            repository,
+            registration,
+            launch,
+            run_root=run_root,
+            graph_run_id=arguments.graph_attempt_id,
+        )
     result = graph.run()
     print(
         json.dumps(

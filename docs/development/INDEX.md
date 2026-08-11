@@ -27,6 +27,8 @@ Status: active
   [`parallel-child-dispatch-plan.md`](parallel-child-dispatch-plan.md)
 - Parallel PlanGraph execution and Retinology replay:
   [`parallel-plangraph-execution-replay-plan.md`](parallel-plangraph-execution-replay-plan.md)
+- Parallel PlanGraph admission and recovery contract:
+  [`../decisions/0006-parallel-plangraph-contract.md`](../decisions/0006-parallel-plangraph-contract.md)
 - Pass-through child context:
   [`pass-through-child-context-plan.md`](pass-through-child-context-plan.md)
 - Hybrid controller and coordinator:

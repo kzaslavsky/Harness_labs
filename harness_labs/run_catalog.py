@@ -18,6 +18,7 @@ from .run_metrics import TERMINAL_STATUSES, availability, project_run_metrics
 Clock = Callable[[], datetime]
 ProcessProbe = Callable[[int], str | None]
 _DESCRIPTOR_FIELDS = frozenset({"protocol", "run_kind", "run_id", "created_at", "objective", "evidence_classification", "repository", "approved_plan", "parent_correlation"})
+_PLAN_GRAPH_LINEAGE_FIELDS = frozenset({"logical_graph_id", "graph_attempt_id", "predecessor_attempt_id"})
 _LEASE_FIELDS = frozenset({"protocol", "run_id", "controller_instance_id", "hostname", "pid", "process_start_token", "heartbeat_sequence", "heartbeat_at", "controller_kind"})
 _ESTIMATED_MODEL_PRICES = {
     "gpt-5.6-sol": {"input": Decimal("5.00"), "cached_input": Decimal("0.50"), "output": Decimal("30.00"), "source": "https://developers.openai.com/api/docs/models/gpt-5.6-sol"},
@@ -157,6 +158,8 @@ def merge_run_catalogs(
                 if child is not None
                 else availability("partial", "child correlation is not verified")
             )
+            if child is not None:
+                node["liveness"] = dict(child["liveness"])
 
     ungrouped = [
         feature for feature in features
@@ -228,8 +231,22 @@ def _project_run(directory: Path, root: Path, now: datetime, probe: ProcessProbe
             "plan_path": approved_plan.get("path"),
             "plan_digest": plan_digest,
             "plan_graph_digest": graph_digest,
+            # Older audited descriptors predate the lineage extension.  Their
+            # run ID is the only durable graph and attempt identity, so retain
+            # that compatibility without inferring a predecessor.
+            "logical_graph_id": descriptor.get("logical_graph_id", metrics["run_id"]),
+            "graph_attempt_id": descriptor.get("graph_attempt_id", metrics["run_id"]),
+            "predecessor_attempt_id": descriptor.get("predecessor_attempt_id"),
+            # PG-06 does not yet receive a retention policy from an audited
+            # descriptor or checkpoint.  Make that boundary observable rather
+            # than treating references as retained by implication.
+            "retention_constraints": availability(
+                "unavailable",
+                "retention constraints were not recorded in the audited descriptor or checkpoint",
+            ),
         })
-        record["nodes"] = _nodes(metrics, liveness)
+        record["nodes"] = _nodes(metrics)
+        record["execution"] = _graph_execution(metrics)
         del record["kind"]
     else:
         record["correlation"] = _correlation(descriptor)
@@ -244,7 +261,14 @@ def _snapshot(root: Path, now: datetime, diagnostics: list[dict[str, str | None]
     for graph in graphs:
         for node in graph["nodes"]:
             child = next((record for record in features if _node_matches_child(graph, node, record)), None)
+            if child is not None:
+                node["liveness"] = dict(child["liveness"])
             if node["feature_run_id"] is not None and child is None:
+                # A recovery disposition is durable graph evidence.  Do not
+                # replace it with the separate, less-specific correlation
+                # warning merely because a child catalog record is absent.
+                if node.get("evidence", {}).get("state") != "available":
+                    continue
                 legacy_matches = [
                     record for record in features
                     if node.get("_candidate_commit") in record.get("_integration_merge_commits", ())
@@ -607,7 +631,7 @@ def _breakdown(records: list[dict[str, Any]], key: str) -> list[dict[str, Any]]:
     return sorted(rows, key=lambda row: (-row["total_tokens"], row["label"]))
 
 
-def _nodes(metrics: Mapping[str, Any], parent_liveness: Mapping[str, Any]) -> list[dict[str, Any]]:
+def _nodes(metrics: Mapping[str, Any]) -> list[dict[str, Any]]:
     state = metrics["checkpoint"].get("state", {})
     nodes = state.get("nodes", {}) if isinstance(state, Mapping) else {}
     if not isinstance(nodes, Mapping): return []
@@ -618,13 +642,179 @@ def _nodes(metrics: Mapping[str, Any], parent_liveness: Mapping[str, Any]) -> li
     for node_id in node_ids:
         data = nodes[node_id]
         if not isinstance(node_id, str) or not isinstance(data, Mapping): continue
-        status = data.get("status", "queued")
+        recorded_status = data.get("status", "queued")
+        status = recorded_status
         if status not in {"queued", "running", "succeeded", "failed", "blocked"}: status = "queued"
         dependencies = data.get("depends_on", ())
         if not isinstance(dependencies, (list, tuple)):
             dependencies = ()
-        result.append({"node_id": node_id, "status": status, "feature_run_id": data.get("feature_run_id") if isinstance(data.get("feature_run_id"), str) else None, "depends_on": [value for value in dependencies if isinstance(value, str)], "liveness": dict(parent_liveness) if status == "running" else {"state": "not_applicable", "reason": None}, "evidence": availability("available"), "_candidate_commit": data.get("candidate_commit") if isinstance(data.get("candidate_commit"), str) else None})
+        liveness = (
+            {"state": "not_applicable", "reason": None}
+            if recorded_status in {"queued", "succeeded", "failed", "blocked"}
+            else {"state": "liveness_unavailable", "reason": "child liveness is unavailable until a correlated FeatureRun is discovered"}
+        )
+        evidence = data.get("evidence")
+        evidence = evidence if isinstance(evidence, Mapping) else {}
+        reason = evidence.get("reason")
+        result.append({"node_id": node_id, "status": status, "feature_run_id": data.get("feature_run_id") if isinstance(data.get("feature_run_id"), str) else None, "depends_on": [value for value in dependencies if isinstance(value, str)], "liveness": liveness, "evidence": availability("partial", reason) if isinstance(reason, str) and reason else availability("available"), "_candidate_commit": data.get("candidate_commit") if isinstance(data.get("candidate_commit"), str) else None})
     return result
+
+
+def _graph_execution(metrics: Mapping[str, Any]) -> dict[str, Any]:
+    """Project checkpoint-recorded parallel state without reconstructing it."""
+    state = metrics["checkpoint"].get("state", {})
+    state = state if isinstance(state, Mapping) else {}
+    nodes = state.get("nodes", {})
+    nodes = nodes if isinstance(nodes, Mapping) else {}
+    active = state.get("active_node_ids", ())
+    active_nodes = [node_id for node_id in active if isinstance(node_id, str) and node_id in nodes] if isinstance(active, (list, tuple)) else []
+    attempts = state.get("successor_attempts", ())
+    attempts = attempts if isinstance(attempts, list) else ()
+    projected_attempts = []
+    for attempt in attempts:
+        if not isinstance(attempt, Mapping):
+            continue
+        node_id = attempt.get("node_id")
+        logical_attempt = attempt.get("logical_attempt")
+        if not isinstance(node_id, str) or type(logical_attempt) is not int:
+            continue
+        node = nodes.get(node_id)
+        node = node if isinstance(node, Mapping) else {}
+        projected_attempts.append({
+            "node_id": node_id,
+            "logical_attempt": logical_attempt,
+            "allocation_id": attempt.get("allocation_id") if isinstance(attempt.get("allocation_id"), str) else None,
+            "checkpoint_revision": attempt.get("checkpoint_revision") if type(attempt.get("checkpoint_revision")) is int else None,
+            "parent_candidate_commit": attempt.get("parent_candidate_commit") if isinstance(attempt.get("parent_candidate_commit"), str) else None,
+            "expected_staging_head": attempt.get("expected_staging_head") if isinstance(attempt.get("expected_staging_head"), str) else None,
+            "status": node.get("status") if isinstance(node.get("status"), str) else "unavailable",
+            "candidate_commit": node.get("candidate_commit") if isinstance(node.get("candidate_commit"), str) else None,
+        })
+    projected_attempts.sort(key=lambda item: (item["logical_attempt"], item["node_id"], item["allocation_id"] or ""))
+    barriers = _integration_barriers(state.get("integration_barriers"))
+    lease_record = _integration_lease(state.get("integration_lease"))
+    lineage = _attempt_lineage(state.get("attempt_lineage"))
+    retry_state = _retry_state(state.get("retry_state"))
+    head = state.get("current_candidate_commit")
+    return {
+        "logical_graph": {
+            "base_commit": state.get("base_commit") if isinstance(state.get("base_commit"), str) else None,
+            "plan_digest": state.get("plan_digest") if isinstance(state.get("plan_digest"), str) else None,
+            "plan_graph_digest": state.get("plan_graph_digest") if isinstance(state.get("plan_graph_digest"), str) else None,
+        },
+        "attempts": projected_attempts,
+        "concurrency": {
+            "active_nodes": active_nodes,
+            "active_count": len(active_nodes),
+            "max_parallelism": availability("unavailable", "parallelism limit was not recorded in this checkpoint"),
+        },
+        "integration": {
+            "staging_head": head if isinstance(head, str) else None,
+            "lease": availability("available") if lease_record else availability("unavailable", "integration lease was not recorded in this checkpoint"),
+            "lease_record": lease_record,
+            "barriers": barriers,
+        },
+        "recovery": {
+            "active_allocations": [item for item in projected_attempts if item["node_id"] in active_nodes],
+            "authority": availability("unavailable", "recovery disposition is not recorded in this checkpoint"),
+            "dispositions": _recovery_dispositions(metrics.get("events", ())),
+            "attempt_lineage": lineage,
+            "retry_state": retry_state,
+        },
+    }
+
+
+def _integration_lease(value: Any) -> dict[str, str] | None:
+    if not isinstance(value, Mapping):
+        return None
+    fields = ("node_id", "lease_id", "expected_staging_head")
+    if not all(isinstance(value.get(field), str) and value[field] for field in fields):
+        return None
+    return {field: value[field] for field in fields}
+
+
+def _integration_barriers(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    fields = ("barrier_id", "node_id", "attempt_id", "allocation_id", "lease_id", "action", "input_commit", "expected_staging_head", "integrated_commit")
+    result = []
+    for item in value:
+        if not isinstance(item, Mapping):
+            continue
+        record = {field: item.get(field) if isinstance(item.get(field), str) else None for field in fields}
+        record["logical_attempt"] = item.get("logical_attempt") if type(item.get("logical_attempt")) is int else None
+        record["checkpoint_revision"] = item.get("checkpoint_revision") if type(item.get("checkpoint_revision")) is int else None
+        refs = _evidence_refs(item)
+        receipt = item.get("receipt")
+        if isinstance(receipt, Mapping):
+            refs.update(_evidence_refs(receipt))
+        record["evidence_refs"] = sorted(refs)
+        result.append(record)
+    return result
+
+
+def _attempt_lineage(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    result = []
+    for item in value:
+        if not isinstance(item, Mapping):
+            continue
+        required = ("attempt_id", "node_id", "allocation_id", "input_commit")
+        if not all(isinstance(item.get(field), str) and item[field] for field in required) or type(item.get("logical_attempt")) is not int:
+            continue
+        result.append({
+            "attempt_id": item["attempt_id"], "node_id": item["node_id"], "logical_attempt": item["logical_attempt"],
+            "allocation_id": item["allocation_id"], "input_commit": item["input_commit"],
+            "predecessor_attempt_id": item.get("predecessor_attempt_id") if isinstance(item.get("predecessor_attempt_id"), str) else None,
+        })
+    return result
+
+
+def _retry_state(value: Any) -> dict[str, list[dict[str, str]]]:
+    result: dict[str, list[dict[str, str]]] = {"invalidations": [], "reuse": []}
+    if not isinstance(value, Mapping):
+        return result
+    for item in value.get("invalidations", ()) if isinstance(value.get("invalidations"), list) else ():
+        if isinstance(item, Mapping) and all(isinstance(item.get(field), str) and item[field] for field in ("attempt_id", "node_id", "allocation_id", "reason", "invalidated_at")):
+            result["invalidations"].append({field: item[field] for field in ("attempt_id", "node_id", "allocation_id", "reason", "invalidated_at")})
+    for item in value.get("reuse", ()) if isinstance(value.get("reuse"), list) else ():
+        if isinstance(item, Mapping) and all(isinstance(item.get(field), str) and item[field] for field in ("node_id", "reused_from_attempt_id", "replacement_attempt_id")):
+            result["reuse"].append({field: item[field] for field in ("node_id", "reused_from_attempt_id", "replacement_attempt_id")})
+    return result
+
+
+def _evidence_refs(value: Mapping[str, Any]) -> set[str]:
+    return {item for key, item in value.items() if key.endswith("_ref") and isinstance(item, str) and item}
+
+
+def _recovery_dispositions(events: Any) -> list[dict[str, Any]]:
+    """Expose only recovery outcomes and refs committed to the graph journal."""
+    if not isinstance(events, list):
+        return []
+    dispositions: list[dict[str, Any]] = []
+    for event in events:
+        if not isinstance(event, Mapping):
+            continue
+        event_type = event.get("event_type")
+        payload = event.get("payload")
+        if event_type not in {"plan_graph_child_recovery_blocked", "plan_graph_child_seal_adopted"} or not isinstance(payload, Mapping):
+            continue
+        node_id = payload.get("plan_node_id")
+        if not isinstance(node_id, str) or not node_id:
+            continue
+        if event_type == "plan_graph_child_recovery_blocked":
+            reason = payload.get("reason")
+            refs = [payload["evidence_ref"]] if isinstance(payload.get("evidence_ref"), str) else []
+            dispositions.append({"node_id": node_id, "disposition": "blocked", "reason": reason if isinstance(reason, str) else "recovery outcome reason was not recorded", "forced": reason == "force_reconcile", "evidence_refs": refs})
+            continue
+        receipt = payload.get("seal_receipt")
+        receipt = receipt if isinstance(receipt, Mapping) else {}
+        refs = [value for key, value in receipt.items() if key.endswith("_ref") and isinstance(value, str)]
+        if isinstance(payload.get("force_evidence_ref"), str):
+            refs.append(payload["force_evidence_ref"])
+        dispositions.append({"node_id": node_id, "disposition": "sealed", "reason": None, "forced": payload.get("forced") is True, "evidence_refs": sorted(set(refs))})
+    return dispositions
 
 
 def _graph_status(metrics: Mapping[str, Any], fallback: str) -> str:
@@ -677,7 +867,17 @@ def _liveness(directory: Path, run_id: str, kind: str | None, status: str, now: 
     return {"state": "live", "reason": None}
 
 def _validate_descriptor(value: Mapping[str, Any], run_id: str) -> None:
-    if set(value) != _DESCRIPTOR_FIELDS or value.get("protocol") != "harness-run-descriptor/1" or value.get("run_id") != run_id or value.get("run_kind") not in {"feature_run", "plan_graph"}: raise AuditError("descriptor does not bind this run")
+    fields = set(value)
+    kind = value.get("run_kind")
+    allowed_fields = _DESCRIPTOR_FIELDS | _PLAN_GRAPH_LINEAGE_FIELDS
+    if (
+        fields not in {_DESCRIPTOR_FIELDS, allowed_fields}
+        or kind not in {"feature_run", "plan_graph"}
+        or (fields == allowed_fields and kind != "plan_graph")
+        or value.get("protocol") != "harness-run-descriptor/1"
+        or value.get("run_id") != run_id
+    ):
+        raise AuditError("descriptor does not bind this run")
     repository = value.get("repository")
     if not isinstance(repository, Mapping) or set(repository) != {"path", "base_branch", "base_commit"} or not all(isinstance(repository.get(key), str) and repository[key] for key in repository) or len(repository["base_commit"]) != 40 or any(character not in "0123456789abcdef" for character in repository["base_commit"]): raise AuditError("descriptor repository is invalid")
     if not all(isinstance(value.get(key), str) and value[key] for key in ("created_at", "objective", "evidence_classification")) or value["evidence_classification"] not in {"production_lifecycle", "component", "synthetic", "fabricated_fixture"}: raise AuditError("descriptor fields are invalid")
@@ -693,8 +893,13 @@ def _validate_descriptor(value: Mapping[str, Any], run_id: str) -> None:
     correlation = value.get("parent_correlation")
     if correlation is not None and (not isinstance(correlation, Mapping) or set(correlation) != {"plan_graph_id", "plan_node_id", "parent_run_id"} or not all(isinstance(correlation.get(key), str) and correlation[key] for key in correlation)):
         raise AuditError("descriptor correlation is invalid")
-    if value["run_kind"] == "plan_graph" and (plan is None or correlation is not None):
+    if kind == "plan_graph" and (plan is None or correlation is not None):
         raise AuditError("plan graph descriptor is invalid")
+    if fields == allowed_fields and (
+        not all(isinstance(value.get(key), str) and value[key] and "/" not in value[key] for key in ("logical_graph_id", "graph_attempt_id"))
+        or value["predecessor_attempt_id"] is not None and (not isinstance(value["predecessor_attempt_id"], str) or not value["predecessor_attempt_id"] or "/" in value["predecessor_attempt_id"])
+    ):
+        raise AuditError("plan graph descriptor lineage is invalid")
 
 def _descriptor(path: Path) -> tuple[dict[str, Any] | None, bytes | None]:
     if path.is_symlink(): raise AuditError("descriptor.json must not be a symlink")

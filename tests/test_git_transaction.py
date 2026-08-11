@@ -95,6 +95,27 @@ class GitWorktreeTransactionTests(unittest.TestCase):
                     message="Scoped change",
                 )
 
+    def test_create_can_pin_a_lane_to_an_immutable_parent_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            base = repository(root)
+            parent = git(base, "rev-parse", "HEAD")
+            (base / "later.txt").write_text("later\n", encoding="utf-8")
+            git(base, "add", "later.txt")
+            git(base, "commit", "--no-gpg-sign", "-m", "Advance main")
+
+            transaction = GitWorktreeTransaction.create(
+                base_repository=base,
+                base_branch="main",
+                feature_branch="lane/immutable-parent",
+                worktree_path=root / "lane",
+                base_commit=parent,
+            )
+
+            self.assertEqual(transaction.base_commit, parent)
+            self.assertEqual(git(transaction.worktree_path, "rev-parse", "HEAD"), parent)
+            self.assertFalse((transaction.worktree_path / "later.txt").exists())
+
     def test_merge_rejects_stale_base_and_success_reads_back_merge(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

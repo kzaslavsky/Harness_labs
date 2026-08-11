@@ -1,0 +1,18 @@
+{
+  "protocol": "harness-plan-graph-parallel-checkpoint/1",
+  "graph_id": "retinology-parallel-replay",
+  "revision": 8,
+  "logical_attempt": 8,
+  "staging_head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "ready": ["FR-20"],
+  "reserved": [],
+  "running": [],
+  "sealed": [
+    {"node_id": "FR-10", "candidate_commit": "1111111111111111111111111111111111111111", "seal_receipt_ref": "artifact:sha256:1111111111111111111111111111111111111111111111111111111111111111"},
+    {"node_id": "FR-11", "candidate_commit": "2222222222222222222222222222222222222222", "seal_receipt_ref": "artifact:sha256:2222222222222222222222222222222222222222222222222222222222222222"},
+    {"node_id": "FR-12", "candidate_commit": "3333333333333333333333333333333333333333", "seal_receipt_ref": "artifact:sha256:3333333333333333333333333333333333333333333333333333333333333333"}
+  ],
+  "blocked": [],
+  "allocations": [],
+  "integration_lease": null
+}

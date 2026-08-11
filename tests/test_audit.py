@@ -8,10 +8,56 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from harness_labs.audit import AuditActor, AuditError, AuditJournal
+from harness_labs.audit import AuditActor, AuditConflictError, AuditError, AuditJournal
 
 
 class AuditJournalTests(unittest.TestCase):
+    def test_compare_and_swap_checkpoint_rejects_a_stale_contender_without_event(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            run_dir = Path(temporary) / "cas"
+            first = AuditJournal(
+                run_dir,
+                "cas",
+                actor=AuditActor("controller-1", "controller"),
+                evidence_classification="fabricated_fixture",
+            )
+            stale = AuditJournal.open_existing(
+                run_dir,
+                actor=AuditActor("controller-2", "controller"),
+            )
+            checkpoint = json.loads((run_dir / "checkpoint.json").read_text())
+            first.compare_and_swap_checkpoint(
+                expected_revision=checkpoint["revision"],
+                expected_head_hash=checkpoint["head_hash"],
+                status="running",
+                state={"winner": "controller-1"},
+                event_type="allocation_reserved",
+                event_status="reserved",
+                payload={"allocation_id": "allocation-1"},
+            )
+
+            with self.assertRaisesRegex(AuditConflictError, "revision changed"):
+                stale.compare_and_swap_checkpoint(
+                    expected_revision=checkpoint["revision"],
+                    expected_head_hash=checkpoint["head_hash"],
+                    status="running",
+                    state={"winner": "controller-2"},
+                    event_type="allocation_reserved",
+                    event_status="reserved",
+                    payload={"allocation_id": "allocation-2"},
+                )
+
+            events = [
+                json.loads(line)
+                for line in (run_dir / "events.jsonl").read_text().splitlines()
+            ]
+            self.assertEqual([event["event_type"] for event in events], ["run_started", "allocation_reserved"])
+            self.assertEqual(
+                json.loads((run_dir / "checkpoint.json").read_text())["state"],
+                {"winner": "controller-1"},
+            )
+            AuditJournal.verify(run_dir)
+
     def test_artifact_suffix_follows_declared_media_type(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             journal = AuditJournal(

@@ -1,0 +1,15 @@
+{
+  "protocol": "harness-plan-graph-parallel-decomposition/1",
+  "graph_id": "retinology-parallel-replay",
+  "plan_sha256": "7c92bf45ccfa94dee75ab145fbc004882daaa5c8db7da1bf8062bf7844f8fca3",
+  "base_commit": "47931ebc9e5993a0dd7babd00350a766b1977601",
+  "execution_policy": {"max_parallelism": 3, "failure_policy": "collect_all", "graph_staging_branch": "codex/flow-node-mockup-parity-plangraph-completion", "base_branch": "codex/flow-node-mockup-parity"},
+  "nodes": [
+    {"id": "FR-00", "depends_on": [], "parallel_group": null, "writable_paths": ["tests/oracle"], "role": "lane"},
+    {"id": "FR-10", "depends_on": ["FR-00"], "parallel_group": "residual-closure", "writable_paths": ["tests/p8-local"], "role": "lane"},
+    {"id": "FR-11", "depends_on": ["FR-00"], "parallel_group": "residual-closure", "writable_paths": ["ci/p8"], "role": "lane"},
+    {"id": "FR-12", "depends_on": ["FR-00"], "parallel_group": "residual-closure", "writable_paths": ["tests/run-data"], "role": "lane"},
+    {"id": "FR-20", "depends_on": ["FR-10", "FR-11", "FR-12"], "parallel_group": null, "writable_paths": ["integration"], "role": "join"},
+    {"id": "FR-30", "depends_on": ["FR-20"], "parallel_group": null, "writable_paths": ["docs/closeout"], "role": "close"}
+  ]
+}

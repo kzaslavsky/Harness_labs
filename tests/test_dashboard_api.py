@@ -17,7 +17,13 @@ from harness_labs.dashboard_server import (
     _apply_cumulative_node_metrics,
     load_audit_root_registry,
 )
+from harness_labs.plan_graph_audit import PlanGraphAudit
 from scripts.dashboard_fixture_run import create_fixture
+
+
+def _registration_binding(graph_run_id: str) -> dict[str, str]:
+    return {"logical_graph_id": graph_run_id, "registration_protocol": "plan-graph-registration/1",
+            "registration_digest": "0" * 64, "graph_attempt_id": graph_run_id}
 
 
 class DashboardApiTests(unittest.TestCase):
@@ -81,6 +87,31 @@ class DashboardApiTests(unittest.TestCase):
         self.assertEqual([row["label"] for row in cumulative["by_try"]], ["try-1", "try-2"])
         self.assertEqual([row["feature_run_id"] for row in cumulative["stages"]], ["try-1", "try-2"])
         self.assertEqual(details["try-3"]["metrics"]["totals"]["total_tokens"], 150)
+    def test_plan_graph_endpoint_discovers_lineage_bearing_descriptor(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            plan = root / "plan.md"
+            plan.write_text("approved plan\n", encoding="utf-8")
+            PlanGraphAudit(
+                repository=root, run_root=root, graph_run_id="graph-attempt-2", plan=str(plan),
+                plan_sha256=hashlib.sha256(plan.read_bytes()).hexdigest(),
+                base_commit="a" * 40, registration_binding=_registration_binding("graph-attempt-2"),
+                objective="API lineage discovery", nodes={},
+                functionality_tests=(),
+            )
+            app = DashboardApplication(root, refresh_seconds=60)
+            status, catalog_body, _ = self._request(app, "GET", "/api/catalog")
+            detail_status, detail_body, _ = self._request(app, "GET", "/api/plan-graphs/graph-attempt-2")
+
+        self.assertEqual(status, 200)
+        graph = json.loads(catalog_body)["plan_graphs"][0]
+        self.assertEqual(graph["run_id"], "graph-attempt-2")
+        self.assertEqual(graph["logical_graph_id"], "graph-attempt-2")
+        self.assertEqual(graph["graph_attempt_id"], "graph-attempt-2")
+        self.assertIsNone(graph["predecessor_attempt_id"])
+        self.assertEqual(graph["retention_constraints"]["state"], "unavailable")
+        self.assertEqual(detail_status, 200)
+        self.assertEqual(json.loads(detail_body)["run_id"], "graph-attempt-2")
 
     def test_catalog_etag_is_stable_across_refreshes_without_a_new_revision(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -17,7 +17,9 @@ from harness_labs.controller_kernel import RunContract
 from harness_labs.controller_results import semantic_payload
 from harness_labs.controller_scheduler import RoleProfile
 from harness_labs.feature_run import (
+    DeterministicVerificationResult,
     FeatureRunHandoffArtifact,
+    FeatureRunResult,
     PlanGraphFeatureRunBinding,
     RecoveryDecision,
     ReviewFixPolicy,
@@ -356,6 +358,240 @@ class FeatureRunTests(unittest.TestCase):
                     verification_repair_executor_factory=lambda attempt: None,
                 )
         run_feature.assert_not_called()
+
+    @patch("harness_labs.feature_run.run_feature_worktree")
+    def test_plan_graph_child_seals_a_lane_without_integration(self, run_feature) -> None:
+        criteria = ({"id": "AC-1", "statement": "Works", "source": "plan"},)
+        binding = PlanGraphFeatureRunBinding(
+            "graph-1",
+            "FR-10",
+            "Build a lane",
+            criteria,
+            {"path": "plan.md"},
+            {"claims": ["bound"]},
+            {"allowed_paths": ["feature.txt"]},
+            "a" * 40,
+            "lane/FR-10",
+            Path("lane"),
+            1,
+            "alloc-fr-10",
+            1,
+            "a" * 40,
+            "batch-1",
+            (),
+            ("feature.txt",),
+        )
+        run_plan_graph_feature_worktree(
+            binding=binding,
+            schema=standard_feature_run_dispatch_schema(),
+            contract_factory=lambda worktree, receipt: None,
+            review_fix_policy=ReviewFixPolicy(),
+            base_repository=Path("repository"),
+            base_branch="main",
+            feature_branch="lane/FR-10",
+            worktree_path=Path("lane"),
+            run_dir=Path("run"),
+            allowed_paths=("feature.txt",),
+            commit_message="Build lane",
+            verification_argv=("python3", "-m", "unittest"),
+            verification_repair_executor_factory=lambda attempt: None,
+        )
+
+        options = run_feature.call_args.kwargs
+        self.assertEqual(options["base_commit"], "a" * 40)
+        self.assertTrue(options["candidate_only"])
+        self.assertFalse(options["merge"])
+
+    def test_plan_graph_child_rejects_shared_integration(self) -> None:
+        criteria = ({"id": "AC-1", "statement": "Works", "source": "plan"},)
+        binding = PlanGraphFeatureRunBinding(
+            "graph-1", "FR-10", "Build a lane", criteria, {"path": "plan.md"},
+            {"claims": ["bound"]}, {"allowed_paths": ["feature.txt"]},
+            "a" * 40, "lane/FR-10", Path("lane"), 1, "alloc-fr-10", 1, "a" * 40,
+            "batch-1", (), ("feature.txt",),
+        )
+        with self.assertRaisesRegex(ValueError, "cannot merge shared integration state"):
+            run_plan_graph_feature_worktree(
+                binding=binding,
+                schema=standard_feature_run_dispatch_schema(),
+                contract_factory=lambda worktree, receipt: None,
+                review_fix_policy=ReviewFixPolicy(),
+                base_repository=Path("repository"), base_branch="main",
+                feature_branch="lane/FR-10", worktree_path=Path("lane"),
+                run_dir=Path("run"), allowed_paths=("feature.txt",),
+                commit_message="Build lane", merge=True,
+                verification_argv=("python3", "-m", "unittest"),
+                verification_repair_executor_factory=lambda attempt: None,
+            )
+
+    @patch("harness_labs.feature_run.run_feature_worktree")
+    def test_plan_graph_child_returns_allocation_bound_canonical_seal_receipt(
+        self, run_feature
+    ) -> None:
+        criteria = ({"id": "AC-1", "statement": "Works", "source": "plan"},)
+        binding = PlanGraphFeatureRunBinding(
+            "graph-1", "FR-10", "Build a lane", criteria, {"path": "plan.md"},
+            {"claims": ["bound"]}, {"allowed_paths": ["feature.txt"]},
+            "a" * 40, "lane/FR-10", Path("lane"), 3, "alloc-fr-10", 7, "a" * 40,
+            "batch-3", (), ("feature.txt",),
+        )
+        verification_command = {"argv": ["python3", "-m", "unittest"], "exit_code": 0}
+        verification_bytes = (
+            json.dumps(verification_command, sort_keys=True, separators=(",", ":")) + "\n"
+        ).encode("utf-8")
+        run_feature.return_value = FeatureRunResult(
+            "succeeded", None, None, {},
+            ({
+                "operation": "commit",
+                "base_commit": "a" * 40,
+                "candidate_commit": "b" * 40,
+                "allowed_paths": ["feature.txt"],
+            },),
+            {"manifest_hash": "c" * 64, "head_hash": "d" * 64},
+            Path("run"), Path("lane"),
+            verification=DeterministicVerificationResult(
+                "succeeded", "passed",
+                ((
+                    verification_command
+                    | {"evidence_ref": f"artifact:sha256:{hashlib.sha256(verification_bytes).hexdigest()}"}
+                ),), 0,
+            ),
+        )
+
+        result = run_plan_graph_feature_worktree(
+            binding=binding,
+            schema=standard_feature_run_dispatch_schema(),
+            contract_factory=lambda worktree, receipt: None,
+            review_fix_policy=ReviewFixPolicy(),
+            base_repository=Path("repository"), base_branch="main",
+            feature_branch="lane/FR-10", worktree_path=Path("lane"),
+            run_dir=Path("run"), allowed_paths=("feature.txt",),
+            commit_message="Build lane", verification_argv=("python3", "-m", "unittest"),
+            verification_repair_executor_factory=lambda attempt: None,
+        )
+
+        self.assertEqual(
+            [artifact.kind for artifact in run_feature.call_args.kwargs["initial_evidence"]],
+            ["engineering-plan", "source-binding-report", "build-briefing", "plan-graph-child-request"],
+        )
+        self.assertEqual(result.seal_receipt["protocol"], "harness-plan-graph-parallel-seal-receipt/1")
+        self.assertEqual(result.seal_receipt["allocation_id"], "alloc-fr-10")
+        self.assertEqual(result.seal_receipt["candidate_commit"], "b" * 40)
+        self.assertEqual(result.seal_receipt["canonical_manifest_ref"], f"artifact:sha256:{'c' * 64}")
+        descriptor = run_feature.call_args.kwargs["initial_evidence"][-1].content
+        self.assertEqual(descriptor["protocol"], "harness-plan-graph-parallel-child-request/1")
+        self.assertEqual(descriptor["allocation"]["batch_id"], "batch-3")
+        self.assertEqual(descriptor["lane"]["may_advance_staging"], False)
+        self.assertEqual(descriptor["writable_paths"], ["feature.txt"])
+        descriptor_bytes = (
+            json.dumps(descriptor, sort_keys=True, separators=(",", ":")) + "\n"
+        ).encode("utf-8")
+        self.assertEqual(
+            result.seal_receipt["descriptor_ref"],
+            f"artifact:sha256:{hashlib.sha256(descriptor_bytes).hexdigest()}",
+        )
+
+    @patch("harness_labs.feature_run.run_feature_worktree")
+    def test_plan_graph_child_preserves_the_complete_dependency_order(self, run_feature) -> None:
+        criteria = ({"id": "AC-1", "statement": "Works", "source": "plan"},)
+        dependencies = (
+            {"node_id": "FR-10", "candidate_commit": "1" * 40, "seal_receipt_ref": f"artifact:sha256:{'1' * 64}"},
+            {"node_id": "FR-11", "candidate_commit": "2" * 40, "seal_receipt_ref": f"artifact:sha256:{'2' * 64}"},
+            {"node_id": "FR-12", "candidate_commit": "3" * 40, "seal_receipt_ref": f"artifact:sha256:{'3' * 64}"},
+        )
+        binding = PlanGraphFeatureRunBinding(
+            "graph-1", "FR-20", "Join lanes", criteria, {"path": "plan.md"},
+            {"claims": ["bound"]}, {"allowed_paths": ["integration"]},
+            "a" * 40, "lane/FR-20", Path("lane"), 8, "alloc-fr-20", 8, "a" * 40,
+            "batch-2", dependencies, ("integration",),
+        )
+        descriptor = binding.child_descriptor()
+
+        self.assertEqual(descriptor["dependency_candidates"], list(dependencies))
+        self.assertEqual(descriptor["allocation"], {
+            "batch_id": "batch-2", "logical_attempt": 8,
+            "allocation_id": "alloc-fr-20", "checkpoint_revision": 8,
+            "expected_staging_head": "a" * 40,
+        })
+        self.assertEqual(binding.handoff_artifacts()[-1].content, descriptor)
+
+    def test_plan_graph_child_rejects_writable_path_substitution(self) -> None:
+        criteria = ({"id": "AC-1", "statement": "Works", "source": "plan"},)
+        binding = PlanGraphFeatureRunBinding(
+            "graph-1", "FR-10", "Build a lane", criteria, {"path": "plan.md"},
+            {"claims": ["bound"]}, {"allowed_paths": ["feature.txt"]},
+            "a" * 40, "lane/FR-10", Path("lane"), 1, "alloc-fr-10", 1, "a" * 40,
+            "batch-1", (), ("feature.txt",),
+        )
+        with self.assertRaisesRegex(ValueError, "allowed_paths must match"):
+            run_plan_graph_feature_worktree(
+                binding=binding, schema=standard_feature_run_dispatch_schema(),
+                contract_factory=lambda worktree, receipt: None,
+                review_fix_policy=ReviewFixPolicy(), base_repository=Path("repository"),
+                base_branch="main", feature_branch="lane/FR-10", worktree_path=Path("lane"),
+                run_dir=Path("run"), allowed_paths=("substituted.txt",),
+                commit_message="Build lane", verification_argv=("python3", "-m", "unittest"),
+                verification_repair_executor_factory=lambda attempt: None,
+            )
+
+    def test_plan_graph_child_rejects_schema_invalid_fields(self) -> None:
+        criteria = ({"id": "AC-1", "statement": "Works", "source": "plan"},)
+        child_fields = {
+            "parent_candidate_commit": "a" * 40,
+            "lane_branch": "lane/FR-10",
+            "lane_worktree": Path("lane"),
+            "logical_attempt": 1,
+            "allocation_id": "alloc-fr-10",
+            "checkpoint_revision": 1,
+            "expected_staging_head": "a" * 40,
+            "batch_id": "batch-1",
+            "dependency_candidates": (),
+            "writable_paths": ("feature.txt",),
+        }
+        cases = (
+            ("Unicode graph ID", {"plan_graph_id": "gr\u00e1ph-1"}, "identifiers"),
+            ("Unicode dependency ID", {"dependency_candidates": (
+                {"node_id": "FR-\u00e9", "candidate_commit": "b" * 40,
+                 "seal_receipt_ref": f"artifact:sha256:{'b' * 64}"},
+            )}, "node_id"),
+            ("boolean logical attempt", {"logical_attempt": True}, "logical_attempt"),
+            ("boolean checkpoint revision", {"checkpoint_revision": True},
+             "checkpoint_revision"),
+            ("empty writable paths", {"writable_paths": ()},
+             "writable_paths must not be empty"),
+        )
+        for label, overrides, message in cases:
+            with self.subTest(label=label), self.assertRaisesRegex(ValueError, message):
+                PlanGraphFeatureRunBinding(**({
+                    "plan_graph_id": "graph-1",
+                    "plan_node_id": "FR-10",
+                    "objective": "Build a lane",
+                    "acceptance_criteria": criteria,
+                    "approved_plan": {"path": "plan.md"},
+                    "source_binding_report": {"claims": ["bound"]},
+                    "build_briefing": {"allowed_paths": ["feature.txt"]},
+                } | child_fields | overrides))
+
+    def test_plan_graph_child_rejects_an_unallocated_worktree(self) -> None:
+        criteria = ({"id": "AC-1", "statement": "Works", "source": "plan"},)
+        binding = PlanGraphFeatureRunBinding(
+            "graph-1", "FR-10", "Build a lane", criteria, {"path": "plan.md"},
+            {"claims": ["bound"]}, {"allowed_paths": ["feature.txt"]},
+            "a" * 40, "lane/FR-10", Path("allocated-lane"), 1, "alloc-fr-10", 1, "a" * 40,
+            "batch-1", (), ("feature.txt",),
+        )
+        with self.assertRaisesRegex(ValueError, "worktree_path must match"):
+            run_plan_graph_feature_worktree(
+                binding=binding,
+                schema=standard_feature_run_dispatch_schema(),
+                contract_factory=lambda worktree, receipt: None,
+                review_fix_policy=ReviewFixPolicy(),
+                base_repository=Path("repository"), base_branch="main",
+                feature_branch="lane/FR-10", worktree_path=Path("substituted-lane"),
+                run_dir=Path("run"), allowed_paths=("feature.txt",),
+                commit_message="Build lane", verification_argv=("python3", "-m", "unittest"),
+                verification_repair_executor_factory=lambda attempt: None,
+            )
 
     def test_plan_graph_feature_run_has_no_skill_or_serial_coupling(self) -> None:
         import harness_labs.feature_run as feature_run_module

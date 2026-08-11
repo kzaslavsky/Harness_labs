@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://harness-labs.local/schemas/plan-graph-parallel-seal-receipt.schema.json",
+  "title": "Verified candidate seal receipt for a parallel PlanGraph child",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["protocol", "status", "graph_id", "node_id", "logical_attempt", "allocation_id", "parent_candidate_commit", "candidate_commit", "canonical_manifest_ref", "descriptor_ref", "verification_evidence_ref", "candidate_receipt_ref", "terminal_journal_event_ref"],
+  "properties": {
+    "protocol": {"const": "harness-plan-graph-parallel-seal-receipt/1"},
+    "status": {"const": "sealed"},
+    "graph_id": {"$ref": "#/$defs/id"},
+    "node_id": {"$ref": "#/$defs/id"},
+    "logical_attempt": {"type": "integer", "minimum": 1},
+    "allocation_id": {"$ref": "#/$defs/id"},
+    "parent_candidate_commit": {"$ref": "#/$defs/commit"},
+    "candidate_commit": {"$ref": "#/$defs/commit"},
+    "canonical_manifest_ref": {"$ref": "#/$defs/evidence_ref"},
+    "descriptor_ref": {"$ref": "#/$defs/evidence_ref"},
+    "verification_evidence_ref": {"$ref": "#/$defs/evidence_ref"},
+    "candidate_receipt_ref": {"$ref": "#/$defs/evidence_ref"},
+    "terminal_journal_event_ref": {"$ref": "#/$defs/evidence_ref"},
+    "stdout_artifact_ref": {"$ref": "#/$defs/evidence_ref"}
+  },
+  "$defs": {
+    "id": {"type": "string", "minLength": 1, "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"},
+    "commit": {"type": "string", "pattern": "^[a-f0-9]{40}$"},
+    "evidence_ref": {"type": "string", "minLength": 1, "pattern": "^artifact:sha256:[a-f0-9]{64}$"}
+  }
+}

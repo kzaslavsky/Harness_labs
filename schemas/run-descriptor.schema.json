@@ -5,6 +5,11 @@
   "type": "object",
   "additionalProperties": false,
   "required": ["protocol", "run_kind", "run_id", "created_at", "objective", "evidence_classification", "repository", "approved_plan", "parent_correlation"],
+  "dependentRequired": {
+    "logical_graph_id": ["graph_attempt_id", "predecessor_attempt_id"],
+    "graph_attempt_id": ["logical_graph_id", "predecessor_attempt_id"],
+    "predecessor_attempt_id": ["logical_graph_id", "graph_attempt_id"]
+  },
   "properties": {
     "protocol": {"const": "harness-run-descriptor/1"},
     "run_kind": {"enum": ["plan_graph", "feature_run"]},
@@ -14,11 +19,14 @@
     "evidence_classification": {"enum": ["production_lifecycle", "component", "synthetic", "fabricated_fixture"]},
     "repository": {"$ref": "#/$defs/repository"},
     "approved_plan": {"type": ["null", "object"], "allOf": [{"if": {"type": "object"}, "then": {"$ref": "#/$defs/plan"}}]},
-    "parent_correlation": {"type": ["null", "object"], "allOf": [{"if": {"type": "object"}, "then": {"$ref": "#/$defs/correlation"}}]}
+    "parent_correlation": {"type": ["null", "object"], "allOf": [{"if": {"type": "object"}, "then": {"$ref": "#/$defs/correlation"}}]},
+    "logical_graph_id": {"type": "string", "minLength": 1, "pattern": "^[^/]+$"},
+    "graph_attempt_id": {"type": "string", "minLength": 1, "pattern": "^[^/]+$"},
+    "predecessor_attempt_id": {"type": ["null", "string"], "minLength": 1, "pattern": "^[^/]+$"}
   },
   "allOf": [
     {"if": {"properties": {"run_kind": {"const": "plan_graph"}}}, "then": {"properties": {"approved_plan": {"$ref": "#/$defs/plan"}, "parent_correlation": {"type": "null"}}}},
-    {"if": {"properties": {"run_kind": {"const": "feature_run"}}}, "then": {"properties": {"parent_correlation": {"type": ["null", "object"], "allOf": [{"if": {"type": "object"}, "then": {"$ref": "#/$defs/correlation"}}]}}}}
+    {"if": {"properties": {"run_kind": {"const": "feature_run"}}}, "then": {"properties": {"parent_correlation": {"type": ["null", "object"], "allOf": [{"if": {"type": "object"}, "then": {"$ref": "#/$defs/correlation"}}]}, "logical_graph_id": {"not": {}}, "graph_attempt_id": {"not": {}}, "predecessor_attempt_id": {"not": {}}}}}
   ],
   "$defs": {
     "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},

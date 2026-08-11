@@ -2,15 +2,25 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
+import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
 
+from harness_labs.plan_graph_audit import PlanGraphAudit
+from harness_labs.run_catalog import build_run_catalog
+
 ROOT = Path(__file__).resolve().parent.parent
 SCHEMAS = ROOT / "schemas"
 FIXTURES = ROOT / "tests" / "fixtures" / "run_catalog"
+
+
+def _registration_binding(graph_run_id: str) -> dict[str, str]:
+    return {"logical_graph_id": graph_run_id, "registration_protocol": "plan-graph-registration/1",
+            "registration_digest": "0" * 64, "graph_attempt_id": graph_run_id}
 
 
 class SchemaValidationError(ValueError):
@@ -47,6 +57,9 @@ class ClosedSchemaValidator:
         if "$ref" in schema:
             self._validate(value, self._resolve(str(schema["$ref"])), path)
             return
+        negated = schema.get("not")
+        if isinstance(negated, dict) and self._valid(value, negated):
+            raise SchemaValidationError(f"{path}: matches a prohibited schema")
         for part in schema.get("allOf", []):
             if not isinstance(part, dict):
                 raise SchemaValidationError(f"{path}: invalid allOf schema")
@@ -69,6 +82,19 @@ class ClosedSchemaValidator:
             for name in required:
                 if name not in value:
                     raise SchemaValidationError(f"{path}: missing {name}")
+            dependent_required = schema.get("dependentRequired", {})
+            if isinstance(dependent_required, dict):
+                for name, dependencies in dependent_required.items():
+                    if name in value:
+                        if not isinstance(dependencies, list):
+                            raise SchemaValidationError(
+                                f"{path}: invalid dependentRequired schema"
+                            )
+                        for dependency in dependencies:
+                            if dependency not in value:
+                                raise SchemaValidationError(
+                                    f"{path}: {name} requires {dependency}"
+                                )
             properties = schema.get("properties", {})
             if schema.get("additionalProperties") is False:
                 extras = set(value) - set(properties)
@@ -104,6 +130,7 @@ class ClosedSchemaValidator:
             "array": isinstance(value, list),
             "string": isinstance(value, str),
             "integer": isinstance(value, int) and not isinstance(value, bool),
+            "boolean": isinstance(value, bool),
             "null": value is None,
         }.get(expected, False)
 
@@ -159,12 +186,73 @@ class RunCatalogContractTests(unittest.TestCase):
         with self.assertRaises(SchemaValidationError):
             self._validator("run-descriptor.schema.json").validate(fixture)
 
+    def test_plan_graph_lineage_fields_are_closed_and_run_kind_scoped(self) -> None:
+        validator = self._validator("run-descriptor.schema.json")
+        legacy_plan_graph = json.loads((FIXTURES / "plan-graph.json").read_text())
+        validator.validate(legacy_plan_graph)
+
+        lineage_descriptor = {
+            **legacy_plan_graph,
+            "logical_graph_id": "graph-1",
+            "graph_attempt_id": "graph-1-attempt-2",
+            "predecessor_attempt_id": "graph-1-attempt-1",
+        }
+        validator.validate(lineage_descriptor)
+        lineage_descriptor["predecessor_attempt_id"] = None
+        validator.validate(lineage_descriptor)
+
+        incomplete = dict(lineage_descriptor)
+        del incomplete["graph_attempt_id"]
+        with self.assertRaises(SchemaValidationError):
+            validator.validate(incomplete)
+
+        feature_run = json.loads((FIXTURES / "active-feature-run.json").read_text())
+        feature_run.update({
+            "logical_graph_id": "graph-1",
+            "graph_attempt_id": "graph-1",
+            "predecessor_attempt_id": None,
+        })
+        with self.assertRaises(SchemaValidationError):
+            validator.validate(feature_run)
+
     def test_unavailable_evidence_is_explicit_not_zero(self) -> None:
         snapshot = json.loads((FIXTURES / "stale-catalog-snapshot.json").read_text())
         stale = snapshot["feature_runs"][0]
         self.assertEqual(stale["liveness"]["state"], "stale")
         self.assertEqual(stale["evidence"]["state"], "unavailable")
         self.assertIsNotNone(stale["evidence"]["reason"])
+
+    def test_emitted_plan_graph_execution_projection_validates_against_catalog_schema(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            plan = root / "plan.md"
+            plan.write_text("approved plan\n", encoding="utf-8")
+            audit = PlanGraphAudit(
+                repository=root,
+                run_root=root,
+                graph_run_id="graph-attempt",
+                plan=str(plan),
+                plan_sha256=hashlib.sha256(plan.read_bytes()).hexdigest(),
+                base_commit="a" * 40,
+                registration_binding=_registration_binding("graph-attempt"),
+                objective="schema projection",
+                nodes={"lane": {"status": "queued", "feature_run_id": "child", "depends_on": []}},
+                functionality_tests=(),
+            )
+            checkpoint = json.loads(audit.journal.checkpoint_path.read_text())
+            audit.reserve_successor_attempt(
+                node_id="lane", logical_attempt=1, allocation_id="allocation-lane",
+                parent_candidate_commit="a" * 40, expected_revision=checkpoint["revision"],
+                expected_staging_head="a" * 40,
+            )
+            snapshot = build_run_catalog(root)
+
+        self._validator("run-catalog-snapshot.schema.json").validate(snapshot)
+        execution = snapshot["plan_graphs"][0]["execution"]
+        self.assertEqual(execution["attempts"][0]["allocation_id"], "allocation-lane")
+        execution["recovery"]["authority"] = {"state": "unavailable", "reason": "not recorded", "unexpected": True}
+        with self.assertRaises(SchemaValidationError):
+            self._validator("run-catalog-snapshot.schema.json").validate(snapshot)
 
 
 if __name__ == "__main__":
