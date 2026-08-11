@@ -18,6 +18,23 @@ test('runtime validation accepts a catalog with a correlated graph node', () => 
   assert.deepEqual(graphProjection(catalog, catalog.plan_graphs[0]).nodes.map((item) => item.data.runId), ['run-1']);
 });
 
+test('runtime validation accepts recorded execution state and rejects incomplete state', () => {
+  const execution = {
+    logical_graph: { base_commit: 'a'.repeat(40), plan_digest: 'a'.repeat(64), plan_graph_digest: 'b'.repeat(64) },
+    attempts: [{ node_id: 'lane', logical_attempt: 1, allocation_id: 'alloc-lane', checkpoint_revision: 1, parent_candidate_commit: 'a'.repeat(40), expected_staging_head: 'a'.repeat(40), status: 'reserved', candidate_commit: null }],
+    concurrency: { active_nodes: ['lane'], active_count: 1, max_parallelism: { state: 'unavailable', reason: 'not recorded' } },
+    integration: { staging_head: 'a'.repeat(40), lease: { state: 'available', reason: null }, lease_record: { node_id: 'lane', lease_id: 'lease-lane', expected_staging_head: 'a'.repeat(40) }, barriers: [{ barrier_id: 'lane:integration:alloc-lane', node_id: 'lane', attempt_id: 'graph:attempt:alloc-lane', allocation_id: 'alloc-lane', logical_attempt: 1, checkpoint_revision: 1, lease_id: 'lease-lane', action: 'lease_acquired', input_commit: 'a'.repeat(40), expected_staging_head: 'a'.repeat(40), integrated_commit: null, evidence_refs: [] }] },
+    recovery: { active_allocations: [], authority: { state: 'unavailable', reason: 'not recorded' }, dispositions: [], attempt_lineage: [{ attempt_id: 'graph:attempt:alloc-lane', node_id: 'lane', logical_attempt: 1, allocation_id: 'alloc-lane', input_commit: 'a'.repeat(40), predecessor_attempt_id: null }], retry_state: { invalidations: [], reuse: [] } },
+  };
+  const catalog = { protocol: 'harness-run-catalog-snapshot/1', revision: 'rev', generated_at: '2026-08-09T00:00:00Z', source_root: '/audit', availability, diagnostics: [], feature_runs: [], ungrouped_feature_runs: [], plan_graphs: [{ ...graph('graph-1', '2026-08-09T00:00:00Z'), execution }] };
+  assert.equal(validateCatalog(catalog), catalog);
+  delete execution.recovery.authority;
+  assert.throws(() => validateCatalog(catalog));
+  execution.recovery.authority = { state: 'unavailable', reason: 'not recorded' };
+  execution.integration.barriers[0].unexpected = true;
+  assert.throws(() => validateCatalog(catalog));
+});
+
 test('attempts are grouped by approved-plan digest and newest live attempt is selected', () => {
   const older = graph('attempt-old', '2026-08-09T00:00:00Z', 'failed', [node('root')]);
   const live = graph('attempt-live', '2026-08-09T00:02:00Z', 'running', [node('root')]);

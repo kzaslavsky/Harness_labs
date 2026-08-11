@@ -4,9 +4,13 @@ from __future__ import annotations
 
 import json
 import re
+import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
+
+from harness_labs.plan_graph_audit import PlanGraphAudit
+from harness_labs.run_catalog import build_run_catalog
 
 ROOT = Path(__file__).resolve().parent.parent
 SCHEMAS = ROOT / "schemas"
@@ -104,6 +108,7 @@ class ClosedSchemaValidator:
             "array": isinstance(value, list),
             "string": isinstance(value, str),
             "integer": isinstance(value, int) and not isinstance(value, bool),
+            "boolean": isinstance(value, bool),
             "null": value is None,
         }.get(expected, False)
 
@@ -165,6 +170,35 @@ class RunCatalogContractTests(unittest.TestCase):
         self.assertEqual(stale["liveness"]["state"], "stale")
         self.assertEqual(stale["evidence"]["state"], "unavailable")
         self.assertIsNotNone(stale["evidence"]["reason"])
+
+    def test_emitted_plan_graph_execution_projection_validates_against_catalog_schema(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            plan = root / "plan.md"
+            plan.write_text("approved plan\n", encoding="utf-8")
+            audit = PlanGraphAudit(
+                run_root=root,
+                graph_run_id="graph-attempt",
+                plan=str(plan),
+                base_commit="a" * 40,
+                objective="schema projection",
+                nodes={"lane": {"status": "queued", "feature_run_id": "child", "depends_on": []}},
+                functionality_tests=(),
+            )
+            checkpoint = json.loads(audit.journal.checkpoint_path.read_text())
+            audit.reserve_successor_attempt(
+                node_id="lane", logical_attempt=1, allocation_id="allocation-lane",
+                parent_candidate_commit="a" * 40, expected_revision=checkpoint["revision"],
+                expected_staging_head="a" * 40,
+            )
+            snapshot = build_run_catalog(root)
+
+        self._validator("run-catalog-snapshot.schema.json").validate(snapshot)
+        execution = snapshot["plan_graphs"][0]["execution"]
+        self.assertEqual(execution["attempts"][0]["allocation_id"], "allocation-lane")
+        execution["recovery"]["authority"] = {"state": "unavailable", "reason": "not recorded", "unexpected": True}
+        with self.assertRaises(SchemaValidationError):
+            self._validator("run-catalog-snapshot.schema.json").validate(snapshot)
 
 
 if __name__ == "__main__":
