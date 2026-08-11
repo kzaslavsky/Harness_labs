@@ -10,7 +10,7 @@ from pathlib import Path
 
 from harness_labs.audit import AuditActor, AuditJournal
 from harness_labs.plan_graph_audit import PlanGraphAudit
-from harness_labs.run_catalog import _detail_metrics, _snapshot, build_run_catalog, build_run_detail
+from harness_labs.run_catalog import _detail_metrics, _graph_execution, _snapshot, build_run_catalog, build_run_detail
 
 
 class RunCatalogTests(unittest.TestCase):
@@ -165,6 +165,100 @@ class RunCatalogTests(unittest.TestCase):
         self.assertEqual(len(graph["plan_graph_digest"]), 64)
         self.assertEqual([node["node_id"] for node in graph["nodes"]], ["root", "join"])
         self.assertEqual(graph["nodes"][1]["depends_on"], ["root"])
+
+    def test_plan_graph_projection_exposes_recorded_attempts_without_fabricating_parallel_state(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            plan = root / "plan.md"
+            plan.write_text("approved plan\n", encoding="utf-8")
+            audit = PlanGraphAudit(
+                run_root=root, graph_run_id="graph-attempt", plan=str(plan),
+                base_commit="a" * 40, objective="test graph",
+                nodes={"lane": {"status": "queued", "feature_run_id": "child", "depends_on": []}},
+                functionality_tests=(),
+            )
+            checkpoint = json.loads(audit.journal.checkpoint_path.read_text())
+            audit.reserve_successor_attempt(
+                node_id="lane", logical_attempt=1, allocation_id="allocation-lane",
+                parent_candidate_commit="a" * 40, expected_revision=checkpoint["revision"],
+                expected_staging_head="a" * 40,
+            )
+            graph = build_run_catalog(root)["plan_graphs"][0]
+
+        execution = graph["execution"]
+        self.assertEqual(execution["logical_graph"]["base_commit"], "a" * 40)
+        self.assertEqual(execution["concurrency"]["active_nodes"], ["lane"])
+        self.assertEqual(execution["concurrency"]["active_count"], 1)
+        self.assertEqual(execution["concurrency"]["max_parallelism"]["state"], "unavailable")
+        self.assertEqual(execution["integration"]["staging_head"], "a" * 40)
+        self.assertEqual(execution["integration"]["lease"]["state"], "unavailable")
+        self.assertIsNone(execution["integration"]["lease_record"])
+        self.assertEqual(execution["integration"]["barriers"], [{
+            "barrier_id": "lane:integration:allocation-lane", "node_id": "lane",
+            "attempt_id": "graph-attempt:attempt:allocation-lane", "allocation_id": None,
+            "logical_attempt": None, "checkpoint_revision": None, "lease_id": None,
+            "action": None, "input_commit": "a" * 40, "expected_staging_head": "a" * 40,
+            "integrated_commit": None, "evidence_refs": [],
+        }])
+        self.assertEqual(execution["recovery"]["attempt_lineage"], [{
+            "attempt_id": "graph-attempt:attempt:allocation-lane", "node_id": "lane",
+            "logical_attempt": 1, "allocation_id": "allocation-lane", "input_commit": "a" * 40,
+            "predecessor_attempt_id": None,
+        }])
+        self.assertEqual(execution["recovery"]["retry_state"], {"invalidations": [], "reuse": []})
+        self.assertEqual(execution["attempts"], [{
+            "node_id": "lane", "logical_attempt": 1, "allocation_id": "allocation-lane",
+            "checkpoint_revision": checkpoint["revision"], "parent_candidate_commit": "a" * 40,
+            "expected_staging_head": "a" * 40, "status": "reserved", "candidate_commit": None,
+        }])
+        self.assertEqual(graph["nodes"][0]["liveness"]["state"], "liveness_unavailable")
+
+    def test_plan_graph_projection_retains_recovery_dispositions_and_evidence_refs(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            plan = root / "plan.md"
+            plan.write_text("approved plan\n", encoding="utf-8")
+            audit = PlanGraphAudit(
+                run_root=root, graph_run_id="graph-recovery", plan=str(plan),
+                base_commit="a" * 40, objective="test graph",
+                nodes={"blocked": {"status": "blocked", "feature_run_id": "child-blocked", "depends_on": [], "evidence": {"reason": "force_reconcile"}}},
+                functionality_tests=(),
+            )
+            audit.journal.append("plan_graph_child_recovery_blocked", status="blocked", payload={"plan_node_id": "blocked", "reason": "force_reconcile", "evidence_ref": f"artifact:sha256:{'b' * 64}"})
+            audit.journal.append("plan_graph_child_seal_adopted", status="succeeded", payload={"plan_node_id": "sealed", "forced": True, "force_evidence_ref": f"artifact:sha256:{'c' * 64}", "seal_receipt": {"canonical_manifest_ref": f"artifact:sha256:{'d' * 64}", "verification_evidence_ref": f"artifact:sha256:{'e' * 64}"}})
+            audit.journal.checkpoint("running", audit.state)
+            graph = build_run_catalog(root)["plan_graphs"][0]
+
+        self.assertEqual(graph["nodes"][0]["evidence"], {"state": "partial", "reason": "force_reconcile"})
+        self.assertEqual(graph["execution"]["recovery"]["dispositions"], [
+            {"node_id": "blocked", "disposition": "blocked", "reason": "force_reconcile", "forced": True, "evidence_refs": [f"artifact:sha256:{'b' * 64}"]},
+            {"node_id": "sealed", "disposition": "sealed", "reason": None, "forced": True, "evidence_refs": sorted([f"artifact:sha256:{'c' * 64}", f"artifact:sha256:{'d' * 64}", f"artifact:sha256:{'e' * 64}"])},
+        ])
+
+    def test_execution_projection_exposes_active_lease_barrier_and_retry_lineage(self) -> None:
+        state = {
+            "nodes": {"join": {"status": "reserved"}}, "active_node_ids": ["join"],
+            "current_candidate_commit": "a" * 40,
+            "integration_lease": {"node_id": "join", "lease_id": "lease-join", "expected_staging_head": "a" * 40},
+            "integration_barriers": [{"node_id": "join", "attempt_id": "graph:attempt:alloc-join", "allocation_id": "alloc-join", "logical_attempt": 2, "checkpoint_revision": 7, "lease_id": "lease-join", "action": "lease_acquired", "receipt_ref": f"artifact:sha256:{'b' * 64}"}],
+            "attempt_lineage": [{"attempt_id": "graph:attempt:alloc-join", "node_id": "join", "logical_attempt": 2, "allocation_id": "alloc-join", "input_commit": "a" * 40, "predecessor_attempt_id": "graph:attempt:old"}],
+            "retry_state": {"invalidations": [{"attempt_id": "graph:attempt:old", "node_id": "join", "allocation_id": "old", "reason": "stopped", "invalidated_at": "2026-08-11T00:00:00Z"}], "reuse": [{"node_id": "join", "reused_from_attempt_id": "graph:attempt:old", "replacement_attempt_id": "graph:attempt:alloc-join"}]},
+        }
+        execution = _graph_execution({"checkpoint": {"state": state}, "events": []})
+        self.assertEqual(execution["integration"]["lease"], {"state": "available", "reason": None})
+        self.assertEqual(execution["integration"]["lease_record"]["lease_id"], "lease-join")
+        self.assertEqual(execution["integration"]["barriers"][0]["evidence_refs"], [f"artifact:sha256:{'b' * 64}"])
+        self.assertEqual(execution["recovery"]["attempt_lineage"][0]["predecessor_attempt_id"], "graph:attempt:old")
+        self.assertEqual(execution["recovery"]["retry_state"]["invalidations"][0]["reason"], "stopped")
+
+    def test_correlated_child_liveness_replaces_graph_controller_liveness(self) -> None:
+        now = datetime(2026, 8, 9, tzinfo=timezone.utc)
+        records = [
+            {"run_id": "graph", "status": "running", "liveness": {"state": "live", "reason": None}, "evidence": {"state": "available", "reason": None}, "nodes": [{"node_id": "node", "status": "running", "feature_run_id": "child", "liveness": {"state": "liveness_unavailable", "reason": "child liveness is unavailable until a correlated FeatureRun is discovered"}, "evidence": {"state": "available", "reason": None}}]},
+            {"run_id": "child", "kind": "feature_run", "status": "running", "liveness": {"state": "stale", "reason": "heartbeat expired"}, "evidence": {"state": "available", "reason": None}, "correlation": {"plan_graph_id": "graph", "plan_node_id": "node", "parent_run_id": "graph"}},
+        ]
+        snapshot = _snapshot(Path("/runs"), now, [], records)
+        self.assertEqual(snapshot["plan_graphs"][0]["nodes"][0]["liveness"]["state"], "stale")
 
 
 if __name__ == "__main__":

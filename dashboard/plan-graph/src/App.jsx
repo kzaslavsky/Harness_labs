@@ -32,6 +32,31 @@ function NodeSummary({ node }) {
   return <section><h3>PlanGraph node</h3><Definition values={{ Graph: node.graphId, Node: node.nodeId, 'Planned FeatureRun': node.plannedRunId, Status: stateLabel(record), Liveness: record.liveness?.state, Dependencies: record.depends_on }} /><Availability label="Node evidence:" value={record.evidence} /></section>;
 }
 
+function GraphExecutionSummary({ graph }) {
+  const execution = graph?.execution;
+  if (!execution) return null;
+  const attempts = execution.attempts.map((attempt) => ({
+    id: `${attempt.logical_attempt}:${attempt.node_id}:${attempt.allocation_id || 'unavailable'}`,
+    title: `${attempt.node_id} · attempt ${attempt.logical_attempt}`,
+    status: attempt.status,
+    description: attempt.candidate_commit ? `Candidate ${attempt.candidate_commit}` : 'Candidate has not been sealed.',
+    allocation_id: attempt.allocation_id || 'Unavailable',
+    parent_candidate_commit: attempt.parent_candidate_commit || 'Unavailable',
+  }));
+  return <section className="execution-summary"><h3>Execution state</h3>
+    <Definition values={{ 'Logical base': execution.logical_graph.base_commit, 'Active slots': execution.concurrency.active_count, 'Active nodes': execution.concurrency.active_nodes, 'Staging head': execution.integration.staging_head }} />
+    <Availability label="Parallelism limit:" value={execution.concurrency.max_parallelism} />
+    <Availability label="Integration lease:" value={execution.integration.lease} />
+    <ReadableList values={execution.integration.lease_record ? [execution.integration.lease_record] : []} empty="No active integration lease was recorded." />
+    <h4>Integration barriers</h4><ReadableList values={execution.integration.barriers} empty="No integration barriers were recorded." />
+    <Availability label="Recovery authority:" value={execution.recovery.authority} />
+    <h4>Recovery dispositions</h4><ReadableList values={execution.recovery.dispositions || []} empty="No recovery dispositions were recorded." />
+    <h4>Attempt lineage</h4><ReadableList values={execution.recovery.attempt_lineage} empty="No attempt lineage was recorded." />
+    <h4>Retry decisions</h4><ReadableList values={[...execution.recovery.retry_state.invalidations, ...execution.recovery.retry_state.reuse]} empty="No retry decisions were recorded." />
+    <h4>Allocated attempts</h4><ReadableList values={attempts} empty="No allocation attempts were recorded." />
+  </section>;
+}
+
 function Detail({ run, node, detail, loading, error, onClose, tab, onTabChange }) {
   if (!run && !node) return <aside className="inspector empty"><h2>Select a FeatureRun</h2><p>Select a PlanGraph node or FeatureRun to inspect verified detail.</p></aside>;
   if (!run) return <aside className="inspector" aria-label={`${node.graphId}:${node.nodeId} PlanGraph node details`}><header><div><Status record={node.nodeRecord} /><code>{node.graphId} / {node.nodeId}</code></div><button onClick={onClose} aria-label="Close inspector">×</button></header><h2>{node.nodeId}</h2><div className="details"><NodeSummary node={node} /><section><h3>Metrics</h3><p className="muted">Verified FeatureRun metrics are unavailable because {node.plannedRunId ? `the planned run ${node.plannedRunId} is not present in the catalog` : 'this node has no correlated FeatureRun'}.</p></section></div></aside>;
@@ -142,7 +167,7 @@ function Dashboard() {
         {graphGroups.length > 1 && <label>Plan<select value={selectedGroup?.key || ''} onChange={(event) => { const group = graphGroups.find((item) => item.key === event.target.value); setSelectedPlanKey(event.target.value); setSelectedGraphId(defaultGraphAttempt(group)?.run_id || null); }}><option value="" disabled>Select plan</option>{graphGroups.map((group) => <option key={group.key} value={group.key}>{group.planPath}</option>)}</select></label>}
         {selectedGroup?.attempts.length > 1 && <label>Attempt<select value={selectedGraph?.run_id || ''} onChange={(event) => setSelectedGraphId(event.target.value)}>{selectedGroup.attempts.map((graph) => <option key={graph.run_id} value={graph.run_id}>{graph.created_at} · {graph.status}</option>)}</select></label>}
       </div><div className="legend">{['running', 'queued', 'blocked', 'stale', 'succeeded', 'unavailable'].map((state) => <span key={state} className={`status status--${state}`}><i />{state}</span>)}</div></div>
-      {nodes.length ? <ReactFlow nodes={nodes} edges={edges} nodeTypes={nodeTypes} onNodeClick={onNodeClick} fitView nodesDraggable={false} nodesConnectable={false} deleteKeyCode={null} proOptions={{ hideAttribution: true }}><Background /><Controls showInteractive={false} /></ReactFlow> : <div className="empty-canvas"><h2>No PlanGraphs discovered</h2><p>The configured audit roots have no verified PlanGraph records.</p></div>}</section>
+      {nodes.length ? <ReactFlow nodes={nodes} edges={edges} nodeTypes={nodeTypes} onNodeClick={onNodeClick} fitView nodesDraggable={false} nodesConnectable={false} deleteKeyCode={null} proOptions={{ hideAttribution: true }}><Background /><Controls showInteractive={false} /></ReactFlow> : <div className="empty-canvas"><h2>No PlanGraphs discovered</h2><p>The configured audit roots have no verified PlanGraph records.</p></div>}</section><GraphExecutionSummary graph={selectedGraph} />
       <section className="runs"><h2>FeatureRuns</h2>{catalog.feature_runs.length ? catalog.feature_runs.map((run) => <button key={run.run_id} onClick={() => { setDetailTab('overview'); setSelectedNodeKey(null); setSelectedRunId(run.run_id); }}><code>{run.run_id}</code><Status record={run} /><span>{run.correlation ? `${run.correlation.plan_graph_id} / ${run.correlation.plan_node_id}` : 'Ungrouped or legacy'}</span></button>) : <p className="muted">No FeatureRuns discovered.</p>}</section>
     </>}</main><Detail run={selectedRun} node={selectedNode} detail={detail} loading={detailLoading} error={detailError} onClose={() => { setSelectedNodeKey(null); setSelectedRunId(null); }} tab={detailTab} onTabChange={setDetailTab} /></div>;
 }
