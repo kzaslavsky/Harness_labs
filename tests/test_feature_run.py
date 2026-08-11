@@ -214,6 +214,13 @@ class FeatureRunTests(unittest.TestCase):
             bound_phases,
             ("implement",),
         )
+        bound_instructions = options["schema"].segments[0].instructions
+        self.assertIn(
+            "Dispatch only implementation or implementation-repair tasks",
+            bound_instructions,
+        )
+        self.assertIn("parent FeatureRun owns", bound_instructions)
+        self.assertNotIn("leave a tested candidate", bound_instructions)
         self.assertEqual(
             [artifact.kind for artifact in options["initial_evidence"]],
             ["engineering-plan", "source-binding-report", "build-briefing"],

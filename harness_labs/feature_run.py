@@ -499,9 +499,20 @@ def run_plan_graph_feature_worktree(
             "PlanGraph-bound FeatureRun requires normal verification recovery"
         )
 
+    bound_implementation = replace(
+        implementation_segments[0],
+        instructions=(
+            "Implement or repair the accepted PlanGraph node from its frozen "
+            "handoff and produce the implementation summary. Dispatch only "
+            "implementation or implementation-repair tasks. Do not dispatch a "
+            "verification-only task or require a worker to run the declared "
+            "deterministic verification command; the parent FeatureRun owns and "
+            "runs that gate immediately after this segment completes."
+        ),
+    )
     bound_schema = CoordinatorDispatchSchema(
         schema_id=f"{schema.schema_id}/plan-graph-bound",
-        segments=implementation_segments,
+        segments=(bound_implementation,),
     )
     bound_phases = ("implement",)
 
