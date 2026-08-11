@@ -66,6 +66,7 @@ def main() -> int:
             "depends_on": list(run.depends_on),
             "criteria": list(run.criteria),
             "verification_argv": list(run.verification_argv),
+            "allowed_paths": list(run.allowed_paths),
             "feature_run_id": f"{arguments.graph_run_id}-{run.id}",
             "run_dir": str((arguments.run_root / f"{arguments.graph_run_id}-{run.id}").resolve()),
             "started_at": None,
