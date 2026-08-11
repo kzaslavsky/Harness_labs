@@ -64,6 +64,10 @@ class AuditError(RuntimeError):
     """Raised when durable audit evidence is invalid or cannot be written."""
 
 
+class AuditConflictError(AuditError):
+    """Raised when a conditional audit mutation observes a newer checkpoint."""
+
+
 @dataclass(frozen=True)
 class AuditActor:
     id: str
@@ -388,6 +392,79 @@ class AuditJournal:
         return set(values)
 
     @_synchronized
+    def compare_and_swap_checkpoint(
+        self,
+        *,
+        expected_revision: int,
+        expected_head_hash: str | None,
+        status: str,
+        state: Mapping[str, Any],
+        event_type: str,
+        event_status: str,
+        payload: Mapping[str, Any],
+        actor: AuditActor | None = None,
+    ) -> dict[str, Any]:
+        """Atomically append an event and advance an expected checkpoint.
+
+        The ordinary journal methods deliberately remain small append/checkpoint
+        primitives for existing callers.  A graph controller that has more than
+        one contender needs one durable compare-and-swap boundary instead: the
+        event and the successor checkpoint must describe the same accepted
+        revision.  Holding the journal's interprocess lock across both writes
+        prevents a second controller from appending between them.
+        """
+
+        if expected_revision < 0:
+            raise ValueError("expected checkpoint revision must be non-negative")
+        self._ensure_writable()
+        with self._locked():
+            verification = _verify_event_journal(self.run_dir)
+            checkpoint = _load_json(self.checkpoint_path)
+            _validate_checkpoint(checkpoint)
+            if checkpoint.get("run_id") != self.run_id:
+                raise AuditError("checkpoint run identity does not match the journal")
+            if checkpoint.get("sequence") != verification["event_count"] or checkpoint.get(
+                "head_hash"
+            ) != verification["head_hash"]:
+                raise AuditError("checkpoint does not bind the journal head")
+            if checkpoint.get("revision") != expected_revision:
+                raise AuditConflictError("audit checkpoint revision changed")
+            if checkpoint.get("head_hash") != expected_head_hash:
+                raise AuditConflictError("audit checkpoint head changed")
+
+            # Refresh this instance while holding the same lock.  This makes a
+            # reopened controller safe even when another process advanced the
+            # journal after it was opened.
+            self._sequence = verification["event_count"]
+            self._head_hash = verification["head_hash"]
+            self._revision = expected_revision
+            event = self._append_locked(
+                event_type,
+                status=event_status,
+                payload=payload,
+                actor=actor,
+            )
+            self._revision += 1
+            successor = {
+                "protocol": CHECKPOINT_PROTOCOL,
+                "run_id": self.run_id,
+                "evidence_classification": self.evidence_classification,
+                "revision": self._revision,
+                "status": status,
+                "sequence": self._sequence,
+                "head_hash": self._head_hash,
+                "started_at": checkpoint["started_at"],
+                "updated_at": _timestamp(),
+                "state": dict(state),
+            }
+            _atomic_write(
+                self.checkpoint_path,
+                (_canonical(successor) + "\n").encode("utf-8"),
+                mode=0o600,
+            )
+            return {"event": event, "checkpoint": successor}
+
+    @_synchronized
     def finalize(
         self,
         status: str,
@@ -569,6 +646,53 @@ class AuditJournal:
 
     def _locked(self):
         return _FileLock(self._lock_path)
+
+    def _append_locked(
+        self,
+        event_type: str,
+        *,
+        status: str,
+        payload: Mapping[str, Any],
+        actor: AuditActor | None = None,
+    ) -> dict[str, Any]:
+        """Append while the caller holds ``_locked`` and has current metadata."""
+
+        event_actor = actor or self.actor
+        event: dict[str, Any] = {
+            "protocol": AUDIT_PROTOCOL,
+            "run_id": self.run_id,
+            "evidence_classification": self.evidence_classification,
+            "sequence": self._sequence,
+            "timestamp": _timestamp(),
+            "monotonic_ns": monotonic_ns(),
+            "event_type": event_type,
+            "status": status,
+            "actor": {
+                "id": event_actor.id,
+                "role": event_actor.role,
+                "parent_id": event_actor.parent_id,
+            },
+            "attempt_id": None,
+            "parent_attempt_id": None,
+            "session_id": None,
+            "backend_id": None,
+            "duration_ms": None,
+            "artifacts": [],
+            "payload": dict(payload),
+            "previous_hash": self._head_hash,
+        }
+        event_hash = hashlib.sha256(_canonical(event).encode("utf-8")).hexdigest()
+        event["event_hash"] = event_hash
+        descriptor = _open_append_with_retry(self.events_path)
+        try:
+            os.write(descriptor, (_canonical(event) + "\n").encode("utf-8"))
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        _fsync_directory(self.run_dir)
+        self._head_hash = event_hash
+        self._sequence += 1
+        return event
 
     def _ensure_writable(self) -> None:
         if self._finalized:
