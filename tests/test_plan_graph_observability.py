@@ -9,7 +9,7 @@ import sys
 import tempfile
 import unittest
 
-from harness_labs.audit import AuditJournal
+from harness_labs.audit import AuditConflictError, AuditJournal
 from harness_labs.plan_graph import (
     FeatureRunOutcome,
     PlanGraph,
@@ -19,11 +19,11 @@ from harness_labs.plan_graph import (
 )
 
 
-def _plan(path: Path) -> PlanGraphPlan:
+def _plan(path: Path, *, base_commit: str = "base") -> PlanGraphPlan:
     path.write_text("approved plan\n", encoding="utf-8")
     return PlanGraphPlan(
         plan=str(path),
-        base_commit="base",
+        base_commit=base_commit,
         runs=(
             PlanRun("first", "First", ("1",), ("AC-1",)),
             PlanRun("second", "Second", ("2",), ("AC-2",), ("first",)),
@@ -45,6 +45,114 @@ def _success(request, commit: str) -> FeatureRunOutcome:
 
 
 class PlanGraphObservabilityTests(unittest.TestCase):
+    def test_successor_attempt_batch_is_cas_bound_and_immutable(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            base_commit = "a" * 40
+            graph = PlanGraph(
+                _plan(root / "plan.md", base_commit=base_commit),
+                lambda request: _success(request, "unused"),
+                run_root=root / "runs",
+                graph_run_id="graph-successor-attempt",
+            )
+            audit = graph._audit_for_run()
+            checkpoint = json.loads(audit.journal.checkpoint_path.read_text())
+            receipts = audit.reserve_successor_attempt_batch(
+                allocations=(
+                    {"node_id": "first", "allocation_id": "allocation-first"},
+                    {"node_id": "second", "allocation_id": "allocation-second"},
+                ),
+                logical_attempt=1,
+                parent_candidate_commit=base_commit,
+                expected_revision=checkpoint["revision"],
+                expected_staging_head=base_commit,
+            )
+
+            state = audit.state
+            evidence = state["successor_attempts"]
+            self.assertEqual(len(evidence), 2)
+            self.assertEqual(
+                {item["checkpoint_revision"] for item in evidence}, {checkpoint["revision"]}
+            )
+            self.assertEqual(
+                {item["parent_candidate_commit"] for item in evidence}, {base_commit}
+            )
+            self.assertEqual(
+                {item["logical_attempt"] for item in evidence}, {1}
+            )
+            self.assertEqual(state["nodes"]["first"]["status"], "reserved")
+            self.assertEqual(state["nodes"]["second"]["status"], "reserved")
+            self.assertEqual(state["active_node_ids"], ["first", "second"])
+            self.assertEqual(len({receipt["event_hash"] for receipt in receipts}), 1)
+
+            with self.assertRaisesRegex(AuditConflictError, "revision changed"):
+                audit.reserve_successor_attempt_batch(
+                    allocations=({"node_id": "second", "allocation_id": "allocation-retry"},),
+                    logical_attempt=2,
+                    parent_candidate_commit=base_commit,
+                    expected_revision=checkpoint["revision"],
+                    expected_staging_head=base_commit,
+                )
+            events = [
+                json.loads(line)
+                for line in (audit.run_dir / "events.jsonl").read_text().splitlines()
+            ]
+            reservations = [
+                event for event in events
+                if event["event_type"] == "plan_graph_successor_attempts_reserved"
+            ]
+            self.assertEqual(len(reservations), 1)
+            self.assertEqual(reservations[0]["payload"]["allocations"], evidence)
+            AuditJournal.verify(audit.run_dir)
+
+    def test_successor_attempt_rejects_non_schema_commit_identities(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            audit = PlanGraph(
+                _plan(root / "plan.md"),
+                lambda request: _success(request, "unused"),
+                run_root=root / "runs",
+                graph_run_id="graph-invalid-identity",
+            )._audit_for_run()
+            checkpoint = json.loads(audit.journal.checkpoint_path.read_text())
+            for parent_candidate_commit, expected_staging_head in (
+                ("base", "a" * 40),
+                ("a" * 40, "base"),
+            ):
+                with self.subTest(
+                    parent_candidate_commit=parent_candidate_commit,
+                    expected_staging_head=expected_staging_head,
+                ), self.assertRaisesRegex(ValueError, "full lowercase Git commit"):
+                    audit.reserve_successor_attempt(
+                        node_id="first",
+                        logical_attempt=1,
+                        allocation_id="allocation-first",
+                        parent_candidate_commit=parent_candidate_commit,
+                        expected_revision=checkpoint["revision"],
+                        expected_staging_head=expected_staging_head,
+                    )
+
+    def test_legacy_checkpoint_requires_explicit_migration_record(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            graph = PlanGraph(
+                _plan(root / "plan.md"),
+                lambda request: _success(request, "unused"),
+                run_root=root / "runs",
+                graph_run_id="graph-legacy",
+            )
+            audit = graph._audit_for_run()
+            checkpoint = json.loads(audit.journal.checkpoint_path.read_text())
+            del checkpoint["state"]["audit_state_protocol"]
+            audit.journal.checkpoint_path.write_text(json.dumps(checkpoint), encoding="utf-8")
+            with self.assertRaisesRegex(PlanGraphError, "legacy-incompatible"):
+                PlanGraph(
+                    _plan(root / "plan.md"),
+                    lambda request: _success(request, "unused"),
+                    run_root=root / "runs",
+                    graph_run_id="graph-legacy",
+                )._audit_for_run()
+
     def test_plan_graph_rejects_non_audited_construction(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
