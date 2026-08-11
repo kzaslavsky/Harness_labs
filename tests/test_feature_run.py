@@ -210,6 +210,9 @@ class _FailOnceReviewFactory:
         return Executor()
 
 
+_PLAN_SHA = hashlib.sha256(b"plan\n").hexdigest()
+
+
 class _InterruptedRepairExecutor:
     def execute(self, attempt):
         raise InterruptedError("repair worker connection dropped")
@@ -284,6 +287,13 @@ class FeatureRunTests(unittest.TestCase):
             bound_phases,
             ("implement",),
         )
+        bound_instructions = options["schema"].segments[0].instructions
+        self.assertIn(
+            "Dispatch only implementation or implementation-repair tasks",
+            bound_instructions,
+        )
+        self.assertIn("parent FeatureRun owns", bound_instructions)
+        self.assertNotIn("leave a tested candidate", bound_instructions)
         self.assertEqual(
             [artifact.kind for artifact in options["initial_evidence"]],
             ["engineering-plan", "source-binding-report", "build-briefing"],
@@ -367,9 +377,12 @@ class FeatureRunTests(unittest.TestCase):
             "FR-10",
             "Build a lane",
             criteria,
-            {"path": "plan.md"},
+            {"path": "plan.md", "sha256": _PLAN_SHA},
             {"claims": ["bound"]},
             {"allowed_paths": ["feature.txt"]},
+            "plan.md",
+            "a" * 40,
+            _PLAN_SHA,
             "a" * 40,
             "lane/FR-10",
             Path("lane"),
@@ -381,21 +394,25 @@ class FeatureRunTests(unittest.TestCase):
             (),
             ("feature.txt",),
         )
-        run_plan_graph_feature_worktree(
-            binding=binding,
-            schema=standard_feature_run_dispatch_schema(),
-            contract_factory=lambda worktree, receipt: None,
-            review_fix_policy=ReviewFixPolicy(),
-            base_repository=Path("repository"),
-            base_branch="main",
-            feature_branch="lane/FR-10",
-            worktree_path=Path("lane"),
-            run_dir=Path("run"),
-            allowed_paths=("feature.txt",),
-            commit_message="Build lane",
-            verification_argv=("python3", "-m", "unittest"),
-            verification_repair_executor_factory=lambda attempt: None,
-        )
+        with patch("harness_labs.feature_run.subprocess.run") as git_show:
+            git_show.return_value = subprocess.CompletedProcess(
+                [], 0, stdout=b"plan\n", stderr=b""
+            )
+            run_plan_graph_feature_worktree(
+                binding=binding,
+                schema=standard_feature_run_dispatch_schema(),
+                contract_factory=lambda worktree, receipt: None,
+                review_fix_policy=ReviewFixPolicy(),
+                base_repository=Path("repository"),
+                base_branch="main",
+                feature_branch="lane/FR-10",
+                worktree_path=Path("lane"),
+                run_dir=Path("run"),
+                allowed_paths=("feature.txt",),
+                commit_message="Build lane",
+                verification_argv=("python3", "-m", "unittest"),
+                verification_repair_executor_factory=lambda attempt: None,
+            )
 
         options = run_feature.call_args.kwargs
         self.assertEqual(options["base_commit"], "a" * 40)
@@ -405,24 +422,29 @@ class FeatureRunTests(unittest.TestCase):
     def test_plan_graph_child_rejects_shared_integration(self) -> None:
         criteria = ({"id": "AC-1", "statement": "Works", "source": "plan"},)
         binding = PlanGraphFeatureRunBinding(
-            "graph-1", "FR-10", "Build a lane", criteria, {"path": "plan.md"},
+            "graph-1", "FR-10", "Build a lane", criteria, {"path": "plan.md", "sha256": _PLAN_SHA},
             {"claims": ["bound"]}, {"allowed_paths": ["feature.txt"]},
+            "plan.md", "a" * 40, _PLAN_SHA,
             "a" * 40, "lane/FR-10", Path("lane"), 1, "alloc-fr-10", 1, "a" * 40,
             "batch-1", (), ("feature.txt",),
         )
-        with self.assertRaisesRegex(ValueError, "cannot merge shared integration state"):
-            run_plan_graph_feature_worktree(
-                binding=binding,
-                schema=standard_feature_run_dispatch_schema(),
-                contract_factory=lambda worktree, receipt: None,
-                review_fix_policy=ReviewFixPolicy(),
-                base_repository=Path("repository"), base_branch="main",
-                feature_branch="lane/FR-10", worktree_path=Path("lane"),
-                run_dir=Path("run"), allowed_paths=("feature.txt",),
-                commit_message="Build lane", merge=True,
-                verification_argv=("python3", "-m", "unittest"),
-                verification_repair_executor_factory=lambda attempt: None,
+        with patch("harness_labs.feature_run.subprocess.run") as git_show:
+            git_show.return_value = subprocess.CompletedProcess(
+                [], 0, stdout=b"plan\n", stderr=b""
             )
+            with self.assertRaisesRegex(ValueError, "cannot merge shared integration state"):
+                run_plan_graph_feature_worktree(
+                    binding=binding,
+                    schema=standard_feature_run_dispatch_schema(),
+                    contract_factory=lambda worktree, receipt: None,
+                    review_fix_policy=ReviewFixPolicy(),
+                    base_repository=Path("repository"), base_branch="main",
+                    feature_branch="lane/FR-10", worktree_path=Path("lane"),
+                    run_dir=Path("run"), allowed_paths=("feature.txt",),
+                    commit_message="Build lane", merge=True,
+                    verification_argv=("python3", "-m", "unittest"),
+                    verification_repair_executor_factory=lambda attempt: None,
+                )
 
     @patch("harness_labs.feature_run.run_feature_worktree")
     def test_plan_graph_child_returns_allocation_bound_canonical_seal_receipt(
@@ -430,8 +452,9 @@ class FeatureRunTests(unittest.TestCase):
     ) -> None:
         criteria = ({"id": "AC-1", "statement": "Works", "source": "plan"},)
         binding = PlanGraphFeatureRunBinding(
-            "graph-1", "FR-10", "Build a lane", criteria, {"path": "plan.md"},
+            "graph-1", "FR-10", "Build a lane", criteria, {"path": "plan.md", "sha256": _PLAN_SHA},
             {"claims": ["bound"]}, {"allowed_paths": ["feature.txt"]},
+            "plan.md", "a" * 40, _PLAN_SHA,
             "a" * 40, "lane/FR-10", Path("lane"), 3, "alloc-fr-10", 7, "a" * 40,
             "batch-3", (), ("feature.txt",),
         )
@@ -458,17 +481,21 @@ class FeatureRunTests(unittest.TestCase):
             ),
         )
 
-        result = run_plan_graph_feature_worktree(
-            binding=binding,
-            schema=standard_feature_run_dispatch_schema(),
-            contract_factory=lambda worktree, receipt: None,
-            review_fix_policy=ReviewFixPolicy(),
-            base_repository=Path("repository"), base_branch="main",
-            feature_branch="lane/FR-10", worktree_path=Path("lane"),
-            run_dir=Path("run"), allowed_paths=("feature.txt",),
-            commit_message="Build lane", verification_argv=("python3", "-m", "unittest"),
-            verification_repair_executor_factory=lambda attempt: None,
-        )
+        with patch("harness_labs.feature_run.subprocess.run") as git_show:
+            git_show.return_value = subprocess.CompletedProcess(
+                [], 0, stdout=b"plan\n", stderr=b""
+            )
+            result = run_plan_graph_feature_worktree(
+                binding=binding,
+                schema=standard_feature_run_dispatch_schema(),
+                contract_factory=lambda worktree, receipt: None,
+                review_fix_policy=ReviewFixPolicy(),
+                base_repository=Path("repository"), base_branch="main",
+                feature_branch="lane/FR-10", worktree_path=Path("lane"),
+                run_dir=Path("run"), allowed_paths=("feature.txt",),
+                commit_message="Build lane", verification_argv=("python3", "-m", "unittest"),
+                verification_repair_executor_factory=lambda attempt: None,
+            )
 
         self.assertEqual(
             [artifact.kind for artifact in run_feature.call_args.kwargs["initial_evidence"]],
@@ -500,8 +527,9 @@ class FeatureRunTests(unittest.TestCase):
             {"node_id": "FR-12", "candidate_commit": "3" * 40, "seal_receipt_ref": f"artifact:sha256:{'3' * 64}"},
         )
         binding = PlanGraphFeatureRunBinding(
-            "graph-1", "FR-20", "Join lanes", criteria, {"path": "plan.md"},
+            "graph-1", "FR-20", "Join lanes", criteria, {"path": "plan.md", "sha256": _PLAN_SHA},
             {"claims": ["bound"]}, {"allowed_paths": ["integration"]},
+            "plan.md", "a" * 40, _PLAN_SHA,
             "a" * 40, "lane/FR-20", Path("lane"), 8, "alloc-fr-20", 8, "a" * 40,
             "batch-2", dependencies, ("integration",),
         )
@@ -518,21 +546,26 @@ class FeatureRunTests(unittest.TestCase):
     def test_plan_graph_child_rejects_writable_path_substitution(self) -> None:
         criteria = ({"id": "AC-1", "statement": "Works", "source": "plan"},)
         binding = PlanGraphFeatureRunBinding(
-            "graph-1", "FR-10", "Build a lane", criteria, {"path": "plan.md"},
+            "graph-1", "FR-10", "Build a lane", criteria, {"path": "plan.md", "sha256": _PLAN_SHA},
             {"claims": ["bound"]}, {"allowed_paths": ["feature.txt"]},
+            "plan.md", "a" * 40, _PLAN_SHA,
             "a" * 40, "lane/FR-10", Path("lane"), 1, "alloc-fr-10", 1, "a" * 40,
             "batch-1", (), ("feature.txt",),
         )
-        with self.assertRaisesRegex(ValueError, "allowed_paths must match"):
-            run_plan_graph_feature_worktree(
-                binding=binding, schema=standard_feature_run_dispatch_schema(),
-                contract_factory=lambda worktree, receipt: None,
-                review_fix_policy=ReviewFixPolicy(), base_repository=Path("repository"),
-                base_branch="main", feature_branch="lane/FR-10", worktree_path=Path("lane"),
-                run_dir=Path("run"), allowed_paths=("substituted.txt",),
-                commit_message="Build lane", verification_argv=("python3", "-m", "unittest"),
-                verification_repair_executor_factory=lambda attempt: None,
+        with patch("harness_labs.feature_run.subprocess.run") as git_show:
+            git_show.return_value = subprocess.CompletedProcess(
+                [], 0, stdout=b"plan\n", stderr=b""
             )
+            with self.assertRaisesRegex(ValueError, "allowed_paths must match"):
+                run_plan_graph_feature_worktree(
+                    binding=binding, schema=standard_feature_run_dispatch_schema(),
+                    contract_factory=lambda worktree, receipt: None,
+                    review_fix_policy=ReviewFixPolicy(), base_repository=Path("repository"),
+                    base_branch="main", feature_branch="lane/FR-10", worktree_path=Path("lane"),
+                    run_dir=Path("run"), allowed_paths=("substituted.txt",),
+                    commit_message="Build lane", verification_argv=("python3", "-m", "unittest"),
+                    verification_repair_executor_factory=lambda attempt: None,
+                )
 
     def test_plan_graph_child_rejects_schema_invalid_fields(self) -> None:
         criteria = ({"id": "AC-1", "statement": "Works", "source": "plan"},)
@@ -567,31 +600,39 @@ class FeatureRunTests(unittest.TestCase):
                     "plan_node_id": "FR-10",
                     "objective": "Build a lane",
                     "acceptance_criteria": criteria,
-                    "approved_plan": {"path": "plan.md"},
+                    "approved_plan": {"path": "plan.md", "sha256": _PLAN_SHA},
                     "source_binding_report": {"claims": ["bound"]},
                     "build_briefing": {"allowed_paths": ["feature.txt"]},
+                    "plan": "plan.md",
+                    "plan_base_commit": "a" * 40,
+                    "plan_sha256": _PLAN_SHA,
                 } | child_fields | overrides))
 
     def test_plan_graph_child_rejects_an_unallocated_worktree(self) -> None:
         criteria = ({"id": "AC-1", "statement": "Works", "source": "plan"},)
         binding = PlanGraphFeatureRunBinding(
-            "graph-1", "FR-10", "Build a lane", criteria, {"path": "plan.md"},
+            "graph-1", "FR-10", "Build a lane", criteria, {"path": "plan.md", "sha256": _PLAN_SHA},
             {"claims": ["bound"]}, {"allowed_paths": ["feature.txt"]},
+            "plan.md", "a" * 40, _PLAN_SHA,
             "a" * 40, "lane/FR-10", Path("allocated-lane"), 1, "alloc-fr-10", 1, "a" * 40,
             "batch-1", (), ("feature.txt",),
         )
-        with self.assertRaisesRegex(ValueError, "worktree_path must match"):
-            run_plan_graph_feature_worktree(
-                binding=binding,
-                schema=standard_feature_run_dispatch_schema(),
-                contract_factory=lambda worktree, receipt: None,
-                review_fix_policy=ReviewFixPolicy(),
-                base_repository=Path("repository"), base_branch="main",
-                feature_branch="lane/FR-10", worktree_path=Path("substituted-lane"),
-                run_dir=Path("run"), allowed_paths=("feature.txt",),
-                commit_message="Build lane", verification_argv=("python3", "-m", "unittest"),
-                verification_repair_executor_factory=lambda attempt: None,
+        with patch("harness_labs.feature_run.subprocess.run") as git_show:
+            git_show.return_value = subprocess.CompletedProcess(
+                [], 0, stdout=b"plan\n", stderr=b""
             )
+            with self.assertRaisesRegex(ValueError, "worktree_path must match"):
+                run_plan_graph_feature_worktree(
+                    binding=binding,
+                    schema=standard_feature_run_dispatch_schema(),
+                    contract_factory=lambda worktree, receipt: None,
+                    review_fix_policy=ReviewFixPolicy(),
+                    base_repository=Path("repository"), base_branch="main",
+                    feature_branch="lane/FR-10", worktree_path=Path("substituted-lane"),
+                    run_dir=Path("run"), allowed_paths=("feature.txt",),
+                    commit_message="Build lane", verification_argv=("python3", "-m", "unittest"),
+                    verification_repair_executor_factory=lambda attempt: None,
+                )
 
     def test_plan_graph_feature_run_has_no_skill_or_serial_coupling(self) -> None:
         import harness_labs.feature_run as feature_run_module
@@ -1013,6 +1054,62 @@ class FeatureRunTests(unittest.TestCase):
                 [7, 0],
             )
             AuditJournal.verify(root / "run")
+
+    def test_no_change_verification_repair_triggers_fresh_recovery(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            seen_contexts = []
+
+            def repair_factory(worktree, attempt):
+                class Executor:
+                    def execute(self, current_attempt):
+                        context = json.loads(current_attempt.context)
+                        seen_contexts.append(context)
+                        if len(seen_contexts) == 1:
+                            return TaskResult(
+                                current_attempt.attempt_id,
+                                "failed",
+                                {
+                                    "error": (
+                                        "writable worker completed without "
+                                        "changing the repository"
+                                    ),
+                                    "error_type": "LiveExecutionError",
+                                },
+                            )
+                        (worktree / "verified.txt").write_text(
+                            "repaired\n",
+                            encoding="utf-8",
+                        )
+                        return TaskResult(
+                            current_attempt.attempt_id,
+                            "succeeded",
+                            {"summary": "Recovered with a changed method."},
+                        )
+
+                return Executor()
+
+            result = self._run_verification_recovery_case(root, repair_factory)
+
+            self.assertEqual(result.status, "succeeded")
+            self.assertEqual(result.verification.status, "succeeded")
+            self.assertEqual(result.verification.repair_attempts, 2)
+            self.assertEqual(len(seen_contexts), 2)
+            self.assertIsNone(seen_contexts[0].get("recovery"))
+            self.assertEqual(seen_contexts[1]["recovery"]["attempt"], 1)
+            events = [
+                json.loads(line)
+                for line in (result.run_dir / "events.jsonl").read_text().splitlines()
+            ]
+            triggered = [
+                event
+                for event in events
+                if event["event_type"]
+                == "deterministic_verification_recovery_triggered"
+            ]
+            self.assertEqual(len(triggered), 1)
+            self.assertEqual(triggered[0]["status"], "recovering")
+            AuditJournal.verify(result.run_dir)
 
     def _run_verification_recovery_case(
         self,

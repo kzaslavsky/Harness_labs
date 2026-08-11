@@ -126,6 +126,70 @@ class PlanGraphTests(unittest.TestCase):
             **options,
         )
 
+
+    def _transfer_registration(self):
+        payload = dict(self.payload)
+        payload["runs"] = [
+            dict(payload["runs"][0], allowed_paths=["producer.py"]),
+            dict(payload["runs"][1], allowed_paths=["consumer.py"]),
+        ]
+        return register_plan_graph(
+            repository=self.repository,
+            logical_graph_id="transfer-graph",
+            decomposition=payload,
+        )
+
+    def test_scope_expanding_finding_is_handed_to_downstream_owner(self) -> None:
+        calls = []
+        transfer = {
+            "key": "consumer.py:wire-producer",
+            "file": "producer.py",
+            "subject": "wire producer",
+            "statement": "Consume the producer receipt.",
+            "scope_expanding": True,
+            "outcome": "transferred",
+            "origin_node": "a",
+            "transferred_to": "b",
+            "required_paths": ["consumer.py"],
+        }
+
+        def launcher(request):
+            calls.append(request)
+            evidence = (
+                {"transferred_findings": [transfer]}
+                if request.run.id == "a"
+                else {"transferred_findings": []}
+            )
+            return FeatureRunOutcome(
+                "succeeded", f"{request.run.id}-commit", evidence=evidence
+            )
+
+        result = self.graph(launcher, registration=self._transfer_registration()).run()
+
+        self.assertEqual(result.status, "succeeded")
+        self.assertEqual(calls[0].finding_transfer_targets, {"consumer.py": "b"})
+        self.assertEqual(calls[1].finding_obligations, (transfer,))
+
+    def test_transfer_to_unbound_owner_fails_closed(self) -> None:
+        transfer = {
+            "key": "consumer.py:wire-producer",
+            "file": "consumer.py",
+            "scope_expanding": True,
+            "transferred_to": "c",
+            "required_paths": ["consumer.py"],
+        }
+        result = self.graph(
+            lambda request: FeatureRunOutcome(
+                "succeeded",
+                "a-commit",
+                evidence={"transferred_findings": [transfer]},
+            ),
+            registration=self._transfer_registration(),
+        ).run()
+
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(result.failed_run_id, "a")
+
     def test_same_commit_is_deterministic_across_worktrees(self) -> None:
         worktree = self.root / "worktree"
         git(self.repository, "worktree", "add", "--detach", str(worktree), self.base_commit)

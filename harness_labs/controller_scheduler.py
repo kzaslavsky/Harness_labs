@@ -240,6 +240,12 @@ class CapabilityScheduler:
             )
         return sorted(candidates, key=lambda item: item.profile_id)[0]
 
+    def validate_task_profiles(self, tasks: list[dict]) -> None:
+        """Fail before kernel registration when any task has no runnable profile."""
+
+        for task in tasks:
+            self._select_profile(task)
+
     def _execute_one(
         self,
         task: dict,

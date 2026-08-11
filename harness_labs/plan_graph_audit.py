@@ -28,6 +28,7 @@ _IMMUTABLE_NODE_FIELDS = (
     "criteria",
     "depends_on",
     "verification_argv",
+    "allowed_paths",
 )
 # /1 did not require the immutable-attempt fields below.  It must remain
 # explicitly incompatible rather than being reinterpreted during resume.
@@ -148,6 +149,7 @@ class PlanGraphAudit:
                 for key, value in nodes.items()
             },
             "registered_functionality_tests": list(functionality_tests),
+            "finding_obligations": {},
             "current_node_id": None,
             # These are controller-owned scheduling facts.  They deliberately
             # live beside the legacy sequential state so a later parallel
@@ -301,7 +303,13 @@ class PlanGraphAudit:
             },
         )
 
-    def node_completed(self, node_id: str, candidate_commit: str) -> None:
+    def node_completed(
+        self,
+        node_id: str,
+        candidate_commit: str,
+        *,
+        finding_obligations: Mapping[str, object] | None = None,
+    ) -> None:
         state = self.state
         nodes = state.get("nodes")
         if not isinstance(nodes, dict) or not isinstance(nodes.get(node_id), dict):
@@ -338,6 +346,11 @@ class PlanGraphAudit:
             },
             current_candidate_commit=candidate_commit,
             integration_barriers=barriers,
+            **(
+                {"finding_obligations": dict(finding_obligations)}
+                if finding_obligations is not None
+                else {}
+            ),
         )
 
     def node_failed(self, node_id: str, status: str, evidence: object | None) -> None:

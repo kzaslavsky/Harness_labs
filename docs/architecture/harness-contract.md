@@ -246,6 +246,25 @@ fix attempt, verification state, and reopening. A required or contract-violating
 finding MUST NOT disappear at a cycle or yield limit. It blocks unless an
 operator explicitly enabled required-finding conversion to technical debt.
 
+In a PlanGraph run, an open `scope_expanding` finding MAY transfer instead of
+blocking only when it declares the exact paths required for repair and the
+frozen graph resolves every required path to the same unique
+downstream owner. The source ledger preserves the finding as `transferred`; the
+graph checkpoint carries the complete record to that owner's bound request, and
+the destination review ledger reopens the same stable key as a required
+obligation. Missing, ambiguous, current, or already-completed owners fail closed.
+Graph completion requires the destination FeatureRun to close the obligation.
+Every review finding MUST declare at least one repair path. The controller
+derives `scope_expanding` whenever any declared repair path is outside the
+current node's frozen grant; reviewer self-classification cannot suppress that
+ownership boundary.
+
+Targeted verification MAY verify only a subset of the findings addressed in one
+repair attempt. Verified keys advance to regression review; unverified keys stay
+open and consume the remaining bounded cycle budget. A successor MAY inherit
+those open stable keys with discovery frozen, so recovery repairs the existing
+ledger without reopening review or repeating already verified work.
+
 The policy independently switches ledgering, duplicate collapse, re-raise
 suppression, normative-citation checks, scope-expansion screening, targeted
 verification, regression re-review, risk-tiered cycle limits, no-progress and
@@ -274,6 +293,12 @@ budget, external blocker, or terminal quality failure. Retries require a changed
 hypothesis, input, or method; repeating the same failed action does not count as
 progress. Recovery resumes from durable verified state and emits a new attempt
 identity linked to the prior failure.
+
+A review-fix or deterministic-verification repair worker that returns the
+mechanical failure `writable worker completed without changing the repository`
+triggers one fresh changed-method repair attempt. The recovery attempt MUST keep
+the candidate, ledger or failed-command evidence, scope, and cycle fixed; a
+second failure terminalizes normally.
 
 The dispatcher treats a durable `running` task as uncertain external state and
 blocks instead of replaying it. A checkpointed active coordinator session can

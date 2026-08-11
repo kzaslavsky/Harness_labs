@@ -410,6 +410,10 @@ def run_feature_worktree(
     candidate_only: bool = False,
     review_fix_executor_factory: ReviewFixExecutorFactory | None = None,
     review_fix_policy: ReviewFixPolicy = ReviewFixPolicy(enabled=False),
+    review_finding_obligations: tuple[Mapping[str, object], ...] = (),
+    review_finding_transfer_targets: Mapping[str, str] | None = None,
+    review_origin_node_id: str = "",
+    review_inherited_ledger_frozen: bool = False,
     verification_argv: tuple[str, ...] = (),
     verification_repair_executor_factory: (
         VerificationRepairExecutorFactory | None
@@ -624,6 +628,10 @@ def run_feature_worktree(
                 evidence=evidence,
                 audit=audit,
                 policy=review_fix_policy,
+                inherited_findings=review_finding_obligations,
+                finding_transfer_targets=review_finding_transfer_targets or {},
+                origin_node_id=review_origin_node_id,
+                inherited_ledger_frozen=review_inherited_ledger_frozen,
             ).run()
             status = review_fix_result.status
             while status in {"blocked", "failed", "interrupted"}:
@@ -923,9 +931,20 @@ def run_plan_graph_feature_worktree(
                 "PlanGraph child FeatureRun allowed_paths must match its allocated writable_paths"
             )
 
+    bound_implementation = replace(
+        implementation_segments[0],
+        instructions=(
+            "Implement or repair the accepted PlanGraph node from its frozen "
+            "handoff and produce the implementation summary. Dispatch only "
+            "implementation or implementation-repair tasks. Do not dispatch a "
+            "verification-only task or require a worker to run the declared "
+            "deterministic verification command; the parent FeatureRun owns and "
+            "runs that gate immediately after this segment completes."
+        ),
+    )
     bound_schema = CoordinatorDispatchSchema(
         schema_id=f"{schema.schema_id}/plan-graph-bound",
-        segments=implementation_segments,
+        segments=(bound_implementation,),
     )
     bound_phases = ("implement",)
 
@@ -1190,6 +1209,7 @@ def _verify_with_recovery(
     stage: str = "post_implementation",
 ) -> DeterministicVerificationResult:
     command_attempts: list[Mapping[str, object]] = []
+    repair_attempts = 0
     runner = AttemptRunner()
     actor = AuditActor("verification-owner", "verification_owner")
 
@@ -1220,14 +1240,14 @@ def _verify_with_recovery(
                 "succeeded",
                 "declared verification command passed",
                 tuple(command_attempts),
-                ordinal - 1,
+                repair_attempts,
             )
         if ordinal > repair_limit:
             return DeterministicVerificationResult(
                 "blocked",
                 "declared verification command still fails after repair budget",
                 tuple(command_attempts),
-                repair_limit,
+                repair_attempts,
             )
 
         attempt = TaskAttempt(
@@ -1267,6 +1287,7 @@ def _verify_with_recovery(
                 tuple(command_attempts),
                 ordinal,
             )
+        repair_attempts += 1
         repaired_workspace = workspace_snapshot(worktree_path)
         prior_workspace = command["workspace"]
         assert isinstance(prior_workspace, Mapping)
@@ -1299,6 +1320,91 @@ def _verify_with_recovery(
             attempt_id=attempt.attempt_id,
         )
         if repair_status != "succeeded":
+            if (
+                not outside_scope
+                and not identity_changed
+                and repair.status == "failed"
+                and repair.payload.get("error")
+                == "writable worker completed without changing the repository"
+            ):
+                recovery_attempt = TaskAttempt(
+                    attempt_id=(
+                        f"{run_id}/verification-repair/"
+                        f"{ordinal}-recovery-1"
+                    ),
+                    task_ref="verification-repair",
+                    context_ref=artifact.ref,
+                    grant_ref="verification-repair-write-grant",
+                    context=json.dumps(
+                        {
+                            "objective": objective,
+                            "acceptance_criteria": list(acceptance_criteria),
+                            "allowed_paths": list(allowed_paths),
+                            "failed_verification": recorded,
+                            "repair_attempt": ordinal,
+                            "repair_limit": repair_limit,
+                            "recovery": {
+                                "attempt": 1,
+                                "reason": repair.payload["error"],
+                                "instruction": (
+                                    "Use a changed implementation method for "
+                                    "the same failed verification; preserve "
+                                    "scope and candidate identity."
+                                ),
+                            },
+                        },
+                        sort_keys=True,
+                    ),
+                )
+                audit.append(
+                    "deterministic_verification_recovery_triggered",
+                    status="recovering",
+                    payload={
+                        "repair_attempt": ordinal,
+                        "recovery_attempt": 1,
+                        "reason": repair.payload["error"],
+                        "failed_command_evidence_ref": artifact.ref,
+                    },
+                    actor=actor,
+                    attempt_id=recovery_attempt.attempt_id,
+                )
+                recovery = runner.run(
+                    recovery_attempt,
+                    repair_executor_factory(recovery_attempt),
+                )
+                repair_attempts += 1
+                recovered_workspace = workspace_snapshot(worktree_path)
+                recovery_outside = paths_outside_scope(
+                    recovered_workspace["changed_paths"],
+                    allowed_paths,
+                )
+                recovery_identity_changed = any(
+                    recovered_workspace[key] != prior_workspace[key]
+                    for key in ("head", "branch")
+                )
+                recovery_status = (
+                    "failed"
+                    if recovery_outside or recovery_identity_changed
+                    else recovery.status
+                )
+                audit.append(
+                    "deterministic_verification_repair_completed",
+                    status=recovery_status,
+                    payload={
+                        "repair_attempt": ordinal,
+                        "recovery_attempt": 1,
+                        "result": dict(recovery.payload),
+                        "evidence_refs": list(recovery.evidence),
+                        "failed_command_evidence_ref": artifact.ref,
+                        "workspace": recovered_workspace,
+                        "outside_allowed_paths": list(recovery_outside),
+                        "repository_identity_changed": recovery_identity_changed,
+                    },
+                    actor=actor,
+                    attempt_id=recovery_attempt.attempt_id,
+                )
+                if recovery_status == "succeeded":
+                    continue
             return DeterministicVerificationResult(
                 "blocked",
                 (
@@ -1307,7 +1413,7 @@ def _verify_with_recovery(
                     else f"verification repair {repair.status}"
                 ),
                 tuple(command_attempts),
-                ordinal,
+                repair_attempts,
             )
 
     raise AssertionError("verification loop did not terminate")

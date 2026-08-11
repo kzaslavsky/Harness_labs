@@ -680,6 +680,33 @@ class ControllerKernel:
             if task_id in supplied_ids or task_id in self._state["tasks"]:
                 raise ValueError(f"duplicate task id: {task_id}")
             supplied_ids.add(task_id)
+            supersedes_task_id = task["supersedes_task_id"]
+            if supersedes_task_id is not None:
+                superseded = self._state["tasks"].get(supersedes_task_id)
+                if superseded is None:
+                    raise ValueError(
+                        f"unknown superseded task: {supersedes_task_id}"
+                    )
+                if superseded["status"] != "failed":
+                    raise ValueError(
+                        f"superseded task is not failed: {supersedes_task_id}"
+                    )
+                frozen_fields = (
+                    "role",
+                    "details_schema",
+                    "required_capabilities",
+                    "acceptance_criteria",
+                    "dependencies",
+                    "parent_task_id",
+                    "optional",
+                    "may_delegate",
+                )
+                for field in frozen_fields:
+                    if task[field] != superseded[field]:
+                        raise ValueError(
+                            "superseding task changes frozen authority: "
+                            f"{field}"
+                        )
             parent_id = task["parent_task_id"]
             depth = 1
             if parent_id is not None:
@@ -895,7 +922,15 @@ class ControllerKernel:
             for kind in self.contract.terminal_artifact_kinds:
                 if kind not in artifact_kinds:
                     failures.append(f"terminal artifact is missing: {kind}")
+            superseded_task_ids = {
+                task["supersedes_task_id"]
+                for task in self._state["tasks"].values()
+                if task["status"] == "succeeded"
+                and task.get("supersedes_task_id") is not None
+            }
             for task in self._state["tasks"].values():
+                if task["id"] in superseded_task_ids:
+                    continue
                 if task["status"] in {"ready", "running"}:
                     failures.append(f"task is still active: {task['id']}")
                 elif task["status"] != "succeeded" and not task["optional"]:
@@ -1206,6 +1241,11 @@ def _task(item: Mapping[str, Any]) -> dict[str, Any]:
     parent = item.get("parent_task_id")
     if parent is not None and (not isinstance(parent, str) or not parent.strip()):
         raise ValueError("task parent_task_id must be non-empty when supplied")
+    supersedes = item.get("supersedes_task_id")
+    if supersedes is not None and (
+        not isinstance(supersedes, str) or not supersedes.strip()
+    ):
+        raise ValueError("task supersedes_task_id must be non-empty when supplied")
     capabilities = _string_list(item, "required_capabilities")
     criteria = _string_list(item, "acceptance_criteria")
     dependencies = _string_list(item, "dependencies")
@@ -1223,6 +1263,7 @@ def _task(item: Mapping[str, Any]) -> dict[str, Any]:
         "acceptance_criteria": criteria,
         "dependencies": dependencies,
         "parent_task_id": parent,
+        "supersedes_task_id": supersedes,
         "optional": optional,
         "may_delegate": may_delegate,
         "depth": 0,
