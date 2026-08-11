@@ -47,6 +47,9 @@ class ClosedSchemaValidator:
         if "$ref" in schema:
             self._validate(value, self._resolve(str(schema["$ref"])), path)
             return
+        negated = schema.get("not")
+        if isinstance(negated, dict) and self._valid(value, negated):
+            raise SchemaValidationError(f"{path}: matches a prohibited schema")
         for part in schema.get("allOf", []):
             if not isinstance(part, dict):
                 raise SchemaValidationError(f"{path}: invalid allOf schema")
@@ -69,6 +72,19 @@ class ClosedSchemaValidator:
             for name in required:
                 if name not in value:
                     raise SchemaValidationError(f"{path}: missing {name}")
+            dependent_required = schema.get("dependentRequired", {})
+            if isinstance(dependent_required, dict):
+                for name, dependencies in dependent_required.items():
+                    if name in value:
+                        if not isinstance(dependencies, list):
+                            raise SchemaValidationError(
+                                f"{path}: invalid dependentRequired schema"
+                            )
+                        for dependency in dependencies:
+                            if dependency not in value:
+                                raise SchemaValidationError(
+                                    f"{path}: {name} requires {dependency}"
+                                )
             properties = schema.get("properties", {})
             if schema.get("additionalProperties") is False:
                 extras = set(value) - set(properties)
@@ -158,6 +174,35 @@ class RunCatalogContractTests(unittest.TestCase):
         fixture["repository"]["base_commit"] = "a" * 64
         with self.assertRaises(SchemaValidationError):
             self._validator("run-descriptor.schema.json").validate(fixture)
+
+    def test_plan_graph_lineage_fields_are_closed_and_run_kind_scoped(self) -> None:
+        validator = self._validator("run-descriptor.schema.json")
+        legacy_plan_graph = json.loads((FIXTURES / "plan-graph.json").read_text())
+        validator.validate(legacy_plan_graph)
+
+        lineage_descriptor = {
+            **legacy_plan_graph,
+            "logical_graph_id": "graph-1",
+            "graph_attempt_id": "graph-1-attempt-2",
+            "predecessor_attempt_id": "graph-1-attempt-1",
+        }
+        validator.validate(lineage_descriptor)
+        lineage_descriptor["predecessor_attempt_id"] = None
+        validator.validate(lineage_descriptor)
+
+        incomplete = dict(lineage_descriptor)
+        del incomplete["graph_attempt_id"]
+        with self.assertRaises(SchemaValidationError):
+            validator.validate(incomplete)
+
+        feature_run = json.loads((FIXTURES / "active-feature-run.json").read_text())
+        feature_run.update({
+            "logical_graph_id": "graph-1",
+            "graph_attempt_id": "graph-1",
+            "predecessor_attempt_id": None,
+        })
+        with self.assertRaises(SchemaValidationError):
+            validator.validate(feature_run)
 
     def test_unavailable_evidence_is_explicit_not_zero(self) -> None:
         snapshot = json.loads((FIXTURES / "stale-catalog-snapshot.json").read_text())
