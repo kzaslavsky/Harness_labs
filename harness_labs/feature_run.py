@@ -187,6 +187,7 @@ def run_feature_worktree(
     review_finding_obligations: tuple[Mapping[str, object], ...] = (),
     review_finding_transfer_targets: Mapping[str, str] | None = None,
     review_origin_node_id: str = "",
+    review_inherited_ledger_frozen: bool = False,
     verification_argv: tuple[str, ...] = (),
     verification_repair_executor_factory: (
         VerificationRepairExecutorFactory | None
@@ -327,6 +328,7 @@ def run_feature_worktree(
                 inherited_findings=review_finding_obligations,
                 finding_transfer_targets=review_finding_transfer_targets or {},
                 origin_node_id=review_origin_node_id,
+                inherited_ledger_frozen=review_inherited_ledger_frozen,
             ).run()
             status = review_fix_result.status
     if (

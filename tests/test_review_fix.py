@@ -297,6 +297,152 @@ class ReviewFixLoopTests(unittest.TestCase):
             ["review", "fix", "verify", "review"],
         )
 
+    def test_frozen_inherited_ledger_repairs_only_existing_key(self):
+        key = "feature.txt:remaining-defect"
+        inherited = {
+            "key": key,
+            "file": "feature.txt",
+            "subject": "remaining defect",
+            "statement": "The frozen assertion fails.",
+            "category": "correctness",
+            "severity": "major",
+            "score": 90,
+            "fix_cost": "local",
+            "protects": "acceptance criterion correct",
+            "requires_disposition": True,
+            "contract_violation": True,
+            "scope_expanding": False,
+            "outcome": "open",
+            "outcome_reason": "",
+            "cycles_seen": [1],
+            "occurrences": 1,
+            "source_finding_ids": ["remaining"],
+            "evidence_refs": ["artifact:prior-verifier"],
+            "fix_attempts": [],
+            "reopened_count": 0,
+            "origin_node": "A",
+            "transferred_to": "",
+            "transfer_eligible": False,
+            "required_paths": ["feature.txt"],
+        }
+        late = {
+            "id": "late",
+            "statement": "A newly proposed issue.",
+            "category": "review",
+            "severity": "major",
+            "requires_disposition": True,
+            "file": "late.txt",
+            "subject": "late issue",
+            "score": 90,
+            "fix_cost": "local",
+            "protects": "criterion",
+        }
+        factory = _Factory(
+            {
+                "review": [
+                    lambda attempt: result(
+                        attempt.attempt_id,
+                        "review-fix-review/1",
+                        findings=(late,),
+                    ),
+                    lambda attempt: result(
+                        attempt.attempt_id, "review-fix-review/1"
+                    ),
+                ],
+                "fix": [
+                    lambda attempt: result(
+                        attempt.attempt_id,
+                        "review-fix-fix/1",
+                        details={"addressed_finding_keys": [key]},
+                    )
+                ],
+                "verify": [
+                    lambda attempt: result(
+                        attempt.attempt_id,
+                        "review-fix-verify/1",
+                        details={"verified_finding_keys": [key]},
+                    )
+                ],
+            }
+        )
+
+        outcome, _, evidence = self.run_loop(
+            factory,
+            inherited_findings=(inherited,),
+            inherited_ledger_frozen=True,
+        )
+
+        self.assertEqual(outcome.status, "succeeded")
+        ledger = json.loads(evidence.open(outcome.ledger_ref))
+        self.assertEqual(ledger["findings"][key]["outcome"], "fixed")
+        self.assertEqual(ledger["findings"]["late.txt:late-issue"]["outcome"], "deferred")
+
+    def test_partial_targeted_verification_uses_remaining_cycle_budget(self):
+        findings = tuple(
+            {
+                "id": subject,
+                "statement": f"{subject} fails.",
+                "category": "correctness",
+                "severity": "major",
+                "requires_disposition": True,
+                "file": "feature.txt",
+                "subject": subject,
+                "score": 90,
+                "fix_cost": "local",
+                "protects": "acceptance criterion correct",
+            }
+            for subject in ("first", "second")
+        )
+        first, second = "feature.txt:first", "feature.txt:second"
+        factory = _Factory(
+            {
+                "review": [
+                    lambda attempt: result(
+                        attempt.attempt_id,
+                        "review-fix-review/1",
+                        findings=findings,
+                    ),
+                    lambda attempt: result(
+                        attempt.attempt_id,
+                        "review-fix-review/1",
+                        findings=(findings[1],),
+                    ),
+                    lambda attempt: result(
+                        attempt.attempt_id, "review-fix-review/1"
+                    ),
+                ],
+                "fix": [
+                    lambda attempt: result(
+                        attempt.attempt_id,
+                        "review-fix-fix/1",
+                        details={"addressed_finding_keys": [first, second]},
+                    ),
+                    lambda attempt: result(
+                        attempt.attempt_id,
+                        "review-fix-fix/1",
+                        details={"addressed_finding_keys": [second]},
+                    ),
+                ],
+                "verify": [
+                    lambda attempt: result(
+                        attempt.attempt_id,
+                        "review-fix-verify/1",
+                        details={"verified_finding_keys": [first]},
+                    ),
+                    lambda attempt: result(
+                        attempt.attempt_id,
+                        "review-fix-verify/1",
+                        details={"verified_finding_keys": [second]},
+                    ),
+                ],
+            }
+        )
+
+        outcome, _, _ = self.run_loop(factory)
+
+        self.assertEqual(outcome.status, "succeeded")
+        self.assertEqual(outcome.cycles, 3)
+
     def test_later_review_cannot_add_findings_to_frozen_ledger(self):
         first = {
             "id": "first",

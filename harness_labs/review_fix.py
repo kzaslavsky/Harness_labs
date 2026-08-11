@@ -104,11 +104,12 @@ class ReviewLedger:
         self.risk_tier = risk_tier
         self.findings: dict[str, dict[str, Any]] = {}
         self.cycles: list[dict[str, Any]] = []
+        self.discovery_frozen = False
 
     def seed_transferred(
         self, findings: tuple[Mapping[str, Any], ...]
     ) -> None:
-        """Reopen downstream obligations without changing their stable identity."""
+        """Reopen inherited obligations without changing their stable identity."""
 
         for finding in findings:
             key = str(finding.get("key", ""))
@@ -117,10 +118,6 @@ class ReviewLedger:
                     f"transferred finding has an empty or duplicate key: {key!r}"
                 )
             record = dict(finding)
-            if not record.get("scope_expanding"):
-                raise ReviewFixError(
-                    f"transferred finding {key} is not scope-expanding"
-                )
             source = str(record.get("transferred_to", ""))
             record["outcome"] = "open"
             record["outcome_reason"] = (
@@ -137,6 +134,9 @@ class ReviewLedger:
             record.setdefault("reopened_count", 0)
             record.setdefault("required_paths", [])
             self.findings[key] = record
+
+    def freeze_discovery(self) -> None:
+        self.discovery_frozen = True
 
     def transfer_scope_expanding(
         self,
@@ -200,7 +200,7 @@ class ReviewLedger:
             existing = self.findings.get(key)
             if existing is None:
                 record = self._new_record(key, finding, cycle)
-                if cycle > 1:
+                if cycle > 1 or self.discovery_frozen:
                     record["outcome"] = "deferred"
                     record["outcome_reason"] = (
                         "discovery frozen after the first review"
@@ -287,16 +287,15 @@ class ReviewLedger:
             )
 
     def mark_verified(self, addressed: list[str], verified: list[str]) -> None:
-        missing = sorted(set(addressed) - set(verified))
-        if missing:
-            raise ReviewFixError(
-                "targeted verification omitted addressed findings: "
-                + ", ".join(missing)
-            )
         for key in addressed:
-            self.findings[key]["outcome"] = (
-                "pending_review" if self.policy.regression_review_enabled else "fixed"
-            )
+            if key in verified:
+                self.findings[key]["outcome"] = (
+                    "pending_review"
+                    if self.policy.regression_review_enabled
+                    else "fixed"
+                )
+            else:
+                self.findings[key]["outcome"] = "open"
 
     def open_required(self) -> list[str]:
         return sorted(
@@ -417,6 +416,7 @@ class ReviewFixLoop:
         inherited_findings: tuple[Mapping[str, Any], ...] = (),
         finding_transfer_targets: Mapping[str, str] | None = None,
         origin_node_id: str = "",
+        inherited_ledger_frozen: bool = False,
     ) -> None:
         self.run_id = run_id
         self.objective = objective
@@ -430,12 +430,15 @@ class ReviewFixLoop:
         self.inherited_findings = inherited_findings
         self.finding_transfer_targets = dict(finding_transfer_targets or {})
         self.origin_node_id = origin_node_id or run_id
+        self.inherited_ledger_frozen = inherited_ledger_frozen
         self.runner = AttemptRunner()
 
     def run(self) -> ReviewFixResult:
         risk_tier = _risk_tier(self.changed_paths, self.policy)
         ledger = ReviewLedger(self.policy, risk_tier)
         ledger.seed_transferred(self.inherited_findings)
+        if self.inherited_ledger_frozen:
+            ledger.freeze_discovery()
         if not self.policy.enabled:
             return self._finish(ledger, "succeeded", "review-fix loop disabled", 0)
         cycle_limit = (
@@ -590,7 +593,7 @@ class ReviewFixLoop:
                 "Check only whether findings from the first review remain after "
                 "their fixes. Do not discover or authorize new work."
                 if stage == "review"
-                and cycle > 1
+                and (cycle > 1 or self.inherited_ledger_frozen)
                 and self.policy.regression_review_enabled
                 else ""
             ),

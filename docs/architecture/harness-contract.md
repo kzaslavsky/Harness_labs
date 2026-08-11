@@ -255,6 +255,12 @@ the destination review ledger reopens the same stable key as a required
 obligation. Missing, ambiguous, current, or already-completed owners fail closed.
 Graph completion requires the destination FeatureRun to close the obligation.
 
+Targeted verification MAY verify only a subset of the findings addressed in one
+repair attempt. Verified keys advance to regression review; unverified keys stay
+open and consume the remaining bounded cycle budget. A successor MAY inherit
+those open stable keys with discovery frozen, so recovery repairs the existing
+ledger without reopening review or repeating already verified work.
+
 The policy independently switches ledgering, duplicate collapse, re-raise
 suppression, normative-citation checks, scope-expansion screening, targeted
 verification, regression re-review, risk-tiered cycle limits, no-progress and
