@@ -8,6 +8,8 @@ runner; selecting or configuring a backend remains outside this module.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -297,6 +299,16 @@ class PlanGraphResult:
     functionality_failure: str | None = None
 
 
+@dataclass(frozen=True)
+class RepairResumeDirective:
+    """Controller-authorized retry frontier for an immutable successor attempt."""
+
+    logical_graph_id: str
+    predecessor_attempt_id: str
+    retry_frontier: tuple[str, ...]
+    blocker_evidence_ref: str
+
+
 FeatureRunLauncher = Callable[[FeatureRunRequest], FeatureRunOutcome]
 FunctionalityTestRunner = Callable[[str, str], None]
 
@@ -413,6 +425,11 @@ class PlanGraph:
         functionality_test_runner: FunctionalityTestRunner | None = None,
         child_liveness_probe: Callable[[int], str | None] | None = None,
         force_reconcile_records: Sequence[Mapping[str, object]] = (),
+        logical_graph_id: str | None = None,
+        predecessor_attempt_id: str | None = None,
+        resume_directive: RepairResumeDirective | None = None,
+        reused_completed: Mapping[str, str] | None = None,
+        predecessor_checkpoint: Mapping[str, object] | None = None,
     ) -> None:
         self.plan = plan
         self.launcher = launcher
@@ -429,6 +446,87 @@ class PlanGraph:
         )
         self.child_liveness_probe = child_liveness_probe or _local_process_start_token
         self.force_reconcile_records = tuple(force_reconcile_records)
+        self.logical_graph_id = logical_graph_id or self.graph_run_id
+        self.predecessor_attempt_id = predecessor_attempt_id
+        self.resume_directive = resume_directive
+        self.reused_completed = dict(reused_completed or {})
+        self.predecessor_checkpoint = (
+            dict(predecessor_checkpoint) if predecessor_checkpoint is not None else None
+        )
+
+    @classmethod
+    def resume(
+        cls,
+        plan: PlanGraphPlan,
+        launcher: FeatureRunLauncher,
+        *,
+        run_root: Path,
+        directive: RepairResumeDirective,
+        **kwargs: object,
+    ) -> "PlanGraph":
+        """Create a new repair attempt without mutating its predecessor."""
+
+        for value, label in (
+            (directive.logical_graph_id, "logical_graph_id"),
+            (directive.predecessor_attempt_id, "predecessor_attempt_id"),
+        ):
+            if not isinstance(value, str) or not value or value in {".", ".."} or "/" in value or "\\" in value:
+                raise PlanGraphError(f"{label} must be a non-empty path-safe name")
+        if not isinstance(directive.blocker_evidence_ref, str) or not directive.blocker_evidence_ref.startswith("artifact:sha256:"):
+            raise PlanGraphError("repair resume requires a blocker evidence reference")
+        run_root = run_root.resolve()
+        lock_dir = run_root / ".plan-graph-locks"
+        lock_dir.mkdir(parents=True, exist_ok=True)
+        lock_id = hashlib.sha256(directive.logical_graph_id.encode("utf-8")).hexdigest()
+        with (lock_dir / f"{lock_id}.lock").open("a+") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            try:
+                supplied_tests = tuple(plan.functionality_tests) + tuple(kwargs.get("functionality_tests", ()))
+                contract_nodes = cls._contract_nodes(plan)
+                predecessor = PlanGraphAudit.open_repair_predecessor(
+                    run_root=run_root,
+                    graph_run_id=directive.predecessor_attempt_id,
+                    plan=plan.plan,
+                    base_commit=plan.base_commit,
+                    logical_graph_id=directive.logical_graph_id,
+                    plan_graph_digest=PlanGraphAudit.repair_contract_digest(
+                        plan=plan.plan, base_commit=plan.base_commit,
+                        nodes=contract_nodes, functionality_tests=supplied_tests,
+                        plan_sections=plan.plan_sections,
+                        acceptance_criteria=plan.acceptance_criteria,
+                    ),
+                )
+                selection = predecessor.repair_selection(
+                    retry_frontier=directive.retry_frontier,
+                    blocker_evidence_ref=directive.blocker_evidence_ref,
+                )
+                attempt_id = f"{directive.logical_graph_id}-attempt-{cls._next_repair_ordinal(run_root, directive.logical_graph_id)}"
+                graph = cls(
+                    plan, launcher, run_root=run_root, graph_run_id=attempt_id,
+                    logical_graph_id=directive.logical_graph_id,
+                    predecessor_attempt_id=directive.predecessor_attempt_id,
+                    resume_directive=directive,
+                    reused_completed=selection["reused_completed"],
+                    predecessor_checkpoint=selection["predecessor_checkpoint"],
+                    **kwargs,
+                )
+                graph.validate()
+                graph._audit_for_run()
+                return graph
+            except (AuditError, OSError, ValueError) as exc:
+                raise PlanGraphError(f"could not allocate repair successor: {exc}") from exc
+            finally:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+    @staticmethod
+    def _contract_nodes(plan: PlanGraphPlan) -> dict[str, dict[str, object]]:
+        return {run.id: {"objective": run.objective, "plan_sections": list(run.plan_sections), "depends_on": list(run.depends_on), "criteria": list(run.criteria), "verification_argv": list(run.verification_argv)} for run in plan.runs}
+
+    @staticmethod
+    def _next_repair_ordinal(run_root: Path, logical_graph_id: str) -> int:
+        prefix = f"{logical_graph_id}-attempt-"
+        ordinals = [int(path.name.removeprefix(prefix)) for path in run_root.glob(f"{prefix}*") if path.is_dir() and path.name.removeprefix(prefix).isdigit()]
+        return max(ordinals, default=0) + 1
 
     def validate(self) -> None:
         """Reject invalid references and cycles before a launcher can run."""
@@ -580,7 +678,7 @@ class PlanGraph:
             assert self.graph_run_id is not None
             nodes = {
                 run.id: {
-                    "status": "queued",
+                    "status": "succeeded" if run.id in self.reused_completed else "queued",
                     "objective": run.objective,
                     "plan_sections": list(run.plan_sections),
                     "depends_on": list(run.depends_on),
@@ -591,8 +689,9 @@ class PlanGraph:
                         (self.run_root / self._feature_run_id(run.id)).resolve()
                     ),
                     "started_at": None,
-                    "finished_at": None,
-                    "candidate_commit": None,
+                    "finished_at": "reused" if run.id in self.reused_completed else None,
+                    "candidate_commit": self.reused_completed.get(run.id),
+                    "reused_from_attempt": self.predecessor_attempt_id if run.id in self.reused_completed else None,
                 }
                 for run in self._ordered_runs()
             }
@@ -605,6 +704,13 @@ class PlanGraph:
                     objective="; ".join(run.objective for run in self.plan.runs),
                     nodes=nodes,
                     functionality_tests=self.functionality_tests,
+                    plan_sections=self.plan.plan_sections,
+                    acceptance_criteria=self.plan.acceptance_criteria,
+                    logical_graph_id=self.logical_graph_id,
+                    graph_attempt_id=self.graph_run_id,
+                    predecessor_attempt_id=self.predecessor_attempt_id,
+                    resume_directive=self.resume_directive,
+                    predecessor_checkpoint=self.predecessor_checkpoint,
                 )
             except (AuditError, OSError, ValueError) as exc:
                 raise PlanGraphError(f"could not open PlanGraph audit: {exc}") from exc

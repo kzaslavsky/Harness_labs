@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 import subprocess
 import sys
@@ -16,6 +17,7 @@ from harness_labs.plan_graph import (
     PlanGraphError,
     PlanGraphPlan,
     PlanRun,
+    RepairResumeDirective,
 )
 
 
@@ -45,6 +47,79 @@ def _success(request, commit: str) -> FeatureRunOutcome:
 
 
 class PlanGraphObservabilityTests(unittest.TestCase):
+    def test_repair_successor_preserves_predecessor_and_reuses_only_outside_frontier(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            base = "a" * 40
+            plan = _plan(root / "plan.md", base_commit=base)
+            predecessor = PlanGraph(
+                plan,
+                lambda request: _success(request, "c" * 40) if request.run.id == "first"
+                else FeatureRunOutcome("failed", evidence={"error": "repair me"}),
+                run_root=root / "runs", graph_run_id="logical",
+            )
+            self.assertEqual(predecessor.run().status, "failed")
+            before = (root / "runs" / "logical" / "manifest.json").read_bytes()
+            blocker_ref = predecessor._audit_for_run().state["nodes"]["second"]["evidence"]["evidence_ref"]
+            requests = []
+            successor = PlanGraph.resume(
+                plan, lambda request: requests.append(request) or _success(request, "d" * 40),
+                run_root=root / "runs",
+                directive=RepairResumeDirective("logical", "logical", ("second",), blocker_ref),
+            )
+            self.assertEqual(successor.run().status, "succeeded")
+            self.assertEqual([request.run.id for request in requests], ["second"])
+            self.assertEqual(requests[0].base_commit, "c" * 40)
+            successor_dir = root / "runs" / "logical-attempt-1"
+            self.assertEqual((root / "runs" / "logical" / "manifest.json").read_bytes(), before)
+            state = successor._audit_for_run().state
+            self.assertEqual(state["nodes"]["first"]["reused_from_attempt"], "logical")
+            self.assertEqual(state["nodes"]["second"]["reused_from_attempt"], None)
+            events = (successor_dir / "events.jsonl").read_text(encoding="utf-8")
+            self.assertIn("plan_graph_repair_successor_allocated", events)
+            self.assertIn("plan_graph_node_reused", events)
+            AuditJournal.verify(successor_dir)
+
+    def test_repair_rejects_plan_contract_drift_and_unrecorded_blocker(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            plan = _plan(root / "plan.md", base_commit="a" * 40)
+            predecessor = PlanGraph(plan, lambda request: FeatureRunOutcome("failed", evidence={"error": "repair"}), run_root=root / "runs", graph_run_id="logical")
+            self.assertEqual(predecessor.run().status, "failed")
+            blocker = predecessor._audit_for_run().state["nodes"]["first"]["evidence"]["evidence_ref"]
+            with self.assertRaisesRegex(PlanGraphError, "not recorded"):
+                PlanGraph.resume(plan, lambda request: _success(request, "c" * 40), run_root=root / "runs", directive=RepairResumeDirective("logical", "logical", ("first",), f"artifact:sha256:{'e' * 64}"))
+            changed = replace(plan, runs=(replace(plan.runs[0], verification_argv=("changed",)), plan.runs[1]))
+            with self.assertRaisesRegex(PlanGraphError, "matching failed or blocked"):
+                PlanGraph.resume(changed, lambda request: _success(request, "c" * 40), run_root=root / "runs", directive=RepairResumeDirective("logical", "logical", ("first",), blocker))
+            for changed in (
+                replace(plan, plan_sections={"1": "changed", "2": "Second AC-2"}),
+                replace(plan, acceptance_criteria={"AC-1": "changed", "AC-2": "AC-2"}),
+            ):
+                with self.subTest(changed=changed):
+                    with self.assertRaisesRegex(PlanGraphError, "matching failed or blocked"):
+                        PlanGraph.resume(changed, lambda request: _success(request, "c" * 40), run_root=root / "runs", directive=RepairResumeDirective("logical", "logical", ("first",), blocker))
+
+    def test_repair_reruns_the_selected_frontier_and_its_descendants(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            plan = _plan(root / "plan.md", base_commit="a" * 40)
+            plan = replace(plan, runs=plan.runs + (PlanRun("third", "Second", ("2",), ("AC-2",), ("second",)),))
+            predecessor = PlanGraph(
+                plan, lambda request: _success(request, "c" * 40) if request.run.id == "first"
+                else FeatureRunOutcome("failed", evidence={"error": "repair"}),
+                run_root=root / "runs", graph_run_id="logical",
+            )
+            self.assertEqual(predecessor.run().status, "failed")
+            blocker = predecessor._audit_for_run().state["nodes"]["second"]["evidence"]["evidence_ref"]
+            requests = []
+            successor = PlanGraph.resume(
+                plan, lambda request: requests.append(request.run.id) or _success(request, "d" * 40),
+                run_root=root / "runs", directive=RepairResumeDirective("logical", "logical", ("second",), blocker),
+            )
+            self.assertEqual(successor.run().status, "succeeded")
+            self.assertEqual(requests, ["second", "third"])
+
     def _reserved_audit(self, root: Path, graph_id: str):
         base = "a" * 40
         graph = PlanGraph(_plan(root / "plan.md", base_commit=base), lambda request: _success(request, "unused"), run_root=root / "runs", graph_run_id=graph_id)

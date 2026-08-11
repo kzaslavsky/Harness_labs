@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from harness_labs.plan_graph import (
     FeatureRunOutcome,
     PlanGraph,
+    RepairResumeDirective,
     SubprocessFeatureRunLauncher,
     plan_from_mapping,
 )
@@ -41,6 +42,11 @@ def main() -> int:
     parser.add_argument("--run-root", type=Path, default=Path("logs/runs"))
     parser.add_argument("--graph-run-id")
     parser.add_argument("--functionality-test", action="append", default=[])
+    parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--logical-graph-id")
+    parser.add_argument("--predecessor-attempt-id")
+    parser.add_argument("--retry-frontier", action="append", default=[])
+    parser.add_argument("--blocker-evidence-ref")
     arguments = parser.parse_args()
     payload = json.loads(arguments.decomposition.read_text(encoding="utf-8"))
     if arguments.launcher:
@@ -60,13 +66,19 @@ def main() -> int:
             return FeatureRunOutcome(**result)
         raise TypeError("launcher must return FeatureRunOutcome or a mapping")
 
-    graph = PlanGraph(
-        plan_from_mapping(payload),
-        launch,
-        run_root=arguments.run_root,
-        graph_run_id=arguments.graph_run_id,
-        functionality_tests=arguments.functionality_test,
-    )
+    plan = plan_from_mapping(payload)
+    if arguments.resume:
+        if not all((arguments.logical_graph_id, arguments.predecessor_attempt_id, arguments.blocker_evidence_ref)):
+            parser.error("--resume requires --logical-graph-id, --predecessor-attempt-id, and --blocker-evidence-ref")
+        graph = PlanGraph.resume(plan, launch, run_root=arguments.run_root,
+            directive=RepairResumeDirective(arguments.logical_graph_id, arguments.predecessor_attempt_id,
+                tuple(arguments.retry_frontier), arguments.blocker_evidence_ref),
+            functionality_tests=arguments.functionality_test)
+    else:
+        if any((arguments.logical_graph_id, arguments.predecessor_attempt_id, arguments.retry_frontier, arguments.blocker_evidence_ref)):
+            parser.error("repair arguments require --resume")
+        graph = PlanGraph(plan, launch, run_root=arguments.run_root,
+            graph_run_id=arguments.graph_run_id, functionality_tests=arguments.functionality_test)
     result = graph.run()
     print(
         json.dumps(
