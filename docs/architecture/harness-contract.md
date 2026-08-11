@@ -254,6 +254,10 @@ graph checkpoint carries the complete record to that owner's bound request, and
 the destination review ledger reopens the same stable key as a required
 obligation. Missing, ambiguous, current, or already-completed owners fail closed.
 Graph completion requires the destination FeatureRun to close the obligation.
+Every review finding MUST declare at least one repair path. The controller
+derives `scope_expanding` whenever any declared repair path is outside the
+current node's frozen grant; reviewer self-classification cannot suppress that
+ownership boundary.
 
 Targeted verification MAY verify only a subset of the findings addressed in one
 repair attempt. Verified keys advance to regression review; unverified keys stay

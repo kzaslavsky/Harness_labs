@@ -12,6 +12,7 @@ from .attempts import AttemptRunner, Executor, TaskAttempt, TaskResult
 from .audit import AuditActor, AuditJournal
 from .controller_evidence import EvidenceCatalog
 from .controller_results import validate_semantic_result
+from .git_transaction import paths_outside_scope
 
 
 REVIEW_LEDGER_PROTOCOL = "review-ledger/1"
@@ -124,7 +125,9 @@ class ReviewLedger:
                 f"inherited from {source}" if source else "inherited"
             )
             record["transferred_to"] = ""
-            record["transfer_eligible"] = False
+            record["transfer_eligible"] = bool(
+                record.get("transfer_eligible", False) and not source
+            )
             record.setdefault("origin_node", "")
             record.setdefault("cycles_seen", [])
             record.setdefault("occurrences", 1)
@@ -453,7 +456,20 @@ class ReviewFixLoop:
                 cycle += 1
                 review = self._execute("review", cycle, ledger)
                 semantic = self._semantic(review, "review-fix-review/1")
-                fix_keys, counts = ledger.ingest(semantic.findings, cycle=cycle)
+                findings = tuple(
+                    {
+                        **dict(finding),
+                        "scope_expanding": bool(
+                            finding.get("scope_expanding", False)
+                            or paths_outside_scope(
+                                finding.get("required_paths", ()),
+                                self.allowed_paths,
+                            )
+                        ),
+                    }
+                    for finding in semantic.findings
+                )
+                fix_keys, counts = ledger.ingest(findings, cycle=cycle)
                 transferred = ledger.transfer_scope_expanding(
                     self.finding_transfer_targets,
                     origin_node=self.origin_node_id,

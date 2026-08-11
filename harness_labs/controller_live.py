@@ -111,6 +111,7 @@ _RAW_OUTPUT_SCHEMA: dict[str, Any] = {
                     "new_evidence": {"type": "string"},
                     "required_paths": {
                         "type": "array",
+                        "minItems": 1,
                         "items": {"type": "string", "minLength": 1},
                     },
                 },

@@ -197,7 +197,7 @@ class ReviewFixLoopTests(unittest.TestCase):
             "score": 90,
             "fix_cost": "surface-growing",
             "protects": "AC integration",
-            "scope_expanding": True,
+            "scope_expanding": False,
             "required_paths": ["consumer.py"],
         }
         factory = _Factory(
