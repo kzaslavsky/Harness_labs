@@ -27,6 +27,7 @@ from .coordinator_schema import CoordinatorDispatchSchema
 from .git_transaction import (
     GitTransactionError,
     GitWorktreeTransaction,
+    normalize_allowed_paths,
     paths_outside_scope,
     workspace_snapshot,
 )
@@ -99,6 +100,9 @@ class PlanGraphFeatureRunBinding:
     allocation_id: str | None = None
     checkpoint_revision: int | None = None
     expected_staging_head: str | None = None
+    batch_id: str | None = None
+    dependency_candidates: tuple[Mapping[str, object], ...] | None = None
+    writable_paths: tuple[str, ...] | None = None
 
     def __post_init__(self) -> None:
         if not all(
@@ -120,6 +124,9 @@ class PlanGraphFeatureRunBinding:
             self.allocation_id,
             self.checkpoint_revision,
             self.expected_staging_head,
+            self.batch_id,
+            self.dependency_candidates,
+            self.writable_paths,
         )
         if any(value is not None for value in child_values):
             if not all(value is not None for value in child_values):
@@ -128,6 +135,10 @@ class PlanGraphFeatureRunBinding:
                 )
             assert self.parent_candidate_commit is not None
             assert self.expected_staging_head is not None
+            if not _is_plan_graph_id(self.plan_graph_id) or not _is_plan_graph_id(
+                self.plan_node_id
+            ):
+                raise ValueError("PlanGraph child binding identifiers must be schema-valid")
             if not _is_full_commit(self.parent_candidate_commit) or not _is_full_commit(
                 self.expected_staging_head
             ):
@@ -142,12 +153,24 @@ class PlanGraphFeatureRunBinding:
                 raise ValueError("PlanGraph child lane_branch must be non-empty")
             if not isinstance(self.lane_worktree, Path):
                 raise ValueError("PlanGraph child lane_worktree must be a Path")
-            if not isinstance(self.logical_attempt, int) or self.logical_attempt < 1:
+            if type(self.logical_attempt) is not int or self.logical_attempt < 1:
                 raise ValueError("PlanGraph child logical_attempt must be positive")
-            if not isinstance(self.checkpoint_revision, int) or self.checkpoint_revision < 1:
+            if type(self.checkpoint_revision) is not int or self.checkpoint_revision < 1:
                 raise ValueError("PlanGraph child checkpoint_revision must be positive")
-            if not isinstance(self.allocation_id, str) or not self.allocation_id.strip():
-                raise ValueError("PlanGraph child allocation_id must be non-empty")
+            if not _is_plan_graph_id(self.allocation_id):
+                raise ValueError("PlanGraph child allocation_id must be a valid identifier")
+            if not isinstance(self.batch_id, str) or not _is_plan_graph_id(self.batch_id):
+                raise ValueError("PlanGraph child batch_id must be a valid identifier")
+            if not isinstance(self.dependency_candidates, tuple):
+                raise ValueError(
+                    "PlanGraph child dependency_candidates must be an ordered tuple"
+                )
+            _validate_dependency_candidates(self.dependency_candidates)
+            if not isinstance(self.writable_paths, tuple):
+                raise ValueError("PlanGraph child writable_paths must be an ordered tuple")
+            if not self.writable_paths:
+                raise ValueError("PlanGraph child writable_paths must not be empty")
+            normalize_allowed_paths(self.writable_paths)
 
     @property
     def is_child_lane(self) -> bool:
@@ -165,19 +188,30 @@ class PlanGraphFeatureRunBinding:
         assert self.allocation_id is not None
         assert self.checkpoint_revision is not None
         assert self.expected_staging_head is not None
+        assert self.batch_id is not None
+        assert self.dependency_candidates is not None
+        assert self.writable_paths is not None
         return {
-            "protocol": "harness-plan-graph-parallel-child-descriptor/1",
+            "protocol": "harness-plan-graph-parallel-child-request/1",
             "graph_id": self.plan_graph_id,
             "node_id": self.plan_node_id,
-            "logical_attempt": self.logical_attempt,
-            "allocation_id": self.allocation_id,
-            "checkpoint_revision": self.checkpoint_revision,
-            "expected_staging_head": self.expected_staging_head,
+            "allocation": {
+                "batch_id": self.batch_id,
+                "logical_attempt": self.logical_attempt,
+                "allocation_id": self.allocation_id,
+                "checkpoint_revision": self.checkpoint_revision,
+                "expected_staging_head": self.expected_staging_head,
+            },
             "parent_candidate_commit": self.parent_candidate_commit,
+            "dependency_candidates": [
+                dict(candidate) for candidate in self.dependency_candidates
+            ],
             "lane": {
                 "branch": self.lane_branch,
                 "worktree": str(self.lane_worktree.resolve()),
+                "may_advance_staging": False,
             },
+            "writable_paths": list(normalize_allowed_paths(self.writable_paths)),
         }
 
     def handoff_artifacts(self) -> tuple[FeatureRunHandoffArtifact, ...]:
@@ -207,7 +241,7 @@ class PlanGraphFeatureRunBinding:
         if self.is_child_lane:
             artifacts += (
                 FeatureRunHandoffArtifact(
-                    "plan-graph-child-descriptor",
+                    "plan-graph-child-request",
                     self.child_descriptor(),
                     producer_task_id=self.plan_graph_id,
                 ),
@@ -843,6 +877,15 @@ def run_plan_graph_feature_worktree(
             raise ValueError(
                 "PlanGraph child FeatureRun worktree_path must match its allocated lane_worktree"
             )
+        assert binding.writable_paths is not None
+        supplied_paths = feature_run_options.get("allowed_paths")
+        if not isinstance(supplied_paths, tuple) or (
+            normalize_allowed_paths(supplied_paths)
+            != normalize_allowed_paths(binding.writable_paths)
+        ):
+            raise ValueError(
+                "PlanGraph child FeatureRun allowed_paths must match its allocated writable_paths"
+            )
 
     bound_schema = CoordinatorDispatchSchema(
         schema_id=f"{schema.schema_id}/plan-graph-bound",
@@ -904,12 +947,16 @@ def _child_seal_receipt(
     if result.verification is None or result.verification.status != "succeeded":
         return None
     verification_ref = _last_verification_evidence_ref(result.verification)
-    candidate_receipt_ref = _candidate_receipt_ref(result.git_receipts)
+    candidate_receipt_ref = _candidate_receipt_ref(
+        result.git_receipts,
+        parent_candidate_commit=binding.parent_candidate_commit,
+        candidate_commit=result.candidate_commit,
+        writable_paths=binding.writable_paths,
+    )
     manifest_hash = result.manifest.get("manifest_hash")
     terminal_event_hash = result.manifest.get("head_hash")
     if not all(
-        isinstance(value, str) and len(value) == 64
-        and all(character in "0123456789abcdef" for character in value)
+        _is_sha256(value)
         for value in (verification_ref, candidate_receipt_ref, manifest_hash, terminal_event_hash)
     ):
         raise ValueError("sealed PlanGraph child is missing canonical audit evidence")
@@ -1348,6 +1395,51 @@ def _is_full_commit(value: object) -> bool:
     )
 
 
+def _is_sha256(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _is_plan_graph_id(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and bool(value)
+        and value.isascii()
+        and value[0].isalnum()
+        and all(character.isalnum() or character in "._-" for character in value)
+    )
+
+
+def _is_evidence_ref(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and value.startswith("artifact:sha256:")
+        and _is_sha256(value.removeprefix("artifact:sha256:"))
+    )
+
+
+def _validate_dependency_candidates(
+    candidates: tuple[Mapping[str, object], ...],
+) -> None:
+    node_ids: set[str] = set()
+    for candidate in candidates:
+        if not isinstance(candidate, Mapping):
+            raise ValueError("PlanGraph child dependency candidate must be a mapping")
+        if set(candidate) != {"node_id", "candidate_commit", "seal_receipt_ref"}:
+            raise ValueError("PlanGraph child dependency candidate has unexpected fields")
+        node_id = candidate["node_id"]
+        if not _is_plan_graph_id(node_id) or node_id in node_ids:
+            raise ValueError("PlanGraph child dependency candidate node_id is invalid or duplicated")
+        if not _is_full_commit(candidate["candidate_commit"]):
+            raise ValueError("PlanGraph child dependency candidate commit is invalid")
+        if not _is_evidence_ref(candidate["seal_receipt_ref"]):
+            raise ValueError("PlanGraph child dependency seal receipt ref is invalid")
+        node_ids.add(node_id)
+
+
 def _content_ref(content: Mapping[str, object]) -> str:
     raw = json.dumps(
         content, sort_keys=True, separators=(",", ":"), ensure_ascii=False
@@ -1360,14 +1452,36 @@ def _last_verification_evidence_ref(
 ) -> str | None:
     for attempt in reversed(verification.command_attempts):
         value = attempt.get("evidence_ref")
-        if isinstance(value, str) and value.startswith("artifact:sha256:"):
+        content = dict(attempt)
+        content.pop("evidence_ref", None)
+        if _is_evidence_ref(value) and _content_ref(content) == value:
             return value.removeprefix("artifact:sha256:")
     return None
 
 
-def _candidate_receipt_ref(receipts: tuple[Mapping[str, object], ...]) -> str | None:
+def _candidate_receipt_ref(
+    receipts: tuple[Mapping[str, object], ...],
+    *,
+    parent_candidate_commit: str,
+    candidate_commit: str,
+    writable_paths: tuple[str, ...] | None,
+) -> str | None:
     for receipt in reversed(receipts):
         if receipt.get("operation") == "commit":
+            if (
+                receipt.get("base_commit") != parent_candidate_commit
+                or receipt.get("candidate_commit") != candidate_commit
+            ):
+                return None
+            if writable_paths is None:
+                return None
+            try:
+                if normalize_allowed_paths(receipt.get("allowed_paths", ())) != (
+                    normalize_allowed_paths(writable_paths)
+                ):
+                    return None
+            except GitTransactionError:
+                return None
             return _content_ref(dict(receipt)).removeprefix("artifact:sha256:")
     return None
 
