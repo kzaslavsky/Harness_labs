@@ -20,6 +20,66 @@ from tests.controller_scenario_fixtures import (
 
 
 class ControllerCoordinatorTests(unittest.TestCase):
+    def test_incompatible_dispatch_leaves_no_orphaned_ready_task(self) -> None:
+        evidence = EvidenceCatalog()
+        kernel = ControllerKernel(
+            RunContract(
+                run_id="transactional-dispatch",
+                objective="Write a report",
+                phases=("active",),
+                criteria=(),
+            ),
+            evidence=evidence,
+        )
+        scheduler = CapabilityScheduler(
+            (
+                RoleProfile(
+                    "writer",
+                    "writer",
+                    frozenset(),
+                    lambda task_value: FixtureExecutor(
+                        task_value,
+                        lambda task_value, attempt: TaskResult(
+                            attempt.attempt_id,
+                            "succeeded",
+                            semantic_payload(
+                                summary="done",
+                                details_schema=task_value["details_schema"],
+                                details={},
+                            ),
+                        ),
+                    ),
+                    details_schemas=frozenset({"report-details/1"}),
+                ),
+            )
+        )
+        session = ScriptedCoordinatorSession(
+            [
+                (
+                    "task_dispatch",
+                    {
+                        "tasks": [
+                            task("ghost", "writer", "Bad", "unsupported/1")
+                        ],
+                        "max_parallelism": 1,
+                    },
+                ),
+                ("run_complete_request", {}),
+            ],
+            final="done",
+        )
+
+        result = CoordinatorLoop(
+            kernel,
+            ControllerQueries(kernel, evidence),
+            scheduler,
+            session,
+        ).run()
+
+        self.assertEqual(result.status, "succeeded")
+        self.assertEqual(kernel.snapshot()["tasks"], {})
+        self.assertFalse(session.results[1].success)
+
     def test_resident_session_drives_task_and_gated_completion(self) -> None:
         evidence = EvidenceCatalog()
         report = evidence.add(

@@ -253,6 +253,12 @@ class CoordinatorLoop:
                 ),
                 payload=arguments,
             )
+            if command_type == "task.dispatch":
+                tasks = arguments.get("tasks")
+                if isinstance(tasks, list) and all(
+                    isinstance(task, dict) for task in tasks
+                ):
+                    self.scheduler.validate_task_profiles(tasks)
             receipt = self.kernel.handle(command)
             response: dict[str, Any] = {"receipt": receipt.as_dict()}
             if receipt.accepted and command_type == "task.dispatch":
