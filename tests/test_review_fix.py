@@ -47,7 +47,14 @@ class _Factory:
 
 
 class ReviewFixLoopTests(unittest.TestCase):
-    def run_loop(self, factory, *, policy=ReviewFixPolicy(), paths=("feature.txt",)):
+    def run_loop(
+        self,
+        factory,
+        *,
+        policy=ReviewFixPolicy(),
+        paths=("feature.txt",),
+        **loop_options,
+    ):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         run_dir = Path(temporary.name) / "run"
@@ -70,6 +77,7 @@ class ReviewFixLoopTests(unittest.TestCase):
             evidence=evidence,
             audit=audit,
             policy=policy,
+            **loop_options,
         )
         return loop.run(), audit, evidence
 
@@ -176,6 +184,118 @@ class ReviewFixLoopTests(unittest.TestCase):
         self.assertEqual(record["outcome"], "scope_screened")
         self.assertEqual(record["occurrences"], 2)
         self.assertEqual(ledger["cycles"][0]["within_cycle_duplicates"], 1)
+
+    def test_scope_expanding_finding_transfers_to_bound_downstream_owner(self):
+        finding = {
+            "id": "consumer",
+            "statement": "Wire the producer into the consumer.",
+            "category": "integration",
+            "severity": "major",
+            "requires_disposition": True,
+            "file": "producer.py",
+            "subject": "consumer integration",
+            "score": 90,
+            "fix_cost": "surface-growing",
+            "protects": "AC integration",
+            "scope_expanding": True,
+            "required_paths": ["consumer.py"],
+        }
+        factory = _Factory(
+            {
+                "review": [
+                    lambda attempt: result(
+                        attempt.attempt_id,
+                        "review-fix-review/1",
+                        findings=(finding,),
+                    )
+                ]
+            }
+        )
+
+        outcome, _, _ = self.run_loop(
+            factory,
+            finding_transfer_targets={"consumer.py": "B"},
+            origin_node_id="A",
+        )
+
+        self.assertEqual(outcome.status, "succeeded")
+        self.assertEqual(len(outcome.transferred_findings), 1)
+        transfer = outcome.transferred_findings[0]
+        self.assertEqual(transfer["key"], "producer.py:consumer-integration")
+        self.assertEqual(transfer["origin_node"], "A")
+        self.assertEqual(transfer["transferred_to"], "B")
+        self.assertEqual([call[0] for call in factory.calls], ["review"])
+
+    def test_inherited_transfer_is_fixed_by_destination_not_retransferred(self):
+        key = "consumer.py:consumer-integration"
+        inherited = {
+            "key": key,
+            "file": "consumer.py",
+            "subject": "consumer integration",
+            "statement": "Wire the producer into the consumer.",
+            "category": "integration",
+            "severity": "major",
+            "score": 90,
+            "fix_cost": "surface-growing",
+            "protects": "AC integration",
+            "requires_disposition": True,
+            "contract_violation": False,
+            "scope_expanding": True,
+            "outcome": "transferred",
+            "outcome_reason": "transferred to downstream owner B",
+            "cycles_seen": [1],
+            "occurrences": 1,
+            "source_finding_ids": ["consumer"],
+            "evidence_refs": ["artifact:producer"],
+            "fix_attempts": [],
+            "reopened_count": 0,
+            "origin_node": "A",
+            "transferred_to": "B",
+            "transfer_eligible": True,
+            "required_paths": ["consumer.py"],
+        }
+        factory = _Factory(
+            {
+                "review": [
+                    lambda attempt: result(
+                        attempt.attempt_id, "review-fix-review/1"
+                    ),
+                    lambda attempt: result(
+                        attempt.attempt_id, "review-fix-review/1"
+                    ),
+                ],
+                "fix": [
+                    lambda attempt: result(
+                        attempt.attempt_id,
+                        "review-fix-fix/1",
+                        details={"addressed_finding_keys": [key]},
+                    )
+                ],
+                "verify": [
+                    lambda attempt: result(
+                        attempt.attempt_id,
+                        "review-fix-verify/1",
+                        details={"verified_finding_keys": [key]},
+                    )
+                ],
+            }
+        )
+
+        outcome, _, evidence = self.run_loop(
+            factory,
+            inherited_findings=(inherited,),
+            finding_transfer_targets={"consumer.py": "C"},
+            origin_node_id="B",
+        )
+
+        self.assertEqual(outcome.status, "succeeded")
+        self.assertEqual(outcome.transferred_findings, ())
+        ledger = json.loads(evidence.open(outcome.ledger_ref))
+        self.assertEqual(ledger["findings"][key]["outcome"], "fixed")
+        self.assertEqual(
+            [call[0] for call in factory.calls],
+            ["review", "fix", "verify", "review"],
+        )
 
     def test_later_review_cannot_add_findings_to_frozen_ledger(self):
         first = {

@@ -246,6 +246,15 @@ fix attempt, verification state, and reopening. A required or contract-violating
 finding MUST NOT disappear at a cycle or yield limit. It blocks unless an
 operator explicitly enabled required-finding conversion to technical debt.
 
+In a PlanGraph run, an open `scope_expanding` finding MAY transfer instead of
+blocking only when it declares the exact paths required for repair and the
+frozen graph resolves every required path to the same unique
+downstream owner. The source ledger preserves the finding as `transferred`; the
+graph checkpoint carries the complete record to that owner's bound request, and
+the destination review ledger reopens the same stable key as a required
+obligation. Missing, ambiguous, current, or already-completed owners fail closed.
+Graph completion requires the destination FeatureRun to close the obligation.
+
 The policy independently switches ledgering, duplicate collapse, re-raise
 suppression, normative-citation checks, scope-expansion screening, targeted
 verification, regression re-review, risk-tiered cycle limits, no-progress and

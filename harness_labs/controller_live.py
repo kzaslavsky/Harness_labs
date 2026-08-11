@@ -78,6 +78,7 @@ _RAW_OUTPUT_SCHEMA: dict[str, Any] = {
                     "scope_expanding",
                     "contract_violation",
                     "new_evidence",
+                    "required_paths",
                 ],
                 "properties": {
                     "id": {"type": "string", "minLength": 1},
@@ -108,6 +109,10 @@ _RAW_OUTPUT_SCHEMA: dict[str, Any] = {
                     "scope_expanding": {"type": "boolean"},
                     "contract_violation": {"type": "boolean"},
                     "new_evidence": {"type": "string"},
+                    "required_paths": {
+                        "type": "array",
+                        "items": {"type": "string", "minLength": 1},
+                    },
                 },
             },
         },

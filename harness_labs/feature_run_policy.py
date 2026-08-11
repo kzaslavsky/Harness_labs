@@ -78,6 +78,7 @@ def standard_feature_run_policy() -> DevelopmentPolicy:
                 "scope_expanding",
                 "contract_violation",
                 "new_evidence",
+                "required_paths",
             ],
             "base_panel": [
                 {

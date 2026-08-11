@@ -79,11 +79,19 @@
             "fixed",
             "note",
             "scope_screened",
+            "transferred",
             "deferred",
             "debt"
           ]
         },
         "outcome_reason": { "type": "string" },
+        "origin_node": { "type": "string" },
+        "transferred_to": { "type": "string" },
+        "transfer_eligible": { "type": "boolean" },
+        "required_paths": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
         "cycles_seen": {
           "type": "array",
           "items": { "type": "integer", "minimum": 1 }

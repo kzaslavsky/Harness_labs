@@ -144,6 +144,92 @@ class PlanGraphTests(unittest.TestCase):
         self.assertEqual(calls, [("A", "base"), ("B", "A-commit")])
         self.assertEqual(tests, [("test final", "B-commit")])
 
+    def test_scope_expanding_finding_is_handed_to_downstream_owner(self) -> None:
+        calls = []
+        transfer = {
+            "key": "consumer.py:wire-producer",
+            "file": "producer.py",
+            "subject": "wire producer",
+            "statement": "Consume the producer receipt.",
+            "scope_expanding": True,
+            "outcome": "transferred",
+            "origin_node": "A",
+            "transferred_to": "B",
+            "required_paths": ["consumer.py"],
+        }
+
+        def launcher(request):
+            calls.append(request)
+            evidence = (
+                {"transferred_findings": [transfer]}
+                if request.run.id == "A"
+                else {"transferred_findings": []}
+            )
+            return FeatureRunOutcome(
+                "succeeded", f"{request.run.id}-commit", evidence=evidence
+            )
+
+        result = self._graph(
+            plan(
+                PlanRun(
+                    "A",
+                    "Build A",
+                    ("1",),
+                    ("AC-1",),
+                    allowed_paths=("producer.py",),
+                ),
+                PlanRun(
+                    "B",
+                    "Build B",
+                    ("2",),
+                    ("AC-2",),
+                    ("A",),
+                    allowed_paths=("consumer.py",),
+                ),
+            ),
+            launcher,
+        ).run()
+
+        self.assertEqual(result.status, "succeeded")
+        self.assertEqual(calls[0].finding_transfer_targets, {"consumer.py": "B"})
+        self.assertEqual(calls[1].finding_obligations, (transfer,))
+
+    def test_transfer_to_unbound_owner_fails_closed(self) -> None:
+        transfer = {
+            "key": "consumer.py:wire-producer",
+            "file": "consumer.py",
+            "scope_expanding": True,
+            "transferred_to": "C",
+            "required_paths": ["consumer.py"],
+        }
+        result = self._graph(
+            plan(
+                PlanRun(
+                    "A",
+                    "Build A",
+                    ("1",),
+                    ("AC-1",),
+                    allowed_paths=("producer.py",),
+                ),
+                PlanRun(
+                    "B",
+                    "Build B",
+                    ("2",),
+                    ("AC-2",),
+                    ("A",),
+                    allowed_paths=("consumer.py",),
+                ),
+            ),
+            lambda request: FeatureRunOutcome(
+                "succeeded",
+                "A-commit",
+                evidence={"transferred_findings": [transfer]},
+            ),
+        ).run()
+
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(result.failed_run_id, "A")
+
     def test_mapping_carries_run_verification_and_final_functionality(self) -> None:
         payload = {
             "plan": "docs/development/APPROVED_PLAN.md",

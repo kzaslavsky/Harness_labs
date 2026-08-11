@@ -78,6 +78,7 @@ class ReviewFixResult:
     ledger_ref: str
     open_finding_keys: tuple[str, ...]
     technical_debt_keys: tuple[str, ...]
+    transferred_findings: tuple[Mapping[str, Any], ...] = ()
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -89,6 +90,9 @@ class ReviewFixResult:
             "ledger_ref": self.ledger_ref,
             "open_finding_keys": list(self.open_finding_keys),
             "technical_debt_keys": list(self.technical_debt_keys),
+            "transferred_findings": [
+                dict(item) for item in self.transferred_findings
+            ],
         }
 
 
@@ -100,6 +104,77 @@ class ReviewLedger:
         self.risk_tier = risk_tier
         self.findings: dict[str, dict[str, Any]] = {}
         self.cycles: list[dict[str, Any]] = []
+
+    def seed_transferred(
+        self, findings: tuple[Mapping[str, Any], ...]
+    ) -> None:
+        """Reopen downstream obligations without changing their stable identity."""
+
+        for finding in findings:
+            key = str(finding.get("key", ""))
+            if not key or key in self.findings:
+                raise ReviewFixError(
+                    f"transferred finding has an empty or duplicate key: {key!r}"
+                )
+            record = dict(finding)
+            if not record.get("scope_expanding"):
+                raise ReviewFixError(
+                    f"transferred finding {key} is not scope-expanding"
+                )
+            source = str(record.get("transferred_to", ""))
+            record["outcome"] = "open"
+            record["outcome_reason"] = (
+                f"inherited from {source}" if source else "inherited"
+            )
+            record["transferred_to"] = ""
+            record["transfer_eligible"] = False
+            record.setdefault("origin_node", "")
+            record.setdefault("cycles_seen", [])
+            record.setdefault("occurrences", 1)
+            record.setdefault("source_finding_ids", [key])
+            record.setdefault("evidence_refs", [])
+            record.setdefault("fix_attempts", [])
+            record.setdefault("reopened_count", 0)
+            record.setdefault("required_paths", [])
+            self.findings[key] = record
+
+    def transfer_scope_expanding(
+        self,
+        targets: Mapping[str, str],
+        *,
+        origin_node: str,
+    ) -> list[str]:
+        """Move eligible findings to their uniquely pre-bound downstream owner."""
+
+        transferred: list[str] = []
+        for key, record in self.findings.items():
+            if (
+                record["outcome"] != "open"
+                or not record["scope_expanding"]
+                or not record.get("transfer_eligible", True)
+            ):
+                continue
+            required_paths = record.get("required_paths", ())
+            resolved = [
+                _target_for_path(str(path), targets) for path in required_paths
+            ]
+            owners = set(resolved)
+            if not required_paths or None in owners or len(owners) != 1:
+                continue
+            target = next(iter(owners))
+            record["outcome"] = "transferred"
+            record["outcome_reason"] = f"transferred to downstream owner {target}"
+            record["origin_node"] = origin_node
+            record["transferred_to"] = target
+            transferred.append(key)
+        return sorted(transferred)
+
+    def transferred(self) -> tuple[Mapping[str, Any], ...]:
+        return tuple(
+            dict(item)
+            for _, item in sorted(self.findings.items())
+            if item["outcome"] == "transferred"
+        )
 
     def ingest(
         self,
@@ -292,6 +367,10 @@ class ReviewLedger:
             "evidence_refs": list(finding.get("evidence_refs", ())),
             "fix_attempts": [],
             "reopened_count": 0,
+            "origin_node": "",
+            "transferred_to": "",
+            "transfer_eligible": True,
+            "required_paths": list(finding.get("required_paths", ())),
         }
 
     @staticmethod
@@ -309,6 +388,9 @@ class ReviewLedger:
         for ref in finding.get("evidence_refs", ()):
             if ref not in record["evidence_refs"]:
                 record["evidence_refs"].append(ref)
+        for path in finding.get("required_paths", ()):
+            if path not in record["required_paths"]:
+                record["required_paths"].append(path)
         incoming_score = finding.get(
             "score",
             _SEVERITY_SCORE.get(str(finding.get("severity", "major")), 0),
@@ -332,6 +414,9 @@ class ReviewFixLoop:
         evidence: EvidenceCatalog,
         audit: AuditJournal,
         policy: ReviewFixPolicy = ReviewFixPolicy(),
+        inherited_findings: tuple[Mapping[str, Any], ...] = (),
+        finding_transfer_targets: Mapping[str, str] | None = None,
+        origin_node_id: str = "",
     ) -> None:
         self.run_id = run_id
         self.objective = objective
@@ -342,11 +427,15 @@ class ReviewFixLoop:
         self.evidence = evidence
         self.audit = audit
         self.policy = policy
+        self.inherited_findings = inherited_findings
+        self.finding_transfer_targets = dict(finding_transfer_targets or {})
+        self.origin_node_id = origin_node_id or run_id
         self.runner = AttemptRunner()
 
     def run(self) -> ReviewFixResult:
         risk_tier = _risk_tier(self.changed_paths, self.policy)
         ledger = ReviewLedger(self.policy, risk_tier)
+        ledger.seed_transferred(self.inherited_findings)
         if not self.policy.enabled:
             return self._finish(ledger, "succeeded", "review-fix loop disabled", 0)
         cycle_limit = (
@@ -362,11 +451,21 @@ class ReviewFixLoop:
                 review = self._execute("review", cycle, ledger)
                 semantic = self._semantic(review, "review-fix-review/1")
                 fix_keys, counts = ledger.ingest(semantic.findings, cycle=cycle)
+                transferred = ledger.transfer_scope_expanding(
+                    self.finding_transfer_targets,
+                    origin_node=self.origin_node_id,
+                )
+                fix_keys = sorted(
+                    key
+                    for key in set(fix_keys) | set(ledger.open_all())
+                    if ledger.findings[key]["outcome"] == "open"
+                )
                 cycle_entry: dict[str, Any] = {
                     "cycle": cycle,
                     "review_attempt_id": review.attempt_id,
                     **counts,
                     "fix_keys": list(fix_keys),
+                    "transferred_finding_keys": transferred,
                 }
                 ledger.cycles.append(cycle_entry)
                 self._persist(ledger, "review_completed", cycle_entry)
@@ -616,6 +715,7 @@ class ReviewFixLoop:
             ledger_ref,
             tuple(ledger.open_all()),
             debt,
+            ledger.transferred(),
         )
 
 
@@ -626,6 +726,19 @@ def _finding_key(finding: Mapping[str, Any]) -> str:
         subject = str(finding.get("id", "finding")).lower()
     normalized = _KEY_TEXT.sub("-", subject).strip("-")[:120] or "finding"
     return f"{path}:{normalized}"
+
+
+def _target_for_path(path: str, targets: Mapping[str, str]) -> str | None:
+    matches = []
+    for grant, target in targets.items():
+        normalized = grant.rstrip("/")
+        if path == normalized or (grant.endswith("/") and path.startswith(grant)):
+            matches.append((len(normalized), target))
+    if not matches:
+        return None
+    longest = max(length for length, _ in matches)
+    owners = {target for length, target in matches if length == longest}
+    return next(iter(owners)) if len(owners) == 1 else None
 
 
 def _detail_keys(details: Mapping[str, Any], name: str) -> list[str]:
@@ -682,6 +795,7 @@ def _stage_output_contract(stage: str) -> Mapping[str, Any]:
                 "scope_expanding",
                 "contract_violation",
                 "new_evidence",
+                "required_paths",
             ],
         }
     key = "addressed_finding_keys" if stage == "fix" else "verified_finding_keys"

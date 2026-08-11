@@ -63,6 +63,7 @@ class PlanGraphAudit:
             "current_candidate_commit": base_commit,
             "ordered_node_ids": list(nodes),
             "nodes": {key: dict(value) for key, value in nodes.items()},
+            "finding_obligations": {},
             "current_node_id": None,
             "functionality_test": {"state": "unavailable", "reason": "not_run"},
             "terminal_graph_status": None,
@@ -100,7 +101,13 @@ class PlanGraphAudit:
             {"status": "running", "started_at": _timestamp()},
         )
 
-    def node_completed(self, node_id: str, candidate_commit: str) -> None:
+    def node_completed(
+        self,
+        node_id: str,
+        candidate_commit: str,
+        *,
+        finding_obligations: Mapping[str, object] | None = None,
+    ) -> None:
         self._transition(
             "plan_node_completed",
             "succeeded",
@@ -111,6 +118,11 @@ class PlanGraphAudit:
                 "candidate_commit": candidate_commit,
             },
             current_candidate_commit=candidate_commit,
+            **(
+                {"finding_obligations": dict(finding_obligations)}
+                if finding_obligations is not None
+                else {}
+            ),
         )
 
     def node_failed(self, node_id: str, status: str, evidence: object | None) -> None:

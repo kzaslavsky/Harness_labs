@@ -33,6 +33,7 @@ class PlanRun:
     criteria: tuple[str, ...]
     depends_on: tuple[str, ...] = ()
     verification_argv: tuple[str, ...] = ()
+    allowed_paths: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -58,6 +59,8 @@ class FeatureRunRequest:
     plan_node_id: str | None = None
     feature_run_id: str | None = None
     run_dir: Path | None = None
+    finding_obligations: tuple[Mapping[str, object], ...] = ()
+    finding_transfer_targets: Mapping[str, str] | None = None
 
 
 @dataclass(frozen=True)
@@ -120,6 +123,7 @@ class SubprocessFeatureRunLauncher:
                 "criteria": list(request.run.criteria),
                 "depends_on": list(request.run.depends_on),
                 "verification_argv": list(request.run.verification_argv),
+                "allowed_paths": list(request.run.allowed_paths),
             },
             "base_commit": request.base_commit,
             "plan": request.plan,
@@ -127,6 +131,12 @@ class SubprocessFeatureRunLauncher:
             "plan_node_id": request.plan_node_id,
             "feature_run_id": request.feature_run_id,
             "run_dir": str(request.run_dir) if request.run_dir is not None else None,
+            "finding_obligations": [
+                dict(item) for item in request.finding_obligations
+            ],
+            "finding_transfer_targets": dict(
+                request.finding_transfer_targets or {}
+            ),
         }
         try:
             completed = subprocess.run(
@@ -235,6 +245,10 @@ class PlanGraph:
                 raise PlanGraphError(
                     f"run {run.id!r} verification_argv contains an empty value"
                 )
+            if any(not value for value in run.allowed_paths):
+                raise PlanGraphError(
+                    f"run {run.id!r} allowed_paths contains an empty value"
+                )
             cited_sections = "\n".join(
                 self.plan.plan_sections[section]
                 for section in run.plan_sections
@@ -288,6 +302,7 @@ class PlanGraph:
         if audit.terminal:
             return self._result_from_audit(audit)
         completed = self._load_audit_completed(audit)
+        finding_obligations = self._load_finding_obligations(audit)
         ordered_runs = self._ordered_runs()
         self._validate_completed_dependencies(ordered_runs, completed)
         candidate_commit = self.plan.base_commit
@@ -295,7 +310,11 @@ class PlanGraph:
             if run.id in completed:
                 candidate_commit = completed[run.id]
                 continue
-            request = self._request_for_run(run, candidate_commit)
+            request = self._request_for_run(
+                run,
+                candidate_commit,
+                tuple(finding_obligations.get(run.id, ())),
+            )
             audit.node_started(run.id)
             outcome = self.launcher(request)
             if not self._outcome_matches_reservation(outcome, request):
@@ -319,9 +338,31 @@ class PlanGraph:
                 raise PlanGraphError(
                     f"successful FeatureRun {run.id!r} did not provide a candidate commit"
                 )
+            try:
+                finding_obligations = self._advance_finding_obligations(
+                    run,
+                    request,
+                    outcome,
+                    finding_obligations,
+                    completed,
+                )
+            except PlanGraphError as exc:
+                result = PlanGraphResult(
+                    status="failed",
+                    candidate_commit=None,
+                    completed=dict(completed),
+                    failed_run_id=run.id,
+                )
+                audit.node_failed(run.id, "failed", {"error": str(exc)})
+                audit.finalize("failed", self._result_payload(result))
+                return result
             completed[run.id] = outcome.candidate_commit
             candidate_commit = outcome.candidate_commit
-            audit.node_completed(run.id, candidate_commit)
+            audit.node_completed(
+                run.id,
+                candidate_commit,
+                finding_obligations=finding_obligations,
+            )
 
         for command in self.functionality_tests:
             try:
@@ -352,6 +393,7 @@ class PlanGraph:
                     "depends_on": list(run.depends_on),
                     "criteria": list(run.criteria),
                     "verification_argv": list(run.verification_argv),
+                    "allowed_paths": list(run.allowed_paths),
                     "feature_run_id": self._feature_run_id(run.id),
                     "run_dir": str(
                         (self.run_root / self._feature_run_id(run.id)).resolve()
@@ -400,10 +442,19 @@ class PlanGraph:
         assert self.graph_run_id is not None
         return f"{self.graph_run_id}-{node_id}"
 
-    def _request_for_run(self, run: PlanRun, candidate_commit: str) -> FeatureRunRequest:
+    def _request_for_run(
+        self,
+        run: PlanRun,
+        candidate_commit: str,
+        finding_obligations: tuple[Mapping[str, object], ...] = (),
+    ) -> FeatureRunRequest:
         if self._audit is None:
             return FeatureRunRequest(
-                run=run, base_commit=candidate_commit, plan=self.plan.plan
+                run=run,
+                base_commit=candidate_commit,
+                plan=self.plan.plan,
+                finding_obligations=finding_obligations,
+                finding_transfer_targets=self._transfer_targets_for(run),
             )
         feature_run_id = self._feature_run_id(run.id)
         return FeatureRunRequest(
@@ -414,7 +465,119 @@ class PlanGraph:
             plan_node_id=run.id,
             feature_run_id=feature_run_id,
             run_dir=(self.run_root / feature_run_id).resolve(),
+            finding_obligations=finding_obligations,
+            finding_transfer_targets=self._transfer_targets_for(run),
         )
+
+    @staticmethod
+    def _load_finding_obligations(
+        audit: PlanGraphAudit,
+    ) -> dict[str, list[Mapping[str, object]]]:
+        raw = audit.state.get("finding_obligations", {})
+        if not isinstance(raw, dict):
+            raise PlanGraphError(
+                "invalid PlanGraph audit checkpoint: finding_obligations must be an object"
+            )
+        loaded: dict[str, list[Mapping[str, object]]] = {}
+        for node_id, findings in raw.items():
+            if not isinstance(node_id, str) or not isinstance(findings, list):
+                raise PlanGraphError("invalid PlanGraph finding obligation checkpoint")
+            if not all(isinstance(item, dict) for item in findings):
+                raise PlanGraphError("invalid PlanGraph finding obligation record")
+            loaded[node_id] = [dict(item) for item in findings]
+        return loaded
+
+    def _advance_finding_obligations(
+        self,
+        run: PlanRun,
+        request: FeatureRunRequest,
+        outcome: FeatureRunOutcome,
+        current: Mapping[str, list[Mapping[str, object]]],
+        completed: Mapping[str, str],
+    ) -> dict[str, list[Mapping[str, object]]]:
+        pending = {
+            node_id: [dict(item) for item in findings]
+            for node_id, findings in current.items()
+            if node_id != run.id
+        }
+        transferred = self._transferred_findings(outcome)
+        targets = request.finding_transfer_targets or {}
+        for finding in transferred:
+            key = finding.get("key")
+            required_paths = finding.get("required_paths")
+            target = finding.get("transferred_to")
+            if (
+                not isinstance(key, str)
+                or not key
+                or not isinstance(target, str)
+                or not target
+                or not isinstance(required_paths, list)
+                or not required_paths
+                or not all(isinstance(path, str) and path for path in required_paths)
+            ):
+                raise PlanGraphError("child returned an invalid transferred finding")
+            expected_owners = {
+                _target_for_path(path, targets) for path in required_paths
+            }
+            if None in expected_owners or expected_owners != {target}:
+                raise PlanGraphError(
+                    f"finding {key} did not resolve uniquely to {target!r}"
+                )
+            if target in completed or target == run.id:
+                raise PlanGraphError(
+                    f"finding {key} was transferred to a completed or current node"
+                )
+            destination = pending.setdefault(target, [])
+            if any(item.get("key") == key for item in destination):
+                raise PlanGraphError(
+                    f"duplicate transferred finding {key} for node {target}"
+                )
+            destination.append(dict(finding))
+        return pending
+
+    @staticmethod
+    def _transferred_findings(
+        outcome: FeatureRunOutcome,
+    ) -> tuple[Mapping[str, object], ...]:
+        if outcome.evidence is None:
+            return ()
+        if not isinstance(outcome.evidence, Mapping):
+            raise PlanGraphError("FeatureRun evidence must be an object")
+        raw = outcome.evidence.get("transferred_findings", ())
+        if not isinstance(raw, (list, tuple)) or not all(
+            isinstance(item, Mapping) for item in raw
+        ):
+            raise PlanGraphError("transferred_findings must be a list of objects")
+        return tuple(dict(item) for item in raw)
+
+    def _transfer_targets_for(self, run: PlanRun) -> dict[str, str]:
+        """Resolve each downstream path grant to its nearest unique owner."""
+
+        by_id = {item.id: item for item in self.plan.runs}
+        distances = {run.id: 0}
+        frontier = [run.id]
+        while frontier:
+            predecessor = frontier.pop(0)
+            for candidate in self.plan.runs:
+                if predecessor not in candidate.depends_on:
+                    continue
+                distance = distances[predecessor] + 1
+                if candidate.id not in distances or distance < distances[candidate.id]:
+                    distances[candidate.id] = distance
+                    frontier.append(candidate.id)
+        candidates: dict[str, list[tuple[int, str]]] = {}
+        for node_id, distance in distances.items():
+            if node_id == run.id:
+                continue
+            for path in by_id[node_id].allowed_paths:
+                candidates.setdefault(path, []).append((distance, node_id))
+        targets: dict[str, str] = {}
+        for path, owners in candidates.items():
+            minimum = min(distance for distance, _ in owners)
+            nearest = {node_id for distance, node_id in owners if distance == minimum}
+            if len(nearest) == 1:
+                targets[path] = next(iter(nearest))
+        return targets
 
     @staticmethod
     def _outcome_matches_reservation(
@@ -570,6 +733,9 @@ def plan_from_mapping(payload: Mapping[str, object]) -> PlanGraphPlan:
                 verification_argv=tuple(
                     str(value) for value in item.get("verification_argv", ())
                 ),
+                allowed_paths=tuple(
+                    str(value) for value in item.get("allowed_paths", ())
+                ),
             )
             for item in payload["runs"]  # type: ignore[index]
         )
@@ -587,6 +753,19 @@ def plan_from_mapping(payload: Mapping[str, object]) -> PlanGraphPlan:
         )
     except (KeyError, TypeError) as exc:
         raise PlanGraphError(f"invalid PlanGraph decomposition: {exc}") from exc
+
+
+def _target_for_path(path: str, targets: Mapping[str, str]) -> str | None:
+    matches = []
+    for grant, target in targets.items():
+        normalized = grant.rstrip("/")
+        if path == normalized or (grant.endswith("/") and path.startswith(grant)):
+            matches.append((len(normalized), target))
+    if not matches:
+        return None
+    longest = max(length for length, _ in matches)
+    owners = {target for length, target in matches if length == longest}
+    return next(iter(owners)) if len(owners) == 1 else None
 
 
 __all__ = [

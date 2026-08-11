@@ -184,6 +184,9 @@ def run_feature_worktree(
     merge: bool = False,
     review_fix_executor_factory: ReviewFixExecutorFactory | None = None,
     review_fix_policy: ReviewFixPolicy = ReviewFixPolicy(enabled=False),
+    review_finding_obligations: tuple[Mapping[str, object], ...] = (),
+    review_finding_transfer_targets: Mapping[str, str] | None = None,
+    review_origin_node_id: str = "",
     verification_argv: tuple[str, ...] = (),
     verification_repair_executor_factory: (
         VerificationRepairExecutorFactory | None
@@ -321,6 +324,9 @@ def run_feature_worktree(
                 evidence=evidence,
                 audit=audit,
                 policy=review_fix_policy,
+                inherited_findings=review_finding_obligations,
+                finding_transfer_targets=review_finding_transfer_targets or {},
+                origin_node_id=review_origin_node_id,
             ).run()
             status = review_fix_result.status
     if (
