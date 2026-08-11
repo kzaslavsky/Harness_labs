@@ -10,16 +10,21 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
-from .audit import AuditActor, AuditError, AuditJournal
+from .audit import AuditActor, AuditConflictError, AuditError, AuditJournal
 
 
 _ACTOR = AuditActor("plan-graph", "plan_graph_controller")
 _TERMINAL = frozenset({"succeeded", "failed", "blocked", "interrupted"})
+# /1 did not require the immutable-attempt fields below.  It must remain
+# explicitly incompatible rather than being reinterpreted during resume.
+_AUDIT_STATE_PROTOCOL = "harness-plan-graph-audit/2"
+_GIT_COMMIT = re.compile(r"^[a-f0-9]{40}$")
 
 
 class PlanGraphAudit:
@@ -48,22 +53,59 @@ class PlanGraphAudit:
         plan_digest = _plan_digest(plan)
         if plan_digest is None:
             raise ValueError("durable PlanGraph requires a readable approved plan")
+        plan_graph_digest = _plan_graph_digest(
+            plan=plan,
+            plan_digest=plan_digest,
+            base_commit=base_commit,
+            nodes=nodes,
+            functionality_tests=functionality_tests,
+        )
         self._initial_state = {
+            "audit_state_protocol": _AUDIT_STATE_PROTOCOL,
             "graph_run_id": graph_run_id,
+            # A graph-run directory is one execution attempt.  Keep the
+            # logical graph identity separate so a successor can prove which
+            # immutable decomposition it continues without consulting
+            # controller liveness or an ambient branch head.
+            "logical_graph": {
+                "protocol": "harness-plan-graph-logical-graph/1",
+                "logical_graph_id": graph_run_id,
+                "plan_digest": plan_digest,
+                "base_commit": base_commit,
+            },
+            "graph_attempt": {
+                "graph_attempt_id": graph_run_id,
+                "predecessor_attempt_id": None,
+            },
             "plan": plan,
             "plan_digest": plan_digest,
             "base_commit": base_commit,
-            "plan_graph_digest": _plan_graph_digest(
-                plan=plan,
-                plan_digest=plan_digest,
-                base_commit=base_commit,
-                nodes=nodes,
-                functionality_tests=functionality_tests,
-            ),
+            "plan_graph_digest": plan_graph_digest,
             "current_candidate_commit": base_commit,
             "ordered_node_ids": list(nodes),
-            "nodes": {key: dict(value) for key, value in nodes.items()},
+            "nodes": {
+                key: {
+                    **dict(value),
+                    "input_commit": None,
+                    "integrated_commit": None,
+                }
+                for key, value in nodes.items()
+            },
             "current_node_id": None,
+            # These are controller-owned scheduling facts.  They deliberately
+            # live beside the legacy sequential state so a later parallel
+            # scheduler can use one audited graph identity without changing
+            # existing PlanGraph callers.
+            "active_node_ids": [],
+            "successor_attempts": [],
+            # Append-only records.  No liveness observation belongs in any of
+            # these structures: liveness remains child-owned and ephemeral.
+            "attempt_lineage": [],
+            "integration_barriers": [],
+            "retry_state": {
+                "invalidations": [],
+                "reuse": [],
+            },
             "functionality_test": {"state": "unavailable", "reason": "not_run"},
             "terminal_graph_status": None,
         }
@@ -93,14 +135,51 @@ class PlanGraphAudit:
         return self.state.get("terminal_graph_status") in _TERMINAL
 
     def node_started(self, node_id: str) -> None:
+        state = self.state
+        nodes = state.get("nodes")
+        if isinstance(nodes, dict) and isinstance(nodes.get(node_id), dict):
+            # Legacy sequential callers have no explicit reservation.  Bind
+            # their input before launch while retaining the same public API.
+            input_commit = nodes[node_id].get("input_commit")
+            if input_commit is None:
+                input_commit = state.get("current_candidate_commit")
+        else:
+            input_commit = None
         self._transition(
             "plan_node_started",
             "running",
             node_id,
-            {"status": "running", "started_at": _timestamp()},
+            {
+                "status": "running",
+                "started_at": _timestamp(),
+                "input_commit": input_commit,
+            },
         )
 
     def node_completed(self, node_id: str, candidate_commit: str) -> None:
+        state = self.state
+        nodes = state.get("nodes")
+        if not isinstance(nodes, dict) or not isinstance(nodes.get(node_id), dict):
+            raise AuditError(f"PlanGraph checkpoint has no node {node_id!r}")
+        node = nodes[node_id]
+        input_commit = node.get("input_commit")
+        if input_commit is None:
+            input_commit = state.get("current_candidate_commit")
+        barrier = {
+            "barrier_id": _barrier_id(node_id, node.get("allocation_id")),
+            "node_id": node_id,
+            "attempt_id": _attempt_id(self.graph_run_id, node.get("allocation_id")),
+            "input_commit": input_commit,
+            "integrated_commit": candidate_commit,
+        }
+        barriers = state.get("integration_barriers")
+        if not isinstance(barriers, list) or not all(isinstance(item, dict) for item in barriers):
+            raise AuditError("PlanGraph integration-barrier evidence is invalid")
+        if not any(item.get("barrier_id") == barrier["barrier_id"] for item in barriers):
+            barriers.append(barrier)
+        # A serial node-completion record lacks the protected-ref CAS witness
+        # and verified evidence reference required by the integration-receipt
+        # contract.  It is therefore barrier context only, never a receipt.
         self._transition(
             "plan_node_completed",
             "succeeded",
@@ -109,8 +188,11 @@ class PlanGraphAudit:
                 "status": "succeeded",
                 "finished_at": _timestamp(),
                 "candidate_commit": candidate_commit,
+                "input_commit": input_commit,
+                "integrated_commit": candidate_commit,
             },
             current_candidate_commit=candidate_commit,
+            integration_barriers=barriers,
         )
 
     def node_failed(self, node_id: str, status: str, evidence: object | None) -> None:
@@ -120,6 +202,302 @@ class PlanGraphAudit:
             node_id,
             {"status": status, "finished_at": _timestamp(), "evidence": evidence},
         )
+
+    def reserve_successor_attempt(
+        self,
+        *,
+        node_id: str,
+        logical_attempt: int,
+        allocation_id: str,
+        parent_candidate_commit: str,
+        expected_revision: int,
+        expected_staging_head: str,
+    ) -> dict[str, Any]:
+        """Reserve one immutable child allocation by checkpoint CAS.
+
+        This compatibility-sized wrapper deliberately has the same semantics as
+        :meth:`reserve_successor_attempt_batch`.  Parallel schedulers must use
+        the batch API so every sibling sharing a logical attempt is accepted by
+        one CAS transition.
+        """
+
+        return self.reserve_successor_attempt_batch(
+            allocations=({"node_id": node_id, "allocation_id": allocation_id},),
+            logical_attempt=logical_attempt,
+            parent_candidate_commit=parent_candidate_commit,
+            expected_revision=expected_revision,
+            expected_staging_head=expected_staging_head,
+        )[0]
+
+    def reserve_successor_attempt_batch(
+        self,
+        *,
+        allocations: tuple[Mapping[str, object], ...],
+        logical_attempt: int,
+        parent_candidate_commit: str,
+        expected_revision: int,
+        expected_staging_head: str,
+    ) -> list[dict[str, Any]]:
+        """Atomically reserve sibling allocations for one logical attempt.
+
+        Every allocation in a batch binds the same revision, staging parent,
+        and attempt number.  A stale contender produces no durable event.
+        """
+
+        if not allocations:
+            raise ValueError("successor-attempt batch must not be empty")
+        if logical_attempt < 1:
+            raise ValueError("logical_attempt must be positive")
+        if expected_revision < 1:
+            raise ValueError("expected_revision must be positive")
+        if not _is_git_commit(parent_candidate_commit):
+            raise ValueError("parent_candidate_commit must be a full lowercase Git commit")
+        if not _is_git_commit(expected_staging_head):
+            raise ValueError("expected_staging_head must be a full lowercase Git commit")
+        if parent_candidate_commit != expected_staging_head:
+            raise ValueError("parent_candidate_commit must equal expected_staging_head")
+        # Reject a stale contender before inspecting mutable graph details.  The
+        # same head is checked again inside the journal's interprocess CAS.
+        expected_head_hash = self._checkpoint_head(expected_revision)
+
+        normalized = []
+        for item in allocations:
+            node_id = item.get("node_id") if isinstance(item, Mapping) else None
+            allocation_id = (
+                item.get("allocation_id") if isinstance(item, Mapping) else None
+            )
+            if not isinstance(node_id, str) or not node_id:
+                raise ValueError("successor-attempt node_id must be non-empty")
+            if not isinstance(allocation_id, str) or not allocation_id:
+                raise ValueError("successor-attempt allocation_id must be non-empty")
+            normalized.append((node_id, allocation_id))
+        node_ids = [node_id for node_id, _ in normalized]
+        allocation_ids = [allocation_id for _, allocation_id in normalized]
+        if len(node_ids) != len(set(node_ids)):
+            raise ValueError("successor-attempt batch repeats a node_id")
+        if len(allocation_ids) != len(set(allocation_ids)):
+            raise ValueError("successor-attempt batch repeats an allocation_id")
+
+        state = self.state
+        if state.get("current_candidate_commit") != expected_staging_head:
+            raise AuditConflictError("PlanGraph staging head changed")
+        nodes = state.get("nodes")
+        if not isinstance(nodes, dict):
+            raise AuditError("PlanGraph checkpoint nodes are invalid")
+        for node_id in node_ids:
+            node = nodes.get(node_id)
+            if not isinstance(node, dict):
+                raise AuditError(f"PlanGraph checkpoint has no node {node_id!r}")
+            if node.get("status") not in {None, "queued"}:
+                raise AuditError(f"PlanGraph node {node_id!r} is not queued")
+
+        attempts = state.setdefault("successor_attempts", [])
+        if not isinstance(attempts, list) or not all(
+            isinstance(item, dict) for item in attempts
+        ):
+            raise AuditError("PlanGraph successor-attempt evidence is invalid")
+        lineage = state.setdefault("attempt_lineage", [])
+        if not isinstance(lineage, list) or not all(isinstance(item, dict) for item in lineage):
+            raise AuditError("PlanGraph attempt lineage is invalid")
+        barriers = state.setdefault("integration_barriers", [])
+        if not isinstance(barriers, list) or not all(isinstance(item, dict) for item in barriers):
+            raise AuditError("PlanGraph integration-barrier evidence is invalid")
+        retry_state = state.setdefault("retry_state", {"invalidations": [], "reuse": []})
+        if (
+            not isinstance(retry_state, dict)
+            or set(retry_state) != {"invalidations", "reuse"}
+            or not all(isinstance(retry_state[key], list) for key in retry_state)
+            or not all(isinstance(item, dict) for key in retry_state for item in retry_state[key])
+        ):
+            raise AuditError("PlanGraph retry state is invalid")
+        if any(item.get("allocation_id") in allocation_ids for item in attempts):
+            raise AuditError("PlanGraph allocation_id was already reserved")
+        invalidated_attempt_ids = {
+            item.get("attempt_id") for item in retry_state["invalidations"]
+        }
+        outstanding_nodes = {
+            item.get("node_id")
+            for item in lineage
+            if item.get("attempt_id") not in invalidated_attempt_ids
+        }
+        if any(node_id in outstanding_nodes for node_id in node_ids):
+            raise AuditError("PlanGraph node already has a live successor attempt")
+        prior_attempts = [item.get("logical_attempt") for item in attempts]
+        if any(not isinstance(item, int) for item in prior_attempts):
+            raise AuditError("PlanGraph successor-attempt number is invalid")
+        if prior_attempts and logical_attempt != max(prior_attempts) + 1:
+            raise AuditError("PlanGraph logical_attempt must advance by one batch")
+        active = state.setdefault("active_node_ids", [])
+        if not isinstance(active, list) or not all(isinstance(item, str) for item in active):
+            raise AuditError("PlanGraph active node state is invalid")
+        if any(node_id in active for node_id in node_ids):
+            raise AuditError("PlanGraph node is already active")
+
+        evidence = []
+        for node_id, allocation_id in normalized:
+            allocation = {
+                "protocol": "harness-plan-graph-parallel-allocation/1",
+                "graph_id": self.graph_run_id,
+                "node_id": node_id,
+                "logical_attempt": logical_attempt,
+                "allocation_id": allocation_id,
+                "checkpoint_revision": expected_revision,
+                "expected_staging_head": expected_staging_head,
+            }
+            attempt = {**allocation, "parent_candidate_commit": parent_candidate_commit}
+            attempt_id = _attempt_id(self.graph_run_id, allocation_id)
+            predecessors = [
+                item for item in lineage
+                if item.get("node_id") == node_id
+                and item.get("attempt_id") in invalidated_attempt_ids
+            ]
+            predecessor_attempt_id = (
+                predecessors[-1]["attempt_id"] if predecessors else None
+            )
+            lineage_record = {
+                "attempt_id": attempt_id,
+                "node_id": node_id,
+                "logical_attempt": logical_attempt,
+                "allocation_id": allocation_id,
+                "input_commit": parent_candidate_commit,
+                "predecessor_attempt_id": predecessor_attempt_id,
+            }
+            evidence.append(attempt)
+            attempts.append(attempt)
+            lineage.append(lineage_record)
+            barriers.append(
+                {
+                    "barrier_id": _barrier_id(node_id, allocation_id),
+                    "node_id": node_id,
+                    "attempt_id": attempt_id,
+                    "input_commit": parent_candidate_commit,
+                    "expected_staging_head": expected_staging_head,
+                }
+            )
+            if predecessor_attempt_id is not None:
+                retry_state["reuse"].append(
+                    {
+                        "node_id": node_id,
+                        "reused_from_attempt_id": predecessor_attempt_id,
+                        "replacement_attempt_id": attempt_id,
+                    }
+                )
+            active.append(node_id)
+            node = nodes[node_id]
+            node["status"] = "reserved"
+            node["parent_candidate_commit"] = parent_candidate_commit
+            node["allocation_id"] = allocation_id
+            node["logical_attempt"] = logical_attempt
+            node["input_commit"] = parent_candidate_commit
+            node["integrated_commit"] = None
+
+        committed = self.journal.compare_and_swap_checkpoint(
+            expected_revision=expected_revision,
+            expected_head_hash=expected_head_hash,
+            status="running",
+            state=state,
+            event_type="plan_graph_successor_attempts_reserved",
+            event_status="reserved",
+            payload={
+                "logical_attempt": logical_attempt,
+                "parent_candidate_commit": parent_candidate_commit,
+                "allocations": evidence,
+                "attempt_lineage": [
+                    item for item in lineage if item.get("allocation_id") in allocation_ids
+                ],
+            },
+            actor=_ACTOR,
+        )
+        return [
+            {
+                **attempt,
+                "successor_checkpoint_revision": committed["checkpoint"]["revision"],
+                "event_hash": committed["event"]["event_hash"],
+            }
+            for attempt in evidence
+        ]
+
+    def invalidate_successor_attempt(
+        self,
+        *,
+        allocation_id: str,
+        reason: str,
+        expected_revision: int,
+    ) -> dict[str, Any]:
+        """Record a retry decision without reusing or rewriting an attempt.
+
+        The controller must explicitly invalidate a stopped allocation before
+        the node can receive a replacement allocation.  This method does not
+        inspect child liveness and therefore cannot turn liveness into durable
+        scheduling authority.
+        """
+
+        if not isinstance(allocation_id, str) or not allocation_id:
+            raise ValueError("allocation_id must be non-empty")
+        if not isinstance(reason, str) or not reason:
+            raise ValueError("invalidation reason must be non-empty")
+        expected_head_hash = self._checkpoint_head(expected_revision)
+        state = self.state
+        lineage = state.get("attempt_lineage")
+        retry_state = state.get("retry_state")
+        nodes = state.get("nodes")
+        active = state.get("active_node_ids")
+        if (
+            not isinstance(lineage, list)
+            or not isinstance(retry_state, dict)
+            or not isinstance(retry_state.get("invalidations"), list)
+            or not isinstance(nodes, dict)
+            or not isinstance(active, list)
+        ):
+            raise AuditError("PlanGraph retry checkpoint is invalid")
+        matches = [item for item in lineage if item.get("allocation_id") == allocation_id]
+        if len(matches) != 1 or not isinstance(matches[0].get("attempt_id"), str):
+            raise AuditError("PlanGraph allocation has no immutable lineage record")
+        attempt = matches[0]
+        attempt_id = attempt["attempt_id"]
+        if any(item.get("attempt_id") == attempt_id for item in retry_state["invalidations"]):
+            raise AuditError("PlanGraph attempt was already invalidated")
+        node_id = attempt.get("node_id")
+        if not isinstance(node_id, str) or not isinstance(nodes.get(node_id), dict):
+            raise AuditError("PlanGraph invalidation node is invalid")
+        node = nodes[node_id]
+        if node.get("allocation_id") != allocation_id:
+            raise AuditError("PlanGraph allocation is no longer active for its node")
+        if node.get("status") == "succeeded":
+            raise AuditError("PlanGraph succeeded attempt cannot be invalidated")
+        invalidation = {
+            "attempt_id": attempt_id,
+            "node_id": node_id,
+            "allocation_id": allocation_id,
+            "reason": reason,
+            "invalidated_at": _timestamp(),
+        }
+        retry_state["invalidations"].append(invalidation)
+        active[:] = [item for item in active if item != node_id]
+        nodes[node_id].update(
+            {
+                "status": "queued",
+                "allocation_id": None,
+                "logical_attempt": None,
+                "input_commit": None,
+                "integrated_commit": None,
+            }
+        )
+        committed = self.journal.compare_and_swap_checkpoint(
+            expected_revision=expected_revision,
+            expected_head_hash=expected_head_hash,
+            status="running",
+            state=state,
+            event_type="plan_graph_successor_attempt_invalidated",
+            event_status="invalidated",
+            payload=dict(invalidation),
+            actor=_ACTOR,
+        )
+        return {
+            **invalidation,
+            "successor_checkpoint_revision": committed["checkpoint"]["revision"],
+            "event_hash": committed["event"]["event_hash"],
+        }
 
     def functionality_completed(self, command: str, candidate_commit: str) -> None:
         state = self.state
@@ -170,6 +548,11 @@ class PlanGraphAudit:
         if self.run_dir.exists():
             journal = AuditJournal.open_existing(self.run_dir, actor=_ACTOR)
             state = journal.checkpoint_state()
+            if state.get("audit_state_protocol") != _AUDIT_STATE_PROTOCOL:
+                raise AuditError(
+                    "existing PlanGraph checkpoint is legacy-incompatible; "
+                    "create a versioned migration record before resuming"
+                )
             if state.get("graph_run_id") != self.graph_run_id:
                 raise AuditError("existing audit directory is not this PlanGraph")
             if state.get("plan_graph_digest") != self._initial_state["plan_graph_digest"]:
@@ -228,6 +611,17 @@ class PlanGraphAudit:
         )
         self.journal.checkpoint("running", state)
 
+    def _checkpoint_head(self, expected_revision: int) -> str | None:
+        """Read the head coupled to the caller's expected checkpoint revision."""
+
+        checkpoint = json.loads(self.journal.checkpoint_path.read_text(encoding="utf-8"))
+        if checkpoint.get("revision") != expected_revision:
+            raise AuditConflictError("audit checkpoint revision changed")
+        head = checkpoint.get("head_hash")
+        if head is not None and not isinstance(head, str):
+            raise AuditError("audit checkpoint head is invalid")
+        return head
+
 
 def _plan_digest(plan: str) -> str | None:
     path = Path(plan)
@@ -264,6 +658,22 @@ def _timestamp() -> str:
         .isoformat(timespec="microseconds")
         .replace("+00:00", "Z")
     )
+
+
+def _is_git_commit(value: object) -> bool:
+    return isinstance(value, str) and bool(_GIT_COMMIT.fullmatch(value))
+
+
+def _attempt_id(graph_run_id: str, allocation_id: object) -> str:
+    """Return a stable audit identity without treating it as a child identity."""
+
+    suffix = allocation_id if isinstance(allocation_id, str) and allocation_id else "serial"
+    return f"{graph_run_id}:attempt:{suffix}"
+
+
+def _barrier_id(node_id: str, allocation_id: object) -> str:
+    suffix = allocation_id if isinstance(allocation_id, str) and allocation_id else "serial"
+    return f"{node_id}:integration:{suffix}"
 
 
 def _atomic_write(path: Path, content: bytes, mode: int) -> None:
