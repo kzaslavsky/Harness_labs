@@ -146,6 +146,7 @@ class ReviewLedger:
         targets: Mapping[str, str],
         *,
         origin_node: str,
+        current_paths: tuple[str, ...] = (),
     ) -> list[str]:
         """Move eligible findings to their uniquely pre-bound downstream owner."""
 
@@ -158,13 +159,15 @@ class ReviewLedger:
             ):
                 continue
             required_paths = record.get("required_paths", ())
-            resolved = [
-                _target_for_path(str(path), targets) for path in required_paths
+            downstream_paths = [
+                str(path) for path in required_paths if str(path) not in current_paths
             ]
+            resolved = [_target_for_path(path, targets) for path in downstream_paths]
             owners = set(resolved)
-            if not required_paths or None in owners or len(owners) != 1:
+            if not downstream_paths or None in owners or len(owners) != 1:
                 continue
             target = next(iter(owners))
+            record["required_paths"] = downstream_paths
             record["outcome"] = "transferred"
             record["outcome_reason"] = f"transferred to downstream owner {target}"
             record["origin_node"] = origin_node
@@ -473,6 +476,7 @@ class ReviewFixLoop:
                 transferred = ledger.transfer_scope_expanding(
                     self.finding_transfer_targets,
                     origin_node=self.origin_node_id,
+                    current_paths=self.allowed_paths,
                 )
                 fix_keys = sorted(
                     key

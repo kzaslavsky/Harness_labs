@@ -226,6 +226,45 @@ class ReviewFixLoopTests(unittest.TestCase):
         self.assertEqual(transfer["transferred_to"], "B")
         self.assertEqual([call[0] for call in factory.calls], ["review"])
 
+    def test_mixed_ownership_finding_transfers_only_downstream_paths(self):
+        finding = {
+            "id": "coupled-consumer",
+            "statement": "Finish the consumer cutover after the producer gate.",
+            "category": "integration",
+            "severity": "major",
+            "requires_disposition": True,
+            "file": "producer.py",
+            "subject": "coupled consumer integration",
+            "score": 90,
+            "fix_cost": "structural",
+            "protects": "AC integration",
+            "required_paths": ["feature.txt", "consumer.py"],
+        }
+        factory = _Factory(
+            {
+                "review": [
+                    lambda attempt: result(
+                        attempt.attempt_id,
+                        "review-fix-review/1",
+                        findings=(finding,),
+                    )
+                ]
+            }
+        )
+
+        outcome, _, _ = self.run_loop(
+            factory,
+            finding_transfer_targets={"consumer.py": "B"},
+            origin_node_id="A",
+        )
+
+        self.assertEqual(outcome.status, "succeeded")
+        self.assertEqual(len(outcome.transferred_findings), 1)
+        transfer = outcome.transferred_findings[0]
+        self.assertEqual(transfer["transferred_to"], "B")
+        self.assertEqual(transfer["required_paths"], ["consumer.py"])
+        self.assertEqual([call[0] for call in factory.calls], ["review"])
+
     def test_inherited_transfer_is_fixed_by_destination_not_retransferred(self):
         key = "consumer.py:consumer-integration"
         inherited = {
