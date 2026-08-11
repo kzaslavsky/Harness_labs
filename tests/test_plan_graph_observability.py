@@ -9,7 +9,7 @@ import sys
 import tempfile
 import unittest
 
-from harness_labs.audit import AuditConflictError, AuditError, AuditJournal
+from harness_labs.audit import AuditActor, AuditConflictError, AuditError, AuditJournal
 from harness_labs.plan_graph import (
     FeatureRunOutcome,
     PlanGraph,
@@ -45,6 +45,132 @@ def _success(request, commit: str) -> FeatureRunOutcome:
 
 
 class PlanGraphObservabilityTests(unittest.TestCase):
+    def _reserved_audit(self, root: Path, graph_id: str):
+        base = "a" * 40
+        graph = PlanGraph(_plan(root / "plan.md", base_commit=base), lambda request: _success(request, "unused"), run_root=root / "runs", graph_run_id=graph_id)
+        audit = graph._audit_for_run()
+        checkpoint = json.loads(audit.journal.checkpoint_path.read_text())
+        audit.reserve_successor_attempt(node_id="first", logical_attempt=1, allocation_id="allocation-first", parent_candidate_commit=base, expected_revision=checkpoint["revision"], expected_staging_head=base)
+        return audit
+
+    def _terminal_child(self, run_dir: Path, run_id: str, *, graph_id: str, attempt: dict[str, object], invalid_request: bool = False) -> dict[str, object]:
+        child = AuditJournal(run_dir, run_id, actor=AuditActor("child", "feature_run"))
+        descriptor = {
+            "protocol": "harness-plan-graph-parallel-child-request/1", "graph_id": graph_id,
+            "node_id": "first", "allocation": {"batch_id": "batch-first", "logical_attempt": 1,
+            "allocation_id": "allocation-first", "checkpoint_revision": attempt["checkpoint_revision"],
+            "expected_staging_head": "a" * 40}, "parent_candidate_commit": "a" * 40,
+            "dependency_candidates": [], "lane": {"branch": "lane-first", "worktree": "/lane-first", "may_advance_staging": False}, "writable_paths": ["harness_labs/plan_graph.py"],
+        }
+        verification = {"exit_code": 0, "command": "test"}
+        candidate = {"operation": "commit", "candidate_commit": "c" * 40}
+        if invalid_request:
+            descriptor["lane"]["may_advance_staging"] = True
+        descriptor_artifact = child.write_artifact("child-descriptor", descriptor)
+        verification_artifact = child.write_artifact("verification", verification)
+        candidate_artifact = child.write_artifact("candidate", candidate)
+        child.finalize("succeeded", result={}, state=child.checkpoint_state())
+        manifest = json.loads((run_dir / "manifest.json").read_text())
+        return {"protocol": "harness-plan-graph-parallel-seal-receipt/1", "status": "sealed", "graph_id": graph_id, "node_id": "first", "logical_attempt": 1, "allocation_id": "allocation-first", "parent_candidate_commit": "a" * 40, "candidate_commit": "c" * 40, "canonical_manifest_ref": f"artifact:sha256:{manifest['manifest_hash']}", "descriptor_ref": f"artifact:sha256:{descriptor_artifact.sha256}", "verification_evidence_ref": f"artifact:sha256:{verification_artifact.sha256}", "candidate_receipt_ref": f"artifact:sha256:{candidate_artifact.sha256}", "terminal_journal_event_ref": f"artifact:sha256:{manifest['head_hash']}"}
+
+    @staticmethod
+    def _liveness(graph_id: str, *, state: str, token: str) -> dict[str, object]:
+        return {"protocol": "harness-plan-graph-parallel-liveness/1", "graph_id": graph_id, "node_id": "first", "logical_attempt": 1, "allocation_id": "allocation-first", "pid": 41, "process_start_token": token, "state": state}
+
+    @staticmethod
+    def _force_evidence(audit) -> str:
+        artifact = audit.journal.write_artifact(
+            "force-reconcile-evidence", {"operator": "recovery controller"}
+        )
+        audit.journal.append(
+            "plan_graph_force_reconcile_evidence_recorded",
+            status="running",
+            payload={},
+            artifacts=(artifact,),
+        )
+        audit.journal.checkpoint("running", audit.state)
+        return f"artifact:sha256:{artifact.sha256}"
+
+    def test_recovery_adopts_dead_child_with_closed_request_and_never_moves_staging(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            audit = self._reserved_audit(Path(temporary), "graph-recovery")
+            node = audit.state["nodes"]["first"]
+            child_dir = Path(node["run_dir"])
+            receipt = self._terminal_child(child_dir, node["feature_run_id"], graph_id="graph-recovery", attempt=audit.state["successor_attempts"][0])
+            (child_dir / "plan-graph-liveness.json").write_text(json.dumps(self._liveness("graph-recovery", state="dead", token="old")))
+            (child_dir / "plan-graph-seal-receipt.json").write_text(json.dumps(receipt))
+            self.assertEqual(audit.reconcile_interrupted_attempts(process_probe=lambda pid: None), {"first": "sealed"})
+            self.assertEqual(audit.state["nodes"]["first"]["candidate_commit"], "c" * 40)
+            self.assertEqual(audit.state["current_candidate_commit"], "a" * 40)
+            self.assertIsNone(audit.state["nodes"]["first"]["integrated_commit"])
+            AuditJournal.verify(audit.run_dir)
+
+    def test_recovery_keeps_matching_live_child_running_and_does_not_adopt_its_seal(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            audit = self._reserved_audit(Path(temporary), "graph-live")
+            node = audit.state["nodes"]["first"]
+            child_dir = Path(node["run_dir"])
+            receipt = self._terminal_child(child_dir, node["feature_run_id"], graph_id="graph-live", attempt=audit.state["successor_attempts"][0])
+            (child_dir / "plan-graph-liveness.json").write_text(json.dumps(self._liveness("graph-live", state="live", token="still-live")))
+            (child_dir / "plan-graph-seal-receipt.json").write_text(json.dumps(receipt))
+            self.assertEqual(audit.reconcile_interrupted_attempts(process_probe=lambda pid: "still-live"), {"first": "running"})
+            self.assertEqual(audit.state["active_node_ids"], ["first"])
+            self.assertIsNone(audit.state["nodes"]["first"]["candidate_commit"])
+
+    def test_recovery_rejects_a_seal_bound_to_an_open_child_request(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            audit = self._reserved_audit(Path(temporary), "graph-open-request")
+            node = audit.state["nodes"]["first"]
+            child_dir = Path(node["run_dir"])
+            receipt = self._terminal_child(child_dir, node["feature_run_id"], graph_id="graph-open-request", attempt=audit.state["successor_attempts"][0], invalid_request=True)
+            (child_dir / "plan-graph-liveness.json").write_text(json.dumps(self._liveness("graph-open-request", state="dead", token="old")))
+            (child_dir / "plan-graph-seal-receipt.json").write_text(json.dumps(receipt))
+            self.assertEqual(audit.reconcile_interrupted_attempts(process_probe=lambda pid: None), {"first": "blocked"})
+
+    def test_force_block_quarantines_late_manifest_and_open_records_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            audit = self._reserved_audit(Path(temporary), "graph-force")
+            node = audit.state["nodes"]["first"]
+            child_dir = Path(node["run_dir"])
+            receipt = self._terminal_child(child_dir, node["feature_run_id"], graph_id="graph-force", attempt=audit.state["successor_attempts"][0])
+            (child_dir / "plan-graph-seal-receipt.json").write_text(json.dumps(receipt))
+            force = {"protocol": "harness-plan-graph-parallel-force-reconcile/1", "graph_id": "graph-force", "node_id": "first", "logical_attempt": 1, "allocation_id": "allocation-first", "disposition": "blocked", "evidence_ref": self._force_evidence(audit)}
+            self.assertEqual(audit.reconcile_interrupted_attempts(process_probe=lambda pid: None, force_records=(force,)), {"first": "blocked"})
+            self.assertIn("plan_graph_late_manifest_quarantined", (audit.run_dir / "events.jsonl").read_text())
+        with tempfile.TemporaryDirectory() as temporary:
+            audit = self._reserved_audit(Path(temporary), "graph-invalid-force")
+            with self.assertRaisesRegex(ValueError, "does not match"):
+                audit.reconcile_interrupted_attempts(process_probe=lambda pid: None, force_records=({"unexpected": True},))
+
+    def test_force_record_rejects_stale_allocation_and_unresolvable_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            audit = self._reserved_audit(Path(temporary), "graph-stale-force")
+            stale = audit.state["successor_attempts"][0]
+            checkpoint = json.loads(audit.journal.checkpoint_path.read_text())
+            audit.invalidate_successor_attempt(
+                allocation_id="allocation-first",
+                reason="replace interrupted allocation",
+                expected_revision=checkpoint["revision"],
+            )
+            checkpoint = json.loads(audit.journal.checkpoint_path.read_text())
+            audit.reserve_successor_attempt(
+                node_id="first",
+                logical_attempt=2,
+                allocation_id="allocation-first-retry",
+                parent_candidate_commit="a" * 40,
+                expected_revision=checkpoint["revision"],
+                expected_staging_head="a" * 40,
+            )
+            stale_force = {"protocol": "harness-plan-graph-parallel-force-reconcile/1", "graph_id": "graph-stale-force", "node_id": "first", "logical_attempt": stale["logical_attempt"], "allocation_id": stale["allocation_id"], "disposition": "blocked", "evidence_ref": self._force_evidence(audit)}
+            with self.assertRaisesRegex(ValueError, "does not match"):
+                audit.reconcile_interrupted_attempts(process_probe=lambda pid: None, force_records=(stale_force,))
+
+        with tempfile.TemporaryDirectory() as temporary:
+            audit = self._reserved_audit(Path(temporary), "graph-unresolvable-force")
+            force = {"protocol": "harness-plan-graph-parallel-force-reconcile/1", "graph_id": "graph-unresolvable-force", "node_id": "first", "logical_attempt": 1, "allocation_id": "allocation-first", "disposition": "blocked", "evidence_ref": f"artifact:sha256:{'d' * 64}"}
+            with self.assertRaisesRegex(ValueError, "does not match"):
+                audit.reconcile_interrupted_attempts(process_probe=lambda pid: None, force_records=(force,))
+
     def test_audit_state_keeps_logical_identity_attempt_lineage_and_retry_records(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

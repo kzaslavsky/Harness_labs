@@ -79,6 +79,15 @@ transaction, binds execution to the allocation's branch and worktree, and
 returns the versioned allocation-bound seal receipt required for subsequent
 controller-owned adoption. Final graph integration remains graph-owned.
 
+PG-05A reconciles interrupted active allocations from fresh child-owned
+liveness without storing it in the graph checkpoint. A matching live
+PID/start-token remains running. A dead child is adopted only when its verified
+terminal manifest, closed child-request descriptor, allocation-bound seal, and
+referenced verification/candidate evidence agree. Ambiguity blocks; a force
+record is audited and late evidence after a forced block is quarantined. A
+child seal never advances the graph staging head: join integration retains that
+custody.
+
 ### Exit criteria
 
 - A representative feature is implemented in an isolated worktree and merged

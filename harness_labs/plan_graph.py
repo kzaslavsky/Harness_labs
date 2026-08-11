@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -410,6 +411,8 @@ class PlanGraph:
         graph_run_id: str | None = None,
         functionality_tests: Sequence[str] = (),
         functionality_test_runner: FunctionalityTestRunner | None = None,
+        child_liveness_probe: Callable[[int], str | None] | None = None,
+        force_reconcile_records: Sequence[Mapping[str, object]] = (),
     ) -> None:
         self.plan = plan
         self.launcher = launcher
@@ -424,6 +427,8 @@ class PlanGraph:
         self.functionality_test_runner = (
             functionality_test_runner or _run_functionality_test
         )
+        self.child_liveness_probe = child_liveness_probe or _local_process_start_token
+        self.force_reconcile_records = tuple(force_reconcile_records)
 
     def validate(self) -> None:
         """Reject invalid references and cycles before a launcher can run."""
@@ -499,7 +504,24 @@ class PlanGraph:
         audit = self._audit_for_run()
         if audit.terminal:
             return self._result_from_audit(audit)
+        recovery = audit.reconcile_interrupted_attempts(
+            process_probe=self.child_liveness_probe,
+            force_records=self.force_reconcile_records,
+        )
         completed = self._load_audit_completed(audit)
+        if any(outcome == "running" for outcome in recovery.values()):
+            # An observed live child continues to own its allocation.  This
+            # synchronous compatibility runner has no authority to adopt or
+            # redispatch it.
+            return PlanGraphResult("running", None, dict(completed))
+        blocked = next(
+            (node_id for node_id, outcome in recovery.items() if outcome == "blocked"),
+            None,
+        )
+        if blocked is not None:
+            result = PlanGraphResult("blocked", None, dict(completed), blocked)
+            audit.finalize("blocked", self._result_payload(result))
+            return result
         ordered_runs = self._ordered_runs()
         self._validate_completed_dependencies(ordered_runs, completed)
         candidate_commit = self.plan.base_commit
@@ -730,6 +752,27 @@ class PlanGraph:
                 raise PlanGraphError(
                     f"PlanGraph state marks {run.id!r} complete before its dependency"
                 )
+
+
+def _local_process_start_token(pid: int) -> str | None:
+    """Return an immutable process-start token when the host can observe one."""
+
+    try:
+        return str(os.stat(f"/proc/{pid}").st_ctime_ns)
+    except OSError:
+        pass
+    try:
+        observed = subprocess.run(
+            ["ps", "-o", "lstart=", "-p", str(pid)],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=1,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return observed.stdout.strip() or None
+
 
 def _run_functionality_test(command: str, candidate_commit: str) -> None:
     with tempfile.TemporaryDirectory(prefix="plan-graph-") as temporary:

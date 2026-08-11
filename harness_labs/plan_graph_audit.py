@@ -14,7 +14,7 @@ import re
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping, Sequence
 
 from .audit import AuditActor, AuditConflictError, AuditError, AuditJournal
 
@@ -25,6 +25,9 @@ _TERMINAL = frozenset({"succeeded", "failed", "blocked", "interrupted"})
 # explicitly incompatible rather than being reinterpreted during resume.
 _AUDIT_STATE_PROTOCOL = "harness-plan-graph-audit/2"
 _GIT_COMMIT = re.compile(r"^[a-f0-9]{40}$")
+_ARTIFACT_REF = re.compile(r"^artifact:sha256:[a-f0-9]{64}$")
+_CHILD_LIVENESS_NAMES = ("plan-graph-liveness.json", "liveness.json")
+_CHILD_SEAL_NAMES = ("plan-graph-seal-receipt.json", "seal-receipt.json")
 
 
 class PlanGraphAudit:
@@ -416,6 +419,271 @@ class PlanGraphAudit:
             }
             for attempt in evidence
         ]
+
+    def reconcile_interrupted_attempts(
+        self,
+        *,
+        process_probe: Callable[[int], str | None],
+        force_records: Sequence[Mapping[str, object]] = (),
+    ) -> dict[str, str]:
+        """Reconcile active allocations from child-owned evidence only.
+
+        The graph checkpoint records the reservation, never child liveness.  A
+        matching live PID/token retains the allocation.  A dead child can be
+        sealed only through its verified terminal manifest, the current closed
+        child-request descriptor, and its exact allocation-bound seal receipt.
+        All other observations are blocked rather than redispatched.
+        """
+
+        if not callable(process_probe):
+            raise ValueError("process_probe must be callable")
+        state = self.state
+        nodes, attempts, active = (
+            state.get("nodes"), state.get("successor_attempts"), state.get("active_node_ids")
+        )
+        if not isinstance(nodes, dict) or not isinstance(attempts, list) or not isinstance(active, list):
+            raise AuditError("PlanGraph recovery checkpoint is invalid")
+        if not all(isinstance(item, dict) for item in attempts) or not all(isinstance(node_id, str) for node_id in active):
+            raise AuditError("PlanGraph recovery checkpoint has invalid allocations")
+        forced = self._force_records(force_records, attempts, nodes, active)
+        outcomes: dict[str, str] = {}
+        for attempt in attempts:
+            node_id = attempt.get("node_id")
+            if not isinstance(node_id, str) or node_id not in active:
+                continue
+            node = nodes.get(node_id)
+            if not isinstance(node, dict) or node.get("status") not in {"reserved", "running"}:
+                raise AuditError(f"PlanGraph recovery node {node_id!r} is not active")
+            liveness = self._liveness_disposition(self._child_liveness(attempt, node), process_probe)
+            if liveness == "running":
+                node["status"] = "running"
+                outcomes[node_id] = "running"
+                continue
+            proof = self._child_seal_proof(attempt, node)
+            force = forced.get(
+                (node_id, attempt.get("logical_attempt"), attempt.get("allocation_id"))
+            )
+            if force is not None:
+                if force["disposition"] == "sealed" and proof is not None:
+                    self._adopt_seal(state, node_id, proof, force["evidence_ref"], forced=True)
+                    outcomes[node_id] = "sealed"
+                else:
+                    if proof is not None:
+                        self._quarantine_late_manifest(node_id, proof, force["evidence_ref"])
+                    self._block_recovery_node(state, node_id, "force_reconcile", force["evidence_ref"])
+                    outcomes[node_id] = "blocked"
+            elif liveness == "dead" and proof is not None:
+                self._adopt_seal(state, node_id, proof, None, forced=False)
+                outcomes[node_id] = "sealed"
+            else:
+                self._block_recovery_node(state, node_id, "ambiguous_child_identity", None)
+                outcomes[node_id] = "blocked"
+        if outcomes:
+            self.journal.append("plan_graph_interrupted_attempts_reconciled", status="running", payload={"outcomes": outcomes}, actor=_ACTOR)
+            self.journal.checkpoint("running", state)
+        return outcomes
+
+    @staticmethod
+    def _liveness_disposition(liveness: Mapping[str, object] | None, process_probe: Callable[[int], str | None]) -> str:
+        if liveness is None:
+            return "ambiguous"
+        try:
+            token = process_probe(liveness["pid"])
+        except Exception:
+            return "ambiguous"
+        matches = token == liveness["process_start_token"]
+        if liveness["state"] == "live" and matches:
+            return "running"
+        if liveness["state"] == "dead" and not matches:
+            return "dead"
+        return "ambiguous"
+
+    def _force_records(
+        self,
+        records: Sequence[Mapping[str, object]],
+        attempts: Sequence[Mapping[str, object]],
+        nodes: Mapping[str, object],
+        active: Sequence[str],
+    ) -> dict[tuple[str, object, object], dict[str, str]]:
+        """Accept only evidence-backed records for the allocation still active now."""
+
+        active_allocations = {
+            (node_id, attempt.get("logical_attempt"), attempt.get("allocation_id"))
+            for attempt in attempts
+            if isinstance((node_id := attempt.get("node_id")), str)
+            and node_id in active
+            and isinstance((node := nodes.get(node_id)), Mapping)
+            and node.get("status") in {"reserved", "running"}
+            and node.get("logical_attempt") == attempt.get("logical_attempt")
+            and node.get("allocation_id") == attempt.get("allocation_id")
+        }
+        result: dict[tuple[str, object, object], dict[str, str]] = {}
+        for record in records:
+            if not isinstance(record, Mapping):
+                raise ValueError("force-reconcile record must be an object")
+            node_id = record.get("node_id")
+            if (set(record) != {"protocol", "graph_id", "node_id", "logical_attempt", "allocation_id", "disposition", "evidence_ref"}
+                or record.get("protocol") != "harness-plan-graph-parallel-force-reconcile/1"
+                or record.get("graph_id") != self.graph_run_id
+                or (node_id, record.get("logical_attempt"), record.get("allocation_id")) not in active_allocations
+                or not isinstance(node_id, str) or record.get("disposition") not in {"blocked", "sealed"}
+                or not isinstance(record.get("evidence_ref"), str) or not _ARTIFACT_REF.fullmatch(record["evidence_ref"])
+                or not self._force_evidence_is_durable(record["evidence_ref"])
+                or (node_id, record.get("logical_attempt"), record.get("allocation_id")) in result):
+                raise ValueError("force-reconcile record does not match an active allocation")
+            result[(node_id, record["logical_attempt"], record["allocation_id"])] = {
+                "disposition": record["disposition"],
+                "evidence_ref": record["evidence_ref"],
+            }
+        return result
+
+    def _force_evidence_is_durable(self, evidence_ref: str) -> bool:
+        """Verify that force evidence is an artifact already bound to this journal."""
+
+        try:
+            AuditJournal.verify(self.run_dir)
+            for line in self.journal.events_path.read_text(encoding="utf-8").splitlines():
+                event = json.loads(line)
+                artifacts = event.get("artifacts") if isinstance(event, dict) else None
+                if not isinstance(artifacts, list):
+                    return False
+                if any(
+                    isinstance(artifact, dict)
+                    and f"artifact:sha256:{artifact.get('sha256')}" == evidence_ref
+                    for artifact in artifacts
+                ):
+                    return True
+        except (AuditError, OSError, ValueError, json.JSONDecodeError):
+            return False
+        return False
+
+    def _child_liveness(self, attempt: Mapping[str, object], node: Mapping[str, object]) -> dict[str, object] | None:
+        raw = self._child_object(node, _CHILD_LIVENESS_NAMES)
+        required = {"protocol", "graph_id", "node_id", "logical_attempt", "allocation_id", "pid", "process_start_token", "state"}
+        if (raw is None or set(raw) != required or raw.get("protocol") != "harness-plan-graph-parallel-liveness/1"
+            or any(raw.get(key) != attempt.get(key) for key in ("graph_id", "node_id", "logical_attempt", "allocation_id"))
+            or type(raw.get("pid")) is not int or raw["pid"] < 1
+            or not isinstance(raw.get("process_start_token"), str) or not raw["process_start_token"]
+            or raw.get("state") not in {"live", "dead", "unavailable", "ambiguous"}):
+            return None
+        return raw
+
+    def _child_seal_proof(self, attempt: Mapping[str, object], node: Mapping[str, object]) -> dict[str, object] | None:
+        run_dir = self._child_run_dir(node)
+        if run_dir is None:
+            return None
+        try:
+            AuditJournal.verify(run_dir)
+            manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
+            receipt = self._child_object(node, _CHILD_SEAL_NAMES)
+            evidence = self._child_evidence(run_dir)
+        except (AuditError, OSError, ValueError, json.JSONDecodeError):
+            return None
+        required = {"protocol", "status", "graph_id", "node_id", "logical_attempt", "allocation_id", "parent_candidate_commit", "candidate_commit", "canonical_manifest_ref", "descriptor_ref", "verification_evidence_ref", "candidate_receipt_ref", "terminal_journal_event_ref"}
+        manifest_hash = manifest.get("manifest_hash") if isinstance(manifest, dict) else None
+        if (not isinstance(receipt, dict) or (set(receipt) != required and set(receipt) != required | {"stdout_artifact_ref"})
+            or not isinstance(manifest, dict) or manifest.get("status") != "succeeded" or manifest.get("run_id") != node.get("feature_run_id")
+            or not isinstance(manifest_hash, str) or not re.fullmatch(r"[a-f0-9]{64}", manifest_hash)
+            or receipt.get("protocol") != "harness-plan-graph-parallel-seal-receipt/1" or receipt.get("status") != "sealed"
+            or any(receipt.get(key) != attempt.get(key) for key in ("graph_id", "node_id", "logical_attempt", "allocation_id", "parent_candidate_commit"))
+            or not _is_git_commit(receipt.get("candidate_commit"))
+            or receipt.get("canonical_manifest_ref") != f"artifact:sha256:{manifest_hash}"
+            or not self._seal_evidence_matches(receipt, attempt, evidence, manifest.get("head_hash"))):
+            return None
+        return {"receipt": receipt, "manifest_hash": manifest_hash}
+
+    @staticmethod
+    def _child_evidence(run_dir: Path) -> dict[str, bytes] | None:
+        try:
+            manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
+            inventory = manifest.get("artifacts") if isinstance(manifest, dict) else None
+            if not isinstance(inventory, list):
+                return None
+            evidence: dict[str, bytes] = {}
+            for item in inventory:
+                if not isinstance(item, dict) or not isinstance(item.get("path"), str) or not isinstance(item.get("sha256"), str):
+                    return None
+                path = (run_dir / item["path"]).resolve()
+                path.relative_to((run_dir / "artifacts").resolve())
+                raw = path.read_bytes()
+                if hashlib.sha256(raw).hexdigest() != item["sha256"]:
+                    return None
+                evidence[f"artifact:sha256:{item['sha256']}"] = raw
+            return evidence
+        except (OSError, ValueError, json.JSONDecodeError):
+            return None
+
+    @staticmethod
+    def _seal_evidence_matches(receipt: Mapping[str, object], attempt: Mapping[str, object], evidence: Mapping[str, bytes] | None, terminal_event_hash: object) -> bool:
+        if evidence is None or not isinstance(terminal_event_hash, str):
+            return False
+        refs = ("descriptor_ref", "verification_evidence_ref", "candidate_receipt_ref")
+        if any(not isinstance(receipt.get(key), str) or receipt[key] not in evidence for key in refs) or receipt.get("terminal_journal_event_ref") != f"artifact:sha256:{terminal_event_hash}":
+            return False
+        try:
+            descriptor = json.loads(evidence[receipt["descriptor_ref"]])
+            verification = json.loads(evidence[receipt["verification_evidence_ref"]])
+            candidate = json.loads(evidence[receipt["candidate_receipt_ref"]])
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return False
+        allocation = descriptor.get("allocation") if isinstance(descriptor, dict) else None
+        dependencies = descriptor.get("dependency_candidates") if isinstance(descriptor, dict) else None
+        lane = descriptor.get("lane") if isinstance(descriptor, dict) else None
+        return (isinstance(descriptor, dict) and set(descriptor) == {"protocol", "graph_id", "node_id", "allocation", "parent_candidate_commit", "dependency_candidates", "lane", "writable_paths"}
+            and descriptor.get("protocol") == "harness-plan-graph-parallel-child-request/1"
+            and all(descriptor.get(key) == attempt.get(key) for key in ("graph_id", "node_id", "parent_candidate_commit"))
+            and isinstance(allocation, dict) and set(allocation) == {"batch_id", "logical_attempt", "allocation_id", "checkpoint_revision", "expected_staging_head"}
+            and isinstance(allocation.get("batch_id"), str) and bool(allocation["batch_id"])
+            and all(allocation.get(key) == attempt.get(key) for key in ("logical_attempt", "allocation_id", "checkpoint_revision", "expected_staging_head"))
+            and isinstance(dependencies, list) and len({item.get("node_id") for item in dependencies if isinstance(item, dict)}) == len(dependencies)
+            and all(isinstance(item, dict) and set(item) == {"node_id", "candidate_commit", "seal_receipt_ref"} and isinstance(item.get("node_id"), str) and bool(item["node_id"]) and _is_git_commit(item.get("candidate_commit")) and isinstance(item.get("seal_receipt_ref"), str) and bool(_ARTIFACT_REF.fullmatch(item["seal_receipt_ref"])) for item in dependencies)
+            and isinstance(lane, dict) and set(lane) == {"branch", "worktree", "may_advance_staging"} and isinstance(lane.get("branch"), str) and bool(lane["branch"]) and isinstance(lane.get("worktree"), str) and bool(lane["worktree"]) and lane.get("may_advance_staging") is False
+            and isinstance(descriptor.get("writable_paths"), list) and bool(descriptor["writable_paths"]) and len(descriptor["writable_paths"]) == len(set(descriptor["writable_paths"])) and all(isinstance(path, str) and path for path in descriptor["writable_paths"])
+            and isinstance(verification, dict) and verification.get("exit_code") == 0
+            and isinstance(candidate, dict) and candidate.get("operation") == "commit" and candidate.get("candidate_commit") == receipt.get("candidate_commit"))
+
+    @staticmethod
+    def _child_run_dir(node: Mapping[str, object]) -> Path | None:
+        value = node.get("run_dir")
+        if not isinstance(value, str) or not value:
+            return None
+        path = Path(value)
+        return path.resolve() if path.is_dir() and not path.is_symlink() else None
+
+    def _child_object(self, node: Mapping[str, object], names: Sequence[str]) -> dict[str, object] | None:
+        run_dir = self._child_run_dir(node)
+        if run_dir is None:
+            return None
+        present = [run_dir / name for name in names if (run_dir / name).exists()]
+        if len(present) != 1 or present[0].is_symlink() or not present[0].is_file():
+            return None
+        try:
+            value = json.loads(present[0].read_text(encoding="utf-8"))
+        except (OSError, ValueError, json.JSONDecodeError):
+            return None
+        return value if isinstance(value, dict) else None
+
+    def _adopt_seal(self, state: dict[str, Any], node_id: str, proof: Mapping[str, object], force_evidence_ref: str | None, *, forced: bool) -> None:
+        receipt = proof["receipt"]
+        assert isinstance(receipt, Mapping)
+        node = state["nodes"][node_id]
+        assert isinstance(node, dict)
+        # A child seal proves its lane candidate.  It never advances the graph
+        # staging head; only the join integration barrier owns that custody.
+        node.update({"status": "succeeded", "candidate_commit": receipt["candidate_commit"], "finished_at": _timestamp(), "integrated_commit": None})
+        state["active_node_ids"].remove(node_id)
+        self.journal.append("plan_graph_child_seal_adopted", status="succeeded", payload={"plan_node_id": node_id, "seal_receipt": dict(receipt), "force_evidence_ref": force_evidence_ref, "forced": forced}, actor=_ACTOR)
+
+    def _block_recovery_node(self, state: dict[str, Any], node_id: str, reason: str, evidence_ref: str | None) -> None:
+        node = state["nodes"][node_id]
+        assert isinstance(node, dict)
+        node.update({"status": "blocked", "finished_at": _timestamp(), "evidence": {"reason": reason, "evidence_ref": evidence_ref}})
+        state["active_node_ids"].remove(node_id)
+        self.journal.append("plan_graph_child_recovery_blocked", status="blocked", payload={"plan_node_id": node_id, "reason": reason, "evidence_ref": evidence_ref}, actor=_ACTOR)
+
+    def _quarantine_late_manifest(self, node_id: str, proof: Mapping[str, object], force_evidence_ref: str) -> None:
+        artifact = self.journal.write_artifact("late-plan-graph-child-manifest", {"node_id": node_id, "manifest_hash": proof["manifest_hash"], "seal_receipt": proof["receipt"]})
+        self.journal.append("plan_graph_late_manifest_quarantined", status="blocked", payload={"plan_node_id": node_id, "force_evidence_ref": force_evidence_ref}, actor=_ACTOR, artifacts=(artifact,))
 
     def invalidate_successor_attempt(
         self,
