@@ -144,6 +144,7 @@ class CodexSemanticTaskExecutor:
     require_preflight_success: bool = False
     sandbox: str = "read-only"
     require_repository_change: bool = False
+    forbid_repository_change: bool = False
     writable_paths: tuple[str, ...] = ()
     allow_dirty_baseline: bool = False
     audit: AuditJournal | None = field(default=None, repr=False)
@@ -155,6 +156,10 @@ class CodexSemanticTaskExecutor:
         if self.require_repository_change and self.sandbox != "workspace-write":
             raise ValueError(
                 "require_repository_change requires the workspace-write sandbox"
+            )
+        if self.require_repository_change and self.forbid_repository_change:
+            raise ValueError(
+                "repository changes cannot be both required and forbidden"
             )
         if self.sandbox == "workspace-write":
             if not self.writable_paths:
@@ -323,6 +328,11 @@ class CodexSemanticTaskExecutor:
             if self.require_repository_change and not worker_changed_paths:
                 raise LiveExecutionError(
                     "writable worker completed without changing the repository"
+                )
+            if self.forbid_repository_change and worker_changed_paths:
+                raise LiveExecutionError(
+                    "writable verifier changed repository paths: "
+                    + ", ".join(worker_changed_paths)
                 )
             workspace_artifact = self.evidence.add(
                 kind="workspace-change-receipt",
@@ -509,6 +519,7 @@ class CodexSemanticTaskExecutor:
                 "reasoning": self.reasoning,
                 "sandbox": self.sandbox,
                 "writable_paths": list(self.writable_paths),
+                "forbid_repository_change": self.forbid_repository_change,
                 "allow_dirty_baseline": self.allow_dirty_baseline,
                 "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
                 "usage": (

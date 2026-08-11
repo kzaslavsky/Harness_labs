@@ -41,6 +41,17 @@ class CodexSemanticTaskExecutorTests(unittest.TestCase):
                 "Build.",
                 sandbox="workspace-write",
             )
+        with self.assertRaisesRegex(ValueError, "required and forbidden"):
+            CodexSemanticTaskExecutor(
+                {},
+                Path("."),
+                EvidenceCatalog(),
+                "Verify.",
+                sandbox="workspace-write",
+                writable_paths=("tests",),
+                require_repository_change=True,
+                forbid_repository_change=True,
+            )
 
     def test_preflight_and_model_output_become_hashed_semantic_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -290,6 +301,72 @@ class CodexSemanticTaskExecutorTests(unittest.TestCase):
             )
         self.assertEqual(result.status, "failed")
         self.assertIn("outside its grant", result.payload["error"])
+
+    def test_writable_verifier_fails_if_it_changes_an_allowed_path(self) -> None:
+        task = {
+            "id": "verify",
+            "objective": "Verify",
+            "context": "{}",
+            "details_schema": "review-fix-verify/1",
+            "acceptance_criteria": [],
+            "required_capabilities": ["repo.write"],
+        }
+        executor = CodexSemanticTaskExecutor(
+            task,
+            Path("."),
+            EvidenceCatalog(),
+            "Verify only.",
+            sandbox="workspace-write",
+            writable_paths=("tests",),
+            allow_dirty_baseline=True,
+            forbid_repository_change=True,
+        )
+        snapshots = (
+            {"head": "abc", "branch": "feature", "changed_paths": [], "files": {}},
+            {
+                "head": "abc",
+                "branch": "feature",
+                "changed_paths": ["tests/test_feature.py"],
+                "files": {
+                    "tests/test_feature.py": {"kind": "file", "sha256": "changed"}
+                },
+            },
+        )
+        raw = {
+            "summary": "Verified.",
+            "deliverable_markdown": "Verified.",
+            "details_json": '{"verified_finding_keys": []}',
+            "claims": [],
+            "findings": [],
+            "recommendations": [],
+            "unresolved_questions": [],
+            "satisfied_criteria": [],
+        }
+
+        def run(argv, **kwargs):
+            output = Path(argv[argv.index("-o") + 1])
+            output.write_text(json.dumps(raw), encoding="utf-8")
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+        with (
+            patch("harness_labs.controller_live.shutil.which", return_value="codex"),
+            patch("harness_labs.controller_live.subprocess.run", side_effect=run),
+            patch(
+                "harness_labs.controller_live.workspace_snapshot",
+                side_effect=snapshots,
+            ),
+            patch.object(Path, "exists", return_value=True),
+        ):
+            result = executor.execute(
+                TaskAttempt(
+                    "verify/attempt-1",
+                    "task:verify",
+                    "context:verify",
+                    "profile:verifier",
+                )
+            )
+        self.assertEqual(result.status, "failed")
+        self.assertIn("verifier changed repository paths", result.payload["error"])
 
     def test_fixer_can_use_dirty_baseline_and_receipt_records_only_its_delta(self):
         with tempfile.TemporaryDirectory() as temporary:
