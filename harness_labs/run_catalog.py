@@ -279,7 +279,7 @@ def _detail(metrics: Mapping[str, Any], descriptor: Mapping[str, Any] | None) ->
     git = [event["payload"] for event in events if str(event.get("event_type", "")).startswith("git_")]
     def family_present(key: str, reason: str) -> dict[str, str | None]:
         return availability("available") if key in controller else availability("unavailable", reason)
-    return {"lifecycle": events, "criteria": controller.get("criteria", []), "tasks": controller.get("tasks", []), "findings": controller.get("findings", []), "decisions": controller.get("decisions", []), "evidence_metadata": metrics["manifest"].get("artifacts", []) if metrics["manifest"] else [], "git_custody": git, "usage": metrics["summary"], "metrics": _detail_metrics(metrics), "timing": {"started_at": metrics["checkpoint"].get("started_at"), "updated_at": metrics["checkpoint"].get("updated_at")}, "availability": {"lifecycle": availability("available"), "criteria": family_present("criteria", "criteria were not recorded"), "tasks": family_present("tasks", "tasks were not recorded"), "findings": family_present("findings", "findings were not recorded"), "evidence_metadata": availability("available") if metrics["manifest"] is not None else availability("unavailable", "manifest is unavailable"), "git_custody": availability("available"), "usage": availability("available") if metrics["summary"] is not None else availability("unavailable", "summary is unavailable")}, "descriptor": descriptor}
+    return {"lifecycle": events, "criteria": controller.get("criteria", []), "tasks": controller.get("tasks", []), "findings": controller.get("findings", []), "decisions": controller.get("decisions", []), "evidence_metadata": metrics["manifest"].get("artifacts", []) if metrics["manifest"] else [], "git_custody": git, "usage": metrics["summary"], "metrics": _detail_metrics(metrics), "timing": {"started_at": metrics["checkpoint"].get("started_at"), "updated_at": metrics["checkpoint"].get("updated_at")}, "availability": {"lifecycle": metrics["availability"]["journal"], "criteria": family_present("criteria", "criteria were not recorded"), "tasks": family_present("tasks", "tasks were not recorded"), "findings": family_present("findings", "findings were not recorded"), "evidence_metadata": availability("available") if metrics["manifest"] is not None else availability("unavailable", "manifest is unavailable"), "git_custody": availability("available"), "usage": availability("available") if metrics["summary"] is not None else availability("unavailable", "summary is unavailable")}, "descriptor": descriptor}
 
 
 def _detail_metrics(metrics: Mapping[str, Any]) -> dict[str, Any]:
@@ -312,6 +312,12 @@ def _detail_metrics(metrics: Mapping[str, Any]) -> dict[str, Any]:
             "cost_source": usage.get("pricing_source") if recorded_cost is not None else estimated_cost["source"] if estimated_cost else None,
             "long_context_priced": estimated_cost["long_context"] if estimated_cost else False,
         })
+    stages = _execution_stages(metrics)
+    collection_method = "verified backend_transport journal events"
+    if not records:
+        records.extend(_codex_token_usage_records(metrics, stages))
+        if records:
+            collection_method = "verified cumulative Codex token-usage notifications"
     totals = _aggregate_metric_rows(records)
     summary = metrics.get("summary") if isinstance(metrics.get("summary"), Mapping) else {}
     summary_usage = summary.get("usage") if isinstance(summary.get("usage"), Mapping) else {}
@@ -347,12 +353,163 @@ def _detail_metrics(metrics: Mapping[str, Any]) -> dict[str, Any]:
         "by_model": _breakdown(records, "model"),
         "by_effort": _breakdown(records, "effort"),
         "by_backend": _breakdown(records, "backend"),
+        "stages": stages,
         "provenance": {
-            "usage_records": len(records),
-            "collection_method": "verified backend_transport journal events",
+            "usage_records": sum(record["calls"] for record in records),
+            "collection_method": collection_method,
             "peak_context_definition": "maximum observed input_tokens in one backend invocation",
         },
     }
+
+
+def _codex_token_usage_records(metrics: Mapping[str, Any], stages: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Read numeric usage only from hash-verified Codex transport artifacts."""
+    supplied = metrics.get("run_dir")
+    if not isinstance(supplied, str):
+        return []
+    run_dir = Path(supplied).resolve()
+    updates: list[dict[str, Any]] = []
+    for event in metrics.get("events", []):
+        payload = event.get("payload") if isinstance(event.get("payload"), Mapping) else {}
+        if event.get("event_type") != "transport_message" or payload.get("direction") != "inbound" or payload.get("method") != "thread/tokenUsage/updated":
+            continue
+        for artifact in event.get("artifacts", []):
+            if not isinstance(artifact, Mapping) or not isinstance(artifact.get("path"), str):
+                continue
+            target = run_dir.joinpath(*Path(artifact["path"]).parts)
+            try:
+                resolved = target.resolve(strict=True)
+                if resolved.is_symlink() or run_dir not in resolved.parents or resolved.stat().st_size > 4 * 1024 * 1024:
+                    continue
+                lines = resolved.read_text(encoding="utf-8").splitlines()
+            except OSError:
+                continue
+            for line in lines:
+                try:
+                    message = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(message, Mapping) or message.get("method") != "thread/tokenUsage/updated":
+                    continue
+                params = message.get("params") if isinstance(message.get("params"), Mapping) else {}
+                usage = params.get("tokenUsage") if isinstance(params.get("tokenUsage"), Mapping) else {}
+                total = usage.get("total") if isinstance(usage.get("total"), Mapping) else {}
+                last = usage.get("last") if isinstance(usage.get("last"), Mapping) else {}
+                normalized_total = _codex_usage_values(total)
+                normalized_last = _codex_usage_values(last)
+                if normalized_total is not None and normalized_last is not None:
+                    updates.append({"total": normalized_total, "last": normalized_last})
+    if not updates:
+        return []
+    final = updates[-1]["total"]
+    model_event = next((event for event in metrics.get("events", []) if event.get("event_type") == "backend_process_started"), {})
+    model_payload = model_event.get("payload") if isinstance(model_event.get("payload"), Mapping) else {}
+    model = str(model_payload.get("model") or "unavailable")
+    effort = str(model_payload.get("reasoning") or "unavailable")
+    estimates = [_estimated_api_cost(model, update["last"]) for update in updates]
+    priced = all(estimate is not None for estimate in estimates)
+    duration_ms = sum(stage["duration_ms"] for stage in stages if stage.get("kind") == "coordinator session" and type(stage.get("duration_ms")) is int)
+    return [{
+        "agent": "codex-app-server coordinator",
+        "phase": next((str(stage.get("phase")) for stage in stages if stage.get("kind") == "coordinator session"), "other"),
+        "agent_type": "run_coordinator",
+        "model": model,
+        "effort": effort,
+        "backend": str(model_event.get("backend_id") or "codex-app-server"),
+        "calls": len(updates),
+        "input_tokens": final["input_tokens"],
+        "cached_input_tokens": final["cached_input_tokens"],
+        "output_tokens": final["output_tokens"],
+        "peak_input_tokens": max(update["last"]["input_tokens"] for update in updates),
+        "duration_ms": duration_ms,
+        "cost_usd": sum(estimate["usd"] for estimate in estimates if estimate is not None) if priced else None,
+        "cost_kind": "estimated" if priced else "unavailable",
+        "cost_source": estimates[0]["source"] if priced else None,
+        "long_context_priced": any(estimate["long_context"] for estimate in estimates if estimate is not None),
+    }]
+
+
+def _codex_usage_values(value: Mapping[str, Any]) -> dict[str, int] | None:
+    fields = {
+        "input_tokens": value.get("inputTokens"),
+        "cached_input_tokens": value.get("cachedInputTokens"),
+        "output_tokens": value.get("outputTokens"),
+    }
+    return fields if all(type(item) is int and item >= 0 for item in fields.values()) else None
+
+
+def _execution_stages(metrics: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Project audited coordinator, task, and verification stages."""
+    events = metrics.get("events", [])
+    starts: dict[str, Mapping[str, Any]] = {}
+    stages: list[dict[str, Any]] = []
+    runtime_model = "unavailable"
+    runtime_effort = "unavailable"
+    for event in events:
+        payload = event.get("payload") if isinstance(event.get("payload"), Mapping) else {}
+        if event.get("event_type") == "backend_process_started":
+            runtime_model = str(payload.get("model") or "unavailable")
+            runtime_effort = str(payload.get("reasoning") or "unavailable")
+        nested = payload.get("controller_event") if isinstance(payload.get("controller_event"), Mapping) else {}
+        nested_payload = nested.get("payload") if isinstance(nested.get("payload"), Mapping) else {}
+        event_type = nested.get("event_type")
+        session_id = nested_payload.get("session_id")
+        if event_type == "coordinator.session_started" and isinstance(session_id, str):
+            starts[session_id] = event
+        elif event_type == "coordinator.session_ended" and isinstance(session_id, str):
+            stages.append({
+                "label": str(nested_payload.get("segment_id") or "coordinator session"),
+                "kind": "coordinator session",
+                "phase": str(nested_payload.get("ending_phase") or nested_payload.get("starting_phase") or "unavailable"),
+                "attempt": str(nested_payload.get("attempt") or "unavailable"),
+                "status": str(nested_payload.get("result_status") or nested_payload.get("outcome") or event.get("status") or "recorded"),
+                "backend": str(nested_payload.get("backend_id") or "unavailable"),
+                "model": runtime_model,
+                "effort": runtime_effort,
+                "duration_ms": _event_elapsed_ms(starts.get(session_id), event),
+            })
+        if event.get("event_type") == "deterministic_verification_completed":
+            stages.append({
+                "label": str(payload.get("stage") or "verification"),
+                "kind": "deterministic verification",
+                "phase": "verify",
+                "attempt": str(payload.get("attempt") or "unavailable"),
+                "status": "succeeded" if payload.get("exit_code") == 0 and not payload.get("timed_out") else "failed",
+                "backend": "local command",
+                "model": "not applicable",
+                "effort": "not applicable",
+                "duration_ms": _nonnegative_int(payload.get("duration_ms")),
+            })
+    state = metrics.get("checkpoint", {}).get("state", {})
+    controller = state.get("controller") if isinstance(state, Mapping) and isinstance(state.get("controller"), Mapping) else {}
+    tasks = controller.get("tasks") if isinstance(controller.get("tasks"), Mapping) else {}
+    for task_id, task in tasks.items():
+        if not isinstance(task, Mapping):
+            continue
+        attempt = str(task.get("attempt_id") or "unavailable")
+        evidence = task.get("evidence") if isinstance(task.get("evidence"), list) else []
+        task_backend = next((value.removeprefix("model-backend:") for value in evidence if isinstance(value, str) and value.startswith("model-backend:")), "unavailable")
+        stages.append({
+            "label": str(task_id),
+            "kind": str(task.get("role") or "task"),
+            "phase": _attempt_phase(attempt),
+            "attempt": attempt,
+            "status": str(task.get("status") or "recorded"),
+            "backend": task_backend,
+            "model": runtime_model,
+            "effort": runtime_effort,
+            "duration_ms": None,
+        })
+    return stages
+
+
+def _event_elapsed_ms(start: Mapping[str, Any] | None, end: Mapping[str, Any]) -> int | None:
+    if not start:
+        return None
+    start_ns, end_ns = start.get("monotonic_ns"), end.get("monotonic_ns")
+    if type(start_ns) is not int or type(end_ns) is not int or end_ns < start_ns:
+        return None
+    return (end_ns - start_ns) // 1_000_000
 
 
 def _attempt_phase(attempt: str) -> str:
@@ -421,7 +578,7 @@ def _aggregate_metric_rows(rows: list[Mapping[str, Any]]) -> dict[str, Any]:
         "cached_input_tokens": sum(row["cached_input_tokens"] for row in rows),
         "output_tokens": sum(row["output_tokens"] for row in rows),
         "duration_ms": sum(row["duration_ms"] for row in rows),
-        "peak_input_tokens": max((row["input_tokens"] for row in rows), default=0),
+        "peak_input_tokens": max((row.get("peak_input_tokens", row["input_tokens"]) for row in rows), default=0),
         "cost": {
             "state": cost_state,
             "usd": round(sum(row["cost_usd"] or 0 for row in rows), 6) if rows and missing_cost == 0 else None,

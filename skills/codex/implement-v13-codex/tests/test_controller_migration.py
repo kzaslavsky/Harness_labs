@@ -58,7 +58,7 @@ class ControllerMigrationTests(unittest.TestCase):
         }
         queue = {
             "protocol_version": "1.0",
-            "dispatcher": "serial-implement-codex",
+            "dispatcher": "implement-v13-codex",
             "queue_run_id": "qr-test",
             "base_branch": "main",
             "state_revision": 3,
@@ -332,8 +332,8 @@ class ControllerMigrationTests(unittest.TestCase):
         migration_result = json.loads(committed.stdout)
         package_root = fixture["package_root"]
         serial = self._load_module(
-            package_root / "serial-implement-codex/scripts/serial_state.py",
-            "serial_state_migrated_e2e",
+            package_root / "implement-v13-codex/scripts/feature_queue_state.py",
+            "feature_queue_state_migrated_e2e",
         )
         queue_path = fixture["paths"]["queue"]
         queue = serial.read_json(queue_path)
@@ -398,8 +398,8 @@ class ControllerMigrationTests(unittest.TestCase):
             "run_feature_migrated_e2e",
         )
         run_feature.PACKAGE = package_root / "implement-v13-codex"
-        run_feature.SERIAL_SCRIPT = (
-            package_root / "serial-implement-codex/scripts/serial_state.py"
+        run_feature.QUEUE_STATE_SCRIPT = (
+            package_root / "implement-v13-codex/scripts/feature_queue_state.py"
         )
         preflight = run_feature._prepare_resumed_run(
             dispatch=payload,

@@ -15,8 +15,8 @@ from unittest.mock import patch
 
 PACKAGE = Path(__file__).parents[1]
 SCRIPTS = PACKAGE / "scripts"
-SERIAL_SCRIPT = PACKAGE.parent / "serial-implement-codex" / "scripts" / "serial_state.py"
-SERIAL_TEST = PACKAGE.parent / "serial-implement-codex" / "tests" / "test_serial_state.py"
+SERIAL_SCRIPT = PACKAGE / "scripts" / "feature_queue_state.py"
+SERIAL_TEST = PACKAGE / "tests" / "test_feature_queue_state.py"
 sys.path.insert(0, str(SCRIPTS))
 
 from run_feature import (  # noqa: E402

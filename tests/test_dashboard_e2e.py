@@ -212,7 +212,7 @@ class DashboardEndToEndTests(unittest.TestCase):
                 page.wait_for("document.querySelector('aside[aria-label=\\\"active-graph:planned PlanGraph node details\\\"]') !== null")
                 page.wait_for("document.querySelector('.inspector').innerText.includes('Verified FeatureRun metrics are unavailable')")
                 # A correlated node opens its verified run directly on metrics.
-                page.evaluate("[...document.querySelectorAll('.react-flow__node')].find((node) => node.innerText.includes('live-child')).click()")
+                page.evaluate("[...document.querySelectorAll('.react-flow__node')].find((node) => node.querySelector('strong')?.innerText === 'live').click()")
                 page.wait_for("document.querySelector('aside[aria-label=\\\"live-child FeatureRun details\\\"]') !== null")
                 page.wait_for("document.querySelector('.inspector').innerText.includes('Dashboard fixture live-child')")
                 self.assertEqual(

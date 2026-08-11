@@ -39,6 +39,8 @@ Status: active
   [`live-plangraph-dashboard-operations.md`](live-plangraph-dashboard-operations.md)
 - PlanGraph and FeatureRun projection design:
   [`plan-projection-design.md`](plan-projection-design.md)
+- Repository-bound PlanGraph approval design:
+  [`plan-approval-design.md`](plan-approval-design.md)
 
 ## Seed implementation records
 

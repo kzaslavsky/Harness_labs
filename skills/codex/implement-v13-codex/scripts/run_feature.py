@@ -23,9 +23,16 @@ from controller_package import (
 )
 from response_schema import production_response_schema_paths
 from implementation_partition import ensure_partition, validate_worker_spec
-from feature_state import block_checkpoint, resume_blocked_checkpoint
+from feature_state import (
+    block_checkpoint,
+    resume_blocked_checkpoint,
+    resume_checkpoint_delta_scoped,
+)
 from closure_driver import PROTOCOL as CLOSURE_PROGRAM_PROTOCOL, run_closure_program
-from review_closure import validate_invocation_spec as validate_closure_invocation_spec
+from review_closure import (
+    validate_delta_scope,
+    validate_invocation_spec as validate_closure_invocation_spec,
+)
 from state_io import (
     StateError,
     atomic_write_bytes,
@@ -39,7 +46,7 @@ from state_io import (
 
 
 PACKAGE = Path(__file__).resolve().parent.parent
-SERIAL_SCRIPT = PACKAGE.parent / "serial-implement-codex" / "scripts" / "serial_state.py"
+QUEUE_STATE_SCRIPT = PACKAGE / "scripts" / "feature_queue_state.py"
 COORDINATOR_PROTOCOL = "implement-v13-codex/coordinator-turn/2"
 ROLLOVER_PROTOCOL = "implement-v13-codex/coordinator-rollover/2"
 LEGACY_ROLLOVER_PROTOCOL = "implement-v13-codex/coordinator-rollover/1"
@@ -77,10 +84,10 @@ def _emit_controller_phase(checkpoint: dict[str, Any]) -> tuple[Any, Any, Any, A
     return signature
 
 
-def _serial_module() -> Any:
-    spec = importlib.util.spec_from_file_location("serial_state_for_feature", SERIAL_SCRIPT)
+def _queue_state_module() -> Any:
+    spec = importlib.util.spec_from_file_location("feature_queue_state", QUEUE_STATE_SCRIPT)
     if spec is None or spec.loader is None:
-        raise StateError("serial controller is unavailable")
+        raise StateError("feature queue controller is unavailable")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -418,7 +425,7 @@ def settle_existing_blocked(dispatch_path: Path) -> dict[str, Any]:
         if isinstance(evidence.get("error"), str) and evidence["error"]:
             reason = evidence["error"]
     return _settle_blocked(
-        _serial_module(),
+        _queue_state_module(),
         queue_path,
         dispatch,
         {
@@ -448,8 +455,8 @@ def _write_turn_inputs(
     bootstrap = (
         "You are the feature coordinator already launched and supervised by run_feature.py. "
         "Never invoke run_feature.py or start_planning.py, including for help or recovery; doing "
-        "so would recursively enter the controller. Never invoke serial_state.py, mutate the "
-        "serial queue, acknowledge a feature, or release a dispatch lease; the supervising "
+        "so would recursively enter the controller. Never invoke feature_queue_state.py, mutate the "
+        "feature queue, acknowledge a feature, or release a dispatch lease; the supervising "
         "run_feature.py process exclusively owns those transitions. Never invoke run_exec.py inside this "
         "sandbox. When one model role is required, write its complete run_exec spec beneath the run artifact "
         "directory and return status=invoke with its absolute path in invocation_spec_path. When two or three "
@@ -460,7 +467,7 @@ def _write_turn_inputs(
         "coordinator turn. Execute deterministic phase work directly with the other lower-level scripts named "
         "by the installed skill. Read the installed "
         f"skill at {PACKAGE / 'SKILL.md'} and its required references once, then continue from the "
-        "durable checkpoint. You own no serial queue judgment: continue phase work until the "
+        "durable checkpoint. You own no feature queue judgment: continue phase work until the "
         "checkpoint is durably blocked after all required revision opportunities, or until the "
         "feature result is written. Do not stop merely to report progress. Read run context from these paths; "
         f"Every brokered child prompt receives this controller-injected environment context:\n{EXECUTION_ENVIRONMENT_CONTEXT}\n\n"
@@ -486,7 +493,7 @@ def _write_turn_inputs(
     continuation = (
         "Continue the same supervised feature-coordinator thread from durable state. Do not reread the installed "
         "skill or repository orientation unless a referenced file hash changed. Never invoke run_feature.py, "
-        "run_exec.py, or serial_state.py. Return the next schema-bound coordinator action after consuming "
+        "run_exec.py, or feature_queue_state.py. Return the next schema-bound coordinator action after consuming "
         "PREVIOUS_CHILD_RESULT_PATH and the current checkpoint.\n\n"
     )
     rollover_context = (
@@ -495,6 +502,21 @@ def _write_turn_inputs(
         "package, checkpoint, closure-ledger, and dependency-graph hashes in rollover_ack. "
         "Do not resume or claim the prior thread.\n\n"
         if rollover_summary is not None
+        else ""
+    )
+    delta_scope = checkpoint.get("delta_resume_scope")
+    delta_context = (
+        (
+            "This run resumed delta-scoped from a terminal block. The verified candidate commit "
+            f"{delta_scope.get('candidate_commit_sha')} is already checked out in the worktree; the "
+            "controller verified it against HEAD before reopening this checkpoint. Do not restart "
+            "PLANNING or IMPLEMENTING and do not rebuild committed work. Close exactly the open "
+            "closure fingerprints recorded in the checkpoint's delta_resume_scope through "
+            "review_closure.py; for re-verification run the recorded verification_slice commands "
+            "and closure-bound targeted review rather than the full certification suite. The full "
+            "COMMITTING gates still run once, after every open finding is closed.\n\n"
+        )
+        if isinstance(delta_scope, dict)
         else ""
     )
     repair_effect_contract = (
@@ -527,6 +549,7 @@ def _write_turn_inputs(
     prompt.write_text(
         (bootstrap if resume_thread_id is None else continuation)
         + rollover_context
+        + delta_context
         + repair_effect_contract
         + repair_model_policy
         + paths,
@@ -977,6 +1000,52 @@ def _runtime_rollover_paths(artifact_dir: Path) -> list[Path]:
     return runtime
 
 
+def _worktree_head(worktree: Path) -> str:
+    completed = subprocess.run(
+        ["git", "-C", str(worktree), "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        raise StateError("delta-scoped resume could not read the candidate worktree HEAD")
+    return completed.stdout.strip()
+
+
+def _resume_checkpoint_with_authorization(
+    checkpoint_path: Path,
+    checkpoint: dict[str, Any],
+    authorization: Any,
+    worktree: Path,
+) -> dict[str, Any]:
+    """Reopen a blocked checkpoint; a delta-scoped authorization imports the candidate."""
+    if not isinstance(authorization, dict):
+        raise StateError("blocked checkpoint lacks queue resume authorization")
+    delta_scope = authorization.get("delta_scope")
+    if delta_scope is None:
+        return resume_blocked_checkpoint(
+            checkpoint_path,
+            int(checkpoint.get("state_revision", -1)),
+            authorization,
+        )
+    if not isinstance(delta_scope, dict):
+        raise StateError("delta-scoped resume authorization scope must be an object")
+    ledger_path = Path(str(delta_scope.get("ledger_path", "")))
+    if not ledger_path.is_absolute():
+        raise StateError("delta scope ledger path must be absolute")
+    validate_delta_scope(ledger_path, delta_scope)
+    head = _worktree_head(worktree)
+    if head != delta_scope.get("candidate_commit_sha"):
+        raise StateError(
+            "delta-scoped resume requires the worktree HEAD to equal the verified candidate commit"
+        )
+    return resume_checkpoint_delta_scoped(
+        checkpoint_path,
+        int(checkpoint.get("state_revision", -1)),
+        authorization,
+        delta_scope,
+    )
+
+
 def _prepare_resumed_run(
     *,
     dispatch: dict[str, Any],
@@ -1002,7 +1071,7 @@ def _prepare_resumed_run(
             raise StateError(f"resumed dispatch {label} argument mismatch")
     package_root = _package_path(base, dispatch)
     journal_path = _migration_path(base, dispatch)
-    serial = _serial_module()
+    serial = _queue_state_module()
     with locked(migration_authority_lock(journal_path)):
         journal = validate_committed_migration(
             journal_path,
@@ -1029,12 +1098,18 @@ def _prepare_resumed_run(
         checkpoint = read_json(checkpoint_path)
         if checkpoint.get("controller_package_digest") != expected_package_digest:
             raise StateError("resumed checkpoint package digest mismatch")
-        if (
+        authorization = feature.get("resume_authorization")
+        delta_scoped = isinstance(authorization, dict) and isinstance(
+            authorization.get("delta_scope"), dict
+        )
+        position = (
             checkpoint.get("phase"),
             checkpoint.get("phase_detail"),
             checkpoint.get("phase_state"),
-        ) not in {("REVIEWING", "fix", "blocked"), ("REVIEWING", "fix", "ready")}:
-            raise StateError("resumed run may reopen only blocked REVIEWING/fix")
+        )
+        if position not in {("REVIEWING", "fix", "blocked"), ("REVIEWING", "fix", "ready")}:
+            if not (delta_scoped and checkpoint.get("phase_state") == "blocked"):
+                raise StateError("resumed run may reopen only blocked REVIEWING/fix")
         schema_receipts = {
             path.name: preflight_response_schema(path)
             for path in production_response_schema_paths(package_root / "implement-v13-codex")
@@ -1067,13 +1142,13 @@ def _prepare_resumed_run(
                 expected_revision=int(queue.get("state_revision", -1)),
             )
         if checkpoint.get("phase_state") == "blocked":
-            authorization = feature.get("resume_authorization")
             if not isinstance(authorization, dict):
-                raise StateError("resumed checkpoint lacks serial authorization")
-            resume_blocked_checkpoint(
+                raise StateError("resumed checkpoint lacks queue authorization")
+            _resume_checkpoint_with_authorization(
                 checkpoint_path,
-                int(checkpoint.get("state_revision", -1)),
+                checkpoint,
                 authorization,
+                Path(str(dispatch["worktree_path"])),
             )
         return preflight_receipt
 
@@ -1122,7 +1197,7 @@ def drive(
         )
     elif resume_existing_run:
         raise StateError("--resume-existing-run cannot consume a fresh or reattach dispatch")
-    serial = _serial_module()
+    serial = _queue_state_module()
     turn, thread_id = _recover_coordinator_position(
         artifact_dir,
         str(dispatch["feature_run_id"]),
@@ -1167,11 +1242,12 @@ def drive(
         if checkpoint.get("phase_state") == "blocked":
             authorization = feature.get("resume_authorization")
             if not isinstance(authorization, dict):
-                raise StateError("blocked checkpoint lacks serial resume authorization")
-            checkpoint = resume_blocked_checkpoint(
+                raise StateError("blocked checkpoint lacks queue resume authorization")
+            checkpoint = _resume_checkpoint_with_authorization(
                 checkpoint_path,
-                int(checkpoint.get("state_revision", -1)),
+                checkpoint,
                 authorization,
+                Path(str(dispatch["worktree_path"])),
             )
         ledger_path = artifact_dir / "review-closure-ledger.v1.json"
         current_closure = (

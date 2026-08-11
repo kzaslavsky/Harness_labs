@@ -33,7 +33,7 @@ def project_run_metrics(run_dir: Path) -> dict[str, Any]:
         raise AuditError("run directory must not be a symlink")
     directory = supplied_directory.resolve()
     _reject_core_audit_symlinks(directory)
-    verification = AuditJournal.verify(directory)
+    verification = AuditJournal.verify_checkpoint_prefix(directory)
     checkpoint = _read_object(directory / "checkpoint.json")
     manifest = _optional_object(directory / "manifest.json")
     summary = _optional_object(directory / "summary.json")
@@ -43,6 +43,7 @@ def project_run_metrics(run_dir: Path) -> dict[str, Any]:
         raise AuditError("audit checkpoint status is invalid")
     return {
         "run_id": verification["run_id"],
+        "run_dir": str(directory),
         "status": status,
         "terminal": status in TERMINAL_STATUSES,
         "evidence_classification": verification["evidence_classification"],
@@ -51,8 +52,9 @@ def project_run_metrics(run_dir: Path) -> dict[str, Any]:
         "summary": summary,
         "events": events,
         "event_count": verification["event_count"],
+        "checkpoint_lag": verification["checkpoint_lag"],
         "availability": {
-            "journal": availability("available"),
+            "journal": availability("available") if verification["checkpoint_lag"] == 0 else availability("partial", f'{verification["checkpoint_lag"]} verified journal event(s) are newer than the checkpoint'),
             "manifest": availability("available") if manifest else availability("unavailable", "no terminal manifest exists"),
             "summary": availability("available") if summary else availability("unavailable", "summary is unavailable"),
         },

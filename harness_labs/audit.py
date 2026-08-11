@@ -567,6 +567,32 @@ class AuditJournal:
             "evidence_classification": evidence_classification,
         }
 
+    @staticmethod
+    def verify_checkpoint_prefix(run_dir: Path) -> dict[str, Any]:
+        """Verify a full journal and its latest nonterminal checkpoint prefix."""
+        run_dir = run_dir.resolve()
+        verification = _verify_event_journal(run_dir)
+        checkpoint = _load_json(run_dir / "checkpoint.json")
+        _validate_checkpoint(checkpoint)
+        if checkpoint.get("run_id") != verification["run_id"]:
+            raise AuditError("checkpoint run identity does not match the journal")
+        if checkpoint.get("evidence_classification") != verification["evidence_classification"]:
+            raise AuditError("checkpoint evidence classification does not match the journal")
+        sequence = checkpoint.get("sequence")
+        if not isinstance(sequence, int) or sequence > verification["event_count"]:
+            raise AuditError("checkpoint sequence is ahead of the journal")
+        expected_head = verification["event_hashes"][sequence - 1] if sequence else None
+        if checkpoint.get("head_hash") != expected_head:
+            raise AuditError("checkpoint does not bind its journal position")
+        if checkpoint.get("status") in _TERMINAL or (run_dir / "manifest.json").is_file():
+            strict = AuditJournal.verify(run_dir)
+            return {**strict, "checkpoint_sequence": sequence, "checkpoint_lag": 0}
+        return {
+            **verification,
+            "checkpoint_sequence": sequence,
+            "checkpoint_lag": verification["event_count"] - sequence,
+        }
+
     def _locked(self):
         return _FileLock(self._lock_path)
 

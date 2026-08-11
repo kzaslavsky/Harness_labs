@@ -18,7 +18,7 @@ from .audit import AuditError
 from .run_catalog import RunCatalog, build_run_detail, merge_run_catalogs
 
 MAX_RUN_DIRECTORIES = 512
-MAX_FILES_PER_RUN = 128
+MAX_FILES_PER_RUN = 4096
 MAX_FILE_BYTES = 4 * 1024 * 1024
 MAX_RESPONSE_BYTES = 1024 * 1024
 MAX_DIAGNOSTICS = 100
@@ -119,7 +119,7 @@ class DashboardApplication:
         catalog_value = _cap_diagnostics(catalog_value)
         _ensure_unique_ids(catalog_value)
         graph_details: dict[str, bytes] = {}
-        run_details: dict[str, bytes] = {}
+        run_detail_values: dict[str, dict[str, Any]] = {}
         for graph in catalog_value["plan_graphs"]:
             graph_details[graph["run_id"]] = _json_bytes(graph)
         for run in catalog_value["feature_runs"]:
@@ -127,10 +127,17 @@ class DashboardApplication:
             if run.get("status") == "corrupt":
                 continue
             try:
-                run_details[run_id] = _json_bytes(build_run_detail(Path(run["source_root"]), run_id))
+                run_detail_values[run_id] = build_run_detail(Path(run["source_root"]), run_id)
             except (AuditError, DashboardError, OSError, ValueError, json.JSONDecodeError):
                 # A catalog summary may safely describe a corrupt detail; it must not
                 # make an arbitrary journal available through the detail endpoint.
+                continue
+        _apply_cumulative_node_metrics(catalog_value, run_detail_values)
+        run_details: dict[str, bytes] = {}
+        for run_id, detail in run_detail_values.items():
+            try:
+                run_details[run_id] = _json_bytes(detail)
+            except DashboardError:
                 continue
         catalog = _json_bytes(catalog_value)
         return _Snapshot(catalog, catalog_value, graph_details, run_details, str(catalog_value["revision"]), time.monotonic())
@@ -310,6 +317,102 @@ def _cap_diagnostics(value: Mapping[str, Any]) -> dict[str, Any]:
         for item in diagnostics[:MAX_DIAGNOSTICS]
         if isinstance(item, Mapping)
     ]
+    return result
+
+
+def _apply_cumulative_node_metrics(catalog: Mapping[str, Any], details: dict[str, dict[str, Any]]) -> None:
+    """Accumulate verified metrics across tries of one logical PlanGraph node."""
+    base_metrics = {
+        run_id: detail.get("metrics")
+        for run_id, detail in details.items()
+        if isinstance(detail.get("metrics"), Mapping)
+    }
+    histories: dict[tuple[str, str], list[str]] = {}
+    graphs = sorted(catalog.get("plan_graphs", []), key=lambda graph: (str(graph.get("created_at", "")), str(graph.get("run_id", ""))))
+    for graph in graphs:
+        plan_digest = graph.get("plan_digest")
+        if not isinstance(plan_digest, str):
+            continue
+        for node in graph.get("nodes", []):
+            if not isinstance(node, Mapping):
+                continue
+            node_id = node.get("node_id")
+            run_id = node.get("feature_run_id")
+            if not isinstance(node_id, str) or not isinstance(run_id, str) or run_id not in details:
+                continue
+            history = histories.setdefault((plan_digest, node_id), [])
+            if run_id in history:
+                continue
+            history.append(run_id)
+            metrics = [base_metrics.get(item) for item in history]
+            if all(isinstance(item, Mapping) for item in metrics):
+                details[run_id]["metrics"] = _merge_detail_metrics(metrics, history)
+
+
+def _merge_detail_metrics(metrics: list[Mapping[str, Any]], run_ids: list[str]) -> dict[str, Any]:
+    latest = metrics[-1]
+    merged = dict(latest)
+    merged["totals"] = _merge_metric_totals([item["totals"] for item in metrics])
+    for key in ("by_phase", "by_agent", "by_agent_type", "by_model", "by_effort", "by_backend"):
+        merged[key] = _merge_metric_breakdown([row for item in metrics for row in item.get(key, [])])
+    merged["by_try"] = [
+        {"label": run_id, **dict(item["totals"])}
+        for run_id, item in zip(run_ids, metrics, strict=True)
+    ]
+    merged["stages"] = [
+        {**stage, "feature_run_id": run_id, "try_index": index}
+        for index, (run_id, item) in enumerate(zip(run_ids, metrics, strict=True), start=1)
+        for stage in item.get("stages", [])
+    ]
+    provenance = dict(latest.get("provenance", {}))
+    provenance.update({
+        "usage_records": sum(int(item.get("provenance", {}).get("usage_records", 0)) for item in metrics),
+        "collection_method": "verified usage accumulated across logical PlanGraph node tries",
+        "attempt_count": len(run_ids),
+        "current_run_id": run_ids[-1],
+        "scope": "cumulative_plan_graph_node",
+    })
+    merged["provenance"] = provenance
+    return merged
+
+
+def _merge_metric_breakdown(rows: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[str, list[Mapping[str, Any]]] = {}
+    for row in rows:
+        grouped.setdefault(str(row.get("label", "Unavailable")), []).append(row)
+    result = []
+    for label, values in grouped.items():
+        row = {"label": label, **_merge_metric_totals(values)}
+        for field in ("phase", "agent_type", "model", "effort", "backend"):
+            items = sorted({str(value[field]) for value in values if value.get(field)})
+            if items:
+                row[field] = ", ".join(items)
+        result.append(row)
+    return sorted(result, key=lambda row: (-row["total_tokens"], row["label"]))
+
+
+def _merge_metric_totals(rows: list[Mapping[str, Any]]) -> dict[str, Any]:
+    result = {
+        key: sum(int(row.get(key, 0)) for row in rows)
+        for key in ("calls", "input_tokens", "cached_input_tokens", "output_tokens", "duration_ms")
+    }
+    result["total_tokens"] = result["input_tokens"] + result["output_tokens"]
+    result["peak_input_tokens"] = max((int(row.get("peak_input_tokens", 0)) for row in rows), default=0)
+    wall = [row.get("wall_clock_ms") for row in rows]
+    if any(value is not None for value in wall):
+        result["wall_clock_ms"] = sum(int(value) for value in wall if type(value) is int)
+    costs = [row.get("cost") for row in rows if isinstance(row.get("cost"), Mapping)]
+    unavailable = [cost for cost in costs if cost.get("state") == "unavailable"]
+    estimated = [cost for cost in costs if cost.get("state") == "estimated"]
+    sources = sorted({str(source) for cost in costs for source in cost.get("sources", [])})
+    result["cost"] = {
+        "state": "unavailable" if unavailable or len(costs) != len(rows) else "estimated" if estimated else "available",
+        "usd": None if unavailable or len(costs) != len(rows) else round(sum(float(cost.get("usd") or 0) for cost in costs), 6),
+        "reason": f"{len(unavailable)} node try cost record(s) are unavailable" if unavailable else "Cumulative across verified node tries" if estimated else None,
+        "sources": sources,
+        "estimated_records": sum(int(cost.get("estimated_records", 0)) for cost in costs),
+        "long_context_records": sum(int(cost.get("long_context_records", 0)) for cost in costs),
+    }
     return result
 
 

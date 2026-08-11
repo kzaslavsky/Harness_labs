@@ -14,6 +14,7 @@ from harness_labs.dashboard_server import (
     DashboardApplication,
     DashboardError,
     _DashboardHandler,
+    _apply_cumulative_node_metrics,
     load_audit_root_registry,
 )
 from scripts.dashboard_fixture_run import create_fixture
@@ -58,6 +59,28 @@ class DashboardApiTests(unittest.TestCase):
             transport.headers = {"If-None-Match": transport.etag}
             _DashboardHandler._send(transport, 200, catalog)
             self.assertEqual(transport.status, 304)
+
+    def test_node_metrics_accumulate_across_plan_attempts_without_double_counting(self) -> None:
+        def metrics(tokens: int, peak: int, stage: str) -> dict:
+            totals = {"calls": 1, "input_tokens": tokens - 5, "cached_input_tokens": 0, "output_tokens": 5, "total_tokens": tokens, "duration_ms": 10, "wall_clock_ms": 20, "peak_input_tokens": peak, "cost": {"state": "estimated", "usd": 0.1, "reason": "estimate", "sources": ["pricing"], "estimated_records": 1, "long_context_records": 0}}
+            row = {"label": "implement", **totals}
+            return {"protocol": "harness-run-detail-metrics/1", "totals": totals, "quality": {"criteria_total": 1}, "by_phase": [row], "by_agent": [], "by_agent_type": [], "by_model": [], "by_effort": [], "by_backend": [], "stages": [{"label": stage}], "provenance": {"usage_records": 1, "collection_method": "verified", "peak_context_definition": "peak"}}
+
+        catalog = {"plan_graphs": [
+            {"run_id": "graph-1", "created_at": "2026-08-09T00:00:00Z", "plan_digest": "plan", "nodes": [{"node_id": "FR-1", "feature_run_id": "try-1"}]},
+            {"run_id": "graph-2", "created_at": "2026-08-09T01:00:00Z", "plan_digest": "plan", "nodes": [{"node_id": "FR-1", "feature_run_id": "try-2"}]},
+            {"run_id": "graph-3", "created_at": "2026-08-09T02:00:00Z", "plan_digest": "plan", "nodes": [{"node_id": "FR-1", "feature_run_id": "try-3"}]},
+        ]}
+        details = {"try-1": {"metrics": metrics(100, 60, "first")}, "try-2": {"metrics": metrics(40, 25, "second")}, "try-3": {"metrics": metrics(10, 8, "third")}}
+        _apply_cumulative_node_metrics(catalog, details)
+        self.assertEqual(details["try-1"]["metrics"]["totals"]["total_tokens"], 100)
+        cumulative = details["try-2"]["metrics"]
+        self.assertEqual(cumulative["totals"]["total_tokens"], 140)
+        self.assertEqual(cumulative["totals"]["peak_input_tokens"], 60)
+        self.assertEqual(cumulative["provenance"]["attempt_count"], 2)
+        self.assertEqual([row["label"] for row in cumulative["by_try"]], ["try-1", "try-2"])
+        self.assertEqual([row["feature_run_id"] for row in cumulative["stages"]], ["try-1", "try-2"])
+        self.assertEqual(details["try-3"]["metrics"]["totals"]["total_tokens"], 150)
 
     def test_catalog_etag_is_stable_across_refreshes_without_a_new_revision(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -185,6 +208,16 @@ class DashboardApiTests(unittest.TestCase):
             )
             self.assertEqual(catalog["feature_runs"][1]["status"], "corrupt")
             self.assertEqual(catalog["diagnostics"][0]["run_id"], "oversized-run")
+
+    def test_normal_executor_artifact_volume_remains_inspectable(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._run(root, "dense-run")
+            artifacts = root / "dense-run" / "artifacts"
+            for index in range(140):
+                (artifacts / f"transport-{index:03d}.jsonl").touch()
+            app = DashboardApplication(root, refresh_seconds=60)
+            self.assertEqual(self._request(app, "GET", "/api/feature-runs/dense-run")[0], 200)
 
     def test_oversized_detail_does_not_make_catalog_unavailable(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -7,7 +7,7 @@ Conversation text is non-authoritative. The checkpoint owns feature phase state;
 A schema-valid coordinator `blocked` result is a complete block request. The
 deterministic controller atomically sets the current checkpoint detail to
 `blocked`, persists the exact blocker and history entry, and then settles the
-serial queue. The coordinator is not required to perform a separate checkpoint
+feature queue. The coordinator is not required to perform a separate checkpoint
 mutation; split ownership can leave a closure ledger blocked while the feature
 controller continues launching coordinator turns.
 
@@ -25,7 +25,7 @@ separate, and the retry table forbids cross-model retry for that class.
 A JSON phase flow may control child order, prompt compilation, declared context,
 model, sandbox, schema, and process evidence. It is subordinate to the feature
 checkpoint and cannot advance repository gates, the feature transaction, or the
-serial queue. Debug flow results use a distinct protocol and are never feature
+feature queue. Debug flow results use a distinct protocol and are never feature
 completion evidence. See [json-phase-flow.md](json-phase-flow.md).
 
 ## Planning-input contract
@@ -76,18 +76,22 @@ control flow. The planner process has a separately named 3,600-second process-le
 safety ceiling; it is not the startup target. The caller runs this controller in
 the foreground through terminal receipt handling. Success advances to
 `PLANNING/plan_validate/ready`; failure writes durable evidence, blocks the
-checkpoint and serial queue, and releases the lease before exit. No coordinator agent is spawned
+checkpoint and feature queue, and releases the lease before exit. No coordinator agent is spawned
 before dispatch, no model is used for worktree setup, and neither `claude` nor
 `claude -p` is permitted anywhere in the Codex control path.
 
-After planner success in a serial run, `start_planning.py` immediately enters
+After planner success, `start_planning.py` immediately enters
 `scripts/run_feature.py` with the persisted dispatch payload in the same foreground
 Python process. That controller launches one resumable context-bounded coordinator thread, treats durable state
 as authoritative, and does not exit until it has settled the queue to `blocked` or
 `done`. App-task messaging is observational and cannot own this transition.
+After 55 seconds without a checkpoint-backed phase event, the parent reports
+only that the controller session remains open and the phase is unknown, then
+reads a zero-timeout queue snapshot. Process liveness is never phase evidence;
+the durable checkpoint is the sole phase authority.
 The coordinator remains rooted in the feature worktree and receives the recorded
 absolute base worktree as an explicit additional writable root, because its
-controller artifacts and serial queue are base-local. Preflight rejects a missing,
+controller artifacts and feature queue are base-local. Preflight rejects a missing,
 relative, or non-directory writable root before launching Codex.
 The coordinator is explicitly a child of `run_feature.py`; its prompt forbids
 invoking `run_feature.py` or `start_planning.py`. The supervised child also sets a
@@ -280,11 +284,22 @@ baseline exactly once for that hash while retaining all historical arrays.
 
 Record `blocker_class`, `resume_condition`, and `resolution_evidence`. Operator/architecture blockers require a matching resolution token. Repeated-failure blocking is permitted only after the closure ledger proves three distinct rejected strategies and an explicit escalation action; a raw retry count is insufficient. Gate failures require a new successful receipt on the same corrected tree. State corruption never auto-restarts over an unknown tree.
 
-Once the serial dispatcher has validated the blocked feature's token, exact run
+Once the feature queue controller has validated the blocked feature's token, exact run
 identity, surviving checkpoint and transaction hashes, and nonempty resolution
 evidence, `run_feature.py` records that dispatcher authorization in checkpoint
-history and reopens only the same phase/detail at `ready`. No other
-`blocked -> ready` transition is valid, and resume never skips a detail.
+history and reopens only the same phase/detail at `ready`.
+
+One additional `blocked -> ready` transition exists: a **delta-scoped retry**
+([references/delta-scoped-retry.md](delta-scoped-retry.md)). When the blocked
+position is at or after `REVIEWING/fix` and the authorization carries a frozen
+`implement-v13-codex/delta-resume-scope/1` document, the controller verifies
+the worktree HEAD equals the scope's verified candidate commit and that the
+frozen review ledger is byte-identical, then rewinds the checkpoint to
+`REVIEWING/fix` at `ready` in one CAS transition. The retry must close exactly
+the recorded open closure fingerprints and re-verify with the recorded
+verification slice; it never re-runs implementation, and `COMMITTING` gates
+still run once after every open finding closes. No other `blocked -> ready`
+transition is valid, and the ordinary resume never skips a detail.
 
 ## Process receipts
 
@@ -351,9 +366,9 @@ read-back, package digest, coordinator, and lease authorize exactly one
 `resume_existing_run` dispatch to the run-owned `run_feature.py`; the fresh
 planning entrypoint rejects it.
 
-In a serial run, the deterministic `run_feature.py` controller settles the model
+The deterministic `run_feature.py` controller settles the model
 coordinator's terminal outcome. The model coordinator never invokes
-`serial_state.py`, mutates the queue, acknowledges a feature, or releases a lease;
+`feature_queue_state.py`, mutates the queue, acknowledges a feature, or releases a lease;
 the supervised-child marker makes those calls fail closed. `run_feature.py` uses
 the dispatch payload's absolute `queue_path`, coordinator ID, and lease to invoke
 guarded block or acknowledgment and reads the queue back before exiting.

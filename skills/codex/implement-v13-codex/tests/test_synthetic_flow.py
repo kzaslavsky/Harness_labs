@@ -17,10 +17,9 @@ flow = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(flow)
 
 _SERIAL_SCRIPT = (
-    Path(__file__).resolve().parents[2]
-    / "serial-implement-codex"
+    Path(__file__).resolve().parents[1]
     / "scripts"
-    / "serial_state.py"
+    / "feature_queue_state.py"
 )
 _SERIAL_SPEC = importlib.util.spec_from_file_location("serial_state_for_integration", _SERIAL_SCRIPT)
 assert _SERIAL_SPEC is not None and _SERIAL_SPEC.loader is not None

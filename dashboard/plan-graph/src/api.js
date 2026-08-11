@@ -12,7 +12,7 @@ function validMetrics(value) {
   const breakdowns = ['by_phase', 'by_agent', 'by_agent_type', 'by_model', 'by_effort', 'by_backend'];
   return isObject(value) && value.protocol === 'harness-run-detail-metrics/1'
     && isObject(value.totals) && isObject(value.quality) && isObject(value.provenance)
-    && breakdowns.every((key) => Array.isArray(value[key]));
+    && breakdowns.every((key) => Array.isArray(value[key])) && Array.isArray(value.stages);
 }
 
 function validFeatureRun(value) {
@@ -66,7 +66,6 @@ export function validateRunDetail(value) {
 export function displayState(record) {
   if (record.evidence?.state === 'unavailable') return 'unavailable';
   if (record.liveness?.state === 'stale') return 'stale';
-  if (record.liveness?.state === 'remote_unverified' || record.liveness?.state === 'liveness_unavailable') return 'unavailable';
   if (record.liveness?.state === 'terminal') return record.status;
   return record.status;
 }
@@ -129,7 +128,7 @@ export function graphProjection(catalog, graph) {
       id: `${graph.run_id}:${node.node_id}`,
       type: 'featureRun',
       position: { x: 40 + depth * 300, y: 40 + row * 150 },
-      data: { graphId: graph.run_id, nodeId: node.node_id, plannedRunId: node.feature_run_id, runId: run?.run_id || null, nodeRecord: node, record, title: run?.run_id || node.node_id },
+      data: { graphId: graph.run_id, nodeId: node.node_id, plannedRunId: node.feature_run_id, runId: run?.run_id || null, nodeRecord: node, record, title: node.node_id },
     };
   });
   const nodeIds = new Set(graph.nodes.map((node) => node.node_id));

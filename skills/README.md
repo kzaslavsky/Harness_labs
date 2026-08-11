@@ -14,11 +14,9 @@ Available workflows:
 - `module-docs` — create or refresh a module's `context.md` and `API.md`.
 - `capture-learning` — record a reusable, evidence-backed learning.
 - `implement-v11` — run one feature through a durable implementation workflow.
-- `serial-implement` — run a queue of features sequentially through `implement-v11`.
 - `local-review` — review uncommitted changes.
 - `local-review-pr` — review a committed branch range before a pull request or merge.
 - `implement-v13-codex` — run one feature through the durable Codex-native production lifecycle.
-- `serial-implement-codex` — dispatch a sequential feature queue through `implement-v13-codex`.
 
 These are templates, not universal policy. Adapt commands, validation gates, branch
 rules, and compliance language to the generated project's `AGENTS.md` and selected

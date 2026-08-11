@@ -33,7 +33,7 @@ PACKAGE_PROTOCOL = "implement-v13-codex/controller-package-manifest/1"
 PACKAGE_VERSION = "1"
 MIGRATION_PROTOCOL = "implement-v13-codex/controller-migration/1"
 PROPOSAL_PROTOCOL = "implement-v13-codex/controller-migration-proposal/1"
-PACKAGE_NAMES = ("implement-v13-codex", "serial-implement-codex")
+PACKAGE_NAMES = ("implement-v13-codex",)
 INCLUDED_TOP_LEVEL = {
     "SKILL.md",
     "agents",
@@ -586,8 +586,8 @@ def _apply_document(
 def migrate_run(inputs: dict[str, Any], *, commit: bool) -> dict[str, Any]:
     package_parent = _package_root().parent
     serial = _load_module(
-        package_parent / "serial-implement-codex" / "scripts" / "serial_state.py",
-        "serial_state_for_controller_migration",
+        package_parent / "implement-v13-codex" / "scripts" / "feature_queue_state.py",
+        "feature_queue_state_for_controller_migration",
     )
     review = _load_module(
         _package_root() / "scripts" / "review_closure.py",

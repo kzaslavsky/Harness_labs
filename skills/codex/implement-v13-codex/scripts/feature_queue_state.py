@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Durable state operations for the serial-implement-codex dispatcher."""
+"""Durable queue-state operations for the feature controller."""
 
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ PROTOCOL_VERSION = "1.0"
 VALID_STATUSES = {"pending", "in_progress", "done", "blocked"}
 TRANSACTION_READY = "feature_result_written"
 TRANSACTION_ACKED = "dispatcher_ack"
-WAIT_PROTOCOL = "serial-implement-codex/wait-status/1"
+WAIT_PROTOCOL = "implement-v13-codex/queue-wait-status/1"
 CONTROLLER_CHILD_ENV = "IMPLEMENT_V13_RUN_FEATURE_CHILD"
 JsonObject = dict[str, Any]
 PACKAGE_PROTOCOL = "implement-v13-codex/controller-package-manifest/1"
@@ -67,7 +67,7 @@ class DispatchLeaseError(SerialStateError):
 def _reject_model_coordinator_queue_write() -> None:
     if os.environ.get(CONTROLLER_CHILD_ENV) == "1":
         raise SerialStateError(
-            "model coordinator children may not mutate the serial queue; run_feature.py owns settlement"
+            "model coordinator children may not mutate the feature queue; run_feature.py owns settlement"
         )
 
 
@@ -161,7 +161,7 @@ def _locked_paths(paths: Sequence[Path]) -> Iterator[None]:
 
 
 def queue_document_bytes(value: Mapping[str, Any]) -> bytes:
-    """Return the exact bytes used by the serial queue writer."""
+    """Return the exact bytes used by the feature queue writer."""
     text = json.dumps(value, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
     return text.encode("utf-8")
 
@@ -214,7 +214,7 @@ def validate_queue(queue: Mapping[str, Any]) -> None:
     if protocol is not None and protocol != PROTOCOL_VERSION:
         raise SerialStateError(f"unsupported immutable protocol_version: {protocol!r}")
     dispatcher = queue.get("dispatcher")
-    if dispatcher is not None and dispatcher != "serial-implement-codex":
+    if dispatcher is not None and dispatcher != "implement-v13-codex":
         raise SerialStateError(f"queue belongs to immutable dispatcher {dispatcher!r}")
     identity = queue.get("queue_identity")
     if identity is not None:
@@ -629,7 +629,7 @@ def add_planning_input(
 def _ensure_queue_identity(queue: JsonObject, new_id: Callable[[str], str]) -> None:
     queue.setdefault("base_branch", "main")
     queue.setdefault("protocol_version", PROTOCOL_VERSION)
-    queue.setdefault("dispatcher", "serial-implement-codex")
+    queue.setdefault("dispatcher", "implement-v13-codex")
     if "queue_run_id" not in queue:
         queue["queue_run_id"] = new_id("qr")
     if not isinstance(queue["queue_run_id"], str) or not queue["queue_run_id"]:
@@ -1151,6 +1151,37 @@ def _validate_resume_artifacts(
             raise AuthorizationError(f"{name} controller package digest does not match")
 
 
+DELTA_SCOPE_PROTOCOL = "implement-v13-codex/delta-resume-scope/1"
+
+
+def _validate_delta_scope_binding(
+    base_root: Path,
+    feature: Mapping[str, Any],
+    delta_scope: Mapping[str, Any],
+) -> None:
+    if not isinstance(delta_scope, Mapping) or delta_scope.get("protocol") != DELTA_SCOPE_PROTOCOL:
+        raise AuthorizationError("delta scope requires the delta-resume-scope protocol")
+    if delta_scope.get("feature_run_id") != feature.get("feature_run_id"):
+        raise AuthorizationError("delta scope belongs to another feature run")
+    raw_path = delta_scope.get("ledger_path")
+    if not isinstance(raw_path, str) or not raw_path:
+        raise AuthorizationError("delta scope requires the frozen ledger path")
+    ledger_path = Path(raw_path)
+    if not ledger_path.is_absolute():
+        ledger_path = base_root / ledger_path
+    ledger_path = ledger_path.resolve()
+    try:
+        ledger_path.relative_to(base_root.resolve())
+    except ValueError as exc:
+        raise AuthorizationError("delta scope ledger escapes the base checkout") from exc
+    if not ledger_path.is_file():
+        raise AuthorizationError("delta scope frozen ledger is missing")
+    supplied_hash = delta_scope.get("ledger_sha256")
+    actual_hash = hashlib.sha256(ledger_path.read_bytes()).hexdigest()
+    if not isinstance(supplied_hash, str) or not hmac.compare_digest(supplied_hash, actual_hash):
+        raise AuthorizationError("delta scope ledger hash does not match the frozen review ledger")
+
+
 def resume_blocked_feature(
     queue: JsonObject,
     *,
@@ -1162,6 +1193,7 @@ def resume_blocked_feature(
     base_root: Path,
     now: str | None = None,
     require_controller_migration: bool = False,
+    delta_scope: Mapping[str, Any] | None = None,
 ) -> JsonObject:
     """Resume one blocked feature after matching authorization and evidence."""
 
@@ -1191,6 +1223,8 @@ def resume_blocked_feature(
     if not isinstance(identity, Mapping) or dict(identity) != expected_identity:
         raise AuthorizationError("resolution evidence identity does not match blocked feature")
     _validate_resume_artifacts(base_root, updated, feature, resolution_evidence)
+    if delta_scope is not None:
+        _validate_delta_scope_binding(base_root, feature, delta_scope)
     if require_controller_migration or feature.get("controller_package_digest") is not None:
         migration, journal = _migration_evidence(
             base_root, feature, resolution_evidence
@@ -1218,6 +1252,8 @@ def resume_blocked_feature(
         "resolution_evidence": copy.deepcopy(dict(resolution_evidence)),
         "authorized_at": timestamp,
     }
+    if delta_scope is not None:
+        target["resume_authorization"]["delta_scope"] = copy.deepcopy(dict(delta_scope))
     if migration:
         target["controller_migration"] = {
             **migration,
@@ -1506,7 +1542,7 @@ def acknowledge_feature(
         if transaction.get("state") != TRANSACTION_ACKED:
             updated_transaction["state"] = TRANSACTION_ACKED
             updated_transaction["dispatcher_ack"] = {
-                "dispatcher": "serial-implement-codex",
+                "dispatcher": "implement-v13-codex",
                 "acknowledged_at": timestamp,
                 "queue_state_revision": updated_queue["state_revision"],
                 "feature_result_sha256": hashlib.sha256(result_bytes).hexdigest(),
@@ -1620,6 +1656,7 @@ def _command_resume(args: argparse.Namespace) -> JsonObject:
     journal = Path(migration["journal_path"])
     if not journal.is_absolute():
         journal = (_base_root_for_queue(args.queue) / journal).resolve()
+    delta_scope = read_json(args.delta_scope) if args.delta_scope is not None else None
     with _locked_paths([_controller_module().migration_authority_lock(journal)]):
         return atomic_mutate(
             args.queue,
@@ -1632,6 +1669,7 @@ def _command_resume(args: argparse.Namespace) -> JsonObject:
                 lease_id=args.lease_id,
                 base_root=_base_root_for_queue(args.queue),
                 require_controller_migration=True,
+                delta_scope=delta_scope,
             ),
             expected_revision=args.expected_revision,
         )
@@ -1704,6 +1742,7 @@ def _parser() -> argparse.ArgumentParser:
     resume_parser.add_argument("--coordinator-id", required=True)
     resume_parser.add_argument("--lease-id", required=True)
     resume_parser.add_argument("--expected-revision", type=int)
+    resume_parser.add_argument("--delta-scope", type=Path)
     resume_parser.set_defaults(handler=_command_resume)
 
     ack_parser = subparsers.add_parser("ack")
@@ -1717,7 +1756,7 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Run the serial state command-line interface."""
+    """Run the feature queue state command-line interface."""
 
     args = _parser().parse_args(argv)
     try:

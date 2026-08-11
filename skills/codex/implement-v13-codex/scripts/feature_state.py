@@ -183,15 +183,7 @@ def transition(
     )
 
 
-def resume_blocked_checkpoint(
-    path: Path,
-    expected_revision: int,
-    resume_authorization: dict[str, Any],
-) -> dict[str, Any]:
-    """Reopen the same detail only after the serial dispatcher authorized resume."""
-    current = read_json(path)
-    if current.get("phase_state") != "blocked":
-        raise StateError("only a blocked checkpoint can be resumed")
+def _validated_resume_authorization(resume_authorization: Any) -> tuple[str, dict[str, Any], str]:
     if not isinstance(resume_authorization, dict) or not resume_authorization:
         raise StateError("blocked checkpoint resume requires dispatcher authorization")
     authorization_sha256 = resume_authorization.get("authorization_sha256")
@@ -203,6 +195,21 @@ def resume_blocked_checkpoint(
         raise StateError("blocked checkpoint resume resolution evidence is missing")
     if not isinstance(authorized_at, str) or not authorized_at:
         raise StateError("blocked checkpoint resume authorization timestamp is missing")
+    return authorization_sha256, resolution_evidence, authorized_at
+
+
+def resume_blocked_checkpoint(
+    path: Path,
+    expected_revision: int,
+    resume_authorization: dict[str, Any],
+) -> dict[str, Any]:
+    """Reopen the same detail only after the feature queue controller authorized resume."""
+    current = read_json(path)
+    if current.get("phase_state") != "blocked":
+        raise StateError("only a blocked checkpoint can be resumed")
+    authorization_sha256, resolution_evidence, authorized_at = _validated_resume_authorization(
+        resume_authorization
+    )
     history = list(current.get("blocked_history", []))
     history.append({
         "phase": current.get("phase"),
@@ -226,6 +233,95 @@ def resume_blocked_checkpoint(
             "active_blocker": None,
             "blocked_history": history,
             "resolution_evidence": evidence,
+            "updated_at": _now(),
+        },
+    )
+
+
+DELTA_SCOPE_PROTOCOL = "implement-v13-codex/delta-resume-scope/1"
+DELTA_RESUME_TARGET = ("REVIEWING", "fix")
+
+
+def _validate_delta_scope_shape(delta_scope: Any) -> dict[str, Any]:
+    if not isinstance(delta_scope, dict) or delta_scope.get("protocol") != DELTA_SCOPE_PROTOCOL:
+        raise StateError("delta-scoped resume requires a delta-resume-scope document")
+    candidate = delta_scope.get("candidate_commit_sha")
+    if not isinstance(candidate, str) or re.fullmatch(r"[0-9a-f]{40}", candidate) is None:
+        raise StateError("delta scope candidate commit sha is invalid")
+    ledger_sha256 = delta_scope.get("ledger_sha256")
+    if not isinstance(ledger_sha256, str) or re.fullmatch(r"[0-9a-f]{64}", ledger_sha256) is None:
+        raise StateError("delta scope frozen ledger hash is invalid")
+    fingerprints = delta_scope.get("open_fingerprints")
+    if (
+        not isinstance(fingerprints, list)
+        or not fingerprints
+        or any(not isinstance(item, str) or not item for item in fingerprints)
+    ):
+        raise StateError("delta scope requires nonempty open finding fingerprints")
+    slice_value = delta_scope.get("verification_slice")
+    if (
+        not isinstance(slice_value, dict)
+        or not isinstance(slice_value.get("commands"), list)
+        or not slice_value["commands"]
+    ):
+        raise StateError("delta scope requires a nonempty verification slice")
+    return delta_scope
+
+
+def resume_checkpoint_delta_scoped(
+    path: Path,
+    expected_revision: int,
+    resume_authorization: dict[str, Any],
+    delta_scope: dict[str, Any],
+) -> dict[str, Any]:
+    """Reopen a blocked run at REVIEWING/fix bound to the frozen residual review delta.
+
+    The rewind is legal only from a blocked position at or after REVIEWING/fix:
+    the verified candidate commit and the review ledger already exist there, so the
+    retry must close exactly the open finding fingerprints instead of re-running
+    implementation or the full gate sequence.
+    """
+    current = read_json(path)
+    if current.get("phase_state") != "blocked":
+        raise StateError("only a blocked checkpoint can be resumed")
+    authorization_sha256, resolution_evidence, authorized_at = _validated_resume_authorization(
+        resume_authorization
+    )
+    _validate_delta_scope_shape(delta_scope)
+    origin = (str(current.get("phase")), str(current.get("phase_detail")))
+    origin_position = _catalog_position(*origin)
+    target_position = _catalog_position(*DELTA_RESUME_TARGET)
+    if origin_position < target_position:
+        raise StateError("delta-scoped resume requires a blocked position at or after REVIEWING/fix")
+    history = list(current.get("blocked_history", []))
+    history.append({
+        "phase": origin[0],
+        "phase_detail": origin[1],
+        "blocked_revision": current.get("state_revision"),
+        "active_blocker": current.get("active_blocker"),
+        "authorization_sha256": authorization_sha256,
+        "authorized_at": authorized_at,
+        "resume_mode": "delta_scoped",
+        "candidate_commit_sha": delta_scope["candidate_commit_sha"],
+        "ledger_sha256": delta_scope["ledger_sha256"],
+    })
+    evidence = list(current.get("resolution_evidence", []))
+    evidence.append({
+        "authorization_sha256": authorization_sha256,
+        "authorized_at": authorized_at,
+        "evidence": resolution_evidence,
+    })
+    return cas_update(
+        path,
+        expected_revision,
+        {
+            "phase": DELTA_RESUME_TARGET[0],
+            "phase_detail": DELTA_RESUME_TARGET[1],
+            "phase_state": "ready",
+            "active_blocker": None,
+            "blocked_history": history,
+            "resolution_evidence": evidence,
+            "delta_resume_scope": dict(delta_scope),
             "updated_at": _now(),
         },
     )
@@ -619,6 +715,11 @@ def main() -> int:
     invalidate.add_argument("checkpoint", type=Path)
     invalidate.add_argument("revision", type=int)
     invalidate.add_argument("evidence", type=Path)
+    delta = sub.add_parser("resume-delta")
+    delta.add_argument("checkpoint", type=Path)
+    delta.add_argument("revision", type=int)
+    delta.add_argument("authorization")
+    delta.add_argument("scope", type=Path)
     inputs = sub.add_parser("build-inputs")
     inputs.add_argument("worktree", type=Path)
     inputs.add_argument("artifact_dir", type=Path)
@@ -652,6 +753,10 @@ def main() -> int:
             value = block_checkpoint(args.checkpoint, args.revision, _json_arg(args.blocker))
         elif args.command == "invalidate-certification":
             value = invalidate_certification(args.checkpoint, args.revision, args.evidence)
+        elif args.command == "resume-delta":
+            value = resume_checkpoint_delta_scoped(
+                args.checkpoint, args.revision, _json_arg(args.authorization), read_json(args.scope)
+            )
         elif args.command == "build-inputs":
             value = build_inputs(args.worktree, args.artifact_dir, args.declared, args.output, args.relevant_paths)
         elif args.command == "validate-reconciliation":

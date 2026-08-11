@@ -56,6 +56,14 @@ metrics directly; selecting the same run from the FeatureRuns list opens its
 overview. A node whose planned FeatureRun is not present in the verified
 catalog still opens a node inspector with its recorded status, dependencies,
 liveness, and evidence, while marking FeatureRun metrics unavailable.
+For an inspectable executor run, the Metrics tab also lists audited coordinator
+sessions, worker tasks, deterministic verification stages, backend/model
+identity, outcomes, attempts, and recorded durations. Token and cost fields
+use normalized backend events when present and otherwise use the final
+cumulative totals plus per-turn peaks from hash-verified Codex
+`thread/tokenUsage/updated` artifacts. Cumulative updates are not summed, so
+polling notifications cannot double-count tokens. Fields remain unavailable
+when the executor emitted neither source.
 
 Repeated executions of the same approved plan are grouped by its durable plan
 digest; each attempt retains its exact PlanGraph digest. The canvas defaults to the newest live or otherwise running
@@ -77,10 +85,25 @@ lease is `liveness_unavailable`.
 used to reconstruct a historical outcome. Terminal state is established by the
 verified journal and manifest. Missing lifecycle, criteria, findings, usage,
 or artifact metadata is shown as unavailable rather than zero.
+For a nonterminal run, the status badge continues to show the audited lifecycle
+status while the inspector reports an absent or remote lease separately as
+unverified liveness. A failed background detail refresh retains the last
+verified detail and retries on the normal polling interval.
+Metrics for a FeatureRun correlated from a PlanGraph node are cumulative across
+all verified tries of that node under the same approved-plan digest. The detail
+view keeps the per-try totals so retries and checkpoint resumes remain
+individually auditable and are not double-counted within a try.
+ReactFlow cards retain the concise PlanGraph node ID as their visible title
+through every lifecycle state. Full FeatureRun and PlanGraph run IDs remain in
+the inspector and metric breakdowns rather than expanding the graph card.
 
 Malformed run directories are isolated: valid peers stay visible and the
 catalog shows a bounded diagnostic. A corrupt summary does not make the raw
 run directory downloadable or its detail endpoint available.
+The bounded audit-tree scan permits up to 4,096 entries per run so normal Codex
+transport evidence remains inspectable. For active nonterminal runs, the full
+event hash chain is verified while checkpoint-derived state is explicitly
+reported as partial when newer verified journal events exist.
 
 Run IDs are global API identities. If the same run ID exists in more than one
 configured root, every copy is withheld as ambiguous and the catalog emits a

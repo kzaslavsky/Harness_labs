@@ -17,10 +17,11 @@ const money = (cost) => cost?.state === 'available' ? `$${Number(cost.usd).toFix
 const compactId = (value) => { const parts = String(value || '').split('/'); return parts.length > 1 ? parts.slice(-3).join(' / ') : value; };
 function Status({ record }) { const state = displayState(record); return <span className={`status status--${state}`}><i />{stateLabel(record)}</span>; }
 function Availability({ value, label }) { return <p className={value?.state === 'available' ? 'availability' : 'availability availability--missing'}><strong>{label}</strong> {value?.state || 'unavailable'}{value?.reason ? ` — ${value.reason}` : ''}</p>; }
+function Liveness({ value }) { if (!value || value.state === 'terminal' || value.state === 'not_applicable') return null; const verified = value.state === 'live'; return <p className={verified ? 'availability' : 'availability availability--missing'}><strong>Liveness:</strong> {verified ? 'verified' : 'unverified'}{value.reason ? ` — ${value.reason}` : ''}</p>; }
 
 function FlowNode({ data, selected }) {
   return <div className={`flow-node ${selected ? 'is-selected' : ''}`}><Handle type="target" position={Position.Left} />
-    <Status record={data.record} /><strong>{data.title}</strong><small>{data.graphId} · {data.nodeId}</small>
+    <Status record={data.record} /><strong>{data.title}</strong>
     {!data.runId && <em>FeatureRun correlation unavailable</em>}<Handle type="source" position={Position.Right} />
   </div>;
 }
@@ -32,12 +33,12 @@ function NodeSummary({ node }) {
   return <section><h3>PlanGraph node</h3><Definition values={{ Graph: node.graphId, Node: node.nodeId, 'Planned FeatureRun': node.plannedRunId, Status: stateLabel(record), Liveness: record.liveness?.state, Dependencies: record.depends_on }} /><Availability label="Node evidence:" value={record.evidence} /></section>;
 }
 
-function Detail({ run, node, detail, loading, error, onClose, tab, onTabChange }) {
+function Detail({ run, node, detail, error, onClose, tab, onTabChange }) {
   if (!run && !node) return <aside className="inspector empty"><h2>Select a FeatureRun</h2><p>Select a PlanGraph node or FeatureRun to inspect verified detail.</p></aside>;
   if (!run) return <aside className="inspector" aria-label={`${node.graphId}:${node.nodeId} PlanGraph node details`}><header><div><Status record={node.nodeRecord} /><code>{node.graphId} / {node.nodeId}</code></div><button onClick={onClose} aria-label="Close inspector">×</button></header><h2>{node.nodeId}</h2><div className="details"><NodeSummary node={node} /><section><h3>Metrics</h3><p className="muted">Verified FeatureRun metrics are unavailable because {node.plannedRunId ? `the planned run ${node.plannedRunId} is not present in the catalog` : 'this node has no correlated FeatureRun'}.</p></section></div></aside>;
-  return <aside className="inspector" aria-label={`${run.run_id} FeatureRun details`}><header><div><Status record={run} /><code>{run.run_id}</code></div><button onClick={onClose} aria-label="Close inspector">×</button></header><h2>{detail?.descriptor?.objective || run.run_id}</h2><Availability label="Catalog evidence:" value={run.evidence} />
+  return <aside className="inspector" aria-label={`${run.run_id} FeatureRun details`} aria-busy={!detail && !error}><header><div><Status record={run} /><code>{run.run_id}</code></div><button onClick={onClose} aria-label="Close inspector">×</button></header><h2>{detail?.descriptor?.objective || run.run_id}</h2><Availability label="Catalog evidence:" value={run.evidence} /><Liveness value={run.liveness} />
     <NodeSummary node={node} />
-    {loading && <p>Loading verified FeatureRun detail…</p>}{error && <p className="error">{error}</p>}
+    {error && <p className="error">{error}</p>}
     {detail && <div className="details">
       <nav className="detail-tabs" aria-label="FeatureRun detail tabs">{['overview', 'activity', 'metrics', 'evidence', 'git custody'].map((name) => <button key={name} className={tab === name ? 'active' : ''} onClick={() => onTabChange(name)}>{name}</button>)}</nav>
       {tab === 'overview' && <><section><h3>Acceptance criteria</h3><Availability label="Availability:" value={detail.availability.criteria} /><ReadableList values={detail.criteria} empty="Criteria were not recorded." /></section><section><h3>Tasks</h3><Availability label="Availability:" value={detail.availability.tasks} /><ReadableList values={detail.tasks} empty="Tasks were not recorded." /></section><section><h3>Findings</h3><Availability label="Availability:" value={detail.availability.findings} /><ReadableList values={detail.findings} empty="Findings were not recorded." /></section></>}
@@ -71,7 +72,7 @@ function Activity({ events, availability }) {
 function MetricCards({ metrics }) {
   const total = metrics.totals; const quality = metrics.quality;
   return <div className="metric-cards">
-    <div><span>Total tokens</span><strong>{tokens(total.total_tokens)}</strong><small>{tokens(total.input_tokens)} in · {tokens(total.output_tokens)} out</small></div>
+    <div><span>{metrics.provenance.attempt_count > 1 ? 'Cumulative tokens' : 'Total tokens'}</span><strong>{tokens(total.total_tokens)}</strong><small>{metrics.provenance.attempt_count > 1 ? `${number.format(metrics.provenance.attempt_count)} node tries · ` : ''}{tokens(total.input_tokens)} in · {tokens(total.output_tokens)} out</small></div>
     <div><span>Peak observed input</span><strong>{tokens(total.peak_input_tokens)}</strong><small>single agent invocation</small></div>
     <div><span>Agent time</span><strong>{duration(total.duration_ms)}</strong><small>{number.format(total.calls)} backend call{total.calls === 1 ? '' : 's'}</small></div>
     <div><span>Wall time</span><strong>{duration(total.wall_clock_ms)}</strong><small>run elapsed time</small></div>
@@ -86,35 +87,38 @@ function MetricsTable({ heading, rows, agents = false }) {
 
 function Metrics({ metrics }) {
   if (!metrics) return <section><h3>Metrics</h3><p className="muted">Metrics are unavailable for this run.</p></section>;
-  return <div className="metrics"><section><h3>Run metrics</h3><MetricCards metrics={metrics} /><p className="metric-note">Derived from {metrics.provenance.usage_records} {metrics.provenance.collection_method}. Peak context means {metrics.provenance.peak_context_definition}. Cached input is included within input and is not double-counted.</p></section><MetricsTable heading="By phase" rows={metrics.by_phase} /><MetricsTable heading="By agent" rows={metrics.by_agent} agents /><MetricsTable heading="By agent type" rows={metrics.by_agent_type} /><MetricsTable heading="By model" rows={metrics.by_model} /><MetricsTable heading="By effort" rows={metrics.by_effort} /><MetricsTable heading="By backend" rows={metrics.by_backend} /></div>;
+  return <div className="metrics"><section><h3>Run metrics</h3><MetricCards metrics={metrics} /><p className="metric-note">Derived from {metrics.provenance.usage_records} {metrics.provenance.collection_method}. Peak context means {metrics.provenance.peak_context_definition}. Cached input is included within input and is not double-counted.</p></section><ExecutionStages rows={metrics.stages} />{metrics.by_try?.length > 1 && <MetricsTable heading="By try" rows={metrics.by_try} />}<MetricsTable heading="By phase" rows={metrics.by_phase} /><MetricsTable heading="By agent" rows={metrics.by_agent} agents /><MetricsTable heading="By agent type" rows={metrics.by_agent_type} /><MetricsTable heading="By model" rows={metrics.by_model} /><MetricsTable heading="By effort" rows={metrics.by_effort} /><MetricsTable heading="By backend" rows={metrics.by_backend} /></div>;
+}
+
+function ExecutionStages({ rows }) {
+  return <section className="metric-section"><h3>Execution stages</h3>{rows.length ? <div className="table-wrap"><table><thead><tr><th>Stage</th><th>Kind</th><th>Phase</th><th>Attempt</th><th>Status</th><th>Backend</th><th>Model / effort</th><th>Duration</th></tr></thead><tbody>{rows.map((row, index) => <tr key={`${row.kind}:${row.label}:${row.attempt}:${index}`}><td>{title(row.label)}</td><td>{title(row.kind)}</td><td>{title(row.phase)}</td><td>{compactId(row.attempt)}</td><td><span className={`pill pill--${row.status}`}>{title(row.status)}</span></td><td>{row.backend}</td><td>{row.model}<small>{row.effort}</small></td><td>{duration(row.duration_ms)}</td></tr>)}</tbody></table></div> : <p className="muted">No audited executor stages were recorded.</p>}</section>;
 }
 
 function Dashboard() {
   const [catalog, setCatalog] = useState(null); const [error, setError] = useState(); const etag = useRef();
-  const [selectedRunId, setSelectedRunId] = useState(null); const [detail, setDetail] = useState(null); const [detailError, setDetailError] = useState(); const [detailLoading, setDetailLoading] = useState(false);
+  const [selectedRunId, setSelectedRunId] = useState(null); const [detail, setDetail] = useState(null); const [detailRunId, setDetailRunId] = useState(null); const [detailError, setDetailError] = useState();
+  const detailRef = useRef(null); const detailRunIdRef = useRef(null);
   const [detailTab, setDetailTab] = useState('overview');
   const [selectedNodeKey, setSelectedNodeKey] = useState(null);
   const [selectedPlanKey, setSelectedPlanKey] = useState(null); const [selectedGraphId, setSelectedGraphId] = useState(null);
   const refresh = useCallback(async (signal) => { try { const result = await fetchCatalog({ etag: etag.current, signal }); if (result.catalog) { etag.current = result.etag; setCatalog(result.catalog); } setError(undefined); } catch (reason) { if (reason.name !== 'AbortError') setError(reason.message); } }, []);
   useEffect(() => { const controller = new AbortController(); const refreshWhileVisible = () => { if (document.visibilityState === 'visible') refresh(controller.signal); }; refreshWhileVisible(); const timer = window.setInterval(refreshWhileVisible, POLL_MILLISECONDS); document.addEventListener('visibilitychange', refreshWhileVisible); return () => { controller.abort(); window.clearInterval(timer); document.removeEventListener('visibilitychange', refreshWhileVisible); }; }, [refresh]);
   const selectedRun = useMemo(() => selectedRunFor(catalog, selectedRunId), [catalog, selectedRunId]);
+  const visibleDetail = detailRunId === selectedRunId ? detail : null;
   useEffect(() => {
-    if (!selectedRunId) { setDetail(null); return undefined; }
-    if (!selectedRun) { setDetail(null); setDetailError('The selected FeatureRun is no longer present in the refreshed catalog.'); return undefined; }
+    if (!selectedRunId) { detailRef.current = null; detailRunIdRef.current = null; setDetail(null); setDetailRunId(null); return undefined; }
+    if (!selectedRun) { detailRef.current = null; detailRunIdRef.current = null; setDetail(null); setDetailRunId(null); setDetailError('The selected FeatureRun is no longer present in the refreshed catalog.'); return undefined; }
     let active = true;
     let requestController;
     const refreshDetail = () => {
       if (document.visibilityState !== 'visible') return;
       requestController?.abort();
       requestController = new AbortController();
-      setDetailLoading(true);
       setDetailError(undefined);
       fetchRunDetail(selectedRunId, requestController.signal).then((result) => {
-        if (active) setDetail(result);
+        if (active) { detailRef.current = result; detailRunIdRef.current = selectedRunId; setDetail(result); setDetailRunId(selectedRunId); }
       }).catch((reason) => {
-        if (active && reason.name !== 'AbortError') setDetailError(reason.message);
-      }).finally(() => {
-        if (active) setDetailLoading(false);
+        if (active && reason.name !== 'AbortError' && (detailRunIdRef.current !== selectedRunId || !detailRef.current)) setDetailError(reason.message);
       });
     };
     refreshDetail();
@@ -144,6 +148,6 @@ function Dashboard() {
       </div><div className="legend">{['running', 'queued', 'blocked', 'stale', 'succeeded', 'unavailable'].map((state) => <span key={state} className={`status status--${state}`}><i />{state}</span>)}</div></div>
       {nodes.length ? <ReactFlow nodes={nodes} edges={edges} nodeTypes={nodeTypes} onNodeClick={onNodeClick} fitView nodesDraggable={false} nodesConnectable={false} deleteKeyCode={null} proOptions={{ hideAttribution: true }}><Background /><Controls showInteractive={false} /></ReactFlow> : <div className="empty-canvas"><h2>No PlanGraphs discovered</h2><p>The configured audit roots have no verified PlanGraph records.</p></div>}</section>
       <section className="runs"><h2>FeatureRuns</h2>{catalog.feature_runs.length ? catalog.feature_runs.map((run) => <button key={run.run_id} onClick={() => { setDetailTab('overview'); setSelectedNodeKey(null); setSelectedRunId(run.run_id); }}><code>{run.run_id}</code><Status record={run} /><span>{run.correlation ? `${run.correlation.plan_graph_id} / ${run.correlation.plan_node_id}` : 'Ungrouped or legacy'}</span></button>) : <p className="muted">No FeatureRuns discovered.</p>}</section>
-    </>}</main><Detail run={selectedRun} node={selectedNode} detail={detail} loading={detailLoading} error={detailError} onClose={() => { setSelectedNodeKey(null); setSelectedRunId(null); }} tab={detailTab} onTabChange={setDetailTab} /></div>;
+    </>}</main><Detail run={selectedRun} node={selectedNode} detail={visibleDetail} error={detailError} onClose={() => { setSelectedNodeKey(null); setSelectedRunId(null); }} tab={detailTab} onTabChange={setDetailTab} /></div>;
 }
 export default function App() { return <ReactFlowProvider><Dashboard /></ReactFlowProvider>; }

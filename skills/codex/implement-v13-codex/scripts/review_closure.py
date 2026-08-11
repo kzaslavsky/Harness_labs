@@ -42,6 +42,7 @@ ATTEMPTS_BEFORE_ESCALATION = 3
 COLLISION_ATTEMPTS_BEFORE_OPERATOR = 2
 MAX_COLLISION_CLOSURES = 3
 EFFECT_CONTRACT_PROTOCOL = "implement-v13-codex/repair-effect-contract/1"
+DELTA_SCOPE_PROTOCOL = "implement-v13-codex/delta-resume-scope/1"
 REPAIR_EFFECTS = {
     "failure_checkpoint",
     "blocked_queue",
@@ -661,6 +662,101 @@ def cas_save_ledger(
 
 def attempt_history_sha256(closure: dict[str, Any]) -> str:
     return _canonical_sha256(closure.get("attempts", []))
+
+
+def _lower_hex(value: Any, length: int) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == length
+        and all(char in "0123456789abcdef" for char in value)
+    )
+
+
+def _open_closures(ledger: dict[str, Any]) -> list[dict[str, Any]]:
+    return [item for item in ledger.get("closures", []) if item.get("status") != "closed"]
+
+
+def freeze_delta_scope(path: Path, *, candidate_commit_sha: str) -> dict[str, Any]:
+    """Freeze the residual review delta a delta-scoped resume must close."""
+    if not _lower_hex(candidate_commit_sha, 40):
+        raise StateError("delta scope requires a 40-hex candidate commit sha")
+    ledger = _load(path)
+    open_closures = _open_closures(ledger)
+    if not open_closures:
+        raise StateError("delta scope requires at least one open closure")
+    scoped: list[dict[str, Any]] = []
+    fingerprints: set[str] = set()
+    node_ids: list[str] = []
+    commands: list[Any] = []
+    seen_nodes: set[str] = set()
+    for closure in open_closures:
+        keys = [item for item in closure.get("fingerprints", []) if isinstance(item, str) and item]
+        if not keys:
+            raise StateError(f"open closure has no finding fingerprints: {closure.get('closure_id')}")
+        fingerprints.update(keys)
+        scoped.append(
+            {
+                "closure_id": closure.get("closure_id"),
+                "status": closure.get("status"),
+                "fingerprints": sorted(keys),
+            }
+        )
+        for test in closure.get("immutable_test_nodes", []):
+            node_id = test.get("node_id") if isinstance(test, dict) else None
+            if not isinstance(node_id, str) or not node_id or node_id in seen_nodes:
+                continue
+            seen_nodes.add(node_id)
+            node_ids.append(node_id)
+            commands.append(test.get("command"))
+    if not node_ids:
+        raise StateError("delta scope requires a bound verification slice for the open closures")
+    return {
+        "protocol": DELTA_SCOPE_PROTOCOL,
+        "feature_run_id": ledger.get("feature_run_id"),
+        "candidate_commit_sha": candidate_commit_sha,
+        "ledger_path": str(path.resolve()),
+        "ledger_sha256": sha256_file(path),
+        "ledger_state_revision": ledger.get("state_revision"),
+        "open_closures": scoped,
+        "open_fingerprints": sorted(fingerprints),
+        "verification_slice": {"test_nodes": node_ids, "commands": commands},
+    }
+
+
+def validate_delta_scope(path: Path, scope: dict[str, Any]) -> dict[str, Any]:
+    """Fail closed unless the frozen delta scope still matches the on-disk ledger."""
+    if not isinstance(scope, dict) or scope.get("protocol") != DELTA_SCOPE_PROTOCOL:
+        raise StateError("delta scope protocol is invalid")
+    if not _lower_hex(scope.get("candidate_commit_sha"), 40):
+        raise StateError("delta scope candidate commit sha is invalid")
+    if not path.is_file():
+        raise StateError("delta scope ledger is missing")
+    if not _lower_hex(scope.get("ledger_sha256"), 64) or sha256_file(path) != scope["ledger_sha256"]:
+        raise StateError("delta scope ledger hash does not match the frozen review ledger")
+    ledger = _load(path)
+    if scope.get("feature_run_id") != ledger.get("feature_run_id"):
+        raise StateError("delta scope belongs to another feature run")
+    current_open: set[str] = set()
+    for closure in _open_closures(ledger):
+        current_open.update(
+            item for item in closure.get("fingerprints", []) if isinstance(item, str) and item
+        )
+    declared = scope.get("open_fingerprints")
+    if (
+        not isinstance(declared, list)
+        or not declared
+        or any(not isinstance(item, str) or not item for item in declared)
+        or set(declared) != current_open
+    ):
+        raise StateError("delta scope open fingerprints do not match the ledger's open findings")
+    slice_value = scope.get("verification_slice")
+    if (
+        not isinstance(slice_value, dict)
+        or not isinstance(slice_value.get("commands"), list)
+        or not slice_value["commands"]
+    ):
+        raise StateError("delta scope verification slice is empty")
+    return scope
 
 
 def _design_rejections(closure: dict[str, Any]) -> list[dict[str, Any]]:
@@ -2289,6 +2385,10 @@ def main(argv: list[str] | None = None) -> int:
     for name in ("record-test", "backfill-assertion-map", "resolve-legacy-assertion-conflict", "record-design", "record-design-review", "backfill-design-rejections", "resolve-design-contradiction", "activate-post-resolution-design-budget", "activate-post-resolution-attempt-budget", "start-attempt", "finish-attempt", "record-review", "record-escalation"):
         command = sub.add_parser(name); command.add_argument("ledger"); command.add_argument("closure_id"); command.add_argument("result")
     status = sub.add_parser("next"); status.add_argument("ledger")
+    freeze = sub.add_parser("freeze-delta-scope")
+    freeze.add_argument("ledger"); freeze.add_argument("candidate_commit_sha"); freeze.add_argument("output")
+    check = sub.add_parser("validate-delta-scope")
+    check.add_argument("ledger"); check.add_argument("scope")
     args = parser.parse_args(argv)
     ledger_path = Path(args.ledger).resolve()
     if args.command == "init":
@@ -2296,6 +2396,11 @@ def main(argv: list[str] | None = None) -> int:
         output = create_ledger(ledger_path, feature_run_id=args.feature_run_id, groups=groups)
     elif args.command == "next":
         output = next_action(ledger_path)
+    elif args.command == "freeze-delta-scope":
+        output = freeze_delta_scope(ledger_path, candidate_commit_sha=args.candidate_commit_sha)
+        atomic_write_json(Path(args.output).resolve(), output)
+    elif args.command == "validate-delta-scope":
+        output = validate_delta_scope(ledger_path, read_json(Path(args.scope).resolve()))
     else:
         function = {
             "record-test": record_test, "record-design": record_design,

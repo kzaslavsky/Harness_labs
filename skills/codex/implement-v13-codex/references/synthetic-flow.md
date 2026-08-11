@@ -11,7 +11,7 @@ documents. A successful legacy result does not prove empty context or zero
 document reads. Use `run_phase_flow.py` for that claim.
 
 The dispatch file is the unchanged JSON object returned by
-`serial_state.py dispatch`. The synthetic coordinator requires and validates
+`feature_queue_state.py dispatch`. The synthetic coordinator requires and validates
 the normal production identity, lease, decision, path, planning-input, and
 run-directive fields. It preserves and hashes the complete payload, including
 unknown additive fields. Its core identity is:
@@ -58,5 +58,5 @@ python3 scripts/run_synthetic_flow.py verify /absolute/run-directory
 ```
 
 The terminal `synthetic-feature-result.json` is deliberately protocol-distinct
-from `feature-result.v1.json`; a serial dispatcher must never accept it as merge
+from `feature-result.v1.json`; a feature queue controller must never accept it as merge
 proof. The replacement debug protocol must preserve this non-interchangeability.

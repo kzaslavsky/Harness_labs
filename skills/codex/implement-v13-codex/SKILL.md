@@ -1,6 +1,6 @@
 ---
 name: implement-v13-codex
-description: Implement or resume exactly one repository feature through a durable Codex-native phase machine with hashed planning inputs, adversarial plan review, bounded implementation workers, runtime and UI verification, code review/fixes, full certification, documented context reconciliation, guarded Git handoff, merge proof, crash recovery, and a migration path to JSON-defined child phases. Use for implement-v13-codex feature runs, Codex-native autonomous implementation, matching in-progress v13-codex checkpoints dispatched by serial-implement-codex, or work on its phase-harness certification layer.
+description: Implement or resume exactly one repository feature through a durable Codex-native phase machine with hashed planning inputs, adversarial plan review, bounded implementation workers, runtime and UI verification, code review/fixes, full certification, documented context reconciliation, guarded Git handoff, merge proof, crash recovery, and a migration path to JSON-defined child phases. Use for implement-v13-codex feature runs, Codex-native autonomous implementation, matching in-progress v13-codex checkpoints, or work on its phase-harness certification layer.
 ---
 
 # Implement v13 Codex
@@ -40,7 +40,7 @@ Before acting, read [references/protocol.md](references/protocol.md), [reference
    file, the exact Codex executable identity, and every declared model name.
    The first child is the live auth/model/quota probe because the CLI exposes no
    exact quota-headroom API. Park immediately if it is rejected.
-2. For a fresh serial dispatch, immediately run
+2. For a fresh feature dispatch, immediately run
    the `controller_entrypoint` from the dispatch's read-only run-owned package
    as `scripts/start_planning.py DISPATCH.json`. It directly creates the recorded
    worktree and branch, initializes the checkpoint and transaction, resolves
@@ -77,26 +77,31 @@ validated unresolved contract or safety conflict.
 
 The caller keeps `start_planning.py` in the foreground until its planner receipt
 is terminal. A terminal planner failure must durably transition the checkpoint to
-`blocked` and settle the serial queue and lease before exit; terminal success
+`blocked` and settle the feature queue and lease before exit; terminal success
 advances it to `PLANNING/plan_validate/ready`. Never
 return from the parent task while the planner receipt is merely prepared, spawned,
 released, or running.
 
-After terminal planner success in a serial run, `start_planning.py` immediately
+After terminal planner success, `start_planning.py` immediately
 enters `scripts/run_feature.py` in the same foreground Python process. It owns
 one resumable, context-bounded coordinator thread and advances this phase loop at
 `plan_validate` until the queue item is terminal.
 Do not substitute an app-task handoff for that durable controller.
+If 55 seconds pass without a checkpoint-backed phase event, report only
+"controller session remains open; phase unknown," then run
+`feature_queue_state.py wait QUEUE --timeout-seconds 0`. Process liveness is
+never evidence that planning is still active; the returned checkpoint is the
+sole phase authority.
 The coordinator must keep the feature worktree as its cwd and receive the
 dispatch's absolute base worktree as an explicit additional writable root so it
-can write base-local run artifacts and settle the serial queue.
+can write base-local run artifacts and settle the feature queue.
 When acting as that coordinator child, execute phase details directly; never
-invoke `run_feature.py`, `start_planning.py`, or `serial_state.py`, and never
-mutate the serial queue or lease. The production controller marks coordinator
+invoke `run_feature.py`, `start_planning.py`, or `feature_queue_state.py`, and never
+mutate the feature queue or lease. The production controller marks coordinator
 subprocesses and rejects recursive controller entry and queue writes before state access.
 A schema-valid coordinator `blocked` result is a complete controller request:
 `run_feature.py` atomically persists the blocker at the current checkpoint detail
-before settling the serial queue. Never require the coordinator child to mutate
+before settling the feature queue. Never require the coordinator child to mutate
 the checkpoint as a separate half of that transition.
 Do not invoke `run_exec.py` inside the coordinator sandbox. Write child specs
 beneath the run artifact directory and return the coordinator `invoke` action.
@@ -261,7 +266,7 @@ Advance the base-local transaction through:
 
 `prepared → feature_committed → manifest_committed → merge_prepared → merged → cleanup_complete → feature_result_written`
 
-Retain the checkpoint until cleanup is proven. Write immutable `feature-result.v1.json` only after merge, manifest-on-base, cleanup, and base invariants pass. The serial dispatcher alone advances `dispatcher_ack` while atomically marking the queue item done.
+Retain the checkpoint until cleanup is proven. Write immutable `feature-result.v1.json` only after merge, manifest-on-base, cleanup, and base invariants pass. The feature queue controller alone advances `dispatcher_ack` while atomically marking the queue item done.
 
 ## Recovery
 
@@ -274,13 +279,13 @@ Retain the checkpoint until cleanup is proven. Write immutable `feature-result.v
   and every terminal, invocation, schema, and semantic check now passes. Append
   recovery provenance and advance its revision without relaunching the child.
 - Require blocker-class-specific resolution evidence before resuming a blocked run.
-- After the serial dispatcher validates a blocked feature's token, identity, surviving checkpoint/transaction hashes, and nonempty resolution evidence, the production controller may reopen only that same checkpoint phase/detail at `ready`. It appends the dispatcher authorization digest and resolution evidence to checkpoint history; no unauthorized `blocked -> ready` edge exists.
+- After the feature queue controller validates a blocked feature's token, identity, surviving checkpoint/transaction hashes, and nonempty resolution evidence, the production controller may reopen only that same checkpoint phase/detail at `ready`. It appends the controller authorization digest and resolution evidence to checkpoint history; no unauthorized `blocked -> ready` edge exists.
 - Recover terminal progress from the base-local transaction and run IDs, never the newest manifest.
 - Never force-remove a worktree with unknown files.
 
-Before returning to a serial dispatcher, the deterministic `run_feature.py`
+Before returning to the feature queue controller, the deterministic `run_feature.py`
 controller settles the queue atomically. A model coordinator returns a validated
-blocker or completion result but never invokes `serial_state.py` itself. The outer
+blocker or completion result but never invokes `feature_queue_state.py` itself. The outer
 controller performs guarded block or acknowledgment with the recorded queue path,
 coordinator ID, and lease, then reads back terminal state. Never rely on a parent
 task waking from a message to perform either transition.
@@ -289,7 +294,7 @@ Return only after verified completion or a durable blocker. Include the feature 
 
 ## Controller package and migrated-run recovery
 
-Every new serial dispatch copies only the two bounded controller packages
+Every new feature dispatch copies the bounded controller package
 (scripts, schemas, prompts, references, manifests, and skill metadata) beneath
 the run artifact directory. `controller-package-manifest.v1.json` binds every
 relative path, SHA-256, and executable mode to one package digest. Queue feature
@@ -301,7 +306,7 @@ A legacy active run may adopt a certified package only through the run-owned
 `controller_package.py migrate-run` command. It holds migration authority and
 then queue, immutable dispatch, checkpoint, transaction, closure-ledger, and
 journal authority in that fixed order. Queue bytes are constructed only by
-`serial_state.cas_migrate_feature_locked`; ledger changes use
+`feature_queue_state.cas_migrate_feature_locked`; ledger changes use
 `review_closure.cas_save_ledger`; every mutable document has revision and hash
 CAS. The original `dispatch.v1.json` is never rewritten.
 
@@ -311,7 +316,7 @@ proposal, witnesses, and authorization to acknowledge an already-written
 post-image or perform the next missing CAS. Only a fully read-back `committed`
 journal is a migration receipt.
 
-After token-gated serial resume, `prepare_dispatch` returns only
+After token-gated queue resume, `prepare_dispatch` returns only
 `dispatch_action=resume_existing_run`. Its sole consumer is the run-owned:
 
 ```text
@@ -329,6 +334,17 @@ lease once, reopens only blocked `REVIEWING/fix`, and uses a fresh migrated
 coordinator receipt namespace. No attempt identity or child exists before that
 deterministic gate passes.
 
+One exception widens the reopenable position: when the resume authorization
+carries a frozen delta-resume scope (`feature_queue_state.py resume ...
+--delta-scope SCOPE.json`, produced by `review_closure.py freeze-delta-scope`),
+a checkpoint blocked at or after `REVIEWING/fix` is rewound to `REVIEWING/fix`
+after the controller verifies the worktree HEAD equals the scope's verified
+candidate commit and the frozen review ledger is unchanged. The retry then
+closes exactly the recorded open finding fingerprints and re-verifies with the
+recorded verification slice instead of re-running implementation or the full
+gate walk. See
+[references/delta-scoped-retry.md](references/delta-scoped-retry.md).
+
 ## JSON phase-harness boundary
 
 Treat the JSON-driven phase harness as an inner child-execution subsystem, not a
@@ -340,7 +356,7 @@ feature result remain authoritative outside that subsystem.
 
 Derive debug mode only from an absent or empty context catalog. Debug mode uses
 an isolated empty workspace, a neutral child protocol, no repository or Git
-operations, and a protocol-distinct result that can never acknowledge a serial
+operations, and a protocol-distinct result that can never acknowledge a feature
 queue item. A nonempty catalog derives project mode and freezes required context
 bytes and hashes before the first dependent child.
 
@@ -370,13 +386,13 @@ python3 scripts/run_phase_flow.py inspect --run-dir /private/isolated/run
 The run directory must be new, private, and outside the repository. The
 controller freezes the exact flow, derives mode from the context catalog, and
 creates a fresh real Codex thread per unit. A terminal `debug-result.json` is
-orchestration-only evidence and cannot acknowledge a serial feature.
+orchestration-only evidence and cannot acknowledge a feature.
 
 ## Legacy synthetic parity fixture
 
 `scripts/run_synthetic_flow.py` preserves the pre-JSON coordinator behavior for
 regression comparison. It accepts the production dispatch payload emitted by
-`serial_state.py` unchanged (including additive extension fields),
+`feature_queue_state.py` unchanged (including additive extension fields),
 starts a fresh real `codex exec` for every detail, and accepts a detail only
 when the child-authored marker, final schema output, JSONL events, hashes, and
 production process receipt agree. `start --stop-after N`, `resume`, and

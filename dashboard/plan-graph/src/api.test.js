@@ -5,7 +5,7 @@ import { defaultGraphAttempt, displayState, graphProjection, planGraphGroups, se
 const availability = { state: 'available', reason: null };
 const liveness = (state) => ({ state, reason: null });
 const feature = { run_id: 'run-1', kind: 'feature_run', status: 'running', liveness: liveness('live'), evidence: availability, correlation: null };
-const metrics = { protocol: 'harness-run-detail-metrics/1', totals: {}, quality: {}, provenance: {}, by_phase: [], by_agent: [], by_agent_type: [], by_model: [], by_effort: [], by_backend: [] };
+const metrics = { protocol: 'harness-run-detail-metrics/1', totals: {}, quality: {}, provenance: {}, by_phase: [], by_agent: [], by_agent_type: [], by_model: [], by_effort: [], by_backend: [], stages: [] };
 const graph = (runId, createdAt, status = 'running', nodes = []) => ({
   run_id: runId, created_at: createdAt, plan_path: 'docs/plan.md', plan_digest: 'a'.repeat(64), plan_graph_digest: 'b'.repeat(64),
   status, liveness: liveness(status === 'running' ? 'live' : 'terminal'), evidence: availability, nodes,
@@ -15,7 +15,9 @@ const node = (nodeId, dependsOn = [], runId = null) => ({ node_id: nodeId, statu
 test('runtime validation accepts a catalog with a correlated graph node', () => {
   const catalog = { protocol: 'harness-run-catalog-snapshot/1', revision: 'rev', generated_at: '2026-08-09T00:00:00Z', source_root: '/audit', source_roots: ['/audit', '/other/audit'], availability, diagnostics: [], feature_runs: [feature], ungrouped_feature_runs: [], plan_graphs: [graph('graph-1', '2026-08-09T00:00:00Z', 'running', [{ ...node('node-1', [], 'run-1'), status: 'running', liveness: liveness('live') }])] };
   assert.equal(validateCatalog(catalog), catalog);
-  assert.deepEqual(graphProjection(catalog, catalog.plan_graphs[0]).nodes.map((item) => item.data.runId), ['run-1']);
+  const projection = graphProjection(catalog, catalog.plan_graphs[0]);
+  assert.deepEqual(projection.nodes.map((item) => item.data.runId), ['run-1']);
+  assert.equal(projection.nodes[0].data.title, 'node-1');
 });
 
 test('attempts are grouped by approved-plan digest and newest live attempt is selected', () => {
@@ -43,6 +45,8 @@ test('dependency projection creates layered nodes and audited edges', () => {
 test('states distinguish queued, blocked, stale, terminal, and unavailable evidence', () => {
   assert.equal(displayState({ ...feature, status: 'queued' }), 'queued');
   assert.equal(displayState({ ...feature, status: 'blocked' }), 'blocked');
+  assert.equal(displayState({ ...feature, status: 'running', liveness: liveness('liveness_unavailable') }), 'running');
+  assert.equal(displayState({ ...feature, status: 'running', liveness: liveness('remote_unverified') }), 'running');
   assert.equal(displayState({ ...feature, liveness: liveness('stale') }), 'stale');
   assert.equal(displayState({ ...feature, status: 'succeeded', liveness: liveness('terminal') }), 'succeeded');
   assert.equal(stateLabel({ ...feature, evidence: { state: 'unavailable', reason: 'missing' } }), 'Evidence unavailable');

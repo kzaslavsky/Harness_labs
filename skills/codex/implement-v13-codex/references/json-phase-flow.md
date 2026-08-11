@@ -8,7 +8,7 @@ receipt policy. Keep the outer feature checkpoint, repository gates, Git
 transaction, merge proof, and immutable feature result authoritative in
 `implement-v13-codex`.
 
-The generic runner must not inspect or update a serial queue. A dispatcher
+The generic runner must not inspect or update a feature queue. A controller
 payload is immutable run metadata. Only the production feature coordinator may
 turn a successful project flow into repository gate and integration evidence.
 

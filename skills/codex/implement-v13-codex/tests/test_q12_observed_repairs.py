@@ -35,11 +35,10 @@ class Q12ObservedRepairTests(unittest.TestCase):
 
     def test_parent_contract_uses_checkpoint_after_unexplained_55_seconds(self) -> None:
         package = Path(__file__).resolve().parents[1]
-        serial = package.parent / "serial-implement-codex"
-        contract = (serial / "SKILL.md").read_text(encoding="utf-8")
-        protocol = (serial / "references/protocol.md").read_text(encoding="utf-8")
-        self.assertIn("liveness, never that planning is still active", contract)
-        self.assertIn("wait QUEUE --timeout-seconds 0", contract)
+        contract = (package / "SKILL.md").read_text(encoding="utf-8")
+        protocol = (package / "references/protocol.md").read_text(encoding="utf-8")
+        self.assertIn("Process liveness is", contract)
+        self.assertIn("feature_queue_state.py wait QUEUE --timeout-seconds 0", contract)
         self.assertIn("phase unknown", contract)
         self.assertIn("sole phase authority", protocol)
 

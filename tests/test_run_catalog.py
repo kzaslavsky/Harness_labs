@@ -89,6 +89,29 @@ class RunCatalogTests(unittest.TestCase):
         self.assertEqual(projected["by_effort"][0]["label"], "high")
         self.assertEqual(projected["quality"]["criteria_satisfied"], 1)
 
+    def test_detail_projects_verified_codex_cumulative_token_notifications(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); run = self._run(root, "codex-usage")
+            journal = AuditJournal.open_existing(run, actor=AuditActor("controller", "controller"))
+            journal.append("backend_process_started", status="started", backend_id="codex-app-server", payload={"model": "gpt-5.6-terra", "reasoning": "medium"})
+            artifact = journal.write_artifact("codex-app-server-inbound", {
+                "method": "thread/tokenUsage/updated",
+                "params": {"tokenUsage": {
+                    "total": {"inputTokens": 100, "cachedInputTokens": 40, "outputTokens": 25, "totalTokens": 125},
+                    "last": {"inputTokens": 100, "cachedInputTokens": 40, "outputTokens": 25, "totalTokens": 125},
+                }},
+            }, media_type="application/x-ndjson")
+            journal.append("transport_message", status="received", backend_id="codex-app-server", artifacts=(artifact,), payload={"direction": "inbound", "method": "thread/tokenUsage/updated", "request_id": None})
+            journal.checkpoint("running", {"controller": {"criteria": {}, "tasks": {}, "findings": {}}})
+            detail = build_run_detail(root, "codex-usage")
+        projected = detail["metrics"]
+        self.assertEqual(projected["totals"]["total_tokens"], 125)
+        self.assertEqual(projected["totals"]["cached_input_tokens"], 40)
+        self.assertEqual(projected["totals"]["calls"], 1)
+        self.assertEqual(projected["totals"]["peak_input_tokens"], 100)
+        self.assertEqual(projected["by_model"][0]["label"], "gpt-5.6-terra")
+        self.assertEqual(projected["provenance"]["collection_method"], "verified cumulative Codex token-usage notifications")
+
     def test_detail_infers_api_equivalent_cost_with_long_context_pricing(self) -> None:
         metrics = _detail_metrics({
             "events": [{
@@ -105,6 +128,24 @@ class RunCatalogTests(unittest.TestCase):
         self.assertEqual(cost["usd"], 1.5)
         self.assertEqual(cost["long_context_records"], 1)
         self.assertIn("gpt-5.6-terra", cost["sources"][0])
+
+    def test_detail_projects_recorded_execution_stages_without_usage(self) -> None:
+        metrics = _detail_metrics({
+            "events": [{
+                "event_type": "controller_event", "status": "succeeded", "monotonic_ns": 1_000_000,
+                "payload": {"controller_event": {"event_type": "coordinator.session_started", "payload": {"session_id": "session-1", "segment_id": "build", "attempt": 1, "starting_phase": "implement", "backend_id": "coordinator"}}},
+            }, {
+                "event_type": "controller_event", "status": "succeeded", "monotonic_ns": 6_000_000,
+                "payload": {"controller_event": {"event_type": "coordinator.session_ended", "payload": {"session_id": "session-1", "segment_id": "build", "attempt": 1, "ending_phase": "implement", "result_status": "succeeded", "backend_id": "coordinator"}}},
+            }, {
+                "event_type": "deterministic_verification_completed", "status": "succeeded", "payload": {"stage": "post_implementation", "attempt": 1, "duration_ms": 20, "exit_code": 0, "timed_out": False},
+            }],
+            "checkpoint": {"state": {"controller": {"tasks": {"implement-one": {"attempt_id": "implement-one/attempt-1", "role": "semantic_worker", "status": "succeeded"}}}}},
+            "summary": None,
+        })
+        self.assertEqual([stage["phase"] for stage in metrics["stages"]], ["implement", "verify", "implement"])
+        self.assertEqual(metrics["stages"][0]["duration_ms"], 5)
+        self.assertEqual(metrics["stages"][1]["model"], "not applicable")
 
     def test_invalid_descriptor_and_unmatched_correlation_are_not_trusted(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

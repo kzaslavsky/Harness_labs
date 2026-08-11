@@ -25,7 +25,7 @@ This plan is intentionally surgical and is checked against
 2. Emit the same event when `run_feature.py` observes a durable checkpoint
    revision/phase transition. The event states that process liveness is not
    phase authority.
-3. Require the parent contract to use a zero-timeout serial snapshot or read the
+3. Require the parent contract to use a zero-timeout queue snapshot or read the
    checkpoint after the first unexplained 55-second interval. Permitted wording
    before reading state is “controller session remains open; phase unknown.”
 4. Put the actual execution environment in coordinator and child guidance:
@@ -64,7 +64,7 @@ This plan is intentionally surgical and is checked against
 - The production dispatch/startup E2E observed `PLANNING/plan_validate/ready`
   and `PLAN_REVIEW/revised_plan_validate/blocked` from structured checkpoint
   events while the same foreground process remained open.
-- All 104 implement-v13 tests, all 32 serial-dispatch tests, the 21 focused
+- All 104 implement-v13 tests, all 32 queue-dispatch tests, the 21 focused
   Retinology release/UI tests, the PHI scan, and documentation/backlink checks
   pass.
 - The final changed-path audit maps every new path to the eight observed issues

@@ -12,7 +12,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-SCRIPT = Path(__file__).parents[1] / "scripts" / "serial_state.py"
+SCRIPT = Path(__file__).parents[1] / "scripts" / "feature_queue_state.py"
 BASE_WORKTREE_PATH = Path("/absolute/base-worktree")
 SPEC = importlib.util.spec_from_file_location("serial_state", SCRIPT)
 assert SPEC and SPEC.loader
@@ -563,7 +563,7 @@ class QueueTests(unittest.TestCase):
             "os.environ", {serial_state.CONTROLLER_CHILD_ENV: "1"}, clear=False
         ):
             with self.assertRaisesRegex(
-                serial_state.SerialStateError, "may not mutate the serial queue"
+                serial_state.SerialStateError, "may not mutate the feature queue"
             ):
                 serial_state.block_feature(
                     active,

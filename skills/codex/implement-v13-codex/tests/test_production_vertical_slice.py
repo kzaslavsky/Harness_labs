@@ -12,7 +12,7 @@ from pathlib import Path
 
 PACKAGE = Path(__file__).parents[1]
 SCRIPTS = PACKAGE / "scripts"
-SERIAL_SCRIPT = PACKAGE.parent / "serial-implement-codex" / "scripts" / "serial_state.py"
+SERIAL_SCRIPT = PACKAGE / "scripts" / "feature_queue_state.py"
 START_PLANNING = SCRIPTS / "start_planning.py"
 sys.path.insert(0, str(SCRIPTS))
 

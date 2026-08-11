@@ -30,6 +30,15 @@ class RunMetricsTests(unittest.TestCase):
             with self.assertRaises(AuditError):
                 project_run_metrics(journal.run_dir)
 
+    def test_nonterminal_verified_event_ahead_of_checkpoint_is_projected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            journal = AuditJournal(Path(directory) / "run", "run", actor=AuditActor("a", "r"))
+            journal.append("deterministic_verification_completed", status="succeeded", payload={"stage": "post_implementation", "attempt": 1, "duration_ms": 5, "exit_code": 0, "timed_out": False})
+            metrics = project_run_metrics(journal.run_dir)
+        self.assertEqual(metrics["checkpoint_lag"], 1)
+        self.assertEqual(metrics["availability"]["journal"]["state"], "partial")
+        self.assertEqual(metrics["events"][-1]["event_type"], "deterministic_verification_completed")
+
 
 if __name__ == "__main__":
     unittest.main()
