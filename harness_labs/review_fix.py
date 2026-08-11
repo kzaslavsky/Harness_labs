@@ -25,6 +25,10 @@ class ReviewFixError(RuntimeError):
     """Raised when the review/fix protocol cannot safely continue."""
 
 
+class _RecoverableFixError(ReviewFixError):
+    """A fix worker failed mechanically while the frozen work remains valid."""
+
+
 class ReviewFixExecutorFactory(Protocol):
     """Construct an executor for one immutable review/fix stage attempt."""
 
@@ -506,7 +510,28 @@ class ReviewFixLoop:
                 if self.policy.cycle_limit_enabled and cycle >= cycle_limit:
                     return self._limit_exit(ledger, cycle, "cycle limit reached")
 
-                fix = self._execute("fix", cycle, ledger, fix_keys=fix_keys)
+                try:
+                    fix = self._execute("fix", cycle, ledger, fix_keys=fix_keys)
+                except _RecoverableFixError as exc:
+                    self.audit.append(
+                        "review_fix_recovery_triggered",
+                        status="recovering",
+                        payload={
+                            "cycle": cycle,
+                            "fix_keys": fix_keys,
+                            "reason": str(exc),
+                            "recovery_attempt": 1,
+                        },
+                        actor=AuditActor("review-fix-controller", "controller"),
+                    )
+                    fix = self._execute(
+                        "fix",
+                        cycle,
+                        ledger,
+                        fix_keys=fix_keys,
+                        recovery_attempt=1,
+                        recovery_reason=str(exc),
+                    )
                 fix_semantic = self._semantic(fix, "review-fix-fix/1")
                 addressed = _detail_keys(
                     fix_semantic.details,
@@ -596,8 +621,11 @@ class ReviewFixLoop:
         ledger: ReviewLedger,
         *,
         fix_keys: list[str] | None = None,
+        recovery_attempt: int | None = None,
+        recovery_reason: str = "",
     ) -> TaskResult:
-        attempt_id = f"{self.run_id}/review-fix/c{cycle}/{stage}"
+        suffix = f"-recovery-{recovery_attempt}" if recovery_attempt else ""
+        attempt_id = f"{self.run_id}/review-fix/c{cycle}/{stage}{suffix}"
         context = {
             "protocol": "review-fix-context/1",
             "stage": stage,
@@ -617,6 +645,18 @@ class ReviewFixLoop:
                 and self.policy.regression_review_enabled
                 else ""
             ),
+            "recovery": (
+                {
+                    "attempt": recovery_attempt,
+                    "reason": recovery_reason,
+                    "instruction": (
+                        "Use a changed implementation method for the same frozen "
+                        "finding keys; do not expand scope or discovery."
+                    ),
+                }
+                if recovery_attempt
+                else None
+            ),
         }
         attempt = TaskAttempt(
             attempt_id=attempt_id,
@@ -631,6 +671,17 @@ class ReviewFixLoop:
             self.executor_factory(stage, attempt),
         )
         if result.status != "succeeded":
+            error = str(result.payload.get("error", ""))
+            if (
+                stage == "fix"
+                and recovery_attempt is None
+                and error
+                == "writable worker completed without changing the repository"
+            ):
+                raise _RecoverableFixError(
+                    f"{stage} attempt ended with status {result.status}: "
+                    f"{result.payload}"
+                )
             raise ReviewFixError(
                 f"{stage} attempt ended with status {result.status}: {result.payload}"
             )

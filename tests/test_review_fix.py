@@ -148,6 +148,83 @@ class ReviewFixLoopTests(unittest.TestCase):
         audit.finalize("succeeded", result=outcome.as_dict())
         AuditJournal.verify(audit.run_dir)
 
+    def test_no_change_fix_triggers_one_fresh_recovery_attempt(self):
+        finding = {
+            "id": "wrong",
+            "statement": "The value is reversed.",
+            "category": "correctness",
+            "severity": "major",
+            "requires_disposition": True,
+            "file": "feature.txt",
+            "subject": "wrong value",
+            "score": 90,
+            "fix_cost": "local",
+            "protects": "acceptance criterion correct",
+        }
+        key = "feature.txt:wrong-value"
+        factory = _Factory(
+            {
+                "review": [
+                    lambda attempt: result(
+                        attempt.attempt_id,
+                        "review-fix-review/1",
+                        findings=(finding,),
+                    ),
+                    lambda attempt: result(
+                        attempt.attempt_id,
+                        "review-fix-review/1",
+                    ),
+                ],
+                "fix": [
+                    lambda attempt: TaskResult(
+                        attempt.attempt_id,
+                        "failed",
+                        {
+                            "error": (
+                                "writable worker completed without changing "
+                                "the repository"
+                            ),
+                            "error_type": "LiveExecutionError",
+                        },
+                    ),
+                    lambda attempt: result(
+                        attempt.attempt_id,
+                        "review-fix-fix/1",
+                        details={"addressed_finding_keys": [key]},
+                    ),
+                ],
+                "verify": [
+                    lambda attempt: result(
+                        attempt.attempt_id,
+                        "review-fix-verify/1",
+                        details={"verified_finding_keys": [key]},
+                    )
+                ],
+            }
+        )
+
+        outcome, audit, _ = self.run_loop(factory)
+
+        self.assertEqual(outcome.status, "succeeded")
+        self.assertEqual(
+            [call[0] for call in factory.calls],
+            ["review", "fix", "fix", "verify", "review"],
+        )
+        recovery = factory.calls[2][1]["recovery"]
+        self.assertEqual(recovery["attempt"], 1)
+        self.assertIn("changed implementation method", recovery["instruction"])
+        events = [
+            json.loads(line)
+            for line in (audit.run_dir / "events.jsonl").read_text().splitlines()
+        ]
+        triggered = [
+            event
+            for event in events
+            if event["event_type"] == "review_fix_recovery_triggered"
+        ]
+        self.assertEqual(len(triggered), 1)
+        self.assertEqual(triggered[0]["status"], "recovering")
+
     def test_duplicate_and_surface_growing_finding_never_reaches_fixer(self):
         finding = {
             "id": "growth-a",
