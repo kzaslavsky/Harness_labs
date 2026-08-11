@@ -57,3 +57,21 @@ python3 -m unittest tests.test_run_catalog_contracts tests.test_run_catalog test
 ```
 
 Result: 33 tests passed.
+
+## PG-07 certification handoff
+
+Certification proceeds in the recorded dependency order: preserve the frozen
+PG-00 contract root at commit `b152bbe6ccef887c1252e3b7d132e2a531be583b`, then
+certify the reviewed PG-05B candidate
+`c66e196` and reviewed PG-06 candidate `7e348f3`. PG-07 adds no product
+behavior and does not alter the controller's full-suite gate:
+
+```sh
+python3 -m unittest discover -s tests
+```
+
+The controller must run that unchanged command in its socket-permitted
+authoritative verification environment. This worker hands off the integrated
+candidate and its bounded non-socket evidence; the dashboard E2E gate remains
+required and is not weakened or skipped when a restricted worker sandbox cannot
+open its loopback server.

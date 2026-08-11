@@ -88,6 +88,34 @@ record is audited and late evidence after a forced block is quarantined. A
 child seal never advances the graph staging head: join integration retains that
 custody.
 
+### PlanGraph PG-07 certification handoff
+
+The certification order preserves the PG-00 root
+`b152bbe6ccef887c1252e3b7d132e2a531be583b`, followed by the reviewed PG-05B
+candidate `c66e196` and PG-06 candidate `7e348f3`. PG-07 records evidence only;
+it does not change product behavior or the controller's full-suite command:
+
+```sh
+python3 -m unittest discover -s tests
+```
+
+The controller receives the integrated candidate plus this worker's non-socket
+evidence handoff and must execute that unchanged full suite in its
+socket-permitted authoritative environment. Before accepting the full-suite
+result, it must provision a Chrome binary, set `DASHBOARD_E2E_CHROME` to its
+absolute executable path, and run the browser gate separately; a skipped test
+is not passing evidence:
+
+```sh
+test -x "$DASHBOARD_E2E_CHROME"
+npm --prefix dashboard/plan-graph run build
+python3 -m unittest tests.test_dashboard_e2e
+```
+
+The controller records a passing execution of that command as required
+dashboard E2E evidence. A restricted worker's loopback-server `PermissionError`
+does not permit the controller to weaken, skip, or replace this gate.
+
 ### Exit criteria
 
 - A representative feature is implemented in an isolated worktree and merged
