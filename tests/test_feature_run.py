@@ -523,6 +523,62 @@ class FeatureRunTests(unittest.TestCase):
             self.assertTrue(result.worktree_path.exists())
             AuditJournal.verify(root / "run")
 
+    def test_no_change_verification_repair_triggers_fresh_recovery(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            seen_contexts = []
+
+            def repair_factory(worktree, attempt):
+                class Executor:
+                    def execute(self, current_attempt):
+                        context = json.loads(current_attempt.context)
+                        seen_contexts.append(context)
+                        if len(seen_contexts) == 1:
+                            return TaskResult(
+                                current_attempt.attempt_id,
+                                "failed",
+                                {
+                                    "error": (
+                                        "writable worker completed without "
+                                        "changing the repository"
+                                    ),
+                                    "error_type": "LiveExecutionError",
+                                },
+                            )
+                        (worktree / "verified.txt").write_text(
+                            "repaired\n",
+                            encoding="utf-8",
+                        )
+                        return TaskResult(
+                            current_attempt.attempt_id,
+                            "succeeded",
+                            {"summary": "Recovered with a changed method."},
+                        )
+
+                return Executor()
+
+            result = self._run_verification_recovery_case(root, repair_factory)
+
+            self.assertEqual(result.status, "succeeded")
+            self.assertEqual(result.verification.status, "succeeded")
+            self.assertEqual(result.verification.repair_attempts, 2)
+            self.assertEqual(len(seen_contexts), 2)
+            self.assertIsNone(seen_contexts[0].get("recovery"))
+            self.assertEqual(seen_contexts[1]["recovery"]["attempt"], 1)
+            events = [
+                json.loads(line)
+                for line in (result.run_dir / "events.jsonl").read_text().splitlines()
+            ]
+            triggered = [
+                event
+                for event in events
+                if event["event_type"]
+                == "deterministic_verification_recovery_triggered"
+            ]
+            self.assertEqual(len(triggered), 1)
+            self.assertEqual(triggered[0]["status"], "recovering")
+            AuditJournal.verify(result.run_dir)
+
     def _run_verification_recovery_case(self, root, repair_factory):
         base = root / "base"
         base.mkdir()

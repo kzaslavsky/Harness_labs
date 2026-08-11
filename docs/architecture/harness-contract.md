@@ -294,11 +294,11 @@ hypothesis, input, or method; repeating the same failed action does not count as
 progress. Recovery resumes from durable verified state and emits a new attempt
 identity linked to the prior failure.
 
-A review-fix worker that returns the mechanical failure `writable worker
-completed without changing the repository` triggers one fresh changed-method
-fix attempt against the same frozen finding keys. The recovery attempt MUST keep
-the candidate, ledger, scope, and cycle fixed; a second failure terminalizes
-normally.
+A review-fix or deterministic-verification repair worker that returns the
+mechanical failure `writable worker completed without changing the repository`
+triggers one fresh changed-method repair attempt. The recovery attempt MUST keep
+the candidate, ledger or failed-command evidence, scope, and cycle fixed; a
+second failure terminalizes normally.
 
 The dispatcher treats a durable `running` task as uncertain external state and
 blocks instead of replaying it. A checkpointed active coordinator session can
