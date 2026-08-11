@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run an explicit PlanGraph decomposition with an injected launcher callable."""
+"""Register an immutable PlanGraph or run one audited attempt."""
 
 from __future__ import annotations
 
@@ -16,7 +16,9 @@ from harness_labs.plan_graph import (
     FeatureRunOutcome,
     PlanGraph,
     SubprocessFeatureRunLauncher,
-    plan_from_mapping,
+    load_registration,
+    persist_registration,
+    register_plan_graph,
 )
 
 
@@ -30,25 +32,82 @@ def _load_callable(reference: str) -> Callable[..., object]:
     return launcher
 
 
-def main() -> int:
+def _repository_path(repository: Path, value: Path | None, default: str) -> Path:
+    selected = value if value is not None else Path(default)
+    return selected.resolve() if selected.is_absolute() else (repository / selected).resolve()
+
+
+def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
-    parser.add_argument("decomposition", type=Path)
-    launcher_group = parser.add_mutually_exclusive_group(required=True)
+    modes = parser.add_subparsers(dest="mode", required=True)
+
+    register = modes.add_parser("register")
+    register.add_argument("decomposition", type=Path)
+    register.add_argument("--repository", type=Path, required=True)
+    register.add_argument("--logical-graph-id", required=True)
+    register.add_argument("--registration-root", type=Path)
+
+    run = modes.add_parser("run")
+    run.add_argument("--repository", type=Path, required=True)
+    run.add_argument("--registration", type=Path, required=True)
+    run.add_argument("--graph-attempt-id", required=True)
+    launcher_group = run.add_mutually_exclusive_group(required=True)
     launcher_group.add_argument("--launcher")
     launcher_group.add_argument("--launcher-command", nargs="+")
-    parser.add_argument("--launcher-cwd", type=Path)
-    parser.add_argument("--launcher-timeout", type=float)
-    parser.add_argument("--run-root", type=Path, default=Path("logs/runs"))
-    parser.add_argument("--graph-run-id")
-    parser.add_argument("--functionality-test", action="append", default=[])
-    arguments = parser.parse_args()
-    payload = json.loads(arguments.decomposition.read_text(encoding="utf-8"))
+    run.add_argument("--launcher-cwd", type=Path)
+    run.add_argument("--launcher-timeout", type=float)
+    run.add_argument("--run-root", type=Path)
+    return parser
+
+
+def main() -> int:
+    arguments = _parser().parse_args()
+    repository = arguments.repository.resolve()
+    if arguments.mode == "register":
+        payload = json.loads(arguments.decomposition.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError("decomposition must be a JSON object")
+        registration = register_plan_graph(
+            repository=repository,
+            logical_graph_id=arguments.logical_graph_id,
+            decomposition=payload,
+        )
+        registration_root = _repository_path(
+            repository,
+            arguments.registration_root,
+            "logs/plan-graph-registrations",
+        )
+        path = persist_registration(
+            repository=repository,
+            registration_root=registration_root,
+            registration=registration,
+        )
+        print(
+            json.dumps(
+                {
+                    "logical_graph_id": registration.logical_graph_id,
+                    "graph_digest": registration.graph_digest,
+                    "registration": str(path),
+                },
+                sort_keys=True,
+            )
+        )
+        return 0
+
+    registration_path = _repository_path(repository, arguments.registration, "")
+    registration = load_registration(registration_path)
+    run_root = _repository_path(repository, arguments.run_root, "logs/runs")
+    launcher_cwd = (
+        _repository_path(repository, arguments.launcher_cwd, "")
+        if arguments.launcher_cwd is not None
+        else repository
+    )
     if arguments.launcher:
         launcher = _load_callable(arguments.launcher)
     else:
         launcher = SubprocessFeatureRunLauncher(
             arguments.launcher_command,
-            cwd=arguments.launcher_cwd,
+            cwd=launcher_cwd,
             timeout_seconds=arguments.launcher_timeout,
         )
 
@@ -61,11 +120,11 @@ def main() -> int:
         raise TypeError("launcher must return FeatureRunOutcome or a mapping")
 
     graph = PlanGraph(
-        plan_from_mapping(payload),
+        repository,
+        registration,
         launch,
-        run_root=arguments.run_root,
-        graph_run_id=arguments.graph_run_id,
-        functionality_tests=arguments.functionality_test,
+        run_root=run_root,
+        graph_run_id=arguments.graph_attempt_id,
     )
     result = graph.run()
     print(
@@ -74,8 +133,11 @@ def main() -> int:
                 "status": result.status,
                 "candidate_commit": result.candidate_commit,
                 "failed_run_id": result.failed_run_id,
-                "graph_run_id": graph.graph_run_id,
-            }
+                "logical_graph_id": registration.logical_graph_id,
+                "graph_attempt_id": graph.graph_run_id,
+                "registration_digest": registration.graph_digest,
+            },
+            sort_keys=True,
         )
     )
     return 0 if result.status == "succeeded" else 1

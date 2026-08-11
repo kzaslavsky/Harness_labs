@@ -227,7 +227,7 @@ class DashboardEndToEndTests(unittest.TestCase):
                 # show the terminal state after the catalog refresh.
                 page.wait_for("document.querySelector('aside[aria-label=\\\"live-child FeatureRun details\\\"]') && document.querySelector('.inspector').innerText.includes('Succeeded')", timeout=6)
 
-    def test_operator_legacy_graph_import_requires_explicit_pairing(self) -> None:
+    def test_operator_legacy_graph_import_is_explicitly_retired(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             plan = root / "approved-plan.md"
@@ -244,11 +244,10 @@ class DashboardEndToEndTests(unittest.TestCase):
             result = subprocess.run([
                 sys.executable, "scripts/import_plan_graph_state.py", str(decomposition), str(state),
                 "--run-root", str(root / "runs"), "--graph-run-id", "imported-graph",
-            ], check=True, capture_output=True, text=True)
-            emitted = json.loads(result.stdout)
-            self.assertEqual(emitted["graph_run_id"], "imported-graph")
-            imported = json.loads((root / "runs" / "imported-graph" / "checkpoint.json").read_text())
-            self.assertEqual(imported["state"]["nodes"]["import-node"]["status"], "succeeded")
+            ], check=False, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("incompatible", result.stderr)
+            self.assertFalse((root / "runs" / "imported-graph").exists())
 
 
 if __name__ == "__main__":

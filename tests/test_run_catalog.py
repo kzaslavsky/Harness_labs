@@ -147,10 +147,18 @@ class RunCatalogTests(unittest.TestCase):
             plan = root / "plan.md"
             plan.write_text("approved plan\n", encoding="utf-8")
             PlanGraphAudit(
+                repository=root,
                 run_root=root,
                 graph_run_id="graph-attempt",
                 plan=str(plan),
+                plan_sha256=hashlib.sha256(plan.read_bytes()).hexdigest(),
                 base_commit="a" * 40,
+                registration_binding={
+                    "logical_graph_id": "graph",
+                    "registration_protocol": "plan-graph-registration/1",
+                    "registration_digest": "b" * 64,
+                    "graph_attempt_id": "graph-attempt",
+                },
                 objective="test graph",
                 nodes={
                     "root": {"status": "queued", "feature_run_id": "child-root", "depends_on": []},

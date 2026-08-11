@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 from dataclasses import dataclass, field, replace
@@ -91,11 +92,21 @@ class PlanGraphFeatureRunBinding:
     approved_plan: Mapping[str, object]
     source_binding_report: Mapping[str, object]
     build_briefing: Mapping[str, object]
+    plan: str
+    plan_base_commit: str
+    plan_sha256: str
 
     def __post_init__(self) -> None:
         if not all(
             isinstance(value, str) and value.strip()
-            for value in (self.plan_graph_id, self.plan_node_id, self.objective)
+            for value in (
+                self.plan_graph_id,
+                self.plan_node_id,
+                self.objective,
+                self.plan,
+                self.plan_base_commit,
+                self.plan_sha256,
+            )
         ):
             raise ValueError("PlanGraph FeatureRun binding identity must be non-empty")
         if not self.acceptance_criteria:
@@ -104,6 +115,15 @@ class PlanGraphFeatureRunBinding:
             value = getattr(self, name)
             if not isinstance(value, Mapping) or not value:
                 raise ValueError(f"PlanGraph FeatureRun binding {name} must be non-empty")
+        if (
+            self.approved_plan.get("path") != self.plan
+            or self.approved_plan.get("sha256") != self.plan_sha256
+        ):
+            raise ValueError("PlanGraph approved-plan artifact does not match its source binding")
+        if len(self.plan_sha256) != 64 or any(
+            character not in "0123456789abcdef" for character in self.plan_sha256
+        ):
+            raise ValueError("PlanGraph plan_sha256 must be a lowercase SHA-256")
 
     def handoff_artifacts(self) -> tuple[FeatureRunHandoffArtifact, ...]:
         def envelope(content: Mapping[str, object]) -> dict[str, object]:
@@ -667,6 +687,23 @@ def run_plan_graph_feature_worktree(
     handoff, while verification, ledger-backed review/fix, Git custody, recovery,
     and reporting continue through the existing FeatureRun implementation.
     """
+
+    repository = feature_run_options.get("base_repository")
+    if not isinstance(repository, Path):
+        raise ValueError("PlanGraph-bound FeatureRun requires base_repository")
+    approved_plan = subprocess.run(
+        ["git", "show", f"{binding.plan_base_commit}:{binding.plan}"],
+        cwd=repository,
+        capture_output=True,
+        check=False,
+    )
+    if approved_plan.returncode:
+        error = approved_plan.stderr.decode("utf-8", "replace").strip()
+        raise ValueError(
+            error or "PlanGraph-bound FeatureRun could not read its registered plan"
+        )
+    if hashlib.sha256(approved_plan.stdout).hexdigest() != binding.plan_sha256:
+        raise ValueError("PlanGraph-bound FeatureRun registered plan hash mismatch")
 
     phases = tuple(phase for segment in schema.segments for phase in segment.phases)
     if phases != _NORMAL_FEATURE_PHASES:

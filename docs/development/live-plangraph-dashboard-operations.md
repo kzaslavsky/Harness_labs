@@ -95,22 +95,12 @@ FeatureRuns without a descriptor remain visible as ungrouped
 `legacy_feature_run` records. This is a discovery compatibility path, not a
 claim that their historical metadata or liveness can be reconstructed.
 
-Legacy PlanGraph state is never inferred by scanning arbitrary JSON. Import a
-single graph only when the matching approved decomposition and legacy state
-file are both supplied:
-
-```sh
-python3 scripts/import_plan_graph_state.py \
-  docs/development/live-plangraph-dashboard-decomposition.json \
-  path/to/legacy-state.json \
-  --run-root logs/runs \
-  --graph-run-id imported-legacy-graph
-```
-
-The importer validates the decomposition and legacy dependency lineage before
-writing a canonical graph journal. It does not launch FeatureRuns. Retain the
-original state file as source evidence according to the applicable retention
-policy.
+Legacy PlanGraph state is never inferred or imported. The retired
+`scripts/import_plan_graph_state.py` exits with an explicit incompatibility
+error because sequential-prefix state lacks the immutable registration,
+manifest, lineage, verification, and attempt evidence required for safe reuse.
+Retain legacy state only as source evidence according to the applicable
+retention policy; create a new registered attempt for continued execution.
 
 ## Deliberate exclusions
 

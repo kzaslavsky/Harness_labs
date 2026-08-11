@@ -1,54 +1,109 @@
-"""Deterministic acceptance tests for the minimal sequential PlanGraph."""
+"""Deterministic acceptance tests for registered PlanGraph execution."""
 
 from __future__ import annotations
 
+from dataclasses import asdict, replace
+from concurrent.futures import ThreadPoolExecutor
 import json
-import tempfile
-import unittest
-from dataclasses import replace
-from types import SimpleNamespace
-from unittest.mock import patch
 from pathlib import Path
+import subprocess
+import sys
+import tempfile
+from types import SimpleNamespace
+import unittest
+from unittest.mock import patch
 
 from harness_labs.plan_graph import (
+    FEATURE_RUN_REQUEST_PROTOCOL,
     FeatureRunOutcome,
     FeatureRunRequest,
     PlanGraph,
     PlanGraphError,
-    PlanGraphPlan,
+    PlanGraphRegistration,
     PlanRun,
     SubprocessFeatureRunLauncher,
-    plan_from_mapping,
+    load_registration,
+    persist_registration,
+    register_plan_graph,
+    registration_bytes,
+    verify_registration,
 )
 
 
-def plan(*runs: PlanRun) -> PlanGraphPlan:
-    return PlanGraphPlan(
-        plan="docs/development/APPROVED_PLAN.md",
-        base_commit="base",
-        runs=runs,
-        plan_sections={
+def git(repository: Path, *arguments: str) -> str:
+    completed = subprocess.run(
+        ["git", *arguments],
+        cwd=repository,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if completed.returncode:
+        raise AssertionError(completed.stderr)
+    return completed.stdout.strip()
+
+
+def decomposition(base_commit: str, *, functionality_tests=()) -> dict[str, object]:
+    return {
+        "plan": "docs/approved-plan.md",
+        "base_commit": base_commit,
+        "runs": [
+            {
+                "id": "a",
+                "objective": "Build A",
+                "plan_sections": ["1"],
+                "criteria": ["AC-1"],
+                "depends_on": [],
+                "verification_argv": ["python3", "-m", "unittest"],
+            },
+            {
+                "id": "b",
+                "objective": "Build B",
+                "plan_sections": ["2"],
+                "criteria": ["AC-2"],
+                "depends_on": ["a"],
+                "verification_argv": ["python3", "-m", "unittest"],
+            },
+        ],
+        "plan_sections": {
             "1": "Build A. AC-1: A works.",
             "2": "Build B. AC-2: B works.",
         },
-        acceptance_criteria={"AC-1": "A works.", "AC-2": "B works."},
-    )
+        "acceptance_criteria": {"AC-1": "A works.", "AC-2": "B works."},
+        "functionality_tests": list(functionality_tests),
+    }
 
 
 class PlanGraphTests(unittest.TestCase):
     def setUp(self) -> None:
-        self._temporary_directory = tempfile.TemporaryDirectory()
-        self._graph_counter = 0
-        self._plan_path = Path(self._temporary_directory.name) / "approved-plan.md"
-        self._plan_path.write_text("approved plan\n", encoding="utf-8")
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.repository = self.root / "repository"
+        self.repository.mkdir()
+        git(self.repository, "init")
+        git(self.repository, "config", "user.email", "tests@example.com")
+        git(self.repository, "config", "user.name", "Tests")
+        plan = self.repository / "docs" / "approved-plan.md"
+        plan.parent.mkdir()
+        plan.write_text("Approved PlanGraph plan\n", encoding="utf-8")
+        git(self.repository, "add", "docs/approved-plan.md")
+        git(self.repository, "commit", "-m", "approved plan")
+        self.base_commit = git(self.repository, "rev-parse", "HEAD")
+        self.payload = decomposition(self.base_commit)
+        self.registration = register_plan_graph(
+            repository=self.repository,
+            logical_graph_id="example-graph",
+            decomposition=self.payload,
+        )
+        self.counter = 0
 
     def tearDown(self) -> None:
-        self._temporary_directory.cleanup()
+        self.temporary.cleanup()
 
-    def _graph(self, queue_plan, launcher, **kwargs) -> PlanGraph:
-        self._graph_counter += 1
+    def graph(self, launcher, *, registration=None, **options) -> PlanGraph:
+        self.counter += 1
 
-        def correlated_launcher(request):
+        def correlated(request):
             outcome = launcher(request)
             if outcome.status != "succeeded":
                 return outcome
@@ -61,249 +116,259 @@ class PlanGraphTests(unittest.TestCase):
             )
 
         return PlanGraph(
-            replace(queue_plan, plan=str(self._plan_path)),
-            correlated_launcher,
-            run_root=Path(self._temporary_directory.name) / "runs",
-            graph_run_id=f"graph-{self._graph_counter}",
-            **kwargs,
+            self.repository,
+            registration or self.registration,
+            correlated,
+            run_root=self.root / "runs",
+            graph_run_id=f"attempt-{self.counter}",
+            **options,
         )
 
-    @patch("harness_labs.plan_graph.subprocess.run")
-    def test_subprocess_launcher_keeps_one_graph_run_moving(self, run) -> None:
-        commits = iter(("A-commit", "B-commit"))
+    def test_same_commit_is_deterministic_across_worktrees(self) -> None:
+        worktree = self.root / "worktree"
+        git(self.repository, "worktree", "add", "--detach", str(worktree), self.base_commit)
+        other = register_plan_graph(
+            repository=worktree,
+            logical_graph_id="example-graph",
+            decomposition=self.payload,
+        )
+        self.assertEqual(registration_bytes(other), registration_bytes(self.registration))
 
-        def respond(*args, **kwargs):
-            request = json.loads(kwargs["input"])
-            commit = next(commits)
-            self.assertEqual(
-                request["base_commit"],
-                "base" if commit == "A-commit" else "A-commit",
+    def test_every_semantic_change_changes_digest(self) -> None:
+        changes = []
+        for mutate in (
+            lambda value: value["runs"][0].update(objective="Build A more"),
+            lambda value: value["runs"].reverse(),
+            lambda value: value["runs"][1].update(depends_on=[]),
+            lambda value: value["runs"][0].update(verification_argv=["true"]),
+            lambda value: value.update(functionality_tests=["true"]),
+        ):
+            changed = json.loads(json.dumps(self.payload))
+            mutate(changed)
+            if changed["runs"][0]["objective"] == "Build A more":
+                changed["plan_sections"][changed["runs"][0]["plan_sections"][0]] += " Build A more"
+            changes.append(changed)
+        for changed in changes:
+            with self.subTest(changed=changed):
+                candidate = register_plan_graph(
+                    repository=self.repository,
+                    logical_graph_id="example-graph",
+                    decomposition=changed,
+                )
+                self.assertNotEqual(candidate.graph_digest, self.registration.graph_digest)
+
+    def test_identity_is_deliberately_part_of_digest(self) -> None:
+        other = register_plan_graph(
+            repository=self.repository,
+            logical_graph_id="other-graph",
+            decomposition=self.payload,
+        )
+        self.assertNotEqual(other.graph_digest, self.registration.graph_digest)
+
+    def test_registration_reads_git_not_dirty_worktree(self) -> None:
+        (self.repository / "docs" / "approved-plan.md").write_text("dirty\n")
+        dirty = register_plan_graph(
+            repository=self.repository,
+            logical_graph_id="example-graph",
+            decomposition=self.payload,
+        )
+        self.assertEqual(dirty.plan_sha256, self.registration.plan_sha256)
+        changed = dict(self.payload, plan="docs/untracked.md")
+        (self.repository / "docs" / "untracked.md").write_text("untracked\n")
+        with self.assertRaises(PlanGraphError):
+            register_plan_graph(
+                repository=self.repository,
+                logical_graph_id="untracked-graph",
+                decomposition=changed,
             )
-            return SimpleNamespace(
-                returncode=0,
-                stdout=json.dumps(
-                    {"status": "succeeded", "candidate_commit": commit}
-                ),
-                stderr="",
+
+    def test_invalid_paths_and_ids_are_rejected_before_attempt(self) -> None:
+        for plan in ("/absolute.md", "../escape.md", "docs/./approved-plan.md"):
+            with self.subTest(plan=plan), self.assertRaises(PlanGraphError):
+                register_plan_graph(
+                    repository=self.repository,
+                    logical_graph_id="example-graph",
+                    decomposition=dict(self.payload, plan=plan),
+                )
+        with self.assertRaises(ValueError):
+            register_plan_graph(
+                repository=self.repository,
+                logical_graph_id="Bad/Graph",
+                decomposition=self.payload,
+            )
+        with self.assertRaises(ValueError):
+            PlanGraph(
+                self.repository,
+                self.registration,
+                lambda request: FeatureRunOutcome("failed"),
+                run_root=self.root / "runs",
+                graph_run_id="../bad",
+            )
+        self.assertFalse((self.root / "runs").exists())
+
+    def test_persistence_is_canonical_idempotent_and_collision_safe(self) -> None:
+        root = self.root / "registrations"
+        path = persist_registration(
+            repository=self.repository,
+            registration_root=root,
+            registration=self.registration,
+        )
+        again = persist_registration(
+            repository=self.repository,
+            registration_root=root,
+            registration=self.registration,
+        )
+        self.assertEqual(path, again)
+        self.assertEqual(load_registration(path), self.registration)
+        different = register_plan_graph(
+            repository=self.repository,
+            logical_graph_id="example-graph",
+            decomposition=dict(self.payload, functionality_tests=["true"]),
+        )
+        with self.assertRaisesRegex(PlanGraphError, "already registered differently"):
+            persist_registration(
+                repository=self.repository,
+                registration_root=root,
+                registration=different,
             )
 
-        run.side_effect = respond
-        result = self._graph(
-            plan(
-                PlanRun("A", "Build A", ("1",), ("AC-1",)),
-                PlanRun("B", "Build B", ("2",), ("AC-2",), ("A",)),
-            ),
-            SubprocessFeatureRunLauncher(("feature-run", "--json")),
-        ).run()
+    def test_concurrent_different_publications_have_one_winner(self) -> None:
+        root = self.root / "concurrent-registrations"
+        different = register_plan_graph(
+            repository=self.repository,
+            logical_graph_id="example-graph",
+            decomposition=dict(self.payload, functionality_tests=["true"]),
+        )
 
-        self.assertEqual(result.status, "succeeded")
-        self.assertEqual(result.candidate_commit, "B-commit")
-        self.assertEqual(run.call_count, 2)
+        def publish(registration):
+            try:
+                persist_registration(
+                    repository=self.repository,
+                    registration_root=root,
+                    registration=registration,
+                )
+                return "published"
+            except PlanGraphError:
+                return "collision"
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            outcomes = list(
+                executor.map(publish, (self.registration, different))
+            )
+        self.assertCountEqual(outcomes, ["published", "collision"])
+        winner = load_registration(root / "example-graph.json")
+        self.assertIn(
+            winner.graph_digest,
+            {self.registration.graph_digest, different.graph_digest},
+        )
+
+    def test_registration_tampering_is_rejected(self) -> None:
+        variants = (
+            replace(self.registration, protocol="unknown/1"),
+            replace(self.registration, graph_digest="0" * 64),
+            replace(self.registration, plan_sha256="0" * 64),
+            replace(self.registration, definition_json="{ \"runs\": [] }"),
+        )
+        for variant in variants:
+            with self.subTest(variant=variant), self.assertRaises(PlanGraphError):
+                verify_registration(self.repository, variant)
+        payload = asdict(self.registration)
+        payload["unknown"] = True
+        path = self.root / "bad.json"
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        with self.assertRaises(PlanGraphError):
+            load_registration(path)
 
     @patch("harness_labs.plan_graph.subprocess.run")
-    def test_subprocess_launcher_returns_concise_failure_evidence(self, run) -> None:
+    def test_subprocess_wire_contract_keeps_both_commit_meanings(self, run) -> None:
+        request = FeatureRunRequest(
+            FEATURE_RUN_REQUEST_PROTOCOL,
+            PlanRun("a", "Build A", ("1",), ("AC-1",)),
+            "candidate",
+            "docs/approved-plan.md",
+            self.base_commit,
+            self.registration.plan_sha256,
+            "attempt-1",
+            "a",
+            "attempt-1-a",
+            self.root / "runs" / "attempt-1-a",
+        )
         run.return_value = SimpleNamespace(
-            returncode=7,
-            stdout="",
-            stderr="bounded implementation failed",
+            returncode=0,
+            stdout=json.dumps({"status": "failed"}),
+            stderr="",
         )
-        outcome = SubprocessFeatureRunLauncher(("feature-run",))(
-            FeatureRunRequest(
-                PlanRun("A", "Build A", ("1",), ("AC-1",)),
-                "base",
-                "plan.md",
-            )
+        SubprocessFeatureRunLauncher(("launcher",))(request)
+        payload = json.loads(run.call_args.kwargs["input"])
+        self.assertEqual(payload["protocol"], FEATURE_RUN_REQUEST_PROTOCOL)
+        self.assertEqual(payload["base_commit"], "candidate")
+        self.assertEqual(payload["plan_base_commit"], self.base_commit)
+        self.assertEqual(payload["plan_sha256"], self.registration.plan_sha256)
+
+    def test_sequential_candidate_and_registered_functionality_test(self) -> None:
+        registration = register_plan_graph(
+            repository=self.repository,
+            logical_graph_id="with-final-test",
+            decomposition=dict(self.payload, functionality_tests=["test final"]),
         )
-
-        self.assertEqual(outcome.status, "failed")
-        self.assertEqual(outcome.evidence["exit_code"], 7)
-        self.assertIn("bounded implementation failed", outcome.evidence["stderr"])
-
-    def test_dependency_candidate_and_final_test(self) -> None:
         calls = []
         tests = []
-
-        def launcher(request):
-            calls.append((request.run.id, request.base_commit))
-            return FeatureRunOutcome("succeeded", f"{request.run.id}-commit")
-
-        graph = self._graph(
-            plan(
-                PlanRun("A", "Build A", ("1",), ("AC-1",)),
-                PlanRun("B", "Build B", ("2",), ("AC-2",), ("A",)),
-            ),
-            launcher,
-            functionality_tests=("test final",),
+        result = self.graph(
+            lambda request: calls.append((request.run.id, request.base_commit))
+            or FeatureRunOutcome("succeeded", f"{request.run.id}-commit"),
+            registration=registration,
             functionality_test_runner=lambda command, commit: tests.append((command, commit)),
-        )
-
-        result = graph.run()
-
-        self.assertEqual(result.status, "succeeded")
-        self.assertEqual(result.candidate_commit, "B-commit")
-        self.assertEqual(calls, [("A", "base"), ("B", "A-commit")])
-        self.assertEqual(tests, [("test final", "B-commit")])
-
-    def test_mapping_carries_run_verification_and_final_functionality(self) -> None:
-        payload = {
-            "plan": "docs/development/APPROVED_PLAN.md",
-            "base_commit": "base",
-            "runs": [
-                {
-                    "id": "A",
-                    "objective": "Build A",
-                    "plan_sections": ["1"],
-                    "criteria": ["AC-1"],
-                    "verification_argv": ["python3", "scripts/ui_walk.py"],
-                }
-            ],
-            "plan_sections": {"1": "Build A. AC-1: A works."},
-            "acceptance_criteria": {"AC-1": "A works."},
-            "functionality_tests": ["python3 scripts/ui_walk.py"],
-        }
-        requests = []
-        final_tests = []
-        graph = self._graph(
-            plan_from_mapping(payload),
-            lambda request: (
-                requests.append(request)
-                or FeatureRunOutcome("succeeded", "candidate")
-            ),
-            functionality_test_runner=lambda command, commit: final_tests.append(
-                (command, commit)
-            ),
-        )
-
-        result = graph.run()
-
-        self.assertEqual(result.status, "succeeded")
-        self.assertEqual(
-            requests[0].run.verification_argv,
-            ("python3", "scripts/ui_walk.py"),
-        )
-        self.assertEqual(final_tests, [("python3 scripts/ui_walk.py", "candidate")])
-
-    def test_sequential_candidate_includes_multiple_roots_and_dependencies(self) -> None:
-        calls = []
-        queue_plan = PlanGraphPlan(
-            plan="docs/development/APPROVED_PLAN.md",
-            base_commit="base",
-            runs=(
-                PlanRun("A", "Build A", ("1",), ("AC-1",)),
-                PlanRun("B", "Build B", ("2",), ("AC-2",)),
-                PlanRun("C", "Build C", ("3",), ("AC-3",), ("A", "B")),
-            ),
-            plan_sections={
-                "1": "Build A. AC-1: A works.",
-                "2": "Build B. AC-2: B works.",
-                "3": "Build C. AC-3: C works.",
-            },
-            acceptance_criteria={
-                "AC-1": "A works.",
-                "AC-2": "B works.",
-                "AC-3": "C works.",
-            },
-        )
-
-        result = self._graph(
-            queue_plan,
-            lambda request: (
-                calls.append((request.run.id, request.base_commit))
-                or FeatureRunOutcome("succeeded", f"{request.run.id}-commit")
-            ),
         ).run()
-
-        self.assertEqual(result.candidate_commit, "C-commit")
-        self.assertEqual(
-            calls,
-            [("A", "base"), ("B", "A-commit"), ("C", "B-commit")],
-        )
-
-    def test_cited_sections_constrain_objective_and_criterion(self) -> None:
-        invalid_plans = (
-            plan(PlanRun("A", "Unapproved work", ("1",), ("AC-1",))),
-            PlanGraphPlan(
-                plan="docs/development/APPROVED_PLAN.md",
-                base_commit="base",
-                runs=(PlanRun("A", "Build A", ("1",), ("AC-1",)),),
-                plan_sections={"1": "Build A."},
-                acceptance_criteria={"AC-1": "A works."},
-            ),
-        )
-        for invalid in invalid_plans:
-            with self.subTest(invalid=invalid):
-                with self.assertRaisesRegex(PlanGraphError, "absent from"):
-                    self._graph(
-                        invalid, lambda request: FeatureRunOutcome("succeeded")
-                    ).run()
+        self.assertEqual(result.candidate_commit, "b-commit")
+        self.assertEqual(calls, [("a", self.base_commit), ("b", "a-commit")])
+        self.assertEqual(tests, [("test final", "b-commit")])
+        with self.assertRaises(TypeError):
+            PlanGraph(
+                self.repository,
+                registration,
+                lambda request: FeatureRunOutcome("failed"),
+                run_root=self.root / "runs",
+                functionality_tests=("runtime addition",),
+            )
 
     @patch("harness_labs.plan_graph.subprocess.run")
-    def test_default_functionality_test_uses_candidate_checkout(self, run) -> None:
+    def test_default_functionality_clone_uses_explicit_repository(self, run) -> None:
         run.return_value.returncode = 0
-
         from harness_labs.plan_graph import _run_functionality_test
 
-        _run_functionality_test("test final", "candidate-commit")
+        _run_functionality_test(self.repository, "true", self.base_commit)
+        clone = run.call_args_list[0]
+        self.assertEqual(clone.args[0][-2], str(self.repository))
 
-        clone, checkout, test = run.call_args_list
-        self.assertEqual(clone.args[0][:4], ["git", "clone", "--shared", "--no-checkout"])
-        self.assertEqual(checkout.args[0][-1], "candidate-commit")
-        self.assertEqual(test.args[0], "test final")
-        self.assertEqual(test.kwargs["cwd"].name, "candidate")
+    def test_request_requires_initialized_audit(self) -> None:
+        graph = self.graph(lambda request: FeatureRunOutcome("failed"))
+        with self.assertRaisesRegex(PlanGraphError, "initialized PlanGraph audit"):
+            graph._request_for_run(graph.plan.runs[0], self.base_commit)
 
-    def test_invalid_references_cycles_and_coverage_prevent_launch(self) -> None:
-        invalid_plans = (
-            plan(PlanRun("A", "Build A", ("missing",), ("AC-1",))),
-            plan(PlanRun("A", "Build A", ("1",), ("AC-1",), ("B",)), PlanRun("B", "Build B", ("2",), ("AC-2",), ("A",))),
-            plan(PlanRun("A", "Build A", ("1",), ("AC-1",))),
-        )
-        for invalid in invalid_plans:
-            with self.subTest(invalid=invalid):
-                calls = []
-                with self.assertRaises(PlanGraphError):
-                    self._graph(
-                        invalid, lambda request: calls.append(request)
-                    ).run()
-                self.assertEqual(calls, [])
-
-    def test_failure_stops_dependents(self) -> None:
+    def test_failure_stops_dependents_and_identity_mismatch_fails(self) -> None:
         calls = []
-
-        def launcher(request):
-            calls.append(request.run.id)
-            return FeatureRunOutcome("failed")
-
-        result = self._graph(
-            plan(
-                PlanRun("A", "Build A", ("1",), ("AC-1",)),
-                PlanRun("B", "Build B", ("2",), ("AC-2",), ("A",)),
-            ),
-            launcher,
+        result = self.graph(
+            lambda request: calls.append(request.run.id) or FeatureRunOutcome("failed")
         ).run()
-        self.assertEqual(result.status, "failed")
-        self.assertEqual(result.failed_run_id, "A")
-        self.assertEqual(calls, ["A"])
+        self.assertEqual((result.status, result.failed_run_id, calls), ("failed", "a", ["a"]))
+        self.counter += 1
+        mismatch = PlanGraph(
+            self.repository,
+            self.registration,
+            lambda request: FeatureRunOutcome("succeeded", "bad-commit"),
+            run_root=self.root / "runs",
+            graph_run_id=f"attempt-{self.counter}",
+        ).run()
+        self.assertEqual(mismatch.status, "failed")
 
-    def test_interchangeable_launchers_need_no_graph_change(self) -> None:
-        queue_plan = plan(PlanRun("A", "Build A", ("1",), ("AC-1",)), PlanRun("B", "Build B", ("2",), ("AC-2",), ("A",)))
-        for prefix in ("one", "two"):
-            with self.subTest(prefix=prefix):
-                result = self._graph(
-                    queue_plan,
-                    lambda request, prefix=prefix: FeatureRunOutcome("succeeded", f"{prefix}-{request.run.id}"),
-                ).run()
-                self.assertEqual(result.candidate_commit, f"{prefix}-B")
+    def test_retired_importer_refuses_without_creating_state(self) -> None:
+        script = Path(__file__).resolve().parents[1] / "scripts" / "import_plan_graph_state.py"
+        completed = subprocess.run(
+            [sys.executable, str(script)], capture_output=True, text=True, check=False
+        )
+        self.assertEqual(completed.returncode, 2)
+        self.assertIn("incompatible", completed.stderr)
 
-    def test_legacy_import_rejects_completed_dependent_without_dependency(self) -> None:
-        ordered_runs = plan(
-            PlanRun("A", "Build A", ("1",), ("AC-1",)),
-            PlanRun("B", "Build B", ("2",), ("AC-2",), ("A",)),
-        ).runs
-
-        with self.assertRaisesRegex(PlanGraphError, "sequential candidate lineage"):
-            PlanGraph._validate_completed_dependencies(
-                ordered_runs, {"B": "B-commit"}
-            )
 
 if __name__ == "__main__":
     unittest.main()

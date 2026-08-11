@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import inspect
 import subprocess
@@ -224,14 +225,19 @@ class FeatureRunTests(unittest.TestCase):
                 "source": "approved-plan",
             },
         )
+        plan_bytes = b"registered plan\n"
+        plan_sha256 = hashlib.sha256(plan_bytes).hexdigest()
         binding = PlanGraphFeatureRunBinding(
             plan_graph_id="graph-1",
             plan_node_id="FR-01",
             objective="Implement the approved feature.",
             acceptance_criteria=criteria,
-            approved_plan={"path": "docs/plan.md", "sha256": "a" * 64},
+            approved_plan={"path": "docs/plan.md", "sha256": plan_sha256},
             source_binding_report={"claims": ["approved"]},
             build_briefing={"allowed_paths": ["feature.txt"]},
+            plan="docs/plan.md",
+            plan_base_commit="a" * 40,
+            plan_sha256=plan_sha256,
         )
         normal_schema = standard_feature_run_dispatch_schema()
         normal_phases = tuple(
@@ -249,14 +255,22 @@ class FeatureRunTests(unittest.TestCase):
 
         sentinel = object()
         run_feature.return_value = sentinel
-        result = run_plan_graph_feature_worktree(
-            binding=binding,
-            schema=normal_schema,
-            contract_factory=contract_factory,
-            review_fix_policy=ReviewFixPolicy(),
-            base_repository=Path("repository"),
-            verification_argv=("python3", "-m", "unittest"),
-            verification_repair_executor_factory=lambda attempt: None,
+        with patch("harness_labs.feature_run.subprocess.run") as git_show:
+            git_show.return_value = subprocess.CompletedProcess(
+                [], 0, stdout=plan_bytes, stderr=b""
+            )
+            result = run_plan_graph_feature_worktree(
+                binding=binding,
+                schema=normal_schema,
+                contract_factory=contract_factory,
+                review_fix_policy=ReviewFixPolicy(),
+                base_repository=Path("repository"),
+                verification_argv=("python3", "-m", "unittest"),
+                verification_repair_executor_factory=lambda attempt: None,
+            )
+        self.assertEqual(
+            git_show.call_args.args[0],
+            ["git", "show", f"{'a' * 40}:docs/plan.md"],
         )
 
         self.assertIs(result, sentinel)
@@ -284,24 +298,64 @@ class FeatureRunTests(unittest.TestCase):
 
     def test_plan_graph_mode_refuses_disabled_review_ledger(self) -> None:
         criteria = ({"id": "AC-1", "statement": "Works", "source": "plan"},)
+        plan_sha256 = hashlib.sha256(b"plan\n").hexdigest()
         binding = PlanGraphFeatureRunBinding(
             "graph-1",
             "FR-01",
             "Build it",
             criteria,
-            {"path": "plan.md"},
+            {"path": "plan.md", "sha256": plan_sha256},
             {"claims": ["bound"]},
             {"allowed_paths": ["feature.txt"]},
+            "plan.md",
+            "a" * 40,
+            plan_sha256,
         )
-        with self.assertRaisesRegex(ValueError, "ledger-backed review guards"):
-            run_plan_graph_feature_worktree(
-                binding=binding,
-                schema=standard_feature_run_dispatch_schema(),
-                contract_factory=lambda worktree, receipt: None,
-                review_fix_policy=ReviewFixPolicy(ledger_enabled=False),
-                verification_argv=("python3", "-m", "unittest"),
-                verification_repair_executor_factory=lambda attempt: None,
+        with patch("harness_labs.feature_run.subprocess.run") as git_show:
+            git_show.return_value = subprocess.CompletedProcess(
+                [], 0, stdout=b"plan\n", stderr=b""
             )
+            with self.assertRaisesRegex(ValueError, "ledger-backed review guards"):
+                run_plan_graph_feature_worktree(
+                    binding=binding,
+                    schema=standard_feature_run_dispatch_schema(),
+                    contract_factory=lambda worktree, receipt: None,
+                    review_fix_policy=ReviewFixPolicy(ledger_enabled=False),
+                    base_repository=Path("repository"),
+                    verification_argv=("python3", "-m", "unittest"),
+                    verification_repair_executor_factory=lambda attempt: None,
+                )
+
+    @patch("harness_labs.feature_run.run_feature_worktree")
+    def test_plan_graph_mode_rejects_registered_plan_hash_drift(self, run_feature) -> None:
+        plan_sha256 = hashlib.sha256(b"approved\n").hexdigest()
+        binding = PlanGraphFeatureRunBinding(
+            "graph-1",
+            "node-1",
+            "Build it",
+            ({"id": "AC-1", "statement": "Works", "source": "plan"},),
+            {"path": "docs/plan.md", "sha256": plan_sha256},
+            {"claims": ["bound"]},
+            {"allowed_paths": ["feature.txt"]},
+            "docs/plan.md",
+            "a" * 40,
+            plan_sha256,
+        )
+        with patch("harness_labs.feature_run.subprocess.run") as git_show:
+            git_show.return_value = subprocess.CompletedProcess(
+                [], 0, stdout=b"drifted\n", stderr=b""
+            )
+            with self.assertRaisesRegex(ValueError, "plan hash mismatch"):
+                run_plan_graph_feature_worktree(
+                    binding=binding,
+                    schema=standard_feature_run_dispatch_schema(),
+                    contract_factory=lambda worktree, receipt: None,
+                    review_fix_policy=ReviewFixPolicy(),
+                    base_repository=Path("repository"),
+                    verification_argv=("python3", "-m", "unittest"),
+                    verification_repair_executor_factory=lambda attempt: None,
+                )
+        run_feature.assert_not_called()
 
     def test_plan_graph_feature_run_has_no_skill_or_serial_coupling(self) -> None:
         import harness_labs.feature_run as feature_run_module

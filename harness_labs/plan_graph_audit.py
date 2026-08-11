@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,6 +21,23 @@ from .audit import AuditActor, AuditError, AuditJournal
 
 _ACTOR = AuditActor("plan-graph", "plan_graph_controller")
 _TERMINAL = frozenset({"succeeded", "failed", "blocked", "interrupted"})
+_GRAPH_ID = re.compile(r"^[a-z0-9][a-z0-9-]{0,127}$")
+_IMMUTABLE_NODE_FIELDS = (
+    "objective",
+    "plan_sections",
+    "criteria",
+    "depends_on",
+    "verification_argv",
+)
+
+
+def validate_plan_graph_id(value: str) -> None:
+    """Require one normalized filename-safe graph or attempt identity."""
+
+    if not isinstance(value, str) or _GRAPH_ID.fullmatch(value) is None:
+        raise ValueError(
+            "PlanGraph ID must match ^[a-z0-9][a-z0-9-]{0,127}$"
+        )
 
 
 class PlanGraphAudit:
@@ -28,41 +46,44 @@ class PlanGraphAudit:
     def __init__(
         self,
         *,
+        repository: Path,
         run_root: Path,
         graph_run_id: str,
         plan: str,
+        plan_sha256: str,
         base_commit: str,
+        registration_binding: Mapping[str, str],
         objective: str,
         nodes: Mapping[str, Mapping[str, object]],
         functionality_tests: tuple[str, ...],
     ) -> None:
-        if (
-            not graph_run_id
-            or graph_run_id in {".", ".."}
-            or "/" in graph_run_id
-            or "\\" in graph_run_id
-        ):
-            raise ValueError("graph_run_id must be a non-empty path-safe name")
+        validate_plan_graph_id(graph_run_id)
         self.graph_run_id = graph_run_id
         self.run_dir = (run_root / graph_run_id).resolve()
-        plan_digest = _plan_digest(plan)
-        if plan_digest is None:
-            raise ValueError("durable PlanGraph requires a readable approved plan")
+        expected_binding = {
+            "logical_graph_id",
+            "registration_protocol",
+            "registration_digest",
+            "graph_attempt_id",
+        }
+        if set(registration_binding) != expected_binding or not all(
+            isinstance(value, str) and value
+            for value in registration_binding.values()
+        ):
+            raise ValueError("registration binding is invalid")
+        if registration_binding["graph_attempt_id"] != graph_run_id:
+            raise ValueError("registration binding does not name this attempt")
         self._initial_state = {
             "graph_run_id": graph_run_id,
+            "registration_binding": dict(registration_binding),
             "plan": plan,
-            "plan_digest": plan_digest,
+            "plan_digest": plan_sha256,
             "base_commit": base_commit,
-            "plan_graph_digest": _plan_graph_digest(
-                plan=plan,
-                plan_digest=plan_digest,
-                base_commit=base_commit,
-                nodes=nodes,
-                functionality_tests=functionality_tests,
-            ),
+            "plan_graph_digest": registration_binding["registration_digest"],
             "current_candidate_commit": base_commit,
             "ordered_node_ids": list(nodes),
             "nodes": {key: dict(value) for key, value in nodes.items()},
+            "registered_functionality_tests": list(functionality_tests),
             "current_node_id": None,
             "functionality_test": {"state": "unavailable", "reason": "not_run"},
             "terminal_graph_status": None,
@@ -75,11 +96,11 @@ class PlanGraphAudit:
             "objective": objective,
             "evidence_classification": "production_lifecycle",
             "repository": {
-                "path": str(Path.cwd().resolve()),
+                "path": str(repository.resolve()),
                 "base_branch": "unavailable",
                 "base_commit": base_commit,
             },
-            "approved_plan": {"path": plan, "sha256": plan_digest},
+            "approved_plan": {"path": plan, "sha256": plan_sha256},
             "parent_correlation": None,
         }
         self.journal = self._open_or_create()
@@ -172,10 +193,27 @@ class PlanGraphAudit:
             state = journal.checkpoint_state()
             if state.get("graph_run_id") != self.graph_run_id:
                 raise AuditError("existing audit directory is not this PlanGraph")
+            if state.get("registration_binding") != self._initial_state["registration_binding"]:
+                raise AuditError("existing PlanGraph registration binding does not match")
             if state.get("plan_graph_digest") != self._initial_state["plan_graph_digest"]:
-                raise AuditError(
-                    "existing PlanGraph checkpoint does not match the supplied plan"
-                )
+                raise AuditError("existing PlanGraph registration digest does not match")
+            if state.get("ordered_node_ids") != self._initial_state["ordered_node_ids"]:
+                raise AuditError("existing PlanGraph checkpoint node order does not match")
+            if state.get("registered_functionality_tests") != self._initial_state["registered_functionality_tests"]:
+                raise AuditError("existing PlanGraph functionality tests do not match")
+            actual_nodes = state.get("nodes")
+            expected_nodes = self._initial_state["nodes"]
+            if not isinstance(actual_nodes, Mapping) or set(actual_nodes) != set(expected_nodes):
+                raise AuditError("existing PlanGraph checkpoint node set does not match")
+            for node_id, expected in expected_nodes.items():
+                actual = actual_nodes.get(node_id)
+                if not isinstance(actual, Mapping) or any(
+                    actual.get(field) != expected.get(field)
+                    for field in _IMMUTABLE_NODE_FIELDS
+                ):
+                    raise AuditError(
+                        f"existing PlanGraph checkpoint node {node_id!r} does not match"
+                    )
             return journal
         self.run_dir.parent.mkdir(parents=True, exist_ok=True)
         # AuditJournal creates its own directory; write the descriptor only after
@@ -195,6 +233,7 @@ class PlanGraphAudit:
                 "plan": self._initial_state["plan"],
                 "plan_digest": self._initial_state["plan_digest"],
                 "base_commit": self._initial_state["base_commit"],
+                "registration_binding": self._initial_state["registration_binding"],
                 "ordered_node_ids": self._initial_state["ordered_node_ids"],
             },
             actor=_ACTOR,
@@ -227,35 +266,6 @@ class PlanGraphAudit:
             actor=_ACTOR,
         )
         self.journal.checkpoint("running", state)
-
-
-def _plan_digest(plan: str) -> str | None:
-    path = Path(plan)
-    try:
-        return hashlib.sha256(path.read_bytes()).hexdigest()
-    except OSError:
-        return None
-
-
-def _plan_graph_digest(
-    *,
-    plan: str,
-    plan_digest: str,
-    base_commit: str,
-    nodes: Mapping[str, Mapping[str, object]],
-    functionality_tests: tuple[str, ...],
-) -> str:
-    """Bind a checkpoint to the complete supplied decomposition."""
-
-    payload = {
-        "plan": plan,
-        "plan_digest": plan_digest,
-        "base_commit": base_commit,
-        "nodes": {key: dict(value) for key, value in nodes.items()},
-        "functionality_tests": list(functionality_tests),
-    }
-    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
 
 
 def _timestamp() -> str:

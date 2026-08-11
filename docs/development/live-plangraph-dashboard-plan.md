@@ -177,12 +177,11 @@ reserves these identities before launch; the FeatureRun descriptor and first
 bound event must echo them. A successful launcher result is rejected if its
 identity does not match the reservation.
 
-Keep legacy state compatibility only in the explicit import command. New runs
-use `--run-root` and `--graph-run-id`; neither the production runner nor the
-`PlanGraph` API accepts a legacy state path. Add a bounded importer
-that requires both the approved decomposition and the old state file, validates
-their existing lineage rules, and produces one canonical graph record. Do not
-scan for arbitrary state JSON.
+Do not import legacy sequential state. Registered runs use `--registration`,
+`--run-root`, and `--graph-attempt-id`; neither the production runner nor the
+`PlanGraph` API accepts a legacy state path. The retired importer emits an
+explicit incompatibility error because the old state lacks the evidence needed
+for safe registered reuse. Do not scan for arbitrary state JSON.
 
 ### 3. Liveness lease
 
