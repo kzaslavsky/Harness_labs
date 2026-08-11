@@ -91,6 +91,9 @@ class PlanGraphFeatureRunBinding:
     approved_plan: Mapping[str, object]
     source_binding_report: Mapping[str, object]
     build_briefing: Mapping[str, object]
+    allowed_paths: tuple[str, ...]
+    verification_argv: tuple[str, ...]
+    verification_timeout_seconds: float
 
     def __post_init__(self) -> None:
         if not all(
@@ -104,6 +107,15 @@ class PlanGraphFeatureRunBinding:
             value = getattr(self, name)
             if not isinstance(value, Mapping) or not value:
                 raise ValueError(f"PlanGraph FeatureRun binding {name} must be non-empty")
+        if not self.allowed_paths or any(not value for value in self.allowed_paths):
+            raise ValueError("PlanGraph FeatureRun binding requires allowed_paths")
+        if not self.verification_argv or any(not value for value in self.verification_argv):
+            raise ValueError("PlanGraph FeatureRun binding requires verification argv")
+        if self.verification_timeout_seconds <= 0:
+            raise ValueError("PlanGraph FeatureRun binding requires a positive timeout")
+        briefing_paths = self.build_briefing.get("allowed_paths")
+        if briefing_paths is not None and tuple(briefing_paths) != self.allowed_paths:
+            raise ValueError("build briefing allowed_paths do not match approved grant")
 
     def handoff_artifacts(self) -> tuple[FeatureRunHandoffArtifact, ...]:
         def envelope(content: Mapping[str, object]) -> dict[str, object]:
@@ -689,7 +701,15 @@ def run_plan_graph_feature_worktree(
         raise ValueError(
             "PlanGraph-bound FeatureRun requires the normal ledger-backed review guards"
         )
-    reserved = {"schema", "contract_factory", "review_fix_policy", "initial_evidence"}
+    reserved = {
+        "schema",
+        "contract_factory",
+        "review_fix_policy",
+        "initial_evidence",
+        "allowed_paths",
+        "verification_argv",
+        "verification_timeout_seconds",
+    }
     overlap = sorted(reserved.intersection(feature_run_options))
     if overlap:
         raise ValueError(
@@ -703,11 +723,6 @@ def run_plan_graph_feature_worktree(
     if len(implementation_segments) != 1:
         raise ValueError(
             "PlanGraph-bound FeatureRun requires one normal implement segment"
-        )
-    verification_argv = feature_run_options.get("verification_argv")
-    if not isinstance(verification_argv, tuple) or not verification_argv:
-        raise ValueError(
-            "PlanGraph-bound FeatureRun requires controller-owned verification"
         )
     if feature_run_options.get("verification_repair_executor_factory") is None:
         raise ValueError(
@@ -741,6 +756,9 @@ def run_plan_graph_feature_worktree(
         contract_factory=bound_contract_factory,
         review_fix_policy=review_fix_policy,
         initial_evidence=binding.handoff_artifacts(),
+        allowed_paths=binding.allowed_paths,
+        verification_argv=binding.verification_argv,
+        verification_timeout_seconds=binding.verification_timeout_seconds,
         **feature_run_options,
     )
 

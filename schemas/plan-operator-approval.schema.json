@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://harness-labs.local/schemas/plan-operator-approval.schema.json",
+  "title": "Operator attestation over one approval subject",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["protocol", "subject_sha256", "actor", "approved_at", "statement"],
+  "properties": {
+    "protocol": {"const": "plan-operator-approval/1"},
+    "subject_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "actor": {"type": "string", "minLength": 1},
+    "approved_at": {"type": "string", "format": "date-time"},
+    "statement": {"type": "string", "minLength": 1}
+  }
+}

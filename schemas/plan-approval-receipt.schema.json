@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://harness-labs.local/schemas/plan-approval-receipt.schema.json",
+  "title": "Operator-attested PlanGraph approval receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["protocol", "status", "subject", "gate_evidence", "operator_approval", "policy_id", "plan_graph_digest", "controller", "created_at"],
+  "properties": {
+    "protocol": {"const": "plan-approval-receipt/1"},
+    "status": {"const": "approved"},
+    "subject": {"$ref": "#/$defs/artifact"},
+    "gate_evidence": {"$ref": "#/$defs/artifact"},
+    "operator_approval": {"$ref": "#/$defs/artifact"},
+    "policy_id": {"const": "operator-attested-plan-approval/1"},
+    "plan_graph_digest": {"$ref": "#/$defs/sha256"},
+    "controller": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "role"],
+      "properties": {"id": {"type": "string", "minLength": 1}, "role": {"type": "string", "minLength": 1}}
+    },
+    "created_at": {"type": "string", "format": "date-time"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "artifact": {
+      "type": "object", "additionalProperties": false,
+      "required": ["path", "sha256"],
+      "properties": {"path": {"type": "string", "minLength": 1}, "sha256": {"$ref": "#/$defs/sha256"}}
+    }
+  }
+}

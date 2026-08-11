@@ -66,7 +66,7 @@ class PlanGraphObservabilityTests(unittest.TestCase):
                     run_root=None,
                 )
 
-    def test_normal_cli_launch_always_creates_canonical_graph_journal(self) -> None:
+    def test_cli_rejects_unapproved_decomposition_before_journal(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             approved_plan = root / "plan.md"
@@ -125,12 +125,10 @@ class PlanGraphObservabilityTests(unittest.TestCase):
                 capture_output=True,
                 text=True,
             )
-            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertIn("--approval-receipt", completed.stderr)
             run_dir = run_root / "normal-launch"
-            descriptor = json.loads((run_dir / "descriptor.json").read_text())
-            self.assertEqual(descriptor["run_kind"], "plan_graph")
-            self.assertEqual(AuditJournal.verify(run_dir)["run_id"], "normal-launch")
-            self.assertTrue((run_dir / "events.jsonl").is_file())
+            self.assertFalse(run_dir.exists())
 
     def test_graph_id_cannot_resolve_to_the_run_root_or_parent(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

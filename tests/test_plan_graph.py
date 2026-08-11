@@ -13,6 +13,7 @@ from pathlib import Path
 from harness_labs.plan_graph import (
     FeatureRunOutcome,
     FeatureRunRequest,
+    FunctionalityCommand,
     PlanGraph,
     PlanGraphError,
     PlanGraphPlan,
@@ -142,7 +143,10 @@ class PlanGraphTests(unittest.TestCase):
         self.assertEqual(result.status, "succeeded")
         self.assertEqual(result.candidate_commit, "B-commit")
         self.assertEqual(calls, [("A", "base"), ("B", "A-commit")])
-        self.assertEqual(tests, [("test final", "B-commit")])
+        self.assertEqual(
+            tests,
+            [(FunctionalityCommand(("sh", "-c", "test final")), "B-commit")],
+        )
 
     def test_mapping_carries_run_verification_and_final_functionality(self) -> None:
         payload = {
@@ -181,7 +185,17 @@ class PlanGraphTests(unittest.TestCase):
             requests[0].run.verification_argv,
             ("python3", "scripts/ui_walk.py"),
         )
-        self.assertEqual(final_tests, [("python3 scripts/ui_walk.py", "candidate")])
+        self.assertEqual(
+            final_tests,
+            [
+                (
+                    FunctionalityCommand(
+                        ("sh", "-c", "python3 scripts/ui_walk.py")
+                    ),
+                    "candidate",
+                )
+            ],
+        )
 
     def test_sequential_candidate_includes_multiple_roots_and_dependencies(self) -> None:
         calls = []
@@ -248,7 +262,8 @@ class PlanGraphTests(unittest.TestCase):
         clone, checkout, test = run.call_args_list
         self.assertEqual(clone.args[0][:4], ["git", "clone", "--shared", "--no-checkout"])
         self.assertEqual(checkout.args[0][-1], "candidate-commit")
-        self.assertEqual(test.args[0], "test final")
+        self.assertEqual(test.args[0], ("sh", "-c", "test final"))
+        self.assertNotIn("shell", test.kwargs)
         self.assertEqual(test.kwargs["cwd"].name, "candidate")
 
     def test_invalid_references_cycles_and_coverage_prevent_launch(self) -> None:

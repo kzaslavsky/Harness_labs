@@ -66,6 +66,12 @@ def main() -> int:
             "depends_on": list(run.depends_on),
             "criteria": list(run.criteria),
             "verification_argv": list(run.verification_argv),
+            "verification_timeout_seconds": run.verification_timeout_seconds,
+            "allowed_paths": list(run.allowed_paths),
+            "path_intents": [
+                {"path": value.path, "action": value.action}
+                for value in run.path_intents
+            ],
             "feature_run_id": f"{arguments.graph_run_id}-{run.id}",
             "run_dir": str((arguments.run_root / f"{arguments.graph_run_id}-{run.id}").resolve()),
             "started_at": None,
@@ -78,10 +84,22 @@ def main() -> int:
         run_root=arguments.run_root,
         graph_run_id=arguments.graph_run_id,
         plan=plan.plan,
+        plan_sha256=graph._plan_sha256(),
         base_commit=plan.base_commit,
+        repository_id=plan.repository_id,
+        repository_path=Path.cwd(),
+        plan_graph_digest=graph._identity_digest(),
+        approval=None,
         objective="; ".join(run.objective for run in plan.runs),
         nodes=nodes,
-        functionality_tests=plan.functionality_tests,
+        functionality_tests=tuple(
+            {
+                "argv": list(command.argv),
+                "timeout_seconds": command.timeout_seconds,
+                "required_paths": [],
+            }
+            for command in graph.functionality_tests
+        ),
     )
     if audit.terminal or any(
         node.get("status") != "queued"

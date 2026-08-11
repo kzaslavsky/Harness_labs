@@ -18,6 +18,7 @@ from harness_labs.plan_graph import (
     SubprocessFeatureRunLauncher,
     plan_from_mapping,
 )
+from harness_labs.plan_approval import PlanApprovalAdmission, PlanApprovalError
 
 
 def _load_callable(reference: str) -> Callable[..., object]:
@@ -33,6 +34,8 @@ def _load_callable(reference: str) -> Callable[..., object]:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("decomposition", type=Path)
+    parser.add_argument("--repository", type=Path, default=Path.cwd())
+    parser.add_argument("--approval-receipt", type=Path, required=True)
     launcher_group = parser.add_mutually_exclusive_group(required=True)
     launcher_group.add_argument("--launcher")
     launcher_group.add_argument("--launcher-command", nargs="+")
@@ -40,9 +43,32 @@ def main() -> int:
     parser.add_argument("--launcher-timeout", type=float)
     parser.add_argument("--run-root", type=Path, default=Path("logs/runs"))
     parser.add_argument("--graph-run-id")
-    parser.add_argument("--functionality-test", action="append", default=[])
     arguments = parser.parse_args()
-    payload = json.loads(arguments.decomposition.read_text(encoding="utf-8"))
+    repository = arguments.repository.resolve()
+    try:
+        admission = PlanApprovalAdmission(
+            repository=repository,
+            receipt_path=arguments.approval_receipt,
+        )
+        approved = admission.validate()
+        decomposition = arguments.decomposition.resolve()
+        try:
+            relative_decomposition = decomposition.relative_to(repository).as_posix()
+        except ValueError as exc:
+            raise PlanApprovalError("decomposition must be inside the repository") from exc
+        if relative_decomposition != approved.decomposition_path:
+            raise PlanApprovalError(
+                "decomposition path does not match the approved subject"
+            )
+        plan = plan_from_mapping(
+            approved.decomposition,
+            base_commit=approved.base_commit,
+            repository_id=approved.repository_id,
+            plan_sha256=approved.plan_sha256,
+        )
+    except (OSError, PlanApprovalError, ValueError) as exc:
+        print(f"PlanGraph admission failed: {exc}", file=sys.stderr)
+        return 1
     if arguments.launcher:
         launcher = _load_callable(arguments.launcher)
     else:
@@ -61,13 +87,18 @@ def main() -> int:
         raise TypeError("launcher must return FeatureRunOutcome or a mapping")
 
     graph = PlanGraph(
-        plan_from_mapping(payload),
+        plan,
         launch,
         run_root=arguments.run_root,
         graph_run_id=arguments.graph_run_id,
-        functionality_tests=arguments.functionality_test,
+        approval_validator=admission.approval_validator(),
+        repository_root=repository,
     )
-    result = graph.run()
+    try:
+        result = graph.run()
+    except PlanGraphError as exc:
+        print(f"PlanGraph failed: {exc}", file=sys.stderr)
+        return 1
     print(
         json.dumps(
             {

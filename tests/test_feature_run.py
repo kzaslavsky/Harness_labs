@@ -232,6 +232,9 @@ class FeatureRunTests(unittest.TestCase):
             approved_plan={"path": "docs/plan.md", "sha256": "a" * 64},
             source_binding_report={"claims": ["approved"]},
             build_briefing={"allowed_paths": ["feature.txt"]},
+            allowed_paths=("feature.txt",),
+            verification_argv=("python3", "-m", "unittest"),
+            verification_timeout_seconds=1200,
         )
         normal_schema = standard_feature_run_dispatch_schema()
         normal_phases = tuple(
@@ -255,7 +258,6 @@ class FeatureRunTests(unittest.TestCase):
             contract_factory=contract_factory,
             review_fix_policy=ReviewFixPolicy(),
             base_repository=Path("repository"),
-            verification_argv=("python3", "-m", "unittest"),
             verification_repair_executor_factory=lambda attempt: None,
         )
 
@@ -272,6 +274,11 @@ class FeatureRunTests(unittest.TestCase):
             [artifact.kind for artifact in options["initial_evidence"]],
             ["engineering-plan", "source-binding-report", "build-briefing"],
         )
+        self.assertEqual(options["allowed_paths"], ("feature.txt",))
+        self.assertEqual(
+            options["verification_argv"], ("python3", "-m", "unittest")
+        )
+        self.assertEqual(options["verification_timeout_seconds"], 1200)
         handoff = options["initial_evidence"][0].content
         self.assertEqual(handoff["plan_graph_id"], "graph-1")
         self.assertEqual(handoff["plan_node_id"], "FR-01")
@@ -281,6 +288,17 @@ class FeatureRunTests(unittest.TestCase):
         )
         self.assertEqual(bound_contract.phases, bound_phases)
         self.assertEqual(bound_contract.criteria, criteria)
+
+        with self.assertRaisesRegex(ValueError, "override controller-owned values"):
+            run_plan_graph_feature_worktree(
+                binding=binding,
+                schema=normal_schema,
+                contract_factory=contract_factory,
+                review_fix_policy=ReviewFixPolicy(),
+                base_repository=Path("repository"),
+                allowed_paths=("everything",),
+                verification_repair_executor_factory=lambda attempt: None,
+            )
 
     def test_plan_graph_mode_refuses_disabled_review_ledger(self) -> None:
         criteria = ({"id": "AC-1", "statement": "Works", "source": "plan"},)
@@ -292,6 +310,9 @@ class FeatureRunTests(unittest.TestCase):
             {"path": "plan.md"},
             {"claims": ["bound"]},
             {"allowed_paths": ["feature.txt"]},
+            ("feature.txt",),
+            ("python3", "-m", "unittest"),
+            1200,
         )
         with self.assertRaisesRegex(ValueError, "ledger-backed review guards"):
             run_plan_graph_feature_worktree(
@@ -299,7 +320,6 @@ class FeatureRunTests(unittest.TestCase):
                 schema=standard_feature_run_dispatch_schema(),
                 contract_factory=lambda worktree, receipt: None,
                 review_fix_policy=ReviewFixPolicy(ledger_enabled=False),
-                verification_argv=("python3", "-m", "unittest"),
                 verification_repair_executor_factory=lambda attempt: None,
             )
 

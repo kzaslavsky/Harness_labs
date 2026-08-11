@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://harness-labs.local/schemas/repository-identity.schema.json",
+  "title": "Stable repository identity",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["protocol", "repository_id"],
+  "properties": {
+    "protocol": {"const": "harness-repository-identity/1"},
+    "repository_id": {"type": "string", "minLength": 1}
+  }
+}

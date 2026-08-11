@@ -62,7 +62,24 @@ def _lease(run_dir: Path, run_id: str, *, stale: bool) -> None:
 
 
 def _graph(root: Path, graph_id: str, plan: Path, nodes: dict[str, dict[str, object]], *, terminal: bool) -> None:
-    audit = PlanGraphAudit(run_root=root, graph_run_id=graph_id, plan=str(plan), base_commit=_BASE, objective="Dashboard fixture graph", nodes=nodes, functionality_tests=())
+    plan_sha256 = hashlib.sha256(plan.read_bytes()).hexdigest()
+    graph_digest = hashlib.sha256(
+        json.dumps(nodes, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    audit = PlanGraphAudit(
+        run_root=root,
+        graph_run_id=graph_id,
+        plan=str(plan),
+        plan_sha256=plan_sha256,
+        base_commit=_BASE,
+        repository_id="dashboard-fixture",
+        repository_path=Path.cwd(),
+        plan_graph_digest=graph_digest,
+        approval=None,
+        objective="Dashboard fixture graph",
+        nodes=nodes,
+        functionality_tests=(),
+    )
     if terminal:
         audit.node_started("done")
         audit.node_completed("done", _BASE)

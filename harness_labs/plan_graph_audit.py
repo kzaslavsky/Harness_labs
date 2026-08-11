@@ -31,10 +31,15 @@ class PlanGraphAudit:
         run_root: Path,
         graph_run_id: str,
         plan: str,
+        plan_sha256: str,
         base_commit: str,
+        repository_id: str,
+        repository_path: Path,
+        plan_graph_digest: str,
+        approval: Mapping[str, object] | None,
         objective: str,
         nodes: Mapping[str, Mapping[str, object]],
-        functionality_tests: tuple[str, ...],
+        functionality_tests: tuple[Mapping[str, object], ...],
     ) -> None:
         if (
             not graph_run_id
@@ -45,21 +50,16 @@ class PlanGraphAudit:
             raise ValueError("graph_run_id must be a non-empty path-safe name")
         self.graph_run_id = graph_run_id
         self.run_dir = (run_root / graph_run_id).resolve()
-        plan_digest = _plan_digest(plan)
-        if plan_digest is None:
-            raise ValueError("durable PlanGraph requires a readable approved plan")
+        if len(plan_sha256) != 64:
+            raise ValueError("durable PlanGraph requires an approved plan digest")
         self._initial_state = {
             "graph_run_id": graph_run_id,
             "plan": plan,
-            "plan_digest": plan_digest,
+            "plan_digest": plan_sha256,
             "base_commit": base_commit,
-            "plan_graph_digest": _plan_graph_digest(
-                plan=plan,
-                plan_digest=plan_digest,
-                base_commit=base_commit,
-                nodes=nodes,
-                functionality_tests=functionality_tests,
-            ),
+            "repository_id": repository_id,
+            "plan_graph_digest": plan_graph_digest,
+            "approval": dict(approval) if approval is not None else None,
             "current_candidate_commit": base_commit,
             "ordered_node_ids": list(nodes),
             "nodes": {key: dict(value) for key, value in nodes.items()},
@@ -75,11 +75,11 @@ class PlanGraphAudit:
             "objective": objective,
             "evidence_classification": "production_lifecycle",
             "repository": {
-                "path": str(Path.cwd().resolve()),
+                "path": str(repository_path.resolve()),
                 "base_branch": "unavailable",
                 "base_commit": base_commit,
             },
-            "approved_plan": {"path": plan, "sha256": plan_digest},
+            "approved_plan": {"path": plan, "sha256": plan_sha256},
             "parent_correlation": None,
         }
         self.journal = self._open_or_create()
@@ -121,7 +121,9 @@ class PlanGraphAudit:
             {"status": status, "finished_at": _timestamp(), "evidence": evidence},
         )
 
-    def functionality_completed(self, command: str, candidate_commit: str) -> None:
+    def functionality_completed(
+        self, command: Mapping[str, object], candidate_commit: str
+    ) -> None:
         state = self.state
         state["functionality_test"] = {
             "state": "succeeded",
@@ -137,7 +139,12 @@ class PlanGraphAudit:
         )
         self.journal.checkpoint("running", state)
 
-    def functionality_failed(self, command: str, candidate_commit: str, error: str) -> None:
+    def functionality_failed(
+        self,
+        command: Mapping[str, object],
+        candidate_commit: str,
+        error: str,
+    ) -> None:
         state = self.state
         state["functionality_test"] = {
             "state": "failed",
@@ -195,6 +202,9 @@ class PlanGraphAudit:
                 "plan": self._initial_state["plan"],
                 "plan_digest": self._initial_state["plan_digest"],
                 "base_commit": self._initial_state["base_commit"],
+                "repository_id": self._initial_state["repository_id"],
+                "plan_graph_digest": self._initial_state["plan_graph_digest"],
+                "approval": self._initial_state["approval"],
                 "ordered_node_ids": self._initial_state["ordered_node_ids"],
             },
             actor=_ACTOR,
@@ -227,35 +237,6 @@ class PlanGraphAudit:
             actor=_ACTOR,
         )
         self.journal.checkpoint("running", state)
-
-
-def _plan_digest(plan: str) -> str | None:
-    path = Path(plan)
-    try:
-        return hashlib.sha256(path.read_bytes()).hexdigest()
-    except OSError:
-        return None
-
-
-def _plan_graph_digest(
-    *,
-    plan: str,
-    plan_digest: str,
-    base_commit: str,
-    nodes: Mapping[str, Mapping[str, object]],
-    functionality_tests: tuple[str, ...],
-) -> str:
-    """Bind a checkpoint to the complete supplied decomposition."""
-
-    payload = {
-        "plan": plan,
-        "plan_digest": plan_digest,
-        "base_commit": base_commit,
-        "nodes": {key: dict(value) for key, value in nodes.items()},
-        "functionality_tests": list(functionality_tests),
-    }
-    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
 
 
 def _timestamp() -> str:

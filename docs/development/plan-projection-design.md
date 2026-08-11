@@ -35,7 +35,8 @@ part of this release.
 
 The input is:
 
-- the approved plan file;
+- the operator-attested approval receipt, which binds the plan file,
+  decomposition, repository identity, and exact base commit;
 - any mockups or other artifacts referenced by that plan;
 - the repository and exact base commit; and
 - the functionality-test commands named by the plan.
@@ -44,15 +45,29 @@ The decomposition result contains only:
 
 ```json
 {
+  "protocol": "plan-graph-plan/1",
   "plan": "docs/development/APPROVED_PLAN.md",
-  "base_commit": "<commit>",
+  "plan_sections": {
+    "2": "Implement the contract described by plan section 2. AC-1: contract works. AC-2: compatibility holds.",
+    "3": "Implement the consumer described by plan section 3. AC-3: consumer works."
+  },
+  "acceptance_criteria": {
+    "AC-1": "contract works.",
+    "AC-2": "compatibility holds.",
+    "AC-3": "consumer works."
+  },
   "runs": [
     {
       "id": "contract",
       "objective": "Implement the contract described by plan section 2",
       "plan_sections": ["2"],
       "criteria": ["AC-1", "AC-2"],
-      "depends_on": []
+      "depends_on": [],
+      "allowed_paths": ["src/contract.py"],
+      "path_intents": [{"path": "src/contract.py", "action": "create"}],
+      "verification_argv": ["python3", "-m", "unittest", "tests.test_contract"],
+      "verification_timeout_seconds": 1200,
+      "verification_required_paths": []
     },
     {
       "id": "consumer",
@@ -60,12 +75,30 @@ The decomposition result contains only:
       "plan_sections": ["3"],
       "criteria": ["AC-3"],
       "depends_on": ["contract"],
-      "verification_argv": ["python3", "scripts/ui_walk.py"]
+      "allowed_paths": ["src/consumer.py"],
+      "path_intents": [{"path": "src/consumer.py", "action": "create"}],
+      "verification_argv": ["python3", "scripts/ui_walk.py"],
+      "verification_timeout_seconds": 1200,
+      "verification_required_paths": [
+        {"path": "scripts/ui_walk.py", "availability": "base"}
+      ]
     }
   ],
-  "functionality_tests": ["python3 scripts/ui_walk.py"]
+  "functionality_tests": [
+    {
+      "argv": ["python3", "scripts/ui_walk.py"],
+      "timeout_seconds": 1200,
+      "required_paths": [
+        {"path": "scripts/ui_walk.py", "availability": "base"}
+      ]
+    }
+  ],
+  "referenced_artifacts": []
 }
 ```
+
+`base_commit` is supplied by the approval subject rather than embedded in this
+committed artifact, avoiding a self-referential commit identity.
 
 FeatureRun derives its ordinary implementation context and writable scope from
 the cited plan sections and repository inspection. PlanGraph does not define a
@@ -116,6 +149,11 @@ failed FeatureRun does not modify PlanGraph or the harness.
 
 These exclusions may be reconsidered only after a delivered feature exposes a
 specific need.
+
+Decision [`0006 — Repository-bound PlanGraph approval`](../decisions/0006-repository-bound-plan-approval.md)
+records one narrow exception: operator-attested, repository-bound admission is
+required before the shipped PlanGraph entrypoint launches work. Automated
+review, adjudication, plan revision, and lineage transfer remain excluded.
 
 ## Implementation slice
 
