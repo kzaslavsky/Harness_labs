@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 from dataclasses import dataclass, field, replace
@@ -91,6 +92,13 @@ class PlanGraphFeatureRunBinding:
     approved_plan: Mapping[str, object]
     source_binding_report: Mapping[str, object]
     build_briefing: Mapping[str, object]
+    parent_candidate_commit: str | None = None
+    lane_branch: str | None = None
+    lane_worktree: Path | None = None
+    logical_attempt: int | None = None
+    allocation_id: str | None = None
+    checkpoint_revision: int | None = None
+    expected_staging_head: str | None = None
 
     def __post_init__(self) -> None:
         if not all(
@@ -104,6 +112,73 @@ class PlanGraphFeatureRunBinding:
             value = getattr(self, name)
             if not isinstance(value, Mapping) or not value:
                 raise ValueError(f"PlanGraph FeatureRun binding {name} must be non-empty")
+        child_values = (
+            self.parent_candidate_commit,
+            self.lane_branch,
+            self.lane_worktree,
+            self.logical_attempt,
+            self.allocation_id,
+            self.checkpoint_revision,
+            self.expected_staging_head,
+        )
+        if any(value is not None for value in child_values):
+            if not all(value is not None for value in child_values):
+                raise ValueError(
+                    "PlanGraph child binding requires one complete allocated lane"
+                )
+            assert self.parent_candidate_commit is not None
+            assert self.expected_staging_head is not None
+            if not _is_full_commit(self.parent_candidate_commit) or not _is_full_commit(
+                self.expected_staging_head
+            ):
+                raise ValueError(
+                    "PlanGraph child commits must be full lowercase Git commits"
+                )
+            if self.expected_staging_head != self.parent_candidate_commit:
+                raise ValueError(
+                    "PlanGraph child expected_staging_head must match its parent candidate"
+                )
+            if not isinstance(self.lane_branch, str) or not self.lane_branch.strip():
+                raise ValueError("PlanGraph child lane_branch must be non-empty")
+            if not isinstance(self.lane_worktree, Path):
+                raise ValueError("PlanGraph child lane_worktree must be a Path")
+            if not isinstance(self.logical_attempt, int) or self.logical_attempt < 1:
+                raise ValueError("PlanGraph child logical_attempt must be positive")
+            if not isinstance(self.checkpoint_revision, int) or self.checkpoint_revision < 1:
+                raise ValueError("PlanGraph child checkpoint_revision must be positive")
+            if not isinstance(self.allocation_id, str) or not self.allocation_id.strip():
+                raise ValueError("PlanGraph child allocation_id must be non-empty")
+
+    @property
+    def is_child_lane(self) -> bool:
+        return self.parent_candidate_commit is not None
+
+    def child_descriptor(self) -> dict[str, object]:
+        """Return the allocation-bound descriptor preserved with child evidence."""
+
+        if not self.is_child_lane:
+            raise ValueError("only an allocated PlanGraph child has a lane descriptor")
+        assert self.parent_candidate_commit is not None
+        assert self.lane_branch is not None
+        assert self.lane_worktree is not None
+        assert self.logical_attempt is not None
+        assert self.allocation_id is not None
+        assert self.checkpoint_revision is not None
+        assert self.expected_staging_head is not None
+        return {
+            "protocol": "harness-plan-graph-parallel-child-descriptor/1",
+            "graph_id": self.plan_graph_id,
+            "node_id": self.plan_node_id,
+            "logical_attempt": self.logical_attempt,
+            "allocation_id": self.allocation_id,
+            "checkpoint_revision": self.checkpoint_revision,
+            "expected_staging_head": self.expected_staging_head,
+            "parent_candidate_commit": self.parent_candidate_commit,
+            "lane": {
+                "branch": self.lane_branch,
+                "worktree": str(self.lane_worktree.resolve()),
+            },
+        }
 
     def handoff_artifacts(self) -> tuple[FeatureRunHandoffArtifact, ...]:
         def envelope(content: Mapping[str, object]) -> dict[str, object]:
@@ -113,10 +188,12 @@ class PlanGraphFeatureRunBinding:
                 "plan_node_id": self.plan_node_id,
                 "objective": self.objective,
                 "acceptance_criteria": [dict(item) for item in self.acceptance_criteria],
+                "parent_candidate_commit": self.parent_candidate_commit,
+                "lane_branch": self.lane_branch,
                 "content": dict(content),
             }
 
-        return (
+        artifacts = (
             FeatureRunHandoffArtifact(
                 "engineering-plan", envelope(self.approved_plan)
             ),
@@ -127,6 +204,15 @@ class PlanGraphFeatureRunBinding:
                 "build-briefing", envelope(self.build_briefing)
             ),
         )
+        if self.is_child_lane:
+            artifacts += (
+                FeatureRunHandoffArtifact(
+                    "plan-graph-child-descriptor",
+                    self.child_descriptor(),
+                    producer_task_id=self.plan_graph_id,
+                ),
+            )
+        return artifacts
 
 
 class VerificationRepairExecutorFactory(Protocol):
@@ -231,6 +317,26 @@ class FeatureRunResult:
     worktree_path: Path
     review_fix: ReviewFixResult | None = None
     verification: DeterministicVerificationResult | None = None
+    seal_receipt: Mapping[str, object] | None = None
+
+    @property
+    def candidate_commit(self) -> str | None:
+        """Return the sealed candidate named by the controller's Git receipt."""
+
+        for receipt in reversed(self.git_receipts):
+            if receipt.get("operation") == "commit":
+                candidate = receipt.get("candidate_commit")
+                return candidate if isinstance(candidate, str) else None
+        return None
+
+    @property
+    def canonical_manifest_ref(self) -> str:
+        """Content address for the terminal manifest that owns this outcome."""
+
+        manifest_hash = self.manifest.get("manifest_hash")
+        if not isinstance(manifest_hash, str):
+            raise ValueError("FeatureRun terminal manifest has no manifest hash")
+        return f"artifact:sha256:{manifest_hash}"
 
 
 def run_feature_worktree(
@@ -247,6 +353,8 @@ def run_feature_worktree(
     allowed_paths: tuple[str, ...],
     commit_message: str,
     merge: bool = False,
+    base_commit: str | None = None,
+    candidate_only: bool = False,
     review_fix_executor_factory: ReviewFixExecutorFactory | None = None,
     review_fix_policy: ReviewFixPolicy = ReviewFixPolicy(enabled=False),
     verification_argv: tuple[str, ...] = (),
@@ -290,11 +398,14 @@ def run_feature_worktree(
     handoff_kinds = [artifact.kind for artifact in initial_evidence]
     if len(set(handoff_kinds)) != len(handoff_kinds):
         raise ValueError("handoff artifact kinds must be unique")
+    if candidate_only and merge:
+        raise ValueError("candidate-only FeatureRun cannot merge")
     transaction = GitWorktreeTransaction.create(
         base_repository=base_repository,
         base_branch=base_branch,
         feature_branch=feature_branch,
         worktree_path=worktree_path,
+        base_commit=base_commit,
     )
     creation = transaction.creation_receipt()
     contract = contract_factory(transaction.worktree_path, creation)
@@ -559,9 +670,10 @@ def run_feature_worktree(
                     )
                     receipts.append(commit)
                     _record_git_receipt(audit, evidence, commit)
-                integration = transaction.integrate(merge=merge)
-                receipts.append(integration)
-                _record_git_receipt(audit, evidence, integration)
+                if not candidate_only:
+                    integration = transaction.integrate(merge=merge)
+                    receipts.append(integration)
+                    _record_git_receipt(audit, evidence, integration)
                 break
             except (GitTransactionError, InterruptedError) as exc:
                 condition = (
@@ -690,6 +802,8 @@ def run_plan_graph_feature_worktree(
             "PlanGraph-bound FeatureRun requires the normal ledger-backed review guards"
         )
     reserved = {"schema", "contract_factory", "review_fix_policy", "initial_evidence"}
+    if binding.is_child_lane:
+        reserved.update({"base_commit", "candidate_only"})
     overlap = sorted(reserved.intersection(feature_run_options))
     if overlap:
         raise ValueError(
@@ -713,6 +827,22 @@ def run_plan_graph_feature_worktree(
         raise ValueError(
             "PlanGraph-bound FeatureRun requires normal verification recovery"
         )
+    if binding.is_child_lane:
+        supplied_branch = feature_run_options.get("feature_branch")
+        if supplied_branch != binding.lane_branch:
+            raise ValueError(
+                "PlanGraph child FeatureRun feature_branch must match its allocated lane_branch"
+            )
+        if feature_run_options.get("merge", False):
+            raise ValueError("PlanGraph child FeatureRun cannot merge shared integration state")
+        supplied_worktree = feature_run_options.get("worktree_path")
+        assert binding.lane_worktree is not None
+        if not isinstance(supplied_worktree, Path) or (
+            supplied_worktree.resolve() != binding.lane_worktree.resolve()
+        ):
+            raise ValueError(
+                "PlanGraph child FeatureRun worktree_path must match its allocated lane_worktree"
+            )
 
     bound_schema = CoordinatorDispatchSchema(
         schema_id=f"{schema.schema_id}/plan-graph-bound",
@@ -736,13 +866,71 @@ def run_plan_graph_feature_worktree(
             )
         return replace(contract, phases=bound_phases)
 
-    return run_feature_worktree(
+    child_options: dict[str, object] = {}
+    if binding.is_child_lane:
+        assert binding.parent_candidate_commit is not None
+        child_options = {
+            "base_commit": binding.parent_candidate_commit,
+            "candidate_only": True,
+            "merge": False,
+        }
+
+    result = run_feature_worktree(
         schema=bound_schema,
         contract_factory=bound_contract_factory,
         review_fix_policy=review_fix_policy,
         initial_evidence=binding.handoff_artifacts(),
+        **child_options,
         **feature_run_options,
     )
+    if binding.is_child_lane and isinstance(result, FeatureRunResult):
+        return replace(result, seal_receipt=_child_seal_receipt(binding, result))
+    return result
+
+
+def _child_seal_receipt(
+    binding: PlanGraphFeatureRunBinding,
+    result: FeatureRunResult,
+) -> Mapping[str, object] | None:
+    """Produce the sole child success-adoption input after a sealed candidate.
+
+    This receipt is deliberately unavailable for failed or blocked child runs.
+    Its allocation descriptor is a persisted handoff artifact; the remaining
+    references are content addresses already retained in the FeatureRun audit.
+    """
+
+    if result.status != "succeeded" or result.candidate_commit is None:
+        return None
+    if result.verification is None or result.verification.status != "succeeded":
+        return None
+    verification_ref = _last_verification_evidence_ref(result.verification)
+    candidate_receipt_ref = _candidate_receipt_ref(result.git_receipts)
+    manifest_hash = result.manifest.get("manifest_hash")
+    terminal_event_hash = result.manifest.get("head_hash")
+    if not all(
+        isinstance(value, str) and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+        for value in (verification_ref, candidate_receipt_ref, manifest_hash, terminal_event_hash)
+    ):
+        raise ValueError("sealed PlanGraph child is missing canonical audit evidence")
+    assert binding.parent_candidate_commit is not None
+    assert binding.logical_attempt is not None
+    assert binding.allocation_id is not None
+    return {
+        "protocol": "harness-plan-graph-parallel-seal-receipt/1",
+        "status": "sealed",
+        "graph_id": binding.plan_graph_id,
+        "node_id": binding.plan_node_id,
+        "logical_attempt": binding.logical_attempt,
+        "allocation_id": binding.allocation_id,
+        "parent_candidate_commit": binding.parent_candidate_commit,
+        "candidate_commit": result.candidate_commit,
+        "canonical_manifest_ref": f"artifact:sha256:{manifest_hash}",
+        "descriptor_ref": _content_ref(binding.child_descriptor()),
+        "verification_evidence_ref": f"artifact:sha256:{verification_ref}",
+        "candidate_receipt_ref": f"artifact:sha256:{candidate_receipt_ref}",
+        "terminal_journal_event_ref": f"artifact:sha256:{terminal_event_hash}",
+    }
 
 
 def _recover_abnormal(
@@ -1152,6 +1340,38 @@ def _record_git_receipt(
     )
 
 
+def _is_full_commit(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 40
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _content_ref(content: Mapping[str, object]) -> str:
+    raw = json.dumps(
+        content, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8") + b"\n"
+    return f"artifact:sha256:{hashlib.sha256(raw).hexdigest()}"
+
+
+def _last_verification_evidence_ref(
+    verification: DeterministicVerificationResult,
+) -> str | None:
+    for attempt in reversed(verification.command_attempts):
+        value = attempt.get("evidence_ref")
+        if isinstance(value, str) and value.startswith("artifact:sha256:"):
+            return value.removeprefix("artifact:sha256:")
+    return None
+
+
+def _candidate_receipt_ref(receipts: tuple[Mapping[str, object], ...]) -> str | None:
+    for receipt in reversed(receipts):
+        if receipt.get("operation") == "commit":
+            return _content_ref(dict(receipt)).removeprefix("artifact:sha256:")
+    return None
+
+
 __all__ = [
     "DeterministicVerificationResult",
     "FeatureContractFactory",
@@ -1161,4 +1381,5 @@ __all__ = [
     "ReviewFixPolicy",
     "VerificationRepairExecutorFactory",
     "run_feature_worktree",
+    "run_plan_graph_feature_worktree",
 ]

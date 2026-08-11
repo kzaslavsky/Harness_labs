@@ -73,6 +73,12 @@ review assignments. Segment exit-artifact gates make these enforceable
 deliverables. Finalized runs write a hashed `summary.json`; missing backend
 pricing remains explicitly unpriced rather than silently counted as zero cost.
 
+PlanGraph parallelization PG-02 pins a graph child lane to its declared
+immutable parent commit, seals its candidate without invoking an integration
+transaction, binds execution to the allocation's branch and worktree, and
+returns the versioned allocation-bound seal receipt required for subsequent
+controller-owned adoption. Final graph integration remains graph-owned.
+
 ### Exit criteria
 
 - A representative feature is implemented in an isolated worktree and merged

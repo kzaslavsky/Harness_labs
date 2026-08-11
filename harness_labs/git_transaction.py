@@ -121,6 +121,7 @@ class GitWorktreeTransaction:
         base_branch: str,
         feature_branch: str,
         worktree_path: Path,
+        base_commit: str | None = None,
     ) -> GitWorktreeTransaction:
         base_repository = base_repository.resolve(strict=True)
         worktree_path = worktree_path.resolve()
@@ -144,9 +145,21 @@ class GitWorktreeTransaction:
             )
         if changed_paths(base_repository):
             raise GitTransactionError("base repository must be clean")
-        base_commit = git_output(
+        observed_base_commit = git_output(
             base_repository, "rev-parse", f"refs/heads/{base_branch}"
         )
+        if base_commit is None:
+            base_commit = observed_base_commit
+        else:
+            if len(base_commit) != 40 or any(
+                character not in "0123456789abcdef" for character in base_commit
+            ):
+                raise GitTransactionError("base_commit must be a full lowercase Git commit")
+            resolved_base_commit = git_output(
+                base_repository, "rev-parse", f"{base_commit}^{{commit}}"
+            )
+            if resolved_base_commit != base_commit:
+                raise GitTransactionError("base_commit did not resolve to its declared commit")
         branch_probe = subprocess.run(
             ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{feature_branch}"],
             cwd=base_repository,
