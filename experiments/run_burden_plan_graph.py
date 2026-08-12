@@ -756,6 +756,10 @@ def run_graph(run_id: str, receipt_path: Path) -> int:
         run_root=ROOT / "logs" / "runs" / "cb-graph",
         graph_run_id=f"cb-graph-{run_id}",
         approval_validator=admission.approval_validator(),
+        # Ready-set execution: the CB DAG is width 2 (CB-01 ∥ CB-02 at the
+        # roots, CB-06 ∥ CB-07 after CB-05). Each node still owns its own
+        # worktree and run_dir; joins are controller-owned merge commits.
+        max_parallelism=2,
     )
     result = graph.run()
     print(

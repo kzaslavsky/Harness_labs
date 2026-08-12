@@ -53,9 +53,15 @@ scheduler contracts) merged with `claude-p-adapters` `44bfef8`
 ## Dependencies and parallelism
 
 Edges exist only where nodes share owned files or one node's mechanism consumes
-another's. The serial-topological launcher executes this DAG in order today;
-the parallel ready-set scheduler merged with PG-00–07 can exploit the width
-later.
+another's. The ready-set scheduler merged with PG-00–07 is now wired into
+`PlanGraph.run` (`max_parallelism` parameter): admission through
+`ReadySetScheduler`, launcher calls on worker threads, all audit/ledger/Git
+mutations on the coordinating thread, sibling candidates joined by
+controller-owned merge commits with ancestor pruning, and the final graph
+candidate joining the sink nodes. A join conflict between siblings blocks the
+dependent node — by construction it means their allowed paths were not
+disjoint in effect, a plan defect. This program runs with `max_parallelism=2`,
+matching the DAG's width.
 
 - `CB-01` (controller kernel + coordinator tool schema) — root.
 - `CB-02` (plan validation) — root; shares no file with any other node and is

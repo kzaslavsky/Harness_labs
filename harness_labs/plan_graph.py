@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import asdict, dataclass, replace
 import errno
 import fcntl
@@ -377,6 +378,18 @@ class FeatureRunOutcome:
     plan_node_id: str | None = None
     feature_run_id: str | None = None
     run_dir: str | None = None
+
+
+@dataclass(frozen=True)
+class _SealDecision:
+    """The caller's next move after one launcher outcome is recorded."""
+
+    kind: str  # "sealed" | "blocked" | "failed"
+    result: "PlanGraphResult | None" = None
+    reason: str | None = None
+    evidence: object | None = None
+    evidence_ref: str | None = None
+    finding_obligations: "dict[str, list[Mapping[str, object]]] | None" = None
 
 
 @dataclass(frozen=True)
@@ -940,9 +953,22 @@ class PlanGraph:
         reused_completed: Mapping[str, str] | None = None,
         predecessor_checkpoint: Mapping[str, object] | None = None,
         on_block_argv: Sequence[str] | None = None,
+        max_parallelism: int = 1,
     ) -> None:
         if run_root is None:
             raise PlanGraphError("run_root is required for audited PlanGraph execution")
+        if (
+            isinstance(max_parallelism, bool)
+            or not isinstance(max_parallelism, int)
+            or max_parallelism < 1
+        ):
+            raise PlanGraphError("max_parallelism must be a positive integer")
+        # max_parallelism > 1 selects the ready-set execution path: admission
+        # through ReadySetScheduler, launcher calls on worker threads, every
+        # audit/ledger mutation on the coordinating thread. The launcher must
+        # be safe to invoke concurrently (each call owns its own run_dir and
+        # feature worktree).
+        self.max_parallelism = max_parallelism
         self.repository = repository.resolve()
         self.registration = registration
         self.plan = verify_registration(self.repository, registration)
@@ -1156,6 +1182,10 @@ class PlanGraph:
         finding_obligations = self._load_finding_obligations(audit)
         ordered_runs = _ordered_runs(self.plan)
         self._validate_completed_dependencies(ordered_runs, completed)
+        if self.max_parallelism > 1:
+            return self._run_ready_set(
+                audit, completed, finding_obligations, ordered_runs
+            )
         candidate_commit = self.plan.base_commit
         admission_rechecked = False
         for run in ordered_runs:
@@ -1184,72 +1214,116 @@ class PlanGraph:
                 return self._transition_to_blocked(audit, result, reason=str(exc))
             audit.node_started(run.id)
             outcome = self.launcher(request)
-            if not self._outcome_matches_reservation(outcome, request):
-                outcome = FeatureRunOutcome(
-                    "failed",
-                    evidence={"error": "launcher result does not match reserved child identity"},
-                )
-            if isinstance(outcome.evidence, Mapping):
-                try:
-                    self.budget.import_child_evidence(
-                        node_id=run.id, evidence=outcome.evidence
-                    )
-                except BudgetError as exc:
-                    raise PlanGraphError(str(exc)) from exc
-            if outcome.status != "succeeded":
-                self.budget.completed(reservation, outcome.status if outcome.status == "blocked" else "failed")
-                result = self._with_deviation_records(PlanGraphResult(
-                    status=outcome.status if outcome.status == "blocked" else "failed",
-                    candidate_commit=None,
-                    completed=dict(completed),
-                    failed_run_id=run.id,
-                ))
-                audit.node_failed(run.id, result.status, outcome.evidence)
-                if result.status == "blocked":
-                    return self._transition_to_blocked(
-                        audit, result, reason="FeatureRun reported blocked", evidence=outcome.evidence
-                    )
-                audit.finalize(result.status, self._result_payload(result))
-                return result
-            if not outcome.candidate_commit:
-                self.budget.completed(reservation, "failed")
-                raise PlanGraphError(
-                    f"successful FeatureRun {run.id!r} did not provide a candidate commit"
-                )
-            audit.candidate_verified_pending_transfer(
-                run.id,
-                outcome.candidate_commit,
-                outcome.evidence,
+            decision = self._seal_outcome(
+                audit, run, request, reservation, outcome,
+                completed, finding_obligations,
             )
-            try:
-                finding_obligations = self._advance_finding_obligations(
-                    run,
-                    request,
-                    outcome,
-                    finding_obligations,
-                    completed,
-                )
-            except PlanGraphError as exc:
-                self.budget.completed(reservation, "blocked")
-                conflict_ref = audit.transfer_conflict_blocked(run.id, str(exc))
-                result = self._with_deviation_records(PlanGraphResult(
-                    status="blocked",
-                    candidate_commit=outcome.candidate_commit,
-                    completed=dict(completed),
-                    failed_run_id=run.id,
-                ))
+            if decision.kind == "sealed":
+                finding_obligations = decision.finding_obligations
+                candidate_commit = completed[run.id]
+                continue
+            if decision.kind == "blocked":
                 return self._transition_to_blocked(
-                    audit, result, reason=str(exc), evidence_ref=conflict_ref
+                    audit, decision.result,
+                    reason=decision.reason,
+                    evidence=decision.evidence,
+                    evidence_ref=decision.evidence_ref,
                 )
-            completed[run.id] = outcome.candidate_commit
-            self.budget.completed(reservation, "succeeded")
-            candidate_commit = outcome.candidate_commit
-            audit.node_completed(
-                run.id,
-                candidate_commit,
-                finding_obligations=finding_obligations,
+            audit.finalize(
+                decision.result.status, self._result_payload(decision.result)
             )
+            return decision.result
 
+        return self._finalize_with_functionality(audit, candidate_commit, completed)
+
+    def _seal_outcome(
+        self,
+        audit: PlanGraphAudit,
+        run: PlanRun,
+        request: FeatureRunRequest,
+        reservation: str,
+        outcome: FeatureRunOutcome,
+        completed: dict[str, str],
+        finding_obligations: dict[str, list[Mapping[str, object]]],
+    ) -> "_SealDecision":
+        """Record one launcher outcome against the ledger and audit journal.
+
+        Mutates ``completed`` on success and returns the caller's next move;
+        the caller owns graph finalization so the ready-set path can drain
+        in-flight siblings before transitioning.
+        """
+        if not self._outcome_matches_reservation(outcome, request):
+            outcome = FeatureRunOutcome(
+                "failed",
+                evidence={"error": "launcher result does not match reserved child identity"},
+            )
+        if isinstance(outcome.evidence, Mapping):
+            try:
+                self.budget.import_child_evidence(
+                    node_id=run.id, evidence=outcome.evidence
+                )
+            except BudgetError as exc:
+                raise PlanGraphError(str(exc)) from exc
+        if outcome.status != "succeeded":
+            self.budget.completed(reservation, outcome.status if outcome.status == "blocked" else "failed")
+            result = self._with_deviation_records(PlanGraphResult(
+                status=outcome.status if outcome.status == "blocked" else "failed",
+                candidate_commit=None,
+                completed=dict(completed),
+                failed_run_id=run.id,
+            ))
+            audit.node_failed(run.id, result.status, outcome.evidence)
+            if result.status == "blocked":
+                return _SealDecision(
+                    "blocked", result=result,
+                    reason="FeatureRun reported blocked", evidence=outcome.evidence,
+                )
+            return _SealDecision("failed", result=result)
+        if not outcome.candidate_commit:
+            self.budget.completed(reservation, "failed")
+            raise PlanGraphError(
+                f"successful FeatureRun {run.id!r} did not provide a candidate commit"
+            )
+        audit.candidate_verified_pending_transfer(
+            run.id,
+            outcome.candidate_commit,
+            outcome.evidence,
+        )
+        try:
+            finding_obligations = self._advance_finding_obligations(
+                run,
+                request,
+                outcome,
+                finding_obligations,
+                completed,
+            )
+        except PlanGraphError as exc:
+            self.budget.completed(reservation, "blocked")
+            conflict_ref = audit.transfer_conflict_blocked(run.id, str(exc))
+            result = self._with_deviation_records(PlanGraphResult(
+                status="blocked",
+                candidate_commit=outcome.candidate_commit,
+                completed=dict(completed),
+                failed_run_id=run.id,
+            ))
+            return _SealDecision(
+                "blocked", result=result, reason=str(exc), evidence_ref=conflict_ref
+            )
+        completed[run.id] = outcome.candidate_commit
+        self.budget.completed(reservation, "succeeded")
+        audit.node_completed(
+            run.id,
+            outcome.candidate_commit,
+            finding_obligations=finding_obligations,
+        )
+        return _SealDecision("sealed", finding_obligations=finding_obligations)
+
+    def _finalize_with_functionality(
+        self,
+        audit: PlanGraphAudit,
+        candidate_commit: str,
+        completed: dict[str, str],
+    ) -> PlanGraphResult:
         for command in self.functionality_tests:
             recorded = _functionality_test_payload(command)
             rendered = (
@@ -1277,6 +1351,211 @@ class PlanGraph:
         )
         audit.finalize(result.status, self._result_payload(result))
         return result
+
+    def _run_ready_set(
+        self,
+        audit: PlanGraphAudit,
+        completed: dict[str, str],
+        finding_obligations: dict[str, list[Mapping[str, object]]],
+        ordered_runs: Sequence[PlanRun],
+    ) -> PlanGraphResult:
+        """Execute the graph through ReadySetScheduler admission.
+
+        Launcher calls run on worker threads; every audit, ledger, and Git
+        mutation stays on this coordinating thread. Sibling candidates branch
+        from their dependencies' candidates and are joined with
+        controller-owned merge commits; the final graph candidate joins the
+        sink nodes' candidates.
+        """
+        scheduler = ReadySetScheduler(
+            ordered_runs, max_parallelism=self.max_parallelism
+        )
+        by_id = {run.id: run for run in ordered_runs}
+        self._revalidate_approval()
+        in_flight: dict[str, tuple[Future, FeatureRunRequest, str]] = {}
+        terminal: _SealDecision | None = None
+        deferred_error: PlanGraphError | None = None
+        with ThreadPoolExecutor(
+            max_workers=self.max_parallelism, thread_name_prefix="plan-graph-node"
+        ) as pool:
+            while True:
+                if terminal is None and deferred_error is None:
+                    active = tuple(
+                        ReadySetDispatch(node_id, "feature_run")
+                        for node_id in sorted(in_flight)
+                    )
+                    for unit in scheduler.select(set(completed), active=active):
+                        run = by_id[unit.node_id]
+                        try:
+                            base = self._base_commit_for_run(run, completed)
+                        except PlanGraphError as exc:
+                            audit.node_failed(
+                                run.id, "blocked",
+                                {"error": str(exc), "classification": "harness_or_configuration"},
+                            )
+                            terminal = _SealDecision(
+                                "blocked",
+                                result=PlanGraphResult("blocked", None, dict(completed), run.id),
+                                reason=str(exc),
+                            )
+                            break
+                        request = self._request_for_run(
+                            run, base, tuple(finding_obligations.get(run.id, ()))
+                        )
+                        try:
+                            reservation = self.budget.reserve(
+                                node_id=run.id, gate=gate_digest(run.verification_argv),
+                                failure_keys=self._finding_keys_for_reservation(
+                                    finding_obligations.get(run.id, ())
+                                ),
+                                failure_reason=self._failure_reason_for_reservation(run.id),
+                                graph_attempt_id=self.graph_run_id,
+                            )
+                            self.budget.started(reservation)
+                        except BudgetError as exc:
+                            audit.node_failed(
+                                run.id, "blocked",
+                                {"error": str(exc), "classification": "harness_or_configuration"},
+                            )
+                            terminal = _SealDecision(
+                                "blocked",
+                                result=PlanGraphResult("blocked", None, dict(completed), run.id),
+                                reason=str(exc),
+                            )
+                            break
+                        audit.node_started(run.id)
+                        in_flight[run.id] = (
+                            pool.submit(self.launcher, request), request, reservation
+                        )
+                if not in_flight:
+                    break
+                done_ids = [
+                    node_id for node_id, (future, _, _) in in_flight.items()
+                    if future.done()
+                ]
+                if not done_ids:
+                    wait(
+                        [future for future, _, _ in in_flight.values()],
+                        return_when=FIRST_COMPLETED,
+                    )
+                    done_ids = [
+                        node_id for node_id, (future, _, _) in in_flight.items()
+                        if future.done()
+                    ]
+                for node_id in sorted(done_ids):
+                    future, request, reservation = in_flight.pop(node_id)
+                    run = by_id[node_id]
+                    try:
+                        outcome = future.result()
+                    except Exception as exc:  # noqa: BLE001 — launcher escape is child failure
+                        outcome = FeatureRunOutcome(
+                            "failed",
+                            evidence={"error": str(exc), "error_type": type(exc).__name__},
+                        )
+                    try:
+                        decision = self._seal_outcome(
+                            audit, run, request, reservation, outcome,
+                            completed, finding_obligations,
+                        )
+                    except PlanGraphError as exc:
+                        if deferred_error is None:
+                            deferred_error = exc
+                        continue
+                    if decision.kind == "sealed":
+                        finding_obligations = decision.finding_obligations
+                        continue
+                    if terminal is None:
+                        terminal = decision
+        if deferred_error is not None and terminal is None:
+            raise deferred_error
+        if terminal is not None:
+            result = replace(terminal.result, completed=dict(completed))
+            if terminal.kind == "blocked":
+                return self._transition_to_blocked(
+                    audit, result,
+                    reason=terminal.reason or "FeatureRun reported blocked",
+                    evidence=terminal.evidence,
+                    evidence_ref=terminal.evidence_ref,
+                )
+            audit.finalize(result.status, self._result_payload(result))
+            return result
+        candidate_commit = self._final_candidate(ordered_runs, completed)
+        return self._finalize_with_functionality(audit, candidate_commit, completed)
+
+    def _base_commit_for_run(
+        self, run: PlanRun, completed: Mapping[str, str]
+    ) -> str:
+        parents: list[str] = []
+        for dependency in run.depends_on:
+            candidate = completed.get(dependency)
+            if candidate is None:
+                raise PlanGraphError(
+                    f"run {run.id!r} admitted before dependency {dependency!r} sealed"
+                )
+            parents.append(candidate)
+        if not parents:
+            return self.plan.base_commit
+        return self._join_candidates(run.id, parents)
+
+    def _final_candidate(
+        self, ordered_runs: Sequence[PlanRun], completed: Mapping[str, str]
+    ) -> str:
+        depended = {
+            dependency for run in ordered_runs for dependency in run.depends_on
+        }
+        sinks = [run.id for run in ordered_runs if run.id not in depended]
+        return self._join_candidates("final", [completed[sink] for sink in sinks])
+
+    def _join_candidates(self, label: str, parents: Sequence[str]) -> str:
+        """Join divergent sibling candidates with controller-owned merges.
+
+        Ancestor parents are pruned first, so a linear lineage joins to its
+        tip without creating a merge commit. Conflicting joins raise — a
+        conflict between siblings means their allowed paths were not disjoint
+        in effect, which is a plan defect, not a repair target.
+        """
+        unique = list(dict.fromkeys(parents))
+        pruned = [
+            parent for parent in unique
+            if not any(
+                other != parent and self._is_ancestor(parent, other)
+                for other in unique
+            )
+        ]
+        if not pruned:
+            raise PlanGraphError(f"join {label!r} has no candidate parents")
+        merged = pruned[0]
+        for parent in pruned[1:]:
+            tree_run = subprocess.run(
+                ["git", "merge-tree", "--write-tree", merged, parent],
+                cwd=self.repository, text=True, capture_output=True, check=False,
+            )
+            if tree_run.returncode != 0:
+                raise PlanGraphError(
+                    f"PlanGraph join {label!r} has merge conflicts between "
+                    f"{merged[:12]} and {parent[:12]}: "
+                    + tree_run.stdout.strip().splitlines()[-1][:200]
+                )
+            tree = tree_run.stdout.strip().splitlines()[0]
+            merged = _git(
+                self.repository, "commit-tree", tree,
+                "-p", merged, "-p", parent,
+                "-m", f"PlanGraph join {label} ({self.graph_run_id})",
+            ).decode().strip()
+        if merged not in unique:
+            # Protect the synthetic join commit from gc for the run's lifetime.
+            _git(
+                self.repository, "update-ref",
+                f"refs/plan-graph/{self.graph_run_id}/join-{label}", merged,
+            )
+        return merged
+
+    def _is_ancestor(self, ancestor: str, descendant: str) -> bool:
+        probe = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", ancestor, descendant],
+            cwd=self.repository, capture_output=True, check=False,
+        )
+        return probe.returncode == 0
 
     def _revalidate_approval(self) -> ApprovalEvidence | None:
         if self.approval_validator is None:
