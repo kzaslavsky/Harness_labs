@@ -75,7 +75,9 @@ from harness_labs.plan_graph_contract import (  # noqa: E402
 
 
 ORBIT = ROOT / "experiments" / "orbit"
-WORKTREE_ROOT = ROOT.parent / "harness_labs_feature_worktrees"
+# ROOT already lives inside harness_labs_feature_worktrees; node worktrees
+# are siblings of this experiment's own worktree.
+WORKTREE_ROOT = ROOT.parent
 CLAUDE = os.environ.get("ORBIT_CLAUDE_EXECUTABLE", "claude")
 
 COORDINATOR_SPEC = "claude:claude-fable-5@medium"
@@ -857,7 +859,7 @@ def _launch_node(
         {
             "id": criterion,
             "statement": acceptance_criteria[criterion],
-            "source": "approved-plan",
+            "source": "operator",
         }
         for criterion in run.criteria
     )
