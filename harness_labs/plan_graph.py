@@ -16,6 +16,7 @@ from uuid import uuid4
 
 from .audit import AuditError
 from .plan_graph_audit import PlanGraphAudit, validate_plan_graph_id
+from .plan_graph_budget import BudgetError, RetryBudgetLedger, gate_digest
 from .plan_graph_contract import (
     PLAN_GRAPH_PROTOCOL,
     PlanGraphContractError,
@@ -26,7 +27,7 @@ from .plan_graph_contract import (
 )
 
 
-REGISTRATION_PROTOCOL = "plan-graph-registration/1"
+REGISTRATION_PROTOCOL = "plan-graph-registration/2"
 LEGACY_PLAN_PROTOCOL = "component-plan/0"
 FEATURE_RUN_REQUEST_PROTOCOL = "plan-graph-feature-run-request/1"
 _REGISTRATION_FIELDS = frozenset(
@@ -38,6 +39,7 @@ _REGISTRATION_FIELDS = frozenset(
         "base_commit",
         "graph_digest",
         "definition_json",
+        "plan_lineage_id",
     }
 )
 class PlanGraphError(ValueError):
@@ -329,6 +331,7 @@ class PlanGraphRegistration:
     base_commit: str
     graph_digest: str
     definition_json: str
+    plan_lineage_id: str
 
 
 @dataclass(frozen=True)
@@ -633,6 +636,7 @@ def _digest_input(
         "plan_path": registration_fields["plan_path"],
         "plan_sha256": registration_fields["plan_sha256"],
         "base_commit": registration_fields["base_commit"],
+        "plan_lineage_id": registration_fields["plan_lineage_id"],
         "definition": dict(definition),
     }
 
@@ -644,6 +648,7 @@ def register_plan_graph(
     decomposition: Mapping[str, object],
     base_commit: str | None = None,
     repository_id: str | None = None,
+    plan_lineage_id: str | None = None,
 ) -> PlanGraphRegistration:
     repository = repository.resolve()
     validate_plan_graph_id(logical_graph_id)
@@ -682,12 +687,24 @@ def register_plan_graph(
         ).hexdigest()
     validate_plan_graph_plan(plan)
     definition_json = canonical_json(canonical_definition(plan))
+    # The lineage identifies the approved graph slot, rather than one version
+    # of its plan.  A version-specific default would create a new ledger before
+    # RetryBudgetLedger can fail closed on changed-plan re-registration.
+    lineage_id = plan_lineage_id or "lineage-" + hashlib.sha256(
+        canonical_json(
+            {
+                "logical_graph_id": logical_graph_id,
+                "plan_path": plan_path,
+            }
+        ).encode("utf-8")
+    ).hexdigest()
     fields: dict[str, object] = {
         "protocol": REGISTRATION_PROTOCOL,
         "logical_graph_id": logical_graph_id,
         "plan_path": plan_path,
         "plan_sha256": plan_sha256,
         "base_commit": base_commit,
+        "plan_lineage_id": lineage_id,
     }
     graph_digest = hashlib.sha256(
         canonical_json(_digest_input(fields, json.loads(definition_json))).encode("utf-8")
@@ -700,6 +717,7 @@ def register_plan_graph(
         base_commit=base_commit,
         graph_digest=graph_digest,
         definition_json=definition_json,
+        plan_lineage_id=str(fields["plan_lineage_id"]),
     )
 
 
@@ -886,6 +904,14 @@ class PlanGraph:
         self.predecessor_checkpoint = (
             dict(predecessor_checkpoint) if predecessor_checkpoint is not None else None
         )
+        self.budget = RetryBudgetLedger(self.run_root, registration.plan_lineage_id)
+        try:
+            self.budget.register(
+                plan_sha256=registration.plan_sha256,
+                gates={run.id: gate_digest(run.verification_argv) for run in self.plan.runs},
+            )
+        except BudgetError as exc:
+            raise PlanGraphError(str(exc)) from exc
 
     @classmethod
     def resume(
@@ -941,6 +967,23 @@ class PlanGraph:
                     retry_frontier=directive.retry_frontier,
                     blocker_evidence_ref=directive.blocker_evidence_ref,
                 )
+                budget = RetryBudgetLedger(run_root, registration.plan_lineage_id)
+                # A finalized predecessor cannot retain a live reservation.
+                # Reconcile before capacity checks so the append-only ledger
+                # records the interrupted launch and a successor cannot hide it.
+                budget.reconcile_attempt(
+                    graph_attempt_id=directive.predecessor_attempt_id,
+                    disposition="abandoned",
+                    reason="repair successor reconciled finalized predecessor",
+                )
+                # Only the selected frontier and its invalidation closure can
+                # launch in this successor.  A spent budget for a reused,
+                # out-of-frontier node must not reject that successor.
+                invalidated = set(selection["invalidated_node_ids"])
+                for run in plan.runs:
+                    if run.id not in invalidated:
+                        continue
+                    budget.verdict(node_id=run.id, gate=gate_digest(run.verification_argv))
                 attempt_id = f"{directive.logical_graph_id}-attempt-{cls._next_repair_ordinal(run_root, directive.logical_graph_id)}"
                 graph = cls(
                     repository, registration, launcher,
@@ -984,6 +1027,34 @@ class PlanGraph:
             process_probe=self.child_liveness_probe,
             force_records=self.force_reconcile_records,
         )
+        for node_id, disposition in recovery.items():
+            if disposition != "running":
+                try:
+                    self.budget.abandon(
+                        node_id=node_id,
+                        disposition=disposition if disposition in {"sealed", "blocked"} else "abandoned",
+                        reason="PlanGraph audit reconciliation",
+                        graph_attempt_id=self.graph_run_id,
+                    )
+                except BudgetError as exc:
+                    raise PlanGraphError(str(exc)) from exc
+        # A controller can die after the durable reservation (or its started
+        # transition) but before the audit records node_started.  That launch
+        # has no audit node for the loop above to reconcile.  Preserve a live
+        # audited child, but terminalize every other reservation for this
+        # attempt before considering a replacement launch.
+        try:
+            self.budget.reconcile_attempt(
+                graph_attempt_id=self.graph_run_id,
+                disposition="abandoned",
+                reason="PlanGraph audit reconciliation of untracked reservation",
+                live_node_ids=tuple(
+                    node_id for node_id, disposition in recovery.items()
+                    if disposition == "running"
+                ),
+            )
+        except BudgetError as exc:
+            raise PlanGraphError(str(exc)) from exc
         completed = self._load_audit_completed(audit)
         if any(outcome == "running" for outcome in recovery.values()):
             # An observed live child continues to own its allocation.  This
@@ -1020,6 +1091,16 @@ class PlanGraph:
                 candidate_commit,
                 tuple(finding_obligations.get(run.id, ())),
             )
+            try:
+                reservation = self.budget.reserve(
+                    node_id=run.id, gate=gate_digest(run.verification_argv),
+                    failure_keys=self._finding_keys_for_reservation(finding_obligations.get(run.id, ())),
+                    failure_reason=self._failure_reason_for_reservation(run.id),
+                    graph_attempt_id=self.graph_run_id,
+                )
+                self.budget.started(reservation)
+            except BudgetError as exc:
+                raise PlanGraphError(str(exc)) from exc
             audit.node_started(run.id)
             outcome = self.launcher(request)
             if not self._outcome_matches_reservation(outcome, request):
@@ -1028,6 +1109,7 @@ class PlanGraph:
                     evidence={"error": "launcher result does not match reserved child identity"},
                 )
             if outcome.status != "succeeded":
+                self.budget.completed(reservation, outcome.status if outcome.status == "blocked" else "failed")
                 result = PlanGraphResult(
                     status=outcome.status if outcome.status == "blocked" else "failed",
                     candidate_commit=None,
@@ -1038,6 +1120,7 @@ class PlanGraph:
                 audit.finalize(result.status, self._result_payload(result))
                 return result
             if not outcome.candidate_commit:
+                self.budget.completed(reservation, "failed")
                 raise PlanGraphError(
                     f"successful FeatureRun {run.id!r} did not provide a candidate commit"
                 )
@@ -1055,6 +1138,7 @@ class PlanGraph:
                     completed,
                 )
             except PlanGraphError as exc:
+                self.budget.completed(reservation, "blocked")
                 conflict_ref = audit.transfer_conflict_blocked(run.id, str(exc))
                 result = PlanGraphResult(
                     status="blocked",
@@ -1069,6 +1153,7 @@ class PlanGraph:
                 )
                 return result
             completed[run.id] = outcome.candidate_commit
+            self.budget.completed(reservation, "succeeded")
             candidate_commit = outcome.candidate_commit
             audit.node_completed(
                 run.id,
@@ -1266,6 +1351,49 @@ class PlanGraph:
                 raise PlanGraphError("invalid PlanGraph finding obligation record")
             loaded[node_id] = [dict(item) for item in findings]
         return loaded
+
+    @staticmethod
+    def _finding_keys_for_reservation(
+        obligations: Sequence[Mapping[str, object]],
+    ) -> tuple[str, ...]:
+        """Return the durable finding keys that a retry launch is addressing."""
+        keys: list[str] = []
+        for obligation in obligations:
+            key = obligation.get("key")
+            if not isinstance(key, str) or not key:
+                raise PlanGraphError("invalid PlanGraph finding obligation key")
+            keys.append(key)
+        return tuple(sorted(set(keys)))
+
+    def _failure_reason_for_reservation(self, node_id: str) -> str | None:
+        """Return the predecessor's durable failure identity for this retry.
+
+        A fresh launch has no prior failure.  A repair successor must carry the
+        audited failure artifact for frontier nodes into its reservation so
+        repeated ordinary failures consume the per-finding allowance too.
+        """
+        if self.resume_directive is None or self.predecessor_checkpoint is None:
+            return None
+        if node_id not in self.resume_directive.retry_frontier:
+            return None
+        checkpoint_state = self.predecessor_checkpoint.get("state")
+        if not isinstance(checkpoint_state, Mapping):
+            raise PlanGraphError("invalid repair predecessor checkpoint state")
+        raw_nodes = checkpoint_state.get("nodes")
+        if not isinstance(raw_nodes, Mapping):
+            raise PlanGraphError("invalid repair predecessor checkpoint nodes")
+        node = raw_nodes.get(node_id)
+        if not isinstance(node, Mapping):
+            raise PlanGraphError("invalid repair predecessor checkpoint node")
+        if node.get("status") not in {"failed", "blocked", "interrupted"}:
+            return None
+        evidence = node.get("evidence")
+        if not isinstance(evidence, Mapping):
+            raise PlanGraphError("repair retry frontier lacks failure evidence")
+        reference = evidence.get("evidence_ref")
+        if not isinstance(reference, str) or not reference.startswith("artifact:sha256:"):
+            raise PlanGraphError("repair retry frontier has invalid failure evidence")
+        return reference
 
     def _advance_finding_obligations(
         self,

@@ -1,0 +1,1 @@
+{"protocol":"retry-budget-ledger/1","lineage_id":"example-lineage","event":"reserved","reservation_id":"budget-example","node_id":"rb-02","gate":"example","classification":"indeterminate","attempt_counters":{"graph_launches":1,"gate_invocations":0,"repair_dispatches":0,"structural_decisions":0}}

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib
 import json
 from pathlib import Path
@@ -23,6 +24,7 @@ from harness_labs.plan_graph import (
     persist_registration,
     register_plan_graph,
 )
+from harness_labs.plan_graph_budget import BudgetError, RetryBudgetLedger
 
 
 def _load_callable(reference: str) -> Callable[..., object]:
@@ -40,6 +42,28 @@ def _repository_path(repository: Path, value: Path | None, default: str) -> Path
     return selected.resolve() if selected.is_absolute() else (repository / selected).resolve()
 
 
+def _approval_lineage_id(
+    repository_id: str,
+    decomposition_path: str,
+) -> str:
+    """Bind receipt-backed registrations to a stable approved graph slot.
+
+    Approval digests deliberately include the plan revision and base commit, so
+    using one as the ledger identity would mint a new retry allowance for every
+    re-approval.  The repository-owned decomposition path identifies the slot.
+    ``logical_graph_id`` is deliberately excluded: it identifies repair state
+    and is required only for a resume invocation, so including it would cause a
+    fresh attempt and its successor to select different ledgers.
+    """
+    identity = {
+        "repository_id": repository_id,
+        "decomposition_path": decomposition_path,
+    }
+    return "approval-" + hashlib.sha256(
+        json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     modes = parser.add_subparsers(dest="mode", required=True)
@@ -49,6 +73,19 @@ def _parser() -> argparse.ArgumentParser:
     register.add_argument("--repository", type=Path, required=True)
     register.add_argument("--logical-graph-id", required=True)
     register.add_argument("--registration-root", type=Path)
+    register.add_argument("--lineage-id")
+
+    budget = modes.add_parser("budget")
+    budget.add_argument("operation", choices=("extend", "reset"))
+    budget.add_argument("--repository", type=Path, required=True)
+    budget.add_argument("--run-root", type=Path)
+    budget.add_argument("--lineage-id", required=True)
+    budget.add_argument("--node", required=True)
+    budget.add_argument("--launches", type=int, default=1)
+    budget.add_argument("--accept-gate-change", action="store_true")
+    budget.add_argument("--accept-plan-sha256")
+    budget.add_argument("--carryover", choices=("full", "reset"), default="full")
+    budget.add_argument("--reason", required=True)
 
     run = modes.add_parser("run")
     run.add_argument("--repository", type=Path, required=True)
@@ -63,6 +100,7 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--launcher-cwd", type=Path)
     run.add_argument("--launcher-timeout", type=float)
     run.add_argument("--run-root", type=Path)
+    run.add_argument("--lineage-id")
     run.add_argument("--resume", action="store_true")
     run.add_argument("--logical-graph-id")
     run.add_argument("--predecessor-attempt-id")
@@ -75,6 +113,18 @@ def main() -> int:
     parser = _parser()
     arguments = parser.parse_args()
     repository = arguments.repository.resolve()
+    if arguments.mode == "budget":
+        try:
+            ledger = RetryBudgetLedger(_repository_path(repository, arguments.run_root, "logs/runs"), arguments.lineage_id)
+            if arguments.operation == "extend":
+                ledger.extend(node_id=arguments.node, launches=arguments.launches, reason=arguments.reason)
+            else:
+                ledger.reset(node_id=arguments.node, reason=arguments.reason, accept_gate_change=arguments.accept_gate_change, accept_plan_sha256=arguments.accept_plan_sha256, carryover=arguments.carryover)
+        except BudgetError as exc:
+            print(f"PlanGraph budget failed: {exc}", file=sys.stderr)
+            return 3
+        print(json.dumps({"lineage_id": arguments.lineage_id, "node_id": arguments.node, "operation": arguments.operation}, sort_keys=True))
+        return 0
     if arguments.mode == "register":
         payload = json.loads(arguments.decomposition.read_text(encoding="utf-8"))
         if not isinstance(payload, dict):
@@ -83,6 +133,7 @@ def main() -> int:
             repository=repository,
             logical_graph_id=arguments.logical_graph_id,
             decomposition=payload,
+            plan_lineage_id=arguments.lineage_id,
         )
         registration_root = _repository_path(
             repository,
@@ -126,6 +177,15 @@ def main() -> int:
                     raise PlanApprovalError(
                         "decomposition path does not match the approved subject"
                     )
+            approval_lineage_id = _approval_lineage_id(
+                approved.repository_id,
+                approved.decomposition_path,
+            )
+            if (
+                arguments.lineage_id is not None
+                and arguments.lineage_id != approval_lineage_id
+            ):
+                parser.error("--lineage-id must match the approval-bound retry lineage")
             registration = register_plan_graph(
                 repository=repository,
                 logical_graph_id=arguments.logical_graph_id
@@ -133,6 +193,7 @@ def main() -> int:
                 decomposition=approved.decomposition,
                 base_commit=approved.base_commit,
                 repository_id=approved.repository_id,
+                plan_lineage_id=approval_lineage_id,
             )
             if registration.plan_sha256 != approved.plan_sha256:
                 raise PlanApprovalError(
@@ -147,6 +208,8 @@ def main() -> int:
             parser.error("--decomposition requires --approval-receipt")
         registration_path = _repository_path(repository, arguments.registration, "")
         registration = load_registration(registration_path)
+        if arguments.lineage_id is not None and arguments.lineage_id != registration.plan_lineage_id:
+            parser.error("--lineage-id must match the persisted registration lineage")
     run_root = _repository_path(repository, arguments.run_root, "logs/runs")
     launcher_cwd = (
         _repository_path(repository, arguments.launcher_cwd, "")
@@ -175,7 +238,10 @@ def main() -> int:
         result = graph.run()
     except PlanGraphError as exc:
         print(f"PlanGraph failed: {exc}", file=sys.stderr)
-        return 1
+        return 3 if any(
+            marker in str(exc)
+            for marker in ("retry budget", "gate-change block", "changed-plan lineage", "operator intervention required")
+        ) else 1
     print(
         json.dumps(
             {

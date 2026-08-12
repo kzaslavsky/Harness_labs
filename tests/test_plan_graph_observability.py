@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from pathlib import Path
 import subprocess
 import sys
@@ -17,6 +18,8 @@ from harness_labs.plan_graph import (
     RepairResumeDirective,
     register_plan_graph,
 )
+from harness_labs.plan_graph_budget import RetryBudgetLedger, gate_digest
+from scripts.run_plan_graph import _approval_lineage_id
 
 
 def git(repository: Path, *arguments: str) -> str:
@@ -83,6 +86,31 @@ class PlanGraphObservabilityTests(unittest.TestCase):
             decomposition=decomposition,
         )
 
+    def test_changed_plan_reregistration_reuses_lineage_and_fails_closed(self) -> None:
+        # Establish the original registration's budget ledger before a later
+        # approval changes the plan contents and commit.
+        PlanGraph(
+            self.repository, self.registration, lambda request: FeatureRunOutcome("failed"),
+            run_root=self.run_root, graph_run_id="original",
+        )
+        plan = self.repository / "docs" / "plan.md"
+        plan.write_text("First AC-1 revised\nSecond AC-2\n", encoding="utf-8")
+        git(self.repository, "add", "docs/plan.md")
+        git(self.repository, "commit", "-m", "revised plan")
+        revised_base = git(self.repository, "rev-parse", "HEAD")
+        revised = register_plan_graph(
+            repository=self.repository,
+            logical_graph_id="observed-graph",
+            decomposition={**self.decomposition, "base_commit": revised_base},
+        )
+
+        self.assertEqual(revised.plan_lineage_id, self.registration.plan_lineage_id)
+        with self.assertRaisesRegex(PlanGraphError, "changed-plan"):
+            PlanGraph(
+                self.repository, revised, lambda request: FeatureRunOutcome("failed"),
+                run_root=self.run_root, graph_run_id="revised",
+            )
+
     def test_repair_successor_preserves_predecessor_and_reuses_only_outside_frontier(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -115,6 +143,126 @@ class PlanGraphObservabilityTests(unittest.TestCase):
             self.assertIn("plan_graph_repair_successor_allocated", events)
             self.assertIn("plan_graph_node_reused", events)
             AuditJournal.verify(successor_dir)
+
+    def test_repair_ignores_exhaustion_for_reused_nodes_outside_selected_frontier(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            predecessor = PlanGraph(
+                self.repository, self.registration,
+                lambda request: _success(request, "c" * 40) if request.run.id == "first"
+                else FeatureRunOutcome("failed", evidence={"error": "repair me"}),
+                run_root=root / "runs", graph_run_id="logical",
+            )
+            self.assertEqual(predecessor.run().status, "failed")
+            ledger = RetryBudgetLedger(root / "runs", self.registration.plan_lineage_id)
+            for _ in range(4):
+                ledger.reserve(node_id="first", gate=gate_digest(()))
+            blocker = predecessor._audit_for_run().state["nodes"]["second"]["evidence"]["evidence_ref"]
+            successor = PlanGraph.resume(
+                self.repository, self.registration, lambda request: _success(request, "d" * 40),
+                run_root=root / "runs",
+                directive=RepairResumeDirective("logical", "logical", ("second",), blocker),
+            )
+            self.assertEqual(successor.run().status, "succeeded")
+
+    def test_repeated_ordinary_repair_failure_consumes_finding_budget(self) -> None:
+        """A retry carries its predecessor failure artifact into the ledger."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            current = PlanGraph(
+                self.repository, self.registration,
+                lambda request: FeatureRunOutcome("failed", evidence={"error": "repair"}),
+                run_root=root / "runs", graph_run_id="logical",
+            )
+            self.assertEqual(current.run().status, "failed")
+            for _ in range(3):
+                blocker = current._audit_for_run().state["nodes"]["first"]["evidence"]["evidence_ref"]
+                current = PlanGraph.resume(
+                    self.repository, self.registration,
+                    lambda request: FeatureRunOutcome("failed", evidence={"error": "repair"}),
+                    run_root=root / "runs",
+                    directive=RepairResumeDirective("logical", current.graph_run_id, ("first",), blocker),
+                )
+                self.assertEqual(current.run().status, "failed")
+            blocker = current._audit_for_run().state["nodes"]["first"]["evidence"]["evidence_ref"]
+            exhausted = PlanGraph.resume(
+                self.repository, self.registration,
+                lambda request: FeatureRunOutcome("failed", evidence={"error": "repair"}),
+                run_root=root / "runs",
+                directive=RepairResumeDirective("logical", current.graph_run_id, ("first",), blocker),
+            )
+            with self.assertRaisesRegex(PlanGraphError, "finding budget exhausted"):
+                exhausted.run()
+            ledger_path = root / "runs" / ".plan-graph-budgets" / f"{self.registration.plan_lineage_id}.jsonl"
+            reserved = [
+                json.loads(line) for line in ledger_path.read_text(encoding="utf-8").splitlines()
+                if json.loads(line).get("event") == "reserved"
+            ]
+            self.assertEqual(
+                reserved[-1]["failure_keys"],
+                ["reason:" + hashlib.sha256(blocker.encode("utf-8")).hexdigest()],
+            )
+
+    def test_approval_lineage_uses_stable_registration_slot(self) -> None:
+        first = _approval_lineage_id("repository-1", "plans/feature.json")
+        self.assertEqual(
+            first,
+            _approval_lineage_id("repository-1", "plans/feature.json"),
+        )
+        self.assertNotEqual(
+            first,
+            _approval_lineage_id("repository-1", "plans/other.json"),
+        )
+        self.assertNotEqual(
+            first,
+            _approval_lineage_id("repository-2", "plans/feature.json"),
+        )
+
+    def test_repair_reconciles_interrupted_predecessor_reservations(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            predecessor = PlanGraph(
+                self.repository, self.registration,
+                lambda request: _success(request, "c" * 40) if request.run.id == "first"
+                else FeatureRunOutcome("failed", evidence={"error": "repair me"}),
+                run_root=root / "runs", graph_run_id="logical",
+            )
+            self.assertEqual(predecessor.run().status, "failed")
+            ledger = RetryBudgetLedger(root / "runs", self.registration.plan_lineage_id)
+            stale = ledger.reserve(
+                node_id="second", gate=gate_digest(()), graph_attempt_id="logical",
+                classification="infrastructure_transient", failure_keys=("worker-lost",),
+            )
+            ledger.started(stale)
+            blocker = predecessor._audit_for_run().state["nodes"]["second"]["evidence"]["evidence_ref"]
+            self.assertEqual(
+                PlanGraph.resume(
+                    self.repository, self.registration, lambda request: _success(request, "d" * 40),
+                    run_root=root / "runs",
+                    directive=RepairResumeDirective("logical", "logical", ("second",), blocker),
+                ).run().status,
+                "succeeded",
+            )
+            events = [json.loads(line) for line in ledger.path.read_text(encoding="utf-8").splitlines()]
+            reconciliation = next(event for event in events if event.get("reservation_id") == stale and event["event"] == "abandoned")
+            self.assertEqual(reconciliation["graph_attempt_id"], "logical")
+            self.assertEqual(reconciliation["disposition"], "abandoned")
+
+    def test_run_reconciles_reservation_without_an_audit_node(self) -> None:
+        """A crash before audit.node_started must not strand the reservation."""
+        graph = PlanGraph(
+            self.repository, self.registration,
+            lambda request: _success(request, "c" * 40),
+            run_root=self.run_root, graph_run_id="reserve-before-audit",
+        )
+        stale = graph.budget.reserve(
+            node_id="first", gate=gate_digest(()), graph_attempt_id="reserve-before-audit",
+        )
+        graph.budget.started(stale)
+        self.assertEqual(graph.run().status, "succeeded")
+        events = [json.loads(line) for line in graph.budget.path.read_text(encoding="utf-8").splitlines()]
+        abandoned = next(event for event in events if event.get("reservation_id") == stale and event["event"] == "abandoned")
+        self.assertEqual(abandoned["disposition"], "abandoned")
 
     def test_repair_rejects_plan_contract_drift_and_unrecorded_blocker(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -581,7 +729,7 @@ class PlanGraphObservabilityTests(unittest.TestCase):
             observed["registration_binding"],
             {
                 "logical_graph_id": "observed-graph",
-                "registration_protocol": "plan-graph-registration/1",
+                "registration_protocol": "plan-graph-registration/2",
                 "registration_digest": self.registration.graph_digest,
                 "graph_attempt_id": "attempt-one",
             },
