@@ -65,6 +65,8 @@ from harness_labs.plan_graph import (  # noqa: E402
     FeatureRunOutcome,
     FeatureRunRequest,
     PlanGraph,
+    RepairResumeDirective,
+    load_registration,
     persist_registration,
     register_plan_graph,
 )
@@ -516,6 +518,11 @@ Inspect the supplied ledger and fix_finding_keys. Modify only
 {', '.join(writable)}, and only as needed to resolve those exact findings
 without feature growth. Run {' '.join(node.run.verification_argv)}. Return
 addressed_finding_keys as the exact subset actually fixed. Do not commit.
+Your structured claims must reference ONLY the supplied ledger finding keys.
+Never place acceptance-criterion ids (like "AC-CB03-1") or annotated criterion
+text anywhere in claims: this task has no assigned criteria and the
+orchestrating harness rejects any claim naming an unassigned criterion,
+failing the whole node.
 """,
             "verify": """\
 Treat controller_verified_command as authoritative. Inspect the repaired
@@ -779,11 +786,65 @@ def run_graph(run_id: str, receipt_path: Path) -> int:
     return 0 if result.status == "succeeded" else 1
 
 
+def resume_graph(
+    run_id: str,
+    receipt_path: Path,
+    predecessor: str,
+    frontier: list[str],
+    blocker: str,
+) -> int:
+    admission = PlanApprovalAdmission(repository=REPO, receipt_path=receipt_path)
+    admission.validate()
+    registration = load_registration(
+        ROOT / "logs" / "registration" / "contract-burden-relaxation.json"
+    )
+    directive = RepairResumeDirective(
+        logical_graph_id="contract-burden-relaxation",
+        predecessor_attempt_id=predecessor,
+        retry_frontier=tuple(frontier),
+        blocker_evidence_ref=blocker,
+    )
+    acceptance = dict(
+        json.loads(
+            (REPO / DECOMPOSITION_PATH).read_text(encoding="utf-8")
+        )["acceptance_criteria"]
+    )
+    graph = PlanGraph.resume(
+        REPO,
+        registration,
+        lambda request: _launch_node(request, acceptance),
+        run_root=ROOT / "logs" / "runs" / "cb-graph",
+        directive=directive,
+        graph_run_id=f"cb-graph-{run_id}",
+        approval_validator=admission.approval_validator(),
+        max_parallelism=2,
+    )
+    result = graph.run()
+    print(
+        json.dumps(
+            {
+                "stage": "resume",
+                "status": result.status,
+                "candidate_commit": result.candidate_commit,
+                "completed": dict(result.completed),
+                "failed_run_id": result.failed_run_id,
+                "functionality_failure": result.functionality_failure,
+                "graph_attempt_id": graph.graph_run_id,
+            },
+            indent=2,
+        )
+    )
+    return 0 if result.status.startswith("completed") or result.status == "succeeded" else 1
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("stage", choices=("decompose", "approve", "run"))
+    parser.add_argument("stage", choices=("decompose", "approve", "run", "resume"))
     parser.add_argument("--run-id")
     parser.add_argument("--receipt", type=Path)
+    parser.add_argument("--predecessor", help="prior graph attempt id to resume from")
+    parser.add_argument("--frontier", nargs="+", help="node ids to retry")
+    parser.add_argument("--blocker", help="artifact:sha256:… blocker evidence ref")
     arguments = parser.parse_args()
     # PlanGraph IDs must match ^[a-z0-9][a-z0-9-]{0,127}$ — lowercase, no T/Z.
     run_id = arguments.run_id or datetime.now(timezone.utc).strftime(
@@ -800,7 +861,14 @@ def main() -> int:
         return 0
     receipt = arguments.receipt
     if receipt is None:
-        parser.error("run stage requires --receipt")
+        parser.error("run/resume stages require --receipt")
+    if arguments.stage == "resume":
+        if not (arguments.predecessor and arguments.frontier and arguments.blocker):
+            parser.error("resume requires --predecessor, --frontier, and --blocker")
+        return resume_graph(
+            run_id, receipt, arguments.predecessor, arguments.frontier,
+            arguments.blocker,
+        )
     return run_graph(run_id, receipt)
 
 
