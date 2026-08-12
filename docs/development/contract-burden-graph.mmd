@@ -1,0 +1,44 @@
+graph TD
+    CB01["CB-01 — Kernel dispatch relaxations
+    controller_kernel + coordinator tool schema
+    (diagnosis items 2, 3, 4, 6)"]
+    CB02["CB-02 — Plan-gate relaxation
+    plan_graph.py verbatim-substring gates
+    (item 1)"]
+    CB03["CB-03 — Verification failure classification
+    structured timeout/signal evidence
+    (item 8)"]
+    CB04["CB-04 — Delta-scoped repair budget
+    RB ledger failure-key substrate
+    (item 7)"]
+    CB05["CB-05 — Retry-with-adoption
+    receipt-bound dirty-baseline grant
+    (item 5)"]
+    CB06["CB-06 — Gate-backed criteria
+    kernel adjudication, bound path
+    (item 10)"]
+    CB07["CB-07 — Semantic deliverable floor
+    shared executor boundary
+    (counterweight)"]
+    CB08["CB-08 — Workaround retirement
+    runner pins + diagnosis closure"]
+
+    CB01 -->|tests/test_feature_run.py| CB03
+    CB03 -->|feature_run.py| CB04
+    CB04 -->|feature_run.py| CB05
+    CB01 -->|controller_kernel.py| CB06
+    CB05 -->|feature_run.py| CB06
+    CB05 -->|controller_live.py, claude_task_executor.py| CB07
+    CB02 --> CB08
+    CB03 --> CB08
+    CB06 --> CB08
+    CB07 --> CB08
+
+    classDef root fill:#1a5e3a,stroke:#2ecc71,color:#fff
+    classDef chain fill:#1a3a5e,stroke:#3498db,color:#fff
+    classDef par fill:#5e3a1a,stroke:#e67e22,color:#fff
+    classDef final fill:#4a1a5e,stroke:#9b59b6,color:#fff
+    class CB01,CB02 root
+    class CB03,CB04,CB05 chain
+    class CB06,CB07 par
+    class CB08 final
