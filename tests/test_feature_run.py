@@ -13,7 +13,8 @@ from unittest.mock import patch
 
 from harness_labs.attempts import TaskResult
 from harness_labs.audit import AuditJournal
-from harness_labs.controller_kernel import RunContract
+from harness_labs.controller_evidence import EvidenceCatalog
+from harness_labs.controller_kernel import ControllerKernel, RunContract
 from harness_labs.controller_results import semantic_payload
 from harness_labs.controller_scheduler import RoleProfile
 from harness_labs.feature_run import (
@@ -246,7 +247,7 @@ class FeatureRunTests(unittest.TestCase):
             {
                 "id": "AC-1",
                 "statement": "The approved feature is implemented.",
-                "source": "approved-plan",
+                "source": "plan",
             },
         )
         plan_bytes = b"registered plan\n"
@@ -337,6 +338,15 @@ class FeatureRunTests(unittest.TestCase):
         )
         self.assertEqual(bound_contract.phases, bound_phases)
         self.assertEqual(bound_contract.criteria, criteria)
+
+        # Exercise the real kernel criterion path (not a mock) with the
+        # plan-graph binding's source, since a kernel that rejects it would
+        # crash every plan-graph-bound feature run at construction time.
+        bound_kernel = ControllerKernel(bound_contract, evidence=EvidenceCatalog())
+        self.assertEqual(
+            bound_kernel.snapshot()["criteria"]["AC-1"]["source"],
+            "plan",
+        )
 
         with patch("harness_labs.feature_run.subprocess.run") as git_show:
             git_show.return_value = subprocess.CompletedProcess(

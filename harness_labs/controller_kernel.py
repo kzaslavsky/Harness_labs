@@ -172,6 +172,7 @@ class ControllerKernel:
                 "active_session": None,
                 "sessions": [],
             },
+            "rejected_task_dispatch_refs": [],
         }
         if audit is not None:
             audit.append(
@@ -229,6 +230,7 @@ class ControllerKernel:
             "coordinator_dispatch",
             {"schema": None, "active_session": None, "sessions": []},
         )
+        state.setdefault("rejected_task_dispatch_refs", [])
         instance._state = state
         instance._receipts = {}
         for key, value in state.get("receipts", {}).items():
@@ -424,8 +426,11 @@ class ControllerKernel:
         if command.type not in allowed:
             return "unauthorized_command", "actor may not issue this command"
         for ref in command.provenance.evidence_refs:
-            if not self.evidence.contains(ref):
-                return "unknown_evidence", f"unknown provenance reference: {ref}"
+            if self.evidence.contains(ref):
+                continue
+            if ref in self._state["rejected_task_dispatch_refs"]:
+                continue
+            return "unknown_evidence", f"unknown provenance reference: {ref}"
         return None
 
     def _evaluate(
@@ -676,6 +681,9 @@ class ControllerKernel:
             if not isinstance(item, Mapping):
                 raise ValueError("task.dispatch tasks must be objects")
             task = _task(item)
+            task["acceptance_criteria"] = _resolve_task_criteria(
+                task["acceptance_criteria"], self._state["criteria"]
+            )
             task_id = task["id"]
             if task_id in supplied_ids or task_id in self._state["tasks"]:
                 raise ValueError(f"duplicate task id: {task_id}")
@@ -694,7 +702,6 @@ class ControllerKernel:
                 frozen_fields = (
                     "role",
                     "details_schema",
-                    "required_capabilities",
                     "acceptance_criteria",
                     "dependencies",
                     "parent_task_id",
@@ -707,6 +714,13 @@ class ControllerKernel:
                             "superseding task changes frozen authority: "
                             f"{field}"
                         )
+                if not set(task["required_capabilities"]).issubset(
+                    set(superseded["required_capabilities"])
+                ):
+                    raise ValueError(
+                        "superseding task changes frozen authority: "
+                        "required_capabilities"
+                    )
             parent_id = task["parent_task_id"]
             depth = 1
             if parent_id is not None:
@@ -1095,6 +1109,12 @@ class ControllerKernel:
                     command.actor.parent_id,
                 ),
             )
+        if code == "invalid_command" and command.type == "task.dispatch":
+            self._state["rejected_task_dispatch_refs"].append(
+                f"command:{command.command_id}"
+            )
+            if self.audit is not None:
+                self.audit.merge_checkpoint(updates={"controller": self.snapshot()})
         return receipt
 
     def _new_event(
@@ -1220,7 +1240,7 @@ def _criterion(item: Mapping[str, Any]) -> dict[str, Any]:
     criterion_id = _payload_text(item, "id", "criterion")
     statement = _payload_text(item, "statement", "criterion")
     source = _payload_text(item, "source", "criterion")
-    if source not in {"operator", "repository", "coordinator"}:
+    if source not in {"operator", "repository", "coordinator", "plan"}:
         raise ValueError("criterion source is invalid")
     minimum_satisfiers = item.get("minimum_satisfiers", 1)
     if not isinstance(minimum_satisfiers, int) or minimum_satisfiers < 1:
@@ -1290,3 +1310,31 @@ def _string_list(item: Mapping[str, Any], name: str) -> list[str]:
     ):
         raise ValueError(f"{name} must be a string list")
     return list(values)
+
+
+def _resolve_task_criteria(
+    entries: Iterable[str],
+    known_criteria: Mapping[str, Any],
+) -> list[str]:
+    """Resolve "<id>" or "<id>: <statement>" entries to declared criterion ids.
+
+    A literal match against a declared criterion always wins over the
+    "<id>: <statement>" split, so a criterion id that itself contains ": "
+    is never mistaken for an annotated entry and truncated.
+    """
+
+    resolved: list[str] = []
+    for value in entries:
+        if value in known_criteria:
+            resolved.append(value)
+        else:
+            resolved.append(_parse_criterion_ref(value))
+    return resolved
+
+
+def _parse_criterion_ref(value: str) -> str:
+    prefix, separator, _ = value.partition(": ")
+    criterion_id = (prefix if separator else value).strip()
+    if not criterion_id:
+        raise ValueError("acceptance_criteria entry must declare a criterion id")
+    return criterion_id

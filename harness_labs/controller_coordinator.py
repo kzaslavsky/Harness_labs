@@ -358,6 +358,11 @@ def _tool_specs() -> tuple[ToolSpec, ...]:
         "evidence_refs": {
             "type": "array",
             "items": {"type": "string"},
+            "description": (
+                "Evidence references backing this command. A rejected "
+                "task.dispatch is itself citable once rejected: use "
+                "command:<command_id> from that dispatch's receipt."
+            ),
         },
     }
     specs = [
@@ -422,7 +427,7 @@ def _tool_specs() -> tuple[ToolSpec, ...]:
                 "statement": {"type": "string", "minLength": 1},
                 "source": {
                     "type": "string",
-                    "enum": ["operator", "repository", "coordinator"],
+                    "enum": ["operator", "repository", "coordinator", "plan"],
                 },
                 "rationale": {"type": "string"},
                 "minimum_satisfiers": {"type": "integer", "minimum": 1},
