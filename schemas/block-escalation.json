@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PlanGraph block escalation",
+  "type": "object",
+  "required": ["protocol", "graph_run_id", "logical_graph_id", "predecessor_attempt_id", "blocked_node_id", "reason", "status_flags", "nodes", "budget_state", "significance_guidance", "decision_request", "paths", "resume_directive_template"],
+  "properties": {
+    "protocol": {"const": "plan-graph-block-escalation/1"},
+    "graph_run_id": {"type": "string"},
+    "logical_graph_id": {"type": "string"},
+    "blocked_node_id": {"type": ["string", "null"]},
+    "reason": {"type": "string"},
+    "status_flags": {"type": "object", "required": ["complete", "success", "resumable", "deviated"], "properties": {"complete": {"type": "boolean"}, "success": {"type": "boolean"}, "resumable": {"type": "boolean"}, "deviated": {"type": "boolean"}}},
+    "nodes": {"type": "array", "items": {"type": "object", "required": ["node_id", "status", "reason", "tier", "classification", "open_obligations", "candidate_commit", "evidence_ref"], "properties": {"node_id": {"type": "string"}, "status": {"type": ["string", "null"]}, "reason": {"type": ["string", "null"]}, "tier": {"const": "tier_2"}, "classification": {"enum": ["product", "indeterminate", "infrastructure_transient", "harness_or_configuration", "policy_violation", "structural_decision"]}, "open_obligations": {"type": "array"}, "candidate_commit": {"type": ["string", "null"]}, "evidence_ref": {"type": ["string", "null"]}, "detail_ref": {"type": "string"}, "detail_index": {"type": "integer", "minimum": 0}}}},
+    "budget_state": {"type": "object"},
+    "significance_guidance": {"type": "object"},
+    "decision_request": {"type": "object", "required": ["required", "requested_action", "rationale", "candidate_actions"], "properties": {"required": {"type": "boolean"}, "requested_action": {"type": ["string", "null"]}, "rationale": {"type": "string"}, "candidate_actions": {"type": "array", "items": {"type": "string"}}}},
+    "paths": {"type": "object", "required": ["escalation", "budget_ledger", "decision_log"], "properties": {"escalation": {"type": "string"}, "budget_ledger": {"type": "string"}, "decision_log": {"type": "string"}}},
+    "resume_directive_template": {"type": "object"}
+  }
+}

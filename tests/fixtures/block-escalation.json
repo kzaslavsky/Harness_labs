@@ -1,0 +1,17 @@
+{
+  "protocol": "plan-graph-block-escalation/1",
+  "graph_run_id": "logical-attempt-1",
+  "logical_graph_id": "logical",
+  "predecessor_attempt_id": null,
+  "blocked_node_id": "RB-04",
+  "reason": "retry budget exhausted",
+  "evidence_ref": null,
+  "evidence": null,
+  "status_flags": {"complete": true, "success": false, "resumable": true, "deviated": true},
+  "nodes": [{"node_id": "RB-04", "status": "blocked", "reason": "retry budget exhausted", "tier": "tier_2", "classification": "indeterminate", "open_obligations": [], "candidate_commit": null, "evidence_ref": null}],
+  "budget_state": {"lineage_id": "example", "nodes": {}, "finding_keys": {}},
+  "significance_guidance": {"AC-RB-04": "blocked finalizations are recoverable"},
+  "decision_request": {"required": true, "requested_action": "operator_review", "rationale": "retry budget exhausted", "candidate_actions": ["resume", "extend_budget", "reset_budget"]},
+  "paths": {"escalation": "escalation.json", "budget_ledger": ".plan-graph-budgets/example.jsonl", "decision_log": ".plan-graph-budgets/example.jsonl"},
+  "resume_directive_template": {"logical_graph_id": "logical", "predecessor_attempt_id": "logical-attempt-1", "retry_frontier": ["RB-04"], "blocker_evidence_ref": "$this_escalation_artifact"}
+}

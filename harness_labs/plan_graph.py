@@ -874,6 +874,7 @@ class PlanGraph:
         resume_directive: RepairResumeDirective | None = None,
         reused_completed: Mapping[str, str] | None = None,
         predecessor_checkpoint: Mapping[str, object] | None = None,
+        on_block_argv: Sequence[str] | None = None,
     ) -> None:
         if run_root is None:
             raise PlanGraphError("run_root is required for audited PlanGraph execution")
@@ -904,6 +905,15 @@ class PlanGraph:
         self.predecessor_checkpoint = (
             dict(predecessor_checkpoint) if predecessor_checkpoint is not None else None
         )
+        if on_block_argv is not None and (
+            not isinstance(on_block_argv, Sequence)
+            or isinstance(on_block_argv, (str, bytes))
+            or not on_block_argv
+            or any(not isinstance(value, str) or not value for value in on_block_argv)
+        ):
+            raise PlanGraphError("on-block argv must be a non-empty string array")
+        self.on_block_argv = tuple(on_block_argv or ())
+        self.on_block_hook: dict[str, object] | None = None
         self.budget = RetryBudgetLedger(self.run_root, registration.plan_lineage_id)
         try:
             self.budget.register(
@@ -1072,8 +1082,7 @@ class PlanGraph:
                 dict(completed),
                 blocked,
             )
-            audit.finalize("blocked", self._result_payload(result))
-            return result
+            return self._transition_to_blocked(audit, result, reason="interrupted child recovery blocked")
         finding_obligations = self._load_finding_obligations(audit)
         ordered_runs = _ordered_runs(self.plan)
         self._validate_completed_dependencies(ordered_runs, completed)
@@ -1100,7 +1109,9 @@ class PlanGraph:
                 )
                 self.budget.started(reservation)
             except BudgetError as exc:
-                raise PlanGraphError(str(exc)) from exc
+                result = PlanGraphResult("blocked", None, dict(completed), run.id)
+                audit.node_failed(run.id, "blocked", {"error": str(exc), "classification": "harness_or_configuration"})
+                return self._transition_to_blocked(audit, result, reason=str(exc))
             audit.node_started(run.id)
             outcome = self.launcher(request)
             if not self._outcome_matches_reservation(outcome, request):
@@ -1124,6 +1135,10 @@ class PlanGraph:
                     failed_run_id=run.id,
                 )
                 audit.node_failed(run.id, result.status, outcome.evidence)
+                if result.status == "blocked":
+                    return self._transition_to_blocked(
+                        audit, result, reason="FeatureRun reported blocked", evidence=outcome.evidence
+                    )
                 audit.finalize(result.status, self._result_payload(result))
                 return result
             if not outcome.candidate_commit:
@@ -1153,12 +1168,9 @@ class PlanGraph:
                     completed=dict(completed),
                     failed_run_id=run.id,
                 )
-                audit.finalize(
-                    "blocked",
-                    self._result_payload(result)
-                    | {"blocker_evidence_ref": conflict_ref},
+                return self._transition_to_blocked(
+                    audit, result, reason=str(exc), evidence_ref=conflict_ref
                 )
-                return result
             completed[run.id] = outcome.candidate_commit
             self.budget.completed(reservation, "succeeded")
             candidate_commit = outcome.candidate_commit
@@ -1520,7 +1532,157 @@ class PlanGraph:
             "completed": dict(result.completed),
             "failed_run_id": result.failed_run_id,
             "functionality_failure": result.functionality_failure,
+            "status_flags": PlanGraph._status_flags(result.status),
         }
+
+    @staticmethod
+    def _status_flags(status: str) -> dict[str, bool]:
+        return {
+            "complete": status in {"succeeded", "failed", "blocked"},
+            "success": status == "succeeded",
+            "resumable": status == "blocked",
+            "deviated": status in {"failed", "blocked"},
+        }
+
+    def _transition_to_blocked(
+        self,
+        audit: PlanGraphAudit,
+        result: PlanGraphResult,
+        *,
+        reason: str,
+        evidence: object | None = None,
+        evidence_ref: str | None = None,
+    ) -> PlanGraphResult:
+        """Finalize every block through one checkpointed escalation transition."""
+        flags = self._status_flags("blocked")
+        with self.budget._locked(shared=True) as handle:  # read-through of the append-only ledger
+            budget_state = self.budget._fold(handle)
+        tokens_by_node: dict[str, int] = {}
+        try:
+            for line in self.budget.path.read_text(encoding="utf-8").splitlines():
+                event = json.loads(line)
+                if event.get("event") != "completed" or not isinstance(event.get("tokens_total"), int):
+                    continue
+                reservation = budget_state.get("reservations", {}).get(event.get("reservation_id"))
+                if isinstance(reservation, Mapping) and isinstance(reservation.get("node_id"), str):
+                    node_id = reservation["node_id"]
+                    tokens_by_node[node_id] = tokens_by_node.get(node_id, 0) + event["tokens_total"]
+        except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+            raise PlanGraphError("could not read retry budget for block escalation") from exc
+        budget_nodes = {
+            node_id: {
+                **(dict(node) if isinstance(node, Mapping) else {}),
+                "attempt_counters": {
+                    name: (node.get("attempt_counters", {}) if isinstance(node, Mapping) else {}).get(name, 0)
+                    for name in ("graph_launches", "gate_invocations", "repair_dispatches", "structural_decisions")
+                },
+                "tokens_total": tokens_by_node.get(node_id, 0),
+            }
+            for node_id, node in budget_state.get("nodes", {}).items()
+            if isinstance(node_id, str)
+        }
+        nodes = audit.state.get("nodes", {})
+        node_detail = []
+        classifications = {
+            "product", "indeterminate", "infrastructure_transient",
+            "harness_or_configuration", "policy_violation", "structural_decision",
+        }
+        if isinstance(nodes, Mapping):
+            for node_id, node in nodes.items():
+                if isinstance(node_id, str) and isinstance(node, Mapping):
+                    budget_node = budget_nodes.get(node_id, {})
+                    counters = budget_node.get("counters", {}) if isinstance(budget_node, Mapping) else {}
+                    classification = "indeterminate"
+                    if node_id == result.failed_run_id and isinstance(evidence, Mapping):
+                        candidate = evidence.get("classification")
+                        if isinstance(candidate, str) and candidate in classifications:
+                            classification = candidate
+                    if classification == "indeterminate" and isinstance(counters, Mapping):
+                        observed = [
+                            name for name, count in counters.items()
+                            if name in classifications and isinstance(count, int) and count > 0
+                        ]
+                        if observed:
+                            classification = sorted(observed)[-1]
+                    node_evidence = node.get("evidence")
+                    evidence_ref = (
+                        node_evidence.get("evidence_ref")
+                        if isinstance(node_evidence, Mapping) else None
+                    )
+                    node_detail.append({
+                        "node_id": node_id,
+                        "status": node.get("status"),
+                        "reason": reason if node_id == result.failed_run_id else None,
+                        "tier": "tier_2",
+                        "classification": classification,
+                        "candidate_commit": node.get("candidate_commit") or self._pending_candidate_commit(audit, node_id),
+                        "evidence_ref": evidence_ref,
+                        "open_obligations": node.get("finding_obligations", []),
+                    })
+        escalation = {
+            "protocol": "plan-graph-block-escalation/1",
+            "graph_run_id": self.graph_run_id,
+            "logical_graph_id": self.logical_graph_id,
+            "predecessor_attempt_id": self.predecessor_attempt_id,
+            "blocked_node_id": result.failed_run_id,
+            "reason": reason,
+            "evidence_ref": evidence_ref,
+            "status_flags": flags,
+            "nodes": node_detail,
+            "budget_state": {
+                "lineage_id": self.budget.lineage_id,
+                "nodes": budget_nodes,
+                "finding_keys": budget_state.get("finding_keys", {}),
+            },
+            "significance_guidance": dict(self.plan.acceptance_criteria),
+            "decision_request": {
+                "required": True,
+                "requested_action": "operator_review",
+                "rationale": reason,
+                "candidate_actions": ["resume", "extend_budget", "reset_budget"],
+            },
+            "paths": {
+                "escalation": "escalation.json",
+                "budget_ledger": str(self.budget.path.relative_to(self.run_root)),
+                "decision_log": str(self.budget.path.relative_to(self.run_root)),
+            },
+            "resume_directive_template": {
+                "logical_graph_id": self.logical_graph_id,
+                "predecessor_attempt_id": self.graph_run_id,
+                "retry_frontier": [result.failed_run_id] if result.failed_run_id else [],
+                "blocker_evidence_ref": "$this_escalation_artifact",
+            },
+        }
+        blocker_ref = audit.record_block_escalation(escalation)
+        payload = self._result_payload(result) | {"blocker_evidence_ref": blocker_ref}
+        audit.finalize("blocked", payload)
+        self._start_block_hook()
+        return result
+
+    def _start_block_hook(self) -> None:
+        if not self.on_block_argv:
+            return
+        log_path = self.run_root / self.graph_run_id / "on-block-hook.log"
+        escalation_path = self.run_root / self.graph_run_id / "escalation.json"
+        try:
+            with log_path.open("ab", buffering=0) as log, open(os.devnull, "rb") as null:
+                process = subprocess.Popen(
+                    [*self.on_block_argv, str(escalation_path)], cwd=self.run_root,
+                    stdin=null, stdout=log, stderr=log, start_new_session=True,
+                )
+            self.on_block_hook = {
+                "attempted": True,
+                "pid": process.pid,
+                "log_path": str(log_path),
+            }
+        except OSError as exc:
+            # Notification is advisory and must never mask the recorded block.
+            self.on_block_hook = {
+                "attempted": True,
+                "pid": None,
+                "log_path": str(log_path),
+                "error": str(exc),
+            }
 
     @staticmethod
     def _result_from_audit(audit: PlanGraphAudit) -> PlanGraphResult:

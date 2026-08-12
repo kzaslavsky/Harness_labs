@@ -37,6 +37,7 @@ _GIT_COMMIT = re.compile(r"^[a-f0-9]{40}$")
 _ARTIFACT_REF = re.compile(r"^artifact:sha256:[a-f0-9]{64}$")
 _CHILD_LIVENESS_NAMES = ("plan-graph-liveness.json", "liveness.json")
 _CHILD_SEAL_NAMES = ("plan-graph-seal-receipt.json", "seal-receipt.json")
+_BLOCK_ESCALATION_MAX_BYTES = 4 * 1024 * 1024
 
 
 def validate_plan_graph_id(value: str) -> None:
@@ -1043,6 +1044,119 @@ class PlanGraphAudit:
         )
         self.journal.finalize(status, result=dict(result), state=state)
 
+    def record_block_escalation(self, payload: Mapping[str, object]) -> str:
+        """Durably publish the one resume authority for a blocked graph.
+
+        The journal event deliberately owns the artifact descriptor: a repair
+        successor can therefore prove that the supplied evidence reference was
+        recorded by its predecessor rather than trusting a path supplied by an
+        operator.
+        """
+        escalation = dict(payload)
+        encoded = _canonical_escalation(escalation)
+        if len(encoded) > _BLOCK_ESCALATION_MAX_BYTES:
+            escalation = self._externalize_block_node_details(escalation)
+            encoded = _canonical_escalation(escalation)
+        if len(encoded) > _BLOCK_ESCALATION_MAX_BYTES:
+            # The transition itself is mandatory.  Preserve the complete
+            # operator detail as an immutable artifact, then publish a small
+            # schema-shaped escalation that points at it instead of leaving a
+            # blocked checkpoint without an escalation or finalization.
+            overflow = self.journal.write_artifact(
+                "plan-graph-block-escalation-overflow", encoded,
+                media_type="application/json",
+            )
+            escalation = self._minimal_block_escalation(
+                escalation, f"artifact:sha256:{overflow.sha256}"
+            )
+            encoded = _canonical_escalation(escalation)
+        if len(encoded) > _BLOCK_ESCALATION_MAX_BYTES:
+            raise AuditError("minimal block escalation exceeds the 4 MiB limit")
+        artifact = self.journal.write_artifact(
+            "plan-graph-block-escalation", encoded, media_type="application/json"
+        )
+        reference = f"artifact:sha256:{artifact.sha256}"
+        # Keep an operator-friendly stable copy in addition to the immutable,
+        # journal-addressed evidence artifact.
+        _atomic_write(self.run_dir / "escalation.json", encoded, 0o600)
+        state = self.state
+        state["block_escalation_ref"] = reference
+        state["status_flags"] = dict(payload.get("status_flags", {}))
+        self.journal.append(
+            "plan_graph_block_escalated",
+            status="blocked",
+            payload={
+                "blocker_evidence_ref": reference,
+                "stable_path": str((self.run_dir / "escalation.json").relative_to(self.run_dir)),
+            },
+            actor=_ACTOR,
+            artifacts=(artifact,),
+        )
+        self.journal.checkpoint("running", state)
+        return reference
+
+    def _externalize_block_node_details(
+        self, escalation: Mapping[str, object]
+    ) -> dict[str, object]:
+        """Replace verbose node records with immutable, per-node references."""
+
+        compact = dict(escalation)
+        nodes = escalation.get("nodes")
+        if not isinstance(nodes, list):
+            return compact
+        summaries: list[dict[str, object]] = []
+        for index, node in enumerate(nodes):
+            if not isinstance(node, Mapping):
+                continue
+            detail = self.journal.write_artifact(
+                "plan-graph-block-escalation-node-detail", dict(node),
+                media_type="application/json",
+            )
+            summaries.append({
+                "node_id": node.get("node_id"),
+                "status": node.get("status"),
+                "reason": node.get("reason"),
+                "tier": node.get("tier"),
+                "classification": node.get("classification"),
+                "open_obligations": node.get("open_obligations", []),
+                "candidate_commit": node.get("candidate_commit"),
+                "evidence_ref": node.get("evidence_ref"),
+                "detail_ref": f"artifact:sha256:{detail.sha256}",
+                "detail_index": index,
+            })
+        compact["nodes"] = summaries
+        compact["node_detail_externalized"] = True
+        return compact
+
+    @staticmethod
+    def _minimal_block_escalation(
+        escalation: Mapping[str, object], overflow_ref: str
+    ) -> dict[str, object]:
+        """Keep required recovery authority fields when all detail is huge."""
+
+        paths = escalation.get("paths")
+        return {
+            "protocol": escalation.get("protocol"),
+            "graph_run_id": escalation.get("graph_run_id"),
+            "logical_graph_id": escalation.get("logical_graph_id"),
+            "predecessor_attempt_id": escalation.get("predecessor_attempt_id"),
+            "blocked_node_id": escalation.get("blocked_node_id"),
+            "reason": "Block escalation detail was externalized; inspect overflow_ref.",
+            "status_flags": escalation.get("status_flags"),
+            "nodes": [],
+            "budget_state": {},
+            "significance_guidance": {},
+            "resume_directive_template": escalation.get("resume_directive_template"),
+            "decision_request": {
+                "required": True,
+                "requested_action": "operator_review",
+                "rationale": "See overflow_ref for the complete decision request.",
+                "candidate_actions": [],
+            },
+            "paths": paths if isinstance(paths, Mapping) else {},
+            "overflow_ref": overflow_ref,
+        }
+
     def _open_or_create(self) -> AuditJournal:
         if self.run_dir.exists():
             journal = AuditJournal.open_existing(self.run_dir, actor=_ACTOR)
@@ -1263,3 +1377,7 @@ def _atomic_write(path: Path, content: bytes, mode: int) -> None:
         if descriptor >= 0:
             os.close(descriptor)
         temporary.unlink(missing_ok=True)
+
+
+def _canonical_escalation(payload: Mapping[str, object]) -> bytes:
+    return (json.dumps(dict(payload), sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")

@@ -106,6 +106,7 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--predecessor-attempt-id")
     run.add_argument("--retry-frontier", action="append", default=[])
     run.add_argument("--blocker-evidence-ref")
+    run.add_argument("--on-block-argv")
     return parser
 
 
@@ -234,9 +235,14 @@ def main() -> int:
         raise TypeError("launcher must return FeatureRunOutcome or a mapping")
 
     try:
-        graph = _build_graph(arguments, parser, repository, registration, launch, run_root, approval_validator)
+        on_block_argv = None
+        if arguments.on_block_argv is not None:
+            on_block_argv = json.loads(arguments.on_block_argv)
+            if not isinstance(on_block_argv, list) or not all(isinstance(value, str) and value for value in on_block_argv):
+                raise ValueError("--on-block-argv must be a JSON array of non-empty strings")
+        graph = _build_graph(arguments, parser, repository, registration, launch, run_root, approval_validator, on_block_argv)
         result = graph.run()
-    except PlanGraphError as exc:
+    except (PlanGraphError, ValueError, json.JSONDecodeError) as exc:
         print(f"PlanGraph failed: {exc}", file=sys.stderr)
         return 3 if any(
             marker in str(exc)
@@ -251,6 +257,10 @@ def main() -> int:
                 "logical_graph_id": registration.logical_graph_id,
                 "graph_attempt_id": graph.graph_run_id,
                 "registration_digest": registration.graph_digest,
+                "status_flags": PlanGraph._status_flags(result.status),
+                "blocker_evidence_ref": graph._audit_for_run().state.get("block_escalation_ref"),
+                "on_block_hook_log": str((run_root / graph.graph_run_id / "on-block-hook.log")) if graph.on_block_argv else None,
+                "on_block_hook": graph.on_block_hook,
             },
             sort_keys=True,
         )
@@ -258,7 +268,7 @@ def main() -> int:
     return 0 if result.status == "succeeded" else 1
 
 
-def _build_graph(arguments, parser, repository, registration, launch, run_root, approval_validator):
+def _build_graph(arguments, parser, repository, registration, launch, run_root, approval_validator, on_block_argv=None):
     if arguments.resume:
         if not all(
             (
@@ -283,6 +293,7 @@ def _build_graph(arguments, parser, repository, registration, launch, run_root, 
                 arguments.blocker_evidence_ref,
             ),
             approval_validator=approval_validator,
+            on_block_argv=on_block_argv,
         )
         return graph
     else:
@@ -302,6 +313,7 @@ def _build_graph(arguments, parser, repository, registration, launch, run_root, 
             run_root=run_root,
             graph_run_id=arguments.graph_attempt_id,
             approval_validator=approval_validator,
+            on_block_argv=on_block_argv,
         )
     return graph
 

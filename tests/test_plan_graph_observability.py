@@ -165,6 +165,57 @@ class PlanGraphObservabilityTests(unittest.TestCase):
             )
             self.assertEqual(successor.run().status, "succeeded")
 
+    def test_block_escalation_is_recorded_and_authorizes_resume(self) -> None:
+        graph = PlanGraph(
+            self.repository, self.registration,
+            lambda request: FeatureRunOutcome("blocked", evidence={"error": "operator review needed"}),
+            run_root=self.run_root, graph_run_id="blocked-graph",
+        )
+        self.assertEqual(graph.run().status, "blocked")
+        audit = graph._audit_for_run()
+        blocker = audit.state["block_escalation_ref"]
+        escalation = json.loads((self.run_root / "blocked-graph" / "escalation.json").read_text(encoding="utf-8"))
+        self.assertEqual(escalation["protocol"], "plan-graph-block-escalation/1")
+        self.assertEqual(escalation["status_flags"], {"complete": True, "success": False, "resumable": True, "deviated": True})
+        self.assertEqual(escalation["nodes"][0]["tier"], "tier_2")
+        self.assertEqual(escalation["nodes"][0]["classification"], "indeterminate")
+        self.assertTrue(escalation["decision_request"]["required"])
+        self.assertEqual(escalation["paths"]["decision_log"], ".plan-graph-budgets/" + self.registration.plan_lineage_id + ".jsonl")
+        successor = PlanGraph.resume(
+            self.repository, self.registration,
+            lambda request: _success(request, "e" * 40),
+            run_root=self.run_root,
+            directive=RepairResumeDirective("blocked-graph", "blocked-graph", ("first",), blocker),
+        )
+        self.assertEqual(successor.run().status, "succeeded")
+
+    def test_oversized_block_escalation_externalizes_node_detail(self) -> None:
+        graph = PlanGraph(
+            self.repository, self.registration,
+            lambda request: FeatureRunOutcome("blocked"),
+            run_root=self.run_root, graph_run_id="large-blocked-graph",
+        )
+        audit = graph._audit_for_run()
+        reference = audit.record_block_escalation({
+            "protocol": "plan-graph-block-escalation/1",
+            "graph_run_id": graph.graph_run_id,
+            "logical_graph_id": graph.logical_graph_id,
+            "predecessor_attempt_id": None,
+            "blocked_node_id": "first",
+            "reason": "operator review needed",
+            "status_flags": {"complete": True, "success": False, "resumable": True, "deviated": True},
+            "nodes": [{"node_id": "first", "status": "blocked", "reason": "operator review needed", "tier": "tier_2", "classification": "indeterminate", "open_obligations": [], "candidate_commit": None, "evidence_ref": None, "detail": "x" * (4 * 1024 * 1024)}],
+            "budget_state": {},
+            "significance_guidance": {},
+            "decision_request": {"required": True, "requested_action": "operator_review", "rationale": "operator review needed", "candidate_actions": ["resume"]},
+            "paths": {"escalation": "escalation.json", "budget_ledger": ".plan-graph-budgets/example.jsonl", "decision_log": ".plan-graph-budgets/example.jsonl"},
+            "resume_directive_template": {"logical_graph_id": graph.logical_graph_id, "predecessor_attempt_id": graph.graph_run_id, "retry_frontier": ["first"], "blocker_evidence_ref": "$this_escalation_artifact"},
+        })
+        escalation = json.loads((self.run_root / "large-blocked-graph" / "escalation.json").read_text(encoding="utf-8"))
+        self.assertTrue(escalation["node_detail_externalized"])
+        self.assertTrue(escalation["nodes"][0]["detail_ref"].startswith("artifact:sha256:"))
+        self.assertEqual(audit.state["block_escalation_ref"], reference)
+
     def test_repeated_ordinary_repair_failure_consumes_finding_budget(self) -> None:
         """A retry carries its predecessor failure artifact into the ledger."""
         with tempfile.TemporaryDirectory() as temporary:
@@ -191,8 +242,8 @@ class PlanGraphObservabilityTests(unittest.TestCase):
                 run_root=root / "runs",
                 directive=RepairResumeDirective("logical", current.graph_run_id, ("first",), blocker),
             )
-            with self.assertRaisesRegex(PlanGraphError, "finding budget exhausted"):
-                exhausted.run()
+            self.assertEqual(exhausted.run().status, "blocked")
+            self.assertTrue((root / "runs" / exhausted.graph_run_id / "escalation.json").is_file())
             ledger_path = root / "runs" / ".plan-graph-budgets" / f"{self.registration.plan_lineage_id}.jsonl"
             reserved = [
                 json.loads(line) for line in ledger_path.read_text(encoding="utf-8").splitlines()
