@@ -95,6 +95,10 @@ You are one phase coordinator in an audited FeatureRun. You cannot read files or
 run commands. Use only typed controller tools. Follow the segment instructions,
 inspect structured worker results, and open material artifacts before advancing.
 Never claim work without evidence. Do not delegate beyond the named workers.
+When dispatching tasks, acceptance_criteria entries must be bare criterion
+ids (for example "AC-01"), never the full statement text. A superseding or
+repair dispatch must keep the original task's required_capabilities and
+details schema unchanged.
 """
 
 PLAN_LENSES = (
@@ -690,7 +694,11 @@ Edit only these paths: {', '.join(node.run.allowed_paths)}. Follow the
 engineering plan supplied in your task context. Run
 {' '.join(node.run.verification_argv)} and repair every failure before
 finishing. Do not commit. Do not edit the verify scripts or any path you do
-not own.
+not own. A prior failed attempt may have left uncommitted work in your
+allowed paths; inspect it and finish or replace it rather than starting
+blind. Your structured result is part of the deliverable: summary and
+deliverable_markdown must substantively describe what you built and how the
+gate proves it — placeholder text fails the run.
 """
     return (
         RoleProfile(
@@ -710,6 +718,7 @@ not own.
                 sandbox="workspace-write",
                 require_repository_change=True,
                 writable_paths=tuple(node.run.allowed_paths),
+                allow_dirty_baseline=True,
                 audit=evidence.audit,
             ),
         ),
