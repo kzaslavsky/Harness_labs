@@ -70,7 +70,6 @@
       "path_intents": [
         {"path": "harness_labs/feature_run.py", "action": "modify"},
         {"path": "harness_labs/plan_graph.py", "action": "modify"},
-        {"path": "harness_labs/plan_graph_budget.py", "action": "modify"},
         {"path": "tests/test_feature_run.py", "action": "modify"}
       ],
       "verification_argv": ["python3", "-m", "unittest", "tests.test_feature_run", "tests.test_plan_graph_budget"],
