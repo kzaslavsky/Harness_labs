@@ -1,6 +1,6 @@
 # Retry-budget lineage, tiered recovery authority, block escalation — staged program plan
 
-**Date:** 2026-08-11 · **Status:** pending operator approval · **Target branch:** worktree branch off latest `Impl-redo` tip, merged back on completion
+**Date:** 2026-08-11 · **Status:** operator approved; PlanApproval receipt pending · **Target branch:** worktree branch off latest `Impl-redo` tip, merged back on completion
 **Provenance:** motivated by the FR-10 launch audit (pg11–pg34) and the two retry postmortems; revised through three external review rounds (Sol critiques #1–#3, all findings adopted — scope-down decisions recorded below).
 
 ## Review-round decisions (recorded)

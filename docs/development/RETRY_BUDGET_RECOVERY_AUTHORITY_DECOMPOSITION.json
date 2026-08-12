@@ -1,0 +1,145 @@
+{
+  "protocol": "plan-graph-plan/1",
+  "plan": "docs/development/RETRY_BUDGET_RECOVERY_AUTHORITY_PLAN.md",
+  "plan_sections": {
+    "RB-01": "Preserve obligation transfer through the production FeatureRun seam, make transfer conflicts resumable, and inventory existing recovery machinery.",
+    "RB-02": "Add a fail-closed append-only lineage retry-budget ledger with atomic reservations, cumulative accounting, crash reconciliation, and operator relief commands.",
+    "RB-03": "Classify failures and import structured verification, repair, invocation, and token evidence without duplicate counting.",
+    "RB-04": "Centralize blocked transitions, emit bounded escalation artifacts, add detached notification hooks, and expose structured terminal status flags.",
+    "RB-05": "Bind bounded recovery authority to immutable registration, validate typed recovery decisions, and support explicit plan-version transitions.",
+    "RB-06": "Add an external recovery coordinator that consumes escalation artifacts and launches fresh, allowance-bounded resume processes."
+  },
+  "acceptance_criteria": {
+    "AC-RB-01": "Production obligation transfer is preserved across review recovery; transfer conflicts checkpoint verified candidates and block resumably; the recovery inventory is committed.",
+    "AC-RB-02": "Retry budgets accumulate across successors and registrations in one lineage, reservations are crash-safe and atomic, exhaustion fails closed, and every new block has an operator relief path.",
+    "AC-RB-03": "Failures use the five-way taxonomy and structured child invocation evidence is imported idempotently into the correct budget class.",
+    "AC-RB-04": "Every blocked finalization uses one ordered transition, emits a schema-valid escalation artifact and status flags, and optionally starts a fully detached notification hook.",
+    "AC-RB-05": "Automatic recovery cannot exceed or mutate the operator-approved registration allowance; typed actions, carryover, transition records, and deviation statuses fail closed.",
+    "AC-RB-06": "A fresh external coordinator can progress Tier-1 recovery to success, bounded exhaustion, or precise human/external blocking without fabricating success."
+  },
+  "runs": [
+    {
+      "id": "RB-01",
+      "objective": "Preserve obligation-transfer state and establish the recovery machinery inventory.",
+      "plan_sections": ["RB-01"],
+      "criteria": ["AC-RB-01"],
+      "depends_on": [],
+      "allowed_paths": ["harness_labs/feature_run.py", "harness_labs/review_fix.py", "harness_labs/plan_graph.py", "harness_labs/plan_graph_audit.py", "docs/development/recovery-machinery-inventory.md", "tests/test_feature_run.py", "tests/test_review_fix.py", "tests/test_plan_graph.py", "tests/test_plan_graph_observability.py"],
+      "path_intents": [
+        {"path": "harness_labs/feature_run.py", "action": "modify"},
+        {"path": "harness_labs/review_fix.py", "action": "modify"},
+        {"path": "harness_labs/plan_graph.py", "action": "modify"},
+        {"path": "harness_labs/plan_graph_audit.py", "action": "modify"},
+        {"path": "docs/development/recovery-machinery-inventory.md", "action": "create"},
+        {"path": "tests/test_feature_run.py", "action": "modify"},
+        {"path": "tests/test_review_fix.py", "action": "modify"},
+        {"path": "tests/test_plan_graph.py", "action": "modify"},
+        {"path": "tests/test_plan_graph_observability.py", "action": "modify"}
+      ],
+      "verification_argv": ["python3", "-m", "unittest", "tests.test_feature_run", "tests.test_review_fix", "tests.test_plan_graph", "tests.test_plan_graph_observability"],
+      "verification_timeout_seconds": 1800,
+      "verification_required_paths": []
+    },
+    {
+      "id": "RB-02",
+      "objective": "Implement the lineage ledger, atomic retry reservations, and operator relief commands.",
+      "plan_sections": ["RB-02"],
+      "criteria": ["AC-RB-02"],
+      "depends_on": ["RB-01"],
+      "allowed_paths": ["harness_labs/plan_graph_budget.py", "harness_labs/plan_graph.py", "scripts/run_plan_graph.py", "schemas/retry-budget-ledger.json", "tests/fixtures/retry-budget-ledger.json", "tests/test_plan_graph_budget.py", "tests/test_plan_graph_observability.py"],
+      "path_intents": [
+        {"path": "harness_labs/plan_graph_budget.py", "action": "create"},
+        {"path": "harness_labs/plan_graph.py", "action": "modify"},
+        {"path": "scripts/run_plan_graph.py", "action": "modify"},
+        {"path": "schemas/retry-budget-ledger.json", "action": "create"},
+        {"path": "tests/fixtures/retry-budget-ledger.json", "action": "create"},
+        {"path": "tests/test_plan_graph_budget.py", "action": "create"},
+        {"path": "tests/test_plan_graph_observability.py", "action": "modify"}
+      ],
+      "verification_argv": ["python3", "-m", "unittest", "tests.test_plan_graph_budget", "tests.test_plan_graph_observability"],
+      "verification_timeout_seconds": 1800,
+      "verification_required_paths": []
+    },
+    {
+      "id": "RB-03",
+      "objective": "Add failure classification and idempotent structured child-evidence accounting.",
+      "plan_sections": ["RB-03"],
+      "criteria": ["AC-RB-03"],
+      "depends_on": ["RB-02"],
+      "allowed_paths": ["harness_labs/feature_run.py", "harness_labs/plan_graph.py", "tests/test_feature_run.py", "tests/test_plan_graph_budget.py"],
+      "path_intents": [
+        {"path": "harness_labs/feature_run.py", "action": "modify"},
+        {"path": "harness_labs/plan_graph.py", "action": "modify"},
+        {"path": "tests/test_feature_run.py", "action": "modify"},
+        {"path": "tests/test_plan_graph_budget.py", "action": "modify"}
+      ],
+      "verification_argv": ["python3", "-m", "unittest", "tests.test_feature_run", "tests.test_plan_graph_budget"],
+      "verification_timeout_seconds": 1800,
+      "verification_required_paths": []
+    },
+    {
+      "id": "RB-04",
+      "objective": "Centralize blocked finalization and add escalation, status, and notification contracts.",
+      "plan_sections": ["RB-04"],
+      "criteria": ["AC-RB-04"],
+      "depends_on": ["RB-03"],
+      "allowed_paths": ["harness_labs/plan_graph.py", "harness_labs/plan_graph_audit.py", "scripts/run_plan_graph.py", "schemas/block-escalation.json", "tests/fixtures/block-escalation.json", "tests/test_plan_graph_observability.py", "tests/test_dashboard_api.py"],
+      "path_intents": [
+        {"path": "harness_labs/plan_graph.py", "action": "modify"},
+        {"path": "harness_labs/plan_graph_audit.py", "action": "modify"},
+        {"path": "scripts/run_plan_graph.py", "action": "modify"},
+        {"path": "schemas/block-escalation.json", "action": "create"},
+        {"path": "tests/fixtures/block-escalation.json", "action": "create"},
+        {"path": "tests/test_plan_graph_observability.py", "action": "modify"},
+        {"path": "tests/test_dashboard_api.py", "action": "modify"}
+      ],
+      "verification_argv": ["python3", "-m", "unittest", "tests.test_plan_graph_observability", "tests.test_dashboard_api"],
+      "verification_timeout_seconds": 1800,
+      "verification_required_paths": []
+    },
+    {
+      "id": "RB-05",
+      "objective": "Bind bounded recovery authority to registration and implement typed recovery actions and plan-version transitions.",
+      "plan_sections": ["RB-05"],
+      "criteria": ["AC-RB-05"],
+      "depends_on": ["RB-04"],
+      "allowed_paths": ["harness_labs/plan_graph_authority.py", "harness_labs/plan_graph_budget.py", "harness_labs/plan_graph.py", "scripts/run_plan_graph.py", "schemas/recovery-decision.json", "schemas/plan-version-transition.json", "tests/fixtures/recovery-decision.json", "tests/fixtures/plan-version-transition.json", "tests/test_plan_graph_authority.py", "tests/test_plan_graph_budget.py", "tests/test_plan_graph_observability.py"],
+      "path_intents": [
+        {"path": "harness_labs/plan_graph_authority.py", "action": "create"},
+        {"path": "harness_labs/plan_graph_budget.py", "action": "modify"},
+        {"path": "harness_labs/plan_graph.py", "action": "modify"},
+        {"path": "scripts/run_plan_graph.py", "action": "modify"},
+        {"path": "schemas/recovery-decision.json", "action": "create"},
+        {"path": "schemas/plan-version-transition.json", "action": "create"},
+        {"path": "tests/fixtures/recovery-decision.json", "action": "create"},
+        {"path": "tests/fixtures/plan-version-transition.json", "action": "create"},
+        {"path": "tests/test_plan_graph_authority.py", "action": "create"},
+        {"path": "tests/test_plan_graph_budget.py", "action": "modify"},
+        {"path": "tests/test_plan_graph_observability.py", "action": "modify"}
+      ],
+      "verification_argv": ["python3", "-m", "unittest", "tests.test_plan_graph_authority", "tests.test_plan_graph_budget", "tests.test_plan_graph_observability"],
+      "verification_timeout_seconds": 1800,
+      "verification_required_paths": []
+    },
+    {
+      "id": "RB-06",
+      "objective": "Implement the external recovery coordinator and prove bounded end-to-end recovery.",
+      "plan_sections": ["RB-06"],
+      "criteria": ["AC-RB-06"],
+      "depends_on": ["RB-05"],
+      "allowed_paths": ["scripts/plan_graph_recover.py", "tests/test_plan_graph_recover.py"],
+      "path_intents": [
+        {"path": "scripts/plan_graph_recover.py", "action": "create"},
+        {"path": "tests/test_plan_graph_recover.py", "action": "create"}
+      ],
+      "verification_argv": ["python3", "-m", "unittest", "tests.test_plan_graph_recover"],
+      "verification_timeout_seconds": 1800,
+      "verification_required_paths": []
+    }
+  ],
+  "functionality_tests": [
+    {"argv": ["python3", "-m", "unittest", "discover", "-s", "tests"], "timeout_seconds": 3600, "required_paths": []},
+    {"argv": ["python3", "scripts/check_repository_contracts.py"], "timeout_seconds": 600, "required_paths": [{"path": "scripts/check_repository_contracts.py", "availability": "base"}]}
+  ],
+  "referenced_artifacts": []
+}
