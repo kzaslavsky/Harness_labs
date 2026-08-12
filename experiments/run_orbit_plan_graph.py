@@ -362,16 +362,8 @@ def _plan_context_block(draft: Mapping[str, Any]) -> str:
     )
 
 
-def engineer_plan(run_id: str) -> None:
-    """Draft, multi-lens review, adversarially refute, and revise the plan."""
-
-    if git(ORBIT, "status", "--porcelain"):
-        raise SystemExit("orbit repository must be clean before plan engineering")
-    review_root = ORBIT / REVIEW_DIR
-    if review_root.exists():
-        shutil.rmtree(review_root)
-
-    draft_charge = f"""\
+def _draft_charge(run_id: str) -> str:
+    return f"""\
 You are the plan author for the Orbit Lab feature. Read README.md,
 verify_physics.py, and verify_ui.py in this repository; they are the operator
 contract and the immutable deterministic gates.
@@ -403,6 +395,18 @@ Produce an implementation plan and a two-node PlanGraph decomposition:
 Every claim about the gates must match the actual verify scripts you read.
 Timestamp context: {run_id}.
 """
+
+
+def engineer_plan(run_id: str) -> None:
+    """Draft, multi-lens review, and revise the plan."""
+
+    if git(ORBIT, "status", "--porcelain"):
+        raise SystemExit("orbit repository must be clean before plan engineering")
+    review_root = ORBIT / REVIEW_DIR
+    if review_root.exists():
+        shutil.rmtree(review_root)
+
+    draft_charge = _draft_charge(run_id)
     print("plan-engineering: drafting with", PLAN_AUTHOR_MODEL, flush=True)
     draft = claude_structured(
         draft_charge,
@@ -416,6 +420,9 @@ Timestamp context: {run_id}.
     for cycle in range(1, MAX_PLAN_CYCLES + 1):
         cycle_dir = review_root / f"cycle-{cycle}"
         cycle_dir.mkdir(parents=True, exist_ok=True)
+        (cycle_dir / "draft.json").write_text(
+            json.dumps(draft, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
         context = _plan_context_block(draft)
         reviews: dict[str, dict[str, Any]] = {}
         for lens_id, charge in PLAN_LENSES:
@@ -526,6 +533,96 @@ Timestamp context: {run_id}.
                 "stage": "plan",
                 "base_commit": git(ORBIT, "rev-parse", "HEAD"),
                 "cycles": history,
+            },
+            indent=2,
+        )
+    )
+
+
+def finalize_plan(run_id: str) -> None:
+    """Author the final plan once from all persisted lens findings; no re-review."""
+
+    review_root = ORBIT / REVIEW_DIR
+    reports = sorted(review_root.glob("cycle-*/[a-z]*.json"))
+    findings = {
+        str(path.relative_to(ORBIT).as_posix()): json.loads(
+            path.read_text(encoding="utf-8")
+        )
+        for path in reports
+        if path.name != "draft.json"
+    }
+    if not findings:
+        raise SystemExit("finalize requires persisted lens reports")
+    drafts = sorted(review_root.glob("cycle-*/draft.json"))
+    latest_draft = (
+        json.loads(drafts[-1].read_text(encoding="utf-8")) if drafts else None
+    )
+    charge = (
+        "Author the final Orbit Lab plan. You are given every independent "
+        "lens review from the pre-approval engineering rounds. Resolve every "
+        "critical finding; in particular, never claim a deterministic gate "
+        "proves behavior it does not observe — state plainly which acceptance "
+        "criteria are proven by the gates and which are proven only by "
+        "review. Address material findings when doing so does not expand "
+        "scope. Read README.md, verify_physics.py, and verify_ui.py yourself "
+        "before writing. This is the final authoring pass: there is no "
+        "further review, so be conservative and honest.\n\nORIGINAL "
+        "CHARGE:\n" + _draft_charge(run_id)
+        + ("\n\nLATEST DRAFT:\n" + json.dumps(latest_draft, indent=2, sort_keys=True)
+           if latest_draft else "")
+        + "\n\nALL LENS FINDINGS:\n"
+        + json.dumps(findings, indent=2, sort_keys=True)
+    )
+    print("plan-engineering: final authoring pass", flush=True)
+    draft = claude_structured(
+        charge,
+        DRAFT_SCHEMA,
+        model=PLAN_AUTHOR_MODEL,
+        effort="high",
+        budget_usd=3.0,
+    )
+    referenced = sorted(
+        str(path.relative_to(ORBIT).as_posix())
+        for path in review_root.rglob("*.json")
+        if path.name != "resolution.json"
+    ) + ["README.md", "verify_physics.py", "verify_ui.py"]
+    (review_root / "resolution.json").write_text(
+        json.dumps(
+            {
+                "status": "review-informed-finalized",
+                "lens_reports": sorted(findings),
+                "note": (
+                    "Operator ended lens review; the final plan was authored "
+                    "once against all persisted findings without re-review."
+                ),
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    referenced.append(f"{REVIEW_DIR}/resolution.json")
+    decomposition = assemble_decomposition(draft, referenced)
+    (ORBIT / PLAN_PATH).parent.mkdir(parents=True, exist_ok=True)
+    (ORBIT / PLAN_PATH).write_text(str(draft["plan_markdown"]), encoding="utf-8")
+    (ORBIT / DECOMPOSITION_PATH).write_text(
+        json.dumps(decomposition, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    git(ORBIT, "add", "-A")
+    git(
+        ORBIT,
+        "commit",
+        "-m",
+        "Finalize orbit plan from multi-lens review findings",
+    )
+    print(
+        json.dumps(
+            {
+                "stage": "finalize",
+                "base_commit": git(ORBIT, "rev-parse", "HEAD"),
+                "lens_reports": len(findings),
             },
             indent=2,
         )
@@ -906,7 +1003,10 @@ def run_graph(run_id: str, receipt_path: Path) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "stage", choices=("plan", "approve", "run", "all"), default="all", nargs="?"
+        "stage",
+        choices=("plan", "finalize", "approve", "run", "all"),
+        default="all",
+        nargs="?",
     )
     parser.add_argument("--run-id")
     parser.add_argument("--receipt", type=Path)
@@ -916,6 +1016,8 @@ def main() -> int:
 
     if arguments.stage in ("plan", "all"):
         engineer_plan(run_id)
+    if arguments.stage == "finalize":
+        finalize_plan(run_id)
     receipt_path = arguments.receipt
     if arguments.stage in ("approve", "all"):
         receipt_path = approve(run_id)
