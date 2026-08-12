@@ -150,6 +150,61 @@ class RetryBudgetLedger:
             raise BudgetError("tokens_total must be a non-negative integer or null")
         self._transition(reservation_id, "completed", status=status, tokens_total=tokens_total)
 
+    def import_child_evidence(self, *, node_id: str, evidence: Mapping[str, object]) -> tuple[str, ...]:
+        """Import structured child invocation facts once, keyed by invocation id.
+
+        This deliberately accepts no prose-derived counts.  Replaying a child
+        result is safe because identifiers already folded into the ledger are
+        ignored rather than charged a second time.
+        """
+        verification = evidence.get("verification")
+        if not isinstance(verification, Mapping):
+            return ()
+        commands = verification.get("command_attempts", ())
+        repair_ids = verification.get("repair_invocation_ids", ())
+        repairs = verification.get("repair_invocations", ())
+        if not isinstance(commands, (list, tuple)) or not isinstance(repair_ids, (list, tuple)) or not isinstance(repairs, (list, tuple)):
+            raise BudgetError("structured child verification evidence is invalid")
+        if repair_ids and not repairs:
+            raise BudgetError("structured child repair evidence lacks classifications")
+        facts: list[dict[str, object]] = []
+        for command in commands:
+            if not isinstance(command, Mapping):
+                raise BudgetError("structured child command evidence is invalid")
+            invocation_id = command.get("invocation_id")
+            failure = command.get("failure")
+            if not isinstance(invocation_id, str) or not invocation_id:
+                raise BudgetError("structured child command evidence lacks invocation_id")
+            classification = failure.get("classification") if isinstance(failure, Mapping) else None
+            if classification is not None and classification not in _CLASS_LIMITS:
+                raise BudgetError("structured child command has invalid classification")
+            fact: dict[str, object] = {"invocation_id": invocation_id, "kind": "gate_invocation"}
+            if classification is not None:
+                fact["classification"] = classification
+            facts.append(fact)
+        structured_repair_ids: list[str] = []
+        for repair in repairs:
+            if not isinstance(repair, Mapping):
+                raise BudgetError("structured child repair evidence is invalid")
+            invocation_id = repair.get("invocation_id")
+            classification = repair.get("classification")
+            if not isinstance(invocation_id, str) or not invocation_id or classification not in _CLASS_LIMITS:
+                raise BudgetError("structured child repair evidence is invalid")
+            structured_repair_ids.append(invocation_id)
+            facts.append({"invocation_id": invocation_id, "kind": "repair_dispatch", "classification": classification})
+        if tuple(repair_ids) != tuple(structured_repair_ids):
+            raise BudgetError("structured child repair evidence ids do not match dispatches")
+        with self._locked() as handle:
+            state = self._fold(handle)
+            imported: list[str] = []
+            for fact in facts:
+                if fact["invocation_id"] in state["imported_invocations"]:
+                    continue
+                self._append(handle, {"event": "evidence_imported", "node_id": node_id, **fact})
+                state["imported_invocations"].add(fact["invocation_id"])
+                imported.append(fact["invocation_id"])
+            return tuple(imported)
+
     def abandon(self, *, node_id: str, disposition: str, reason: str, graph_attempt_id: str | None = None) -> tuple[str, ...]:
         """Terminalize interrupted reservations after an audit reconciliation."""
         if disposition not in {"sealed", "blocked", "abandoned"} or not reason:
@@ -386,7 +441,7 @@ class RetryBudgetLedger:
         return _Lock(handle, ledger_was_missing=ledger_was_missing)
 
     def _fold(self, handle) -> dict[str, Any]:
-        state: dict[str, Any] = {"plan_sha256": set(), "gates": {}, "nodes": {}, "reservations": {}, "finding_keys": {}, "accepted_plan_sha256": None}
+        state: dict[str, Any] = {"plan_sha256": set(), "gates": {}, "nodes": {}, "reservations": {}, "finding_keys": {}, "accepted_plan_sha256": None, "imported_invocations": set()}
         handle.seek(0)
         for line in handle:
             try:
@@ -456,6 +511,21 @@ class RetryBudgetLedger:
                     if event.get("disposition") not in {"sealed", "blocked", "abandoned"} or not event.get("reason"):
                         raise ValueError
                     reservation["state"] = "abandoned"
+                elif kind == "evidence_imported":
+                    invocation_id = event["invocation_id"]
+                    classification = event.get("classification")
+                    if (not isinstance(invocation_id, str) or not invocation_id
+                        or invocation_id in state["imported_invocations"]
+                        or (classification is not None and classification not in _CLASS_LIMITS)
+                        or (event.get("kind") == "repair_dispatch" and classification is None)
+                        or event.get("kind") not in {"gate_invocation", "repair_dispatch"}):
+                        raise ValueError
+                    node = self._node(state, event["node_id"])
+                    counters = node.setdefault("attempt_counters", {name: 0 for name in _ATTEMPT_COUNTERS})
+                    counters["gate_invocations" if event["kind"] == "gate_invocation" else "repair_dispatches"] += 1
+                    if classification is not None:
+                        node["counters"][classification] = node["counters"].get(classification, 0) + 1
+                    state["imported_invocations"].add(invocation_id)
                 elif kind == "blocked": self._node(state, event["node_id"])["blocked"] = True
                 elif kind == "extended":
                     node = self._node(state, event["node_id"]); node["extra"] += event["launches"]; node["blocked"] = False

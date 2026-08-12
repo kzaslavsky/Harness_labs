@@ -381,6 +381,8 @@ class DeterministicVerificationResult:
     reason: str
     command_attempts: tuple[Mapping[str, object], ...]
     repair_attempts: int
+    repair_invocation_ids: tuple[str, ...] = ()
+    repair_invocations: tuple[Mapping[str, str], ...] = ()
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -388,7 +390,37 @@ class DeterministicVerificationResult:
             "reason": self.reason,
             "command_attempts": [dict(item) for item in self.command_attempts],
             "repair_attempts": self.repair_attempts,
+            "repair_invocation_ids": list(self.repair_invocation_ids),
+            "repair_invocations": [dict(item) for item in self.repair_invocations],
         }
+
+
+_VERIFICATION_FAILURE_CLASSES = frozenset({
+    "product", "infrastructure_transient", "harness_or_configuration",
+    "policy_violation", "indeterminate",
+})
+
+
+def classify_verification_failure(command: Mapping[str, object]) -> dict[str, str]:
+    """Classify only evidence present in one deterministic command result.
+
+    The conservative default deliberately treats timeouts and selector/browser
+    failures as indeterminate: neither proves a product defect nor transient
+    infrastructure.
+    """
+    excerpt = "\n".join(str(command.get(key, "")) for key in ("stderr", "stdout"))[:500]
+    lowered = excerpt.lower()
+    if any(marker in lowered for marker in ("connection reset", "temporary failure", "dns", "network is unreachable")):
+        return {"classification": "infrastructure_transient", "rule_id": "transient-network", "evidence_excerpt": excerpt}
+    if any(marker in lowered for marker in ("permission denied", "outside_allowed_paths", "outside allowed paths")):
+        return {"classification": "policy_violation", "rule_id": "policy-boundary", "evidence_excerpt": excerpt}
+    if any(marker in lowered for marker in ("no such file", "module not found", "command not found", "configuration")):
+        return {"classification": "harness_or_configuration", "rule_id": "harness-configuration", "evidence_excerpt": excerpt}
+    if any(marker in lowered for marker in ("selector", "browser", "webdriver", "playwright", "puppeteer")):
+        return {"classification": "indeterminate", "rule_id": "conservative-default", "evidence_excerpt": excerpt}
+    if any(marker in lowered for marker in ("assertionerror", "assertion failed", "failed")):
+        return {"classification": "product", "rule_id": "product-assertion", "evidence_excerpt": excerpt}
+    return {"classification": "indeterminate", "rule_id": "conservative-default", "evidence_excerpt": excerpt}
 
 
 @dataclass(frozen=True)
@@ -1287,10 +1319,14 @@ def _verify_with_recovery(
 ) -> DeterministicVerificationResult:
     command_attempts: list[Mapping[str, object]] = []
     repair_attempts = 0
+    repair_invocation_ids: list[str] = []
+    repair_invocations: list[Mapping[str, str]] = []
+    env_retries = 0
     runner = AttemptRunner()
     actor = AuditActor("verification-owner", "verification_owner")
 
-    for ordinal in range(1, repair_limit + 2):
+    # Two environment-only retries are separate from the bounded repair budget.
+    for ordinal in range(1, repair_limit + 4):
         command = _run_verification_command(
             worktree_path,
             argv,
@@ -1304,7 +1340,13 @@ def _verify_with_recovery(
             media_type="application/json",
             producer_task_id="verification-owner",
         )
-        recorded = {**command, "evidence_ref": artifact.ref}
+        recorded = {
+            **command,
+            "evidence_ref": artifact.ref,
+            "invocation_id": f"{run_id}:verification-command:{stage}:{ordinal}",
+        }
+        if command["exit_code"] != 0:
+            recorded["failure"] = classify_verification_failure(command)
         command_attempts.append(recorded)
         audit.append(
             "deterministic_verification_completed",
@@ -1318,13 +1360,27 @@ def _verify_with_recovery(
                 "declared verification command passed",
                 tuple(command_attempts),
                 repair_attempts,
+                tuple(repair_invocation_ids),
+                tuple(repair_invocations),
             )
-        if ordinal > repair_limit:
+        failure = recorded.get("failure")
+        if (
+            isinstance(failure, Mapping)
+            and failure.get("classification") == "infrastructure_transient"
+            and env_retries < 2
+        ):
+            # Infrastructure retries consume neither a repair dispatch nor its
+            # repair allowance; their invocation evidence remains explicit.
+            env_retries += 1
+            continue
+        if repair_attempts >= repair_limit:
             return DeterministicVerificationResult(
                 "blocked",
                 "declared verification command still fails after repair budget",
                 tuple(command_attempts),
                 repair_attempts,
+                tuple(repair_invocation_ids),
+                tuple(repair_invocations),
             )
 
         attempt = TaskAttempt(
@@ -1344,6 +1400,18 @@ def _verify_with_recovery(
                 sort_keys=True,
             ),
         )
+        assert isinstance(failure, Mapping)
+        classification = failure.get("classification")
+        assert isinstance(classification, str)
+        repair_invocation_id = f"{run_id}:verification-repair:{stage}:{ordinal}"
+        # Record the dispatch before execution so an interrupted worker is still
+        # visible to the parent ledger and can be idempotently reconciled.
+        repair_attempts += 1
+        repair_invocation_ids.append(repair_invocation_id)
+        repair_invocations.append({
+            "invocation_id": repair_invocation_id,
+            "classification": classification,
+        })
         try:
             repair = runner.run(attempt, repair_executor_factory(attempt))
         except InterruptedError as exc:
@@ -1362,9 +1430,10 @@ def _verify_with_recovery(
                 "interrupted",
                 str(exc) or "verification repair interrupted",
                 tuple(command_attempts),
-                ordinal,
+                repair_attempts,
+                tuple(repair_invocation_ids),
+                tuple(repair_invocations),
             )
-        repair_attempts += 1
         repaired_workspace = workspace_snapshot(worktree_path)
         prior_workspace = command["workspace"]
         assert isinstance(prior_workspace, Mapping)
@@ -1445,11 +1514,19 @@ def _verify_with_recovery(
                     actor=actor,
                     attempt_id=recovery_attempt.attempt_id,
                 )
+                recovery_invocation_id = (
+                    f"{run_id}:verification-repair:{stage}:{ordinal}:recovery-1"
+                )
+                repair_attempts += 1
+                repair_invocation_ids.append(recovery_invocation_id)
+                repair_invocations.append({
+                    "invocation_id": recovery_invocation_id,
+                    "classification": classification,
+                })
                 recovery = runner.run(
                     recovery_attempt,
                     repair_executor_factory(recovery_attempt),
                 )
-                repair_attempts += 1
                 recovered_workspace = workspace_snapshot(worktree_path)
                 recovery_outside = paths_outside_scope(
                     recovered_workspace["changed_paths"],
@@ -1491,6 +1568,8 @@ def _verify_with_recovery(
                 ),
                 tuple(command_attempts),
                 repair_attempts,
+                tuple(repair_invocation_ids),
+                tuple(repair_invocations),
             )
 
     raise AssertionError("verification loop did not terminate")
@@ -1552,6 +1631,8 @@ def _combine_verification_results(
         reason=second.reason,
         command_attempts=first.command_attempts + second.command_attempts,
         repair_attempts=first.repair_attempts + second.repair_attempts,
+        repair_invocation_ids=first.repair_invocation_ids + second.repair_invocation_ids,
+        repair_invocations=first.repair_invocations + second.repair_invocations,
     )
 
 

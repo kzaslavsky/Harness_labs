@@ -26,6 +26,7 @@ from harness_labs.feature_run import (
     ReviewFixResult,
     run_feature_worktree,
     run_plan_graph_feature_worktree,
+    classify_verification_failure,
 )
 from harness_labs.feature_run_policy import standard_feature_run_dispatch_schema
 from harness_labs.coordinator_schema import (
@@ -220,6 +221,23 @@ class _InterruptedRepairExecutor:
 
 
 class FeatureRunTests(unittest.TestCase):
+    def test_verification_failure_classifier_is_conservative_and_rule_bound(self) -> None:
+        transient = classify_verification_failure(
+            {"stderr": "temporary failure resolving DNS", "stdout": ""}
+        )
+        self.assertEqual(transient["classification"], "infrastructure_transient")
+        self.assertEqual(transient["rule_id"], "transient-network")
+        timeout = classify_verification_failure(
+            {"stderr": "browser selector timed out", "stdout": ""}
+        )
+        self.assertEqual(timeout["classification"], "indeterminate")
+        self.assertEqual(timeout["rule_id"], "conservative-default")
+        selector_failure = classify_verification_failure(
+            {"stderr": "browser selector failed", "stdout": ""}
+        )
+        self.assertEqual(selector_failure["classification"], "indeterminate")
+        self.assertEqual(selector_failure["rule_id"], "conservative-default")
+
     @patch("harness_labs.feature_run.run_feature_worktree")
     def test_plan_graph_mode_omits_only_orientation_and_planning(
         self, run_feature
@@ -1169,6 +1187,16 @@ class FeatureRunTests(unittest.TestCase):
             self.assertEqual(
                 [item["exit_code"] for item in result.verification.command_attempts],
                 [7, 0],
+            )
+            self.assertEqual(
+                result.verification.repair_invocations,
+                ({
+                    "invocation_id": (
+                        "feature-verification-run:verification-repair:"
+                        "post_implementation:1"
+                    ),
+                    "classification": "product",
+                },),
             )
             AuditJournal.verify(root / "run")
 

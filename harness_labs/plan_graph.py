@@ -1108,6 +1108,13 @@ class PlanGraph:
                     "failed",
                     evidence={"error": "launcher result does not match reserved child identity"},
                 )
+            if isinstance(outcome.evidence, Mapping):
+                try:
+                    self.budget.import_child_evidence(
+                        node_id=run.id, evidence=outcome.evidence
+                    )
+                except BudgetError as exc:
+                    raise PlanGraphError(str(exc)) from exc
             if outcome.status != "succeeded":
                 self.budget.completed(reservation, outcome.status if outcome.status == "blocked" else "failed")
                 result = PlanGraphResult(

@@ -246,6 +246,35 @@ class RetryBudgetLedgerTests(unittest.TestCase):
             (stale,),
         )
 
+    def test_structured_child_evidence_is_classified_and_imported_once(self) -> None:
+        evidence = {
+            "verification": {
+                "command_attempts": [{
+                    "invocation_id": "child:command:1",
+                    "failure": {"classification": "infrastructure_transient"},
+                }, {
+                    "invocation_id": "child:command:2",
+                }],
+                "repair_invocation_ids": ["child:repair:1"],
+                "repair_invocations": [{
+                    "invocation_id": "child:repair:1",
+                    "classification": "infrastructure_transient",
+                }],
+            },
+        }
+        self.assertEqual(
+            self.ledger.import_child_evidence(node_id="node", evidence=evidence),
+            ("child:command:1", "child:command:2", "child:repair:1"),
+        )
+        self.assertEqual(self.ledger.import_child_evidence(node_id="node", evidence=evidence), ())
+        with self.ledger._locked(shared=True) as handle:
+            state = self.ledger._fold(handle)
+        counters = state["nodes"]["node"]["attempt_counters"]
+        self.assertEqual(counters["gate_invocations"], 2)
+        self.assertEqual(counters["repair_dispatches"], 1)
+        self.assertEqual(state["nodes"]["node"]["counters"]["infrastructure_transient"], 2)
+        self.assertNotIn("product", state["nodes"]["node"]["counters"])
+
 
 if __name__ == "__main__":
     unittest.main()
