@@ -65,6 +65,7 @@ from harness_labs.plan_graph import (  # noqa: E402
     FeatureRunOutcome,
     FeatureRunRequest,
     PlanGraph,
+    persist_registration,
     register_plan_graph,
 )
 from harness_labs.plan_graph_contract import (  # noqa: E402
@@ -103,15 +104,22 @@ their replacements.
 # Node specification. Objectives and criterion statements live in the plan
 # document; this table binds structure only.
 # ---------------------------------------------------------------------------
+# Dependency edges exist only where nodes share owned files or consume another
+# node's mechanism; CB-02 is parallel-eligible with the whole program and
+# CB-07 with CB-06. Every node's green phase runs the full suite (~40s), so a
+# node that breaks an unowned consumer fails its own gate, not the terminal
+# graph functionality check.
 NODES: tuple[dict[str, Any], ...] = (
     {
         "id": "CB-01",
         "finding_tests": ["tests/test_relax_kernel.py"],
-        "regression": ["tests/test_controller_kernel.py", "tests/test_feature_run.py"],
+        "regression": ["tests/"],
         "allowed_paths": [
             "harness_labs/controller_kernel.py",
+            "harness_labs/controller_coordinator.py",
             "tests/test_relax_kernel.py",
             "tests/test_controller_kernel.py",
+            "tests/test_controller_coordinator.py",
             "tests/test_feature_run.py",
         ],
         "creates": ["tests/test_relax_kernel.py"],
@@ -120,35 +128,37 @@ NODES: tuple[dict[str, Any], ...] = (
     {
         "id": "CB-02",
         "finding_tests": ["tests/test_relax_plan_gates.py"],
-        "regression": ["tests/test_plan_graph.py"],
+        "regression": ["tests/"],
         "allowed_paths": [
             "harness_labs/plan_graph.py",
             "tests/test_relax_plan_gates.py",
             "tests/test_plan_graph.py",
         ],
         "creates": ["tests/test_relax_plan_gates.py"],
-        "depends_on": ["CB-01"],
+        "depends_on": [],
     },
     {
         "id": "CB-03",
         "finding_tests": ["tests/test_relax_verification_classes.py"],
-        "regression": ["tests/test_feature_run.py"],
+        "regression": ["tests/"],
         "allowed_paths": [
             "harness_labs/feature_run.py",
             "tests/test_relax_verification_classes.py",
             "tests/test_feature_run.py",
         ],
         "creates": ["tests/test_relax_verification_classes.py"],
-        "depends_on": ["CB-02"],
+        "depends_on": ["CB-01"],
     },
     {
         "id": "CB-04",
         "finding_tests": ["tests/test_relax_delta_repair.py"],
-        "regression": ["tests/test_feature_run.py"],
+        "regression": ["tests/"],
         "allowed_paths": [
             "harness_labs/feature_run.py",
+            "harness_labs/plan_graph_budget.py",
             "tests/test_relax_delta_repair.py",
             "tests/test_feature_run.py",
+            "tests/test_plan_graph_budget.py",
         ],
         "creates": ["tests/test_relax_delta_repair.py"],
         "depends_on": ["CB-03"],
@@ -156,18 +166,17 @@ NODES: tuple[dict[str, Any], ...] = (
     {
         "id": "CB-05",
         "finding_tests": ["tests/test_relax_adoption.py"],
-        "regression": [
-            "tests/test_claude_task_executor.py",
-            "tests/test_controller_live.py",
-            "tests/test_feature_run.py",
-        ],
+        "regression": ["tests/"],
         "allowed_paths": [
             "harness_labs/claude_task_executor.py",
             "harness_labs/controller_live.py",
             "harness_labs/feature_run.py",
+            "harness_labs/agent_mixture.py",
             "tests/test_relax_adoption.py",
             "tests/test_claude_task_executor.py",
             "tests/test_controller_live.py",
+            "tests/test_agent_mixture.py",
+            "tests/test_feature_run.py",
         ],
         "creates": ["tests/test_relax_adoption.py"],
         "depends_on": ["CB-04"],
@@ -175,7 +184,7 @@ NODES: tuple[dict[str, Any], ...] = (
     {
         "id": "CB-06",
         "finding_tests": ["tests/test_relax_gate_criteria.py"],
-        "regression": ["tests/test_controller_kernel.py", "tests/test_feature_run.py"],
+        "regression": ["tests/"],
         "allowed_paths": [
             "harness_labs/controller_kernel.py",
             "harness_labs/feature_run.py",
@@ -184,23 +193,40 @@ NODES: tuple[dict[str, Any], ...] = (
             "tests/test_feature_run.py",
         ],
         "creates": ["tests/test_relax_gate_criteria.py"],
-        "depends_on": ["CB-05"],
+        "depends_on": ["CB-01", "CB-05"],
     },
     {
         "id": "CB-07",
         "finding_tests": ["tests/test_relax_semantic_floor.py"],
-        "regression": ["tests/test_claude_task_executor.py"],
+        "regression": ["tests/"],
         "allowed_paths": [
-            "harness_labs/deliverable_floor.py",
             "harness_labs/claude_task_executor.py",
+            "harness_labs/controller_live.py",
+            "harness_labs/controller_results.py",
             "tests/test_relax_semantic_floor.py",
             "tests/test_claude_task_executor.py",
+            "tests/test_controller_live.py",
         ],
-        "creates": [
-            "harness_labs/deliverable_floor.py",
-            "tests/test_relax_semantic_floor.py",
+        "creates": ["tests/test_relax_semantic_floor.py"],
+        "depends_on": ["CB-05"],
+    },
+    {
+        "id": "CB-08",
+        "finding_tests": [],
+        "regression": [],
+        "allowed_paths": [
+            "experiments/run_burden_plan_graph.py",
+            "docs/development/contract-burden-reduction.md",
         ],
-        "depends_on": ["CB-06"],
+        "creates": [],
+        "depends_on": ["CB-02", "CB-03", "CB-06", "CB-07"],
+        "verification_argv": [
+            "python3", "scripts/dev/check_workaround_retirement.py",
+        ],
+        "verification_required_paths": [
+            {"path": "scripts/dev/check_workaround_retirement.py",
+             "availability": "base"},
+        ],
     },
 )
 
@@ -251,11 +277,15 @@ def assemble_decomposition() -> dict[str, Any]:
     runs: list[dict[str, Any]] = []
     for spec in NODES:
         node_id = spec["id"]
-        argv = [
+        argv = spec.get("verification_argv") or [
             "python3", "scripts/dev/red_green_check.py",
             "--base", RED_BASE,
             "--finding-tests", *spec["finding_tests"],
             "--regression", *spec["regression"],
+            "--timeout", "700",
+        ]
+        required = spec.get("verification_required_paths") or [
+            {"path": "scripts/dev/red_green_check.py", "availability": "base"},
         ]
         runs.append(
             {
@@ -274,9 +304,7 @@ def assemble_decomposition() -> dict[str, Any]:
                 ],
                 "verification_argv": argv,
                 "verification_timeout_seconds": 1800,
-                "verification_required_paths": [
-                    {"path": "scripts/dev/red_green_check.py", "availability": "base"},
-                ],
+                "verification_required_paths": required,
             }
         )
     # Registration (currently) requires each run's objective, criterion ids,
@@ -310,7 +338,15 @@ def assemble_decomposition() -> dict[str, Any]:
                 ],
             }
         ],
-        "referenced_artifacts": [DIAGNOSIS_PATH, "scripts/dev/red_green_check.py"],
+        "referenced_artifacts": [
+            DIAGNOSIS_PATH,
+            "scripts/dev/red_green_check.py",
+            "scripts/dev/check_workaround_retirement.py",
+            "docs/development/plan-review-cb/frame.json",
+            "docs/development/plan-review-cb/necessity.json",
+            "docs/development/plan-review-cb/mechanism.json",
+            "docs/development/plan-review-cb/adjudication.md",
+        ],
     }
     canonical_plan_graph_payload(decomposition)
     return decomposition
@@ -661,10 +697,25 @@ def _launch_node(
         commit_message=f"PlanGraph node {request.plan_node_id}",
         review_fix_executor_factory=review_fix,
         verification_repair_executor_factory=verification_repair,
+        verification_repair_limit=3,
     )
+    # Feed the node's structured verification facts into the RB ledger; without
+    # this the retry-budget accounting never sees gate or repair evidence.
+    evidence: dict[str, object] | None = None
+    if result.verification is not None:
+        evidence = {
+            "verification": {
+                "command_attempts": list(result.verification.command_attempts),
+                "repair_invocation_ids": list(
+                    result.verification.repair_invocation_ids
+                ),
+                "repair_invocations": list(result.verification.repair_invocations),
+            }
+        }
     return FeatureRunOutcome(
         status=result.status,
         candidate_commit=result.candidate_commit,
+        evidence=evidence,
         plan_graph_id=request.plan_graph_id,
         plan_node_id=request.plan_node_id,
         feature_run_id=request.feature_run_id,
@@ -677,7 +728,7 @@ def run_graph(run_id: str, receipt_path: Path) -> int:
     approved = admission.validate()
     registration = register_plan_graph(
         repository=REPO,
-        logical_graph_id=f"contract-burden-{run_id}",
+        logical_graph_id="contract-burden-relaxation",
         decomposition=approved.decomposition,
         base_commit=approved.base_commit,
         repository_id=approved.repository_id,
@@ -688,12 +739,21 @@ def run_graph(run_id: str, receipt_path: Path) -> int:
             "max_structural_decisions": 2,
         },
     )
+    # Persist the registration so scripts/plan_graph_recover.py can act on a
+    # blocked graph, and key the run root to the LINEAGE (not the attempt) so
+    # the RB ledger carries budget state across attempts.
+    registration_path = persist_registration(
+        repository=REPO,
+        registration_root=ROOT / "logs" / "registration",
+        registration=registration,
+    )
+    print(json.dumps({"registration": str(registration_path)}))
     acceptance = dict(approved.decomposition["acceptance_criteria"])
     graph = PlanGraph(
         REPO,
         registration,
         lambda request: _launch_node(request, acceptance),
-        run_root=ROOT / "logs" / "runs" / f"cb-graph-{run_id}",
+        run_root=ROOT / "logs" / "runs" / "cb-graph",
         graph_run_id=f"cb-graph-{run_id}",
         approval_validator=admission.approval_validator(),
     )
@@ -721,7 +781,12 @@ def main() -> int:
     parser.add_argument("--run-id")
     parser.add_argument("--receipt", type=Path)
     arguments = parser.parse_args()
-    run_id = arguments.run_id or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    # PlanGraph IDs must match ^[a-z0-9][a-z0-9-]{0,127}$ — lowercase, no T/Z.
+    run_id = arguments.run_id or datetime.now(timezone.utc).strftime(
+        "%Y%m%d-%H%M%S"
+    )
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,100}", run_id):
+        parser.error(f"--run-id must match ^[a-z0-9][a-z0-9-]+$, got {run_id!r}")
 
     if arguments.stage == "decompose":
         decompose()
