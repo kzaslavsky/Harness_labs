@@ -345,10 +345,13 @@ class FeatureRunRequest:
     run_dir: Path
     finding_obligations: tuple[Mapping[str, object], ...] = ()
     finding_transfer_targets: Mapping[str, str] | None = None
+    inherited_ledger_frozen: bool = False
 
     def __post_init__(self) -> None:
         if self.protocol != FEATURE_RUN_REQUEST_PROTOCOL:
             raise ValueError("unsupported PlanGraph FeatureRun request protocol")
+        if not isinstance(self.inherited_ledger_frozen, bool):
+            raise ValueError("inherited_ledger_frozen must be a boolean")
 
 
 @dataclass(frozen=True)
@@ -441,6 +444,7 @@ class SubprocessFeatureRunLauncher:
             "finding_transfer_targets": dict(
                 request.finding_transfer_targets or {}
             ),
+            "inherited_ledger_frozen": request.inherited_ledger_frozen,
         }
         try:
             completed = subprocess.run(
@@ -991,7 +995,12 @@ class PlanGraph:
             None,
         )
         if blocked is not None:
-            result = PlanGraphResult("blocked", None, dict(completed), blocked)
+            result = PlanGraphResult(
+                "blocked",
+                self._pending_candidate_commit(audit, blocked),
+                dict(completed),
+                blocked,
+            )
             audit.finalize("blocked", self._result_payload(result))
             return result
         finding_obligations = self._load_finding_obligations(audit)
@@ -1032,6 +1041,11 @@ class PlanGraph:
                 raise PlanGraphError(
                     f"successful FeatureRun {run.id!r} did not provide a candidate commit"
                 )
+            audit.candidate_verified_pending_transfer(
+                run.id,
+                outcome.candidate_commit,
+                outcome.evidence,
+            )
             try:
                 finding_obligations = self._advance_finding_obligations(
                     run,
@@ -1041,14 +1055,18 @@ class PlanGraph:
                     completed,
                 )
             except PlanGraphError as exc:
+                conflict_ref = audit.transfer_conflict_blocked(run.id, str(exc))
                 result = PlanGraphResult(
-                    status="failed",
-                    candidate_commit=None,
+                    status="blocked",
+                    candidate_commit=outcome.candidate_commit,
                     completed=dict(completed),
                     failed_run_id=run.id,
                 )
-                audit.node_failed(run.id, "failed", {"error": str(exc)})
-                audit.finalize("failed", self._result_payload(result))
+                audit.finalize(
+                    "blocked",
+                    self._result_payload(result)
+                    | {"blocker_evidence_ref": conflict_ref},
+                )
                 return result
             completed[run.id] = outcome.candidate_commit
             candidate_commit = outcome.candidate_commit
@@ -1228,6 +1246,7 @@ class PlanGraph:
             run_dir=(self.run_root / feature_run_id).resolve(),
             finding_obligations=finding_obligations,
             finding_transfer_targets=self._transfer_targets_for(run),
+            inherited_ledger_frozen=bool(finding_obligations),
         )
 
     @staticmethod
@@ -1304,7 +1323,12 @@ class PlanGraph:
             return ()
         if not isinstance(outcome.evidence, Mapping):
             raise PlanGraphError("FeatureRun evidence must be an object")
-        raw = outcome.evidence.get("transferred_findings", ())
+        raw = outcome.evidence.get("transferred_findings")
+        if raw is None:
+            review_fix = outcome.evidence.get("review_fix", {})
+            if not isinstance(review_fix, Mapping):
+                raise PlanGraphError("FeatureRun review_fix evidence must be an object")
+            raw = review_fix.get("transferred_findings", ())
         if not isinstance(raw, (list, tuple)) or not all(
             isinstance(item, Mapping) for item in raw
         ):
@@ -1383,13 +1407,29 @@ class PlanGraph:
             None,
         )
         functionality = state.get("functionality_test", {})
+        candidate_commit = state.get("current_candidate_commit")
+        if state.get("terminal_graph_status") == "blocked" and failed is not None:
+            candidate_commit = PlanGraph._pending_candidate_commit(audit, failed)
         return PlanGraphResult(
             status=str(state.get("terminal_graph_status")),
-            candidate_commit=state.get("current_candidate_commit") if isinstance(state.get("current_candidate_commit"), str) else None,
+            candidate_commit=candidate_commit if isinstance(candidate_commit, str) else None,
             completed=completed,
             failed_run_id=failed,
             functionality_failure=functionality.get("error") if isinstance(functionality, dict) and isinstance(functionality.get("error"), str) else None,
         )
+
+    @staticmethod
+    def _pending_candidate_commit(audit: PlanGraphAudit, node_id: str) -> str | None:
+        """Read the verified, unintegrated candidate retained by a blocked transfer."""
+
+        nodes = audit.state.get("nodes")
+        if not isinstance(nodes, dict) or not isinstance(nodes.get(node_id), dict):
+            return None
+        pending = nodes[node_id].get("candidate_verified_pending_transfer")
+        if not isinstance(pending, dict):
+            return None
+        candidate = pending.get("candidate_commit")
+        return candidate if isinstance(candidate, str) else None
 
     @staticmethod
     def _validate_completed_dependencies(

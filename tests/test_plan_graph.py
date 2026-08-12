@@ -21,6 +21,7 @@ from harness_labs.plan_graph import (
     PlanGraphError,
     PlanGraphRegistration,
     PlanRun,
+    RepairResumeDirective,
     ReadySetDispatch,
     ReadySetScheduler,
     SubprocessFeatureRunLauncher,
@@ -169,6 +170,7 @@ class PlanGraphTests(unittest.TestCase):
         self.assertEqual(result.status, "succeeded")
         self.assertEqual(calls[0].finding_transfer_targets, {"consumer.py": "b"})
         self.assertEqual(calls[1].finding_obligations, (transfer,))
+        self.assertTrue(calls[1].inherited_ledger_frozen)
 
     def test_transfer_to_unbound_owner_fails_closed(self) -> None:
         transfer = {
@@ -187,8 +189,67 @@ class PlanGraphTests(unittest.TestCase):
             registration=self._transfer_registration(),
         ).run()
 
-        self.assertEqual(result.status, "failed")
+        self.assertEqual(result.status, "blocked")
         self.assertEqual(result.failed_run_id, "a")
+        state = json.loads(
+            (self.root / "runs" / "attempt-1" / "checkpoint.json").read_text()
+        )["state"]
+        node = state["nodes"]["a"]
+        self.assertEqual(node["status"], "blocked")
+        self.assertEqual(
+            node["candidate_verified_pending_transfer"]["candidate_commit"], "a-commit"
+        )
+        self.assertTrue(
+            node["candidate_verified_pending_transfer"]["proof_ref"].startswith("artifact:sha256:")
+        )
+        self.assertIn("evidence_ref", node["evidence"])
+        reopened = PlanGraph(
+            self.repository,
+            self._transfer_registration(),
+            lambda request: (_ for _ in ()).throw(AssertionError("terminal graph relaunched")),
+            run_root=self.root / "runs",
+            graph_run_id="attempt-1",
+        ).run()
+        self.assertEqual(reopened.status, "blocked")
+        self.assertEqual(reopened.candidate_commit, "a-commit")
+        def retry_launcher(request):
+            return FeatureRunOutcome(
+                "succeeded", f"{request.run.id}-retry", evidence={},
+                plan_graph_id=request.plan_graph_id, plan_node_id=request.plan_node_id,
+                feature_run_id=request.feature_run_id, run_dir=str(request.run_dir),
+            )
+
+        resumed = PlanGraph.resume(
+            self.repository,
+            self._transfer_registration(),
+            retry_launcher,
+            run_root=self.root / "runs",
+            directive=RepairResumeDirective(
+                "attempt-1", "attempt-1", ("a",), node["evidence"]["evidence_ref"]
+            ),
+        ).run()
+        self.assertEqual(resumed.status, "succeeded")
+
+    def test_terminal_review_payload_transfers_to_downstream_owner(self) -> None:
+        calls = []
+        transfer = {
+            "key": "consumer.py:wire-producer", "file": "producer.py",
+            "scope_expanding": True, "transferred_to": "b",
+            "required_paths": ["consumer.py"],
+        }
+
+        def launcher(request):
+            calls.append(request)
+            return FeatureRunOutcome(
+                "succeeded", f"{request.run.id}-commit",
+                evidence={"review_fix": {"transferred_findings": [transfer]}}
+                if request.run.id == "a" else {"review_fix": {"transferred_findings": []}},
+            )
+
+        result = self.graph(launcher, registration=self._transfer_registration()).run()
+
+        self.assertEqual(result.status, "succeeded")
+        self.assertEqual(calls[1].finding_obligations, (transfer,))
 
     def test_same_commit_is_deterministic_across_worktrees(self) -> None:
         worktree = self.root / "worktree"
@@ -358,6 +419,7 @@ class PlanGraphTests(unittest.TestCase):
             "a",
             "attempt-1-a",
             self.root / "runs" / "attempt-1-a",
+            inherited_ledger_frozen=True,
         )
         run.return_value = SimpleNamespace(
             returncode=0,
@@ -370,6 +432,7 @@ class PlanGraphTests(unittest.TestCase):
         self.assertEqual(payload["base_commit"], "candidate")
         self.assertEqual(payload["plan_base_commit"], self.base_commit)
         self.assertEqual(payload["plan_sha256"], self.registration.plan_sha256)
+        self.assertTrue(payload["inherited_ledger_frozen"])
 
     def test_sequential_candidate_and_registered_functionality_test(self) -> None:
         registration = register_plan_graph(

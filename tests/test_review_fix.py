@@ -303,6 +303,63 @@ class ReviewFixLoopTests(unittest.TestCase):
         self.assertEqual(transfer["transferred_to"], "B")
         self.assertEqual([call[0] for call in factory.calls], ["review"])
 
+    def test_retained_transfer_survives_replacement_review_without_reopening(self):
+        key = "producer.py:consumer-integration"
+        transfer = {
+            "id": "consumer",
+            "key": key,
+            "file": "producer.py",
+            "subject": "consumer integration",
+            "statement": "Wire the producer into the consumer.",
+            "category": "integration",
+            "severity": "major",
+            "score": 90,
+            "fix_cost": "surface-growing",
+            "protects": "AC integration",
+            "requires_disposition": True,
+            "contract_violation": False,
+            "scope_expanding": True,
+            "outcome": "transferred",
+            "outcome_reason": "transferred to downstream owner B",
+            "cycles_seen": [1],
+            "occurrences": 1,
+            "source_finding_ids": ["consumer"],
+            "evidence_refs": ["artifact:producer"],
+            "fix_attempts": [],
+            "reopened_count": 0,
+            "origin_node": "A",
+            "transferred_to": "B",
+            "transfer_eligible": True,
+            "required_paths": ["consumer.py"],
+        }
+        factory = _Factory(
+            {
+                "review": [
+                    lambda attempt: result(
+                        attempt.attempt_id,
+                        "review-fix-review/1",
+                        findings=(transfer,),
+                    )
+                ]
+            }
+        )
+
+        outcome, _, evidence = self.run_loop(
+            factory,
+            retained_transfers=(transfer,),
+            finding_transfer_targets={"consumer.py": "B"},
+            origin_node_id="A",
+        )
+
+        self.assertEqual(outcome.status, "succeeded", outcome.reason)
+        self.assertEqual(len(outcome.transferred_findings), 1)
+        self.assertEqual(outcome.transferred_findings[0]["key"], key)
+        self.assertEqual(outcome.transferred_findings[0]["transferred_to"], "B")
+        self.assertEqual([call[0] for call in factory.calls], ["review"])
+        ledger = json.loads(evidence.open(outcome.ledger_ref))
+        self.assertEqual(ledger["findings"][key]["outcome"], "transferred")
+        self.assertEqual(ledger["cycles"][0]["ledger_collapses"], 1)
+
     def test_mixed_ownership_finding_transfers_only_downstream_paths(self):
         finding = {
             "id": "coupled-consumer",

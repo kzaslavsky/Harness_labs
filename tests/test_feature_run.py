@@ -23,6 +23,7 @@ from harness_labs.feature_run import (
     PlanGraphFeatureRunBinding,
     RecoveryDecision,
     ReviewFixPolicy,
+    ReviewFixResult,
     run_feature_worktree,
     run_plan_graph_feature_worktree,
 )
@@ -289,6 +290,10 @@ class FeatureRunTests(unittest.TestCase):
             bound_phases,
             ("implement",),
         )
+        self.assertEqual(options["review_finding_obligations"], ())
+        self.assertIsNone(options["review_finding_transfer_targets"])
+        self.assertEqual(options["review_origin_node_id"], "FR-01")
+        self.assertFalse(options["review_inherited_ledger_frozen"])
         bound_instructions = options["schema"].segments[0].instructions
         self.assertIn(
             "Dispatch only implementation or implementation-repair tasks",
@@ -331,6 +336,36 @@ class FeatureRunTests(unittest.TestCase):
                     allowed_paths=("everything",),
                     verification_repair_executor_factory=lambda attempt: None,
                 )
+
+    @patch("harness_labs.feature_run.run_feature_worktree")
+    def test_plan_graph_mode_binds_transfer_obligations_to_review(self, run_feature) -> None:
+        plan_bytes = b"registered plan\n"
+        binding = PlanGraphFeatureRunBinding(
+            plan_graph_id="graph-1", plan_node_id="FR-01", objective="Implement.",
+            acceptance_criteria=({"id": "AC-1", "statement": "Works"},),
+            approved_plan={"path": "docs/plan.md", "sha256": hashlib.sha256(plan_bytes).hexdigest()},
+            source_binding_report={"claims": ["approved"]},
+            build_briefing={"allowed_paths": ["feature.txt"]},
+            plan="docs/plan.md", plan_base_commit="a" * 40,
+            plan_sha256=hashlib.sha256(plan_bytes).hexdigest(),
+            allowed_paths=("feature.txt",), verification_argv=("python3", "-m", "unittest"),
+            finding_obligations=({"key": "feature.txt:transfer"},),
+            finding_transfer_targets={"feature.txt": "FR-02"},
+            origin_node_id="FR-01", inherited_ledger_frozen=True,
+        )
+        with patch("harness_labs.feature_run.subprocess.run") as git_show:
+            git_show.return_value = subprocess.CompletedProcess([], 0, stdout=plan_bytes, stderr=b"")
+            run_plan_graph_feature_worktree(
+                binding=binding, schema=standard_feature_run_dispatch_schema(),
+                contract_factory=lambda worktree, receipt: None,
+                review_fix_policy=ReviewFixPolicy(), base_repository=Path("repository"),
+                verification_repair_executor_factory=lambda attempt: None,
+            )
+        options = run_feature.call_args.kwargs
+        self.assertEqual(options["review_finding_obligations"], binding.finding_obligations)
+        self.assertEqual(options["review_finding_transfer_targets"], binding.finding_transfer_targets)
+        self.assertEqual(options["review_origin_node_id"], "FR-01")
+        self.assertTrue(options["review_inherited_ledger_frozen"])
 
     def test_plan_graph_mode_refuses_disabled_review_ledger(self) -> None:
         criteria = ({"id": "AC-1", "statement": "Works", "source": "plan"},)
@@ -1056,6 +1091,52 @@ class FeatureRunTests(unittest.TestCase):
             self.assertEqual(len(recovery_contexts), 1)
             self.assertEqual(recovery_contexts[0].stage, "review")
             self.assertEqual(recovery_contexts[0].condition, "failed")
+            AuditJournal.verify(root / "run")
+
+    @patch("harness_labs.feature_run.ReviewFixLoop")
+    def test_recovered_review_retains_transfers_from_failed_attempt(
+        self, review_loop
+    ) -> None:
+        transferred = {
+            "key": "downstream.py:required-change",
+            "file": "downstream.py",
+            "transferred_to": "FR-02",
+            "outcome": "transferred",
+        }
+        review_loop.return_value.run.side_effect = (
+            ReviewFixResult(
+                "failed", "reviewer interrupted", 1, "mechanical", "first-ledger",
+                (), (), (transferred,),
+            ),
+            ReviewFixResult(
+                "succeeded", "review cleared", 1, "mechanical", "second-ledger",
+                (), (), (),
+            ),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+
+            result = self._run_verification_recovery_case(
+                root,
+                lambda worktree, attempt: _VerificationRepairExecutor(
+                    worktree, []
+                ),
+                recovery_agent=lambda context: RecoveryDecision(
+                    "retry", "Retry the interrupted review."
+                ),
+                recovery_limit=1,
+                review_fix_executor_factory=_FailOnceReviewFactory(),
+                review_fix_policy=ReviewFixPolicy(),
+            )
+
+            self.assertEqual(result.status, "succeeded")
+            self.assertIsNotNone(result.review_fix)
+            self.assertEqual(result.review_fix.transferred_findings, (transferred,))
+            self.assertEqual(review_loop.call_count, 2)
+            self.assertEqual(
+                review_loop.call_args_list[1].kwargs["retained_transfers"],
+                (transferred,),
+            )
             AuditJournal.verify(root / "run")
 
     def test_interrupted_repair_raises_recovery_agent(self) -> None:

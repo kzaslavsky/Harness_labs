@@ -109,6 +109,10 @@ class PlanGraphFeatureRunBinding:
     batch_id: str | None = None
     dependency_candidates: tuple[Mapping[str, object], ...] | None = None
     writable_paths: tuple[str, ...] | None = None
+    finding_obligations: tuple[Mapping[str, object], ...] = ()
+    finding_transfer_targets: Mapping[str, str] | None = None
+    origin_node_id: str = ""
+    inherited_ledger_frozen: bool = False
 
     def __post_init__(self) -> None:
         if not all(
@@ -137,6 +141,23 @@ class PlanGraphFeatureRunBinding:
             raise ValueError("PlanGraph FeatureRun binding requires verification argv")
         if self.verification_timeout_seconds <= 0:
             raise ValueError("PlanGraph FeatureRun binding requires a positive timeout")
+        if not isinstance(self.finding_obligations, tuple) or not all(
+            isinstance(item, Mapping) for item in self.finding_obligations
+        ):
+            raise ValueError("PlanGraph finding_obligations must be a tuple of objects")
+        if self.finding_transfer_targets is not None and (
+            not isinstance(self.finding_transfer_targets, Mapping)
+            or not all(
+                isinstance(path, str) and path
+                and isinstance(node_id, str) and node_id
+                for path, node_id in self.finding_transfer_targets.items()
+            )
+        ):
+            raise ValueError("PlanGraph finding_transfer_targets must map paths to node IDs")
+        if not isinstance(self.origin_node_id, str):
+            raise ValueError("PlanGraph origin_node_id must be a string")
+        if not isinstance(self.inherited_ledger_frozen, bool):
+            raise ValueError("PlanGraph inherited_ledger_frozen must be a boolean")
         briefing_paths = self.build_briefing.get("allowed_paths")
         if briefing_paths is not None and tuple(briefing_paths) != self.allowed_paths:
             raise ValueError("build briefing allowed_paths do not match approved grant")
@@ -577,6 +598,7 @@ def run_feature_worktree(
     status = dispatch.result.status
     verification_result = None
     review_fix_result = None
+    review_transfers: dict[str, Mapping[str, object]] = {}
     pre_review_workspace = None
     if status == "succeeded" and project_run_view(kernel)["status"] == "succeeded":
         if verification_argv:
@@ -643,10 +665,14 @@ def run_feature_worktree(
                 audit=audit,
                 policy=review_fix_policy,
                 inherited_findings=review_finding_obligations,
+                retained_transfers=(),
                 finding_transfer_targets=review_finding_transfer_targets or {},
                 origin_node_id=review_origin_node_id,
                 inherited_ledger_frozen=review_inherited_ledger_frozen,
             ).run()
+            _remember_review_transfers(
+                review_transfers, review_fix_result.transferred_findings
+            )
             status = review_fix_result.status
             while status in {"blocked", "failed", "interrupted"}:
                 if not _recover_abnormal(
@@ -673,8 +699,24 @@ def run_feature_worktree(
                     evidence=evidence,
                     audit=audit,
                     policy=review_fix_policy,
+                    inherited_findings=review_finding_obligations,
+                    retained_transfers=tuple(
+                        review_transfers[key] for key in sorted(review_transfers)
+                    ),
+                    finding_transfer_targets=review_finding_transfer_targets or {},
+                    origin_node_id=review_origin_node_id,
+                    inherited_ledger_frozen=review_inherited_ledger_frozen,
                 ).run()
+                _remember_review_transfers(
+                    review_transfers, review_fix_result.transferred_findings
+                )
                 status = review_fix_result.status
+            review_fix_result = replace(
+                review_fix_result,
+                transferred_findings=tuple(
+                    review_transfers[key] for key in sorted(review_transfers)
+                ),
+            )
     if (
         status == "succeeded"
         and project_run_view(kernel)["status"] == "succeeded"
@@ -839,6 +881,19 @@ def run_feature_worktree(
     )
 
 
+def _remember_review_transfers(
+    retained: dict[str, Mapping[str, object]],
+    transfers: tuple[Mapping[str, object], ...],
+) -> None:
+    """Retain transfer records across a recovered review-loop replacement."""
+
+    for transfer in transfers:
+        key = str(transfer.get("key", ""))
+        if not key:
+            raise ValueError("review transfer record requires a stable finding key")
+        retained[key] = dict(transfer)
+
+
 def run_plan_graph_feature_worktree(
     *,
     binding: PlanGraphFeatureRunBinding,
@@ -994,6 +1049,10 @@ def run_plan_graph_feature_worktree(
         review_fix_policy=review_fix_policy,
         initial_evidence=binding.handoff_artifacts(),
         allowed_paths=binding.allowed_paths,
+        review_finding_obligations=binding.finding_obligations,
+        review_finding_transfer_targets=binding.finding_transfer_targets,
+        review_origin_node_id=binding.origin_node_id or binding.plan_node_id,
+        review_inherited_ledger_frozen=binding.inherited_ledger_frozen,
         verification_argv=binding.verification_argv,
         verification_timeout_seconds=binding.verification_timeout_seconds,
         **child_options,

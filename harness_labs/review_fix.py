@@ -142,6 +142,34 @@ class ReviewLedger:
             record.setdefault("required_paths", [])
             self.findings[key] = record
 
+    def seed_retained_transfers(
+        self, findings: tuple[Mapping[str, Any], ...]
+    ) -> None:
+        """Restore obligations already transferred by a replaced review loop."""
+
+        for finding in findings:
+            key = str(finding.get("key", ""))
+            target = str(finding.get("transferred_to", ""))
+            if not key or not target or key in self.findings:
+                raise ReviewFixError(
+                    "retained transfer must have a unique key and downstream owner"
+                )
+            record = dict(finding)
+            record["outcome"] = "transferred"
+            record.setdefault(
+                "outcome_reason",
+                f"retained by recovery for downstream owner {target}",
+            )
+            record.setdefault("origin_node", "")
+            record.setdefault("cycles_seen", [])
+            record.setdefault("occurrences", 1)
+            record.setdefault("source_finding_ids", [key])
+            record.setdefault("evidence_refs", [])
+            record.setdefault("fix_attempts", [])
+            record.setdefault("reopened_count", 0)
+            record.setdefault("required_paths", [])
+            self.findings[key] = record
+
     def freeze_discovery(self) -> None:
         self.discovery_frozen = True
 
@@ -219,6 +247,9 @@ class ReviewLedger:
                 self.findings[key] = record
                 continue
             self._merge_occurrence(existing, finding, cycle)
+            if existing["outcome"] == "transferred":
+                ledger_collapses += 1
+                continue
             if (
                 self.policy.reraise_guard_enabled
                 and existing["outcome"] in {"fixed", "note", "scope_screened", "debt"}
@@ -424,6 +455,7 @@ class ReviewFixLoop:
         audit: AuditJournal,
         policy: ReviewFixPolicy = ReviewFixPolicy(),
         inherited_findings: tuple[Mapping[str, Any], ...] = (),
+        retained_transfers: tuple[Mapping[str, Any], ...] = (),
         finding_transfer_targets: Mapping[str, str] | None = None,
         origin_node_id: str = "",
         inherited_ledger_frozen: bool = False,
@@ -438,6 +470,7 @@ class ReviewFixLoop:
         self.audit = audit
         self.policy = policy
         self.inherited_findings = inherited_findings
+        self.retained_transfers = retained_transfers
         self.finding_transfer_targets = dict(finding_transfer_targets or {})
         self.origin_node_id = origin_node_id or run_id
         self.inherited_ledger_frozen = inherited_ledger_frozen
@@ -447,6 +480,7 @@ class ReviewFixLoop:
         risk_tier = _risk_tier(self.changed_paths, self.policy)
         ledger = ReviewLedger(self.policy, risk_tier)
         ledger.seed_transferred(self.inherited_findings)
+        ledger.seed_retained_transfers(self.retained_transfers)
         if self.inherited_ledger_frozen:
             ledger.freeze_discovery()
         if not self.policy.enabled:

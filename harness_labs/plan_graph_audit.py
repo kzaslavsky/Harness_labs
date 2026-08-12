@@ -371,6 +371,66 @@ class PlanGraphAudit:
             artifacts=(artifact,),
         )
 
+    def candidate_verified_pending_transfer(
+        self, node_id: str, candidate_commit: str, evidence: object | None
+    ) -> str:
+        """Checkpoint a verified candidate before mutating obligations."""
+
+        artifact = self.journal.write_artifact(
+            "plan-graph-verified-candidate-transfer-proof",
+            {
+                "plan_node_id": node_id,
+                "candidate_commit": candidate_commit,
+                "evidence": evidence,
+            },
+        )
+        proof_ref = f"artifact:sha256:{artifact.sha256}"
+        self._transition(
+            "plan_graph_candidate_verified_pending_transfer",
+            "running",
+            node_id,
+            {
+                "candidate_verified_pending_transfer": {
+                    "candidate_commit": candidate_commit,
+                    "proof_ref": proof_ref,
+                }
+            },
+            artifacts=(artifact,),
+        )
+        return proof_ref
+
+    def transfer_conflict_blocked(self, node_id: str, reason: str) -> str:
+        """Block a transfer conflict while preserving the verified candidate."""
+
+        state = self.state
+        nodes = state.get("nodes")
+        if not isinstance(nodes, dict) or not isinstance(nodes.get(node_id), dict):
+            raise AuditError(f"PlanGraph checkpoint has no node {node_id!r}")
+        pending = nodes[node_id].get("candidate_verified_pending_transfer")
+        if not isinstance(pending, dict) or not isinstance(pending.get("proof_ref"), str):
+            raise AuditError("transfer conflict has no verified-candidate checkpoint")
+        artifact = self.journal.write_artifact(
+            "plan-graph-transfer-conflict",
+            {
+                "plan_node_id": node_id,
+                "reason": reason,
+                "candidate_verified_pending_transfer": dict(pending),
+            },
+        )
+        conflict_ref = f"artifact:sha256:{artifact.sha256}"
+        self._transition(
+            "plan_graph_transfer_conflict_blocked",
+            "blocked",
+            node_id,
+            {
+                "status": "blocked",
+                "finished_at": _timestamp(),
+                "evidence": {"reason": reason, "evidence_ref": conflict_ref},
+            },
+            artifacts=(artifact,),
+        )
+        return conflict_ref
+
     def reserve_successor_attempt(
         self,
         *,
