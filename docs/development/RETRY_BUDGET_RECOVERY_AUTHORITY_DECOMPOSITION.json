@@ -2,12 +2,12 @@
   "protocol": "plan-graph-plan/1",
   "plan": "docs/development/RETRY_BUDGET_RECOVERY_AUTHORITY_PLAN.md",
   "plan_sections": {
-    "RB-01": "Preserve obligation-transfer state and establish the recovery machinery inventory.",
-    "RB-02": "Implement the lineage ledger, atomic retry reservations, and operator relief commands.",
-    "RB-03": "Add failure classification and idempotent structured child-evidence accounting.",
-    "RB-04": "Centralize blocked finalization and add escalation, status, and notification contracts.",
-    "RB-05": "Bind bounded recovery authority to registration and implement typed recovery actions and plan-version transitions.",
-    "RB-06": "Implement the external recovery coordinator and prove bounded end-to-end recovery."
+    "RB-01": "Preserve obligation-transfer state and establish the recovery machinery inventory. Production obligation transfer is preserved across review recovery; transfer conflicts checkpoint verified candidates and block resumably; the recovery inventory is committed.",
+    "RB-02": "Implement the lineage ledger, atomic retry reservations, and operator relief commands. Retry budgets accumulate across successors and registrations in one lineage, reservations are crash-safe and atomic, exhaustion fails closed, and every new block has an operator relief path.",
+    "RB-03": "Add failure classification and idempotent structured child-evidence accounting. Failures use the five-way taxonomy and structured child invocation evidence is imported idempotently into the correct budget class.",
+    "RB-04": "Centralize blocked finalization and add escalation, status, and notification contracts. Every blocked finalization uses one ordered transition, emits a schema-valid escalation artifact and status flags, and optionally starts a fully detached notification hook.",
+    "RB-05": "Bind bounded recovery authority to registration and implement typed recovery actions and plan-version transitions. Automatic recovery cannot exceed or mutate the operator-approved registration allowance; typed actions, carryover, transition records, and deviation statuses fail closed.",
+    "RB-06": "Implement the external recovery coordinator and prove bounded end-to-end recovery. A fresh external coordinator can progress Tier-1 recovery to success, bounded exhaustion, or precise human/external blocking without fabricating success."
   },
   "acceptance_criteria": {
     "AC-RB-01": "Production obligation transfer is preserved across review recovery; transfer conflicts checkpoint verified candidates and block resumably; the recovery inventory is committed.",
