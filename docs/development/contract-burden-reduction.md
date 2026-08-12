@@ -27,7 +27,7 @@ Every entry below cites the run evidence that qualified it. New entries need the
 - **Where:** controller task dispatch; rejection `unknown task criterion: AC-01: physics.js is requireable…`.
 - **Evidence:** the plan-graph handoff artifact hands the coordinator criteria as `id: statement` pairs; dispatch accepts only bare ids. Burned a coordinator turn in **both** graph attempts (exp-1 05:26:21, exp-2). No ambiguity is defended — ids are unique.
 - **Action:** accept `id` or `id: anything`; strip to the id and validate that. Postel's-law fix, no policy change.
-- **Status:** open (prompt-pinned workaround in `BASE_INSTRUCTIONS`, commit `169ffb1` — remove the pin once fixed).
+- **Status:** open (prompt-pinned workaround in `BASE_INSTRUCTIONS`, commit `169ffb1` — remove the pin once fixed). **Reconfirmed 2026-08-12** in the flow-editor-authoring program (independent operator, independent launcher): `unknown task criterion: AC-FR20-1: Full flow-editor unit suite…` burned coordinator turns in at least attempts pg85, pg90, pg98, pg99. Two programs, two coordinators, same mechanical rejection.
 
 ### 3. Capability narrowing as frozen-authority violation — allow subsets
 
@@ -50,7 +50,7 @@ Every entry below cites the run evidence that qualified it. New entries need the
 - **Evidence:** the single most damaging blocker observed. Exp-1: worker produced a **gate-passing** `physics.js` with a placeholder report; the refused attempt left the tree dirty; every subsequent write dispatch was impossible; node blocked, graph blocked, candidate stranded.
 - **Rationale for supersession:** the workspace-change receipt already attests exactly what the failed attempt changed; with delta-scoped retry (RB-01–06) the natural semantics are *retry-with-adoption* — within a node lineage, a repair's baseline is the prior attempt's receipted dirty state, classified as resumable work. Keep clean-baseline for first attempts.
 - **Action:** ride on the RB ledger (semantics change, not a bare default-flip); converts the hand-patched `allow_dirty_baseline=True` + "adopt prior work" instruction (commit `169ffb1`) into mechanism.
-- **Status:** open — highest value, needs RB integration design.
+- **Status:** open — highest value, needs RB integration design. **Massively reconfirmed 2026-08-12** by the flow-editor-authoring audit (see §Flow-editor audit below): the operator's launcher hand-implements candidate lineage by pinning `FR20_RECOVERY_WORKTREE` to a prior attempt's worktree and prompting "FIRST ACTION: byte-copy and verify every changed path from the retained pg97 FR-20 worktree… preserve every retained file byte-for-byte." Per-node hand-authored adoption prompts exist for FR-02A, FR-02B, FR-15, and FR-20. This is the RB retry-with-adoption mechanism, implemented as prose, per node, by hand, across 101 graph attempts.
 
 ### 6. Unreferencable failed dispatches — mint provenance for rejections
 
@@ -58,6 +58,53 @@ Every entry below cites the run evidence that qualified it. New entries need the
 - **Evidence:** exp-1 coordinator could not even *cite the repair failure* in its next command's reason, because the rejected dispatch never minted a referencable identity — though the rejection is already a journal event.
 - **Action:** let rejected/failed dispatches be referencable provenance (they exist in the hash chain regardless).
 - **Status:** open — minor.
+
+## Flow-editor authoring PlanGraph audit (2026-08-12)
+
+**Subject:** `FLOW_EDITOR_AUTHORING_AND_NODE_EXECUTION_UX_PLANGRAPH.json` (15 nodes FR-00 → FR-30, Retinology repo), executing in `/Users/kirillzaslavsky/Documents/retinology-flow-authoring-plangraph-audit/`. At audit time the graph is on **FR-20** (integration certification), attempt **pg101**, live. Attempts pg2 → pg101: **101 whole-graph relaunches**, 232 run-log directories. FR-20 alone consumed at least 16 attempts (pg85–pg101); every terminal FR-20 attempt ended `blocked`.
+
+**How each FR-20 attempt dies** (from node journals `logs/runs/*-FR-20/{events.jsonl,manifest.json,artifacts}`):
+
+| Class | Attempts | Detail |
+|---|---|---|
+| Real defect, repair budget exhausted | pg89, pg90, pg96, pg97, pg99 | 1–4 failing tests out of ~733; one repair permitted; repair fixes test A and test B fails → `declared verification command still fails after repair budget` → node blocked |
+| Environmental / flaky gate | pg85 (timeout 7200s), pg87, pg94, pg98 (SIGTERM), pg91, pg92, pg93 (`FAIL walk driver`, all pytest green) | live-browser walk drivers inside the "deterministic" verification command; failure charged against the same single repair budget |
+| Contract dead-end | pg88 | coordinator finished implementation, then blocked itself: criteria require verification/review gates, but "this build segment is explicitly prohibited from dispatching verification-only tasks or rerunning that command" |
+| Infra before session | pg95, pg100 | `coordinator segment build failed before session start`; crash with no manifest |
+
+In pg99 the run view shows **all four acceptance criteria `satisfied`** and `run_status: succeeded` — then the node blocks on the verification stage and the 733/734-passing candidate is stranded with no lineage. The only recovery the harness offers is relaunching the whole graph; checkpoint replay makes FR-00–FR-15 free, but FR-20 restarts from FR-15's candidate unless the operator hand-carries the prior tree (see item 5 evidence).
+
+### New worklist items from this audit
+
+### 7. Scalar verification-repair budget — delta-scope it (companion to item 5)
+
+- **Where:** `verification_repair_limit=2 if run_id == "FR-10" else 1` in the operator's launcher; harness treats the limit as a frozen scalar per node.
+- **Evidence:** five attempts blocked with a single-digit failing-test count out of ~733. The budget has no relationship to failure size or to whether repairs are converging. The repair seesaw (pg99: repair fixes `test_fr20_node_run_uses_effective_lock_and_selected_identity`, then `test_node_run_uses_served_node_lock_and_selected_revision_identity` fails) is exactly one repair short of convergence, repeatedly.
+- **Action:** make the repair budget delta-scoped on the RB ledger: a repair that strictly shrinks the failing set renews the budget; only non-monotone or stagnant repairs consume it. Blocked-by-verification nodes must be resumable in place (same candidate, same lineage) instead of forcing a graph relaunch.
+- **Status:** open — this plus item 5 would have collapsed pg85–pg101 into a handful of attempts.
+
+### 8. Environmental failures charged as repair failures — classify before charging
+
+- **Where:** deterministic-verification stage; exit 124 (timeout), 143/-15 (SIGTERM), and browser walk-driver crashes all consume the repair budget and block the node.
+- **Evidence:** seven of fourteen terminal FR-20 attempts died on timeout/SIGTERM/walk-driver failures with pytest fully green. A repair executor was dispatched to "fix" an environmental failure it cannot fix.
+- **Action:** classify verification failures before charging: nonzero-exit-with-failing-tests → repairable; timeout/signal/driver-crash → retryable environment fault, re-run the gate without consuming repair budget (bounded retry count). Additionally allow a decomposed verification contract — the FR-20 command serializes full pytest + two runtime smokes + four live-browser walks + UI-graph gate + PHI scan into one 7,200-second `bash -lc` string, so any single flake voids the whole certification; per-gate argv with per-gate retry/repair semantics removes that coupling without weakening any gate.
+- **Status:** open.
+
+### 9. Cross-node finding-obligation transfer exists only as prose
+
+- **Where:** operator launcher: "left is browser evidence, uniquely owned downstream by FR-20", "PlanGraph transfer it to the nearest unique downstream owner (FR-20)", plus a one-path grant "This one-path grant repairs the frozen ownership defect".
+- **Evidence:** when a finding's only fix lives outside the discovering node's `allowed_paths`, the harness has no transfer mechanism; the operator routes obligations between nodes by editing prompt text, and patches path-ownership defects with hand-written single-path grants.
+- **Action:** first-class obligation transfer: a blocked finding names a target node; the graph attaches it to that node's inherited findings with provenance. Related to item 3 (narrowing) — both are "the coordinator can see the right move but the contract has no verb for it."
+- **Status:** open.
+
+### 10. Build segment cannot dispatch verification-only work — dead-end when only verification remains
+
+- **Where:** phase/segment dispatch policy; pg88 block reason quoted above.
+- **Evidence:** implementation and the summary artifact were complete, no findings pending; the remaining criteria were pure gate criteria. The coordinator's only legal move was `run.block_request` — a mandatory dead-end followed by a full graph relaunch.
+- **Action:** either let the kernel auto-advance to its own verification stage when the coordinator declares build-complete (it already owns the gate), or permit verification-scoped dispatches in the build segment. Nothing is defended by forcing the block.
+- **Status:** open.
+
+**Also observed, tracked under existing items:** item 2 recurrences (four+ attempts burned turns on `unknown task criterion: AC-FR20-1: <full text>`); item 5 at scale (hand-maintained 1,100-line launcher whose main content is per-node adoption/recovery prose — pinned recovery worktrees, "copy its exact eleven changed paths", per-attempt defect pinning).
 
 ## Explicit keep-list (earned their cost this run)
 
@@ -79,3 +126,4 @@ The originating defect of the blocked run was an **absence** of contract: the se
 ## Change log
 
 - **2026-08-12** — document created from the orbit experiment diagnosis; all items open; RB-01–06 noted as merged baseline.
+- **2026-08-12 (later)** — flow-editor-authoring PlanGraph audit (Retinology, FR-20, attempts pg2–pg101): items 2 and 5 independently reconfirmed at scale; items 7–10 added (delta-scoped repair budget, environmental-failure classification, obligation transfer, build-segment verification dead-end). Item 5 + 7 jointly identified as the dominant cost driver — 101 whole-graph relaunches with hand-carried candidate lineage.
