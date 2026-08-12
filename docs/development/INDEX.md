@@ -4,6 +4,8 @@ Status: active
 
 ## Current direction
 
+- Contract-burden reduction (living): [`contract-burden-reduction.md`](contract-burden-reduction.md)
+
 - Next milestone: [`NEXT_STEPS.md`](NEXT_STEPS.md)
 - Harness contract: [`../architecture/harness-contract.md`](../architecture/harness-contract.md)
 - Context contract: [`../architecture/context-engineering.md`](../architecture/context-engineering.md)
