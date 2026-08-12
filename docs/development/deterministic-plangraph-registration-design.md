@@ -1,5 +1,7 @@
 # Deterministic PlanGraph Registration — Minimal Design
 
+Status: active
+
 ## Purpose
 
 PlanGraph must register its complete executable graph before creating an attempt

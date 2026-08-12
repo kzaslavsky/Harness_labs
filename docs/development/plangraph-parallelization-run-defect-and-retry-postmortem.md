@@ -1,5 +1,7 @@
 # PlanGraph Parallelization Run: Defect, Recovery, Retry, and Cost Postmortem
 
+Status: complete
+
 ## Bottom line
 
 The run exposed:
