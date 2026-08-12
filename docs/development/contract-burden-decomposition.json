@@ -1,0 +1,466 @@
+{
+  "acceptance_criteria": {
+    "AC-CB01-1": "task.dispatch accepts acceptance_criteria entries of the form \"<id>\" or \"<id>: <text>\"; both resolve to the same declared criterion id, and an id unknown to the contract is still rejected.",
+    "AC-CB01-2": "a superseding or repair dispatch may declare required_capabilities that are a strict subset of the superseded task's capabilities; widening or disjoint capability sets are still rejected as frozen-authority violations, and details_schema remains frozen.",
+    "AC-CB01-3": "the controller kernel accepts criterion source \"plan\" alongside operator, repository, and coordinator, and tests/test_feature_run.py exercises the real kernel criterion path with a kernel-valid source instead of mocking past it.",
+    "AC-CB01-4": "a rejected task.dispatch mints a referencable provenance identity recorded in the audit journal, and a later command citing that identity passes provenance validation.",
+    "AC-CB01-5": "tests/test_relax_kernel.py fails against the frozen base harness and passes on the candidate, and the kernel and feature-run regression suites pass on the candidate.",
+    "AC-CB02-1": "validate_plan_graph_plan accepts a decomposition whose cited plan sections describe each run without containing the run objective or the criterion statements verbatim.",
+    "AC-CB02-2": "the validator still rejects unknown plan-section keys, criteria assigned to no run or to an unknown run, unknown or cyclic dependencies, empty allowed_paths, and path intents outside allowed_paths.",
+    "AC-CB02-3": "tests/test_relax_plan_gates.py fails against the frozen base harness and passes on the candidate, and the plan-graph regression suite passes on the candidate.",
+    "AC-CB03-1": "classify_verification_failure classifies a timed-out command result and a signal-terminated exit as environment_retryable with distinct rule identifiers, using the structured timed_out and exit_code evidence rather than output text alone.",
+    "AC-CB03-2": "the deterministic verification loop retries environment_retryable failures within a bounded, audited environment-retry allowance without dispatching a repair executor and without consuming the repair budget.",
+    "AC-CB03-3": "product-classified failures consume the repair budget exactly as before, and the classification of every failure is recorded in the audit journal.",
+    "AC-CB03-4": "tests/test_relax_verification_classes.py fails against the frozen base harness and passes on the candidate, and the feature-run regression suite passes on the candidate.",
+    "AC-CB04-1": "the verification loop extracts a stable failing-identifier set from each failed command result, and a repair whose rerun produces a strictly smaller non-empty failing set does not count against the declared repair limit.",
+    "AC-CB04-2": "a repair whose rerun produces an equal, larger, or non-comparable failing set consumes the repair limit as before, and total repair dispatches are bounded by a hard cap recorded in the audit journal.",
+    "AC-CB04-3": "a two-step convergence in which the first repair fixes one failing test and surfaces another, and the second repair fixes the remainder, completes with a declared repair limit of one on the candidate harness and blocks on the base harness.",
+    "AC-CB04-4": "tests/test_relax_delta_repair.py fails against the frozen base harness and passes on the candidate, and the feature-run regression suite passes on the candidate.",
+    "AC-CB05-1": "a writable executor preflight accepts a dirty baseline when the controller supplies an adoption grant naming the prior attempt's workspace-change receipt and every dirty path is covered by the receipted change set or the task's writable paths.",
+    "AC-CB05-2": "a dirty baseline without an adoption grant, or with dirty paths outside the receipted set, is still refused with the existing clean-baseline message.",
+    "AC-CB05-3": "verification-repair and review-fix dispatches launched by the feature run supply the adoption grant automatically from the prior attempt's workspace-change receipt, and the grant is recorded in the audit journal.",
+    "AC-CB05-4": "tests/test_relax_adoption.py fails against the frozen base harness and passes on the candidate, and the executor and controller-live regression suites pass on the candidate.",
+    "AC-CB06-1": "a run-contract criterion may declare deterministic-verification adjudication, and the kernel marks such a criterion satisfied from the verification owner's passing command evidence rather than from a coordinator claim.",
+    "AC-CB06-2": "the plan-graph bound completion path accepts a coordinator completion request when every non-gate criterion is satisfied and gate-backed criteria are pending, and the run reaches a successful terminal status only after the controller-owned command passes.",
+    "AC-CB06-3": "a coordinator claim that attempts to satisfy a gate-backed criterion directly is rejected by the kernel.",
+    "AC-CB06-4": "tests/test_relax_gate_criteria.py fails against the frozen base harness and passes on the candidate, and the kernel and feature-run regression suites pass on the candidate.",
+    "AC-CB07-1": "a structured worker result whose summary or deliverable fields are placeholder content \u2014 sub-minimal length, a known placeholder token such as \"test\", \"todo\", or \"n/a\", or a single repeated token \u2014 is refused at the executor boundary with an audited classified refusal.",
+    "AC-CB07-2": "the floor is a closed deterministic rule set in harness_labs/deliverable_floor.py with no model judgment, and substantive worker results pass unchanged.",
+    "AC-CB07-3": "tests/test_relax_semantic_floor.py fails against the frozen base harness because the placeholder result is accepted there, passes on the candidate because it is refused, and the executor regression suite passes on the candidate."
+  },
+  "functionality_tests": [
+    {
+      "argv": [
+        "python3",
+        "-m",
+        "pytest",
+        "tests/",
+        "-q"
+      ],
+      "required_paths": [
+        {
+          "availability": "base",
+          "path": "tests/__init__.py"
+        }
+      ],
+      "timeout_seconds": 3600
+    }
+  ],
+  "plan": "docs/development/CONTRACT_BURDEN_RELAXATION_PLAN.md",
+  "plan_sections": {
+    "CB-01": "## CB-01 \u2014 Kernel dispatch relaxations\n\nObjective: Relax four mechanical dispatch-time rejections in the controller kernel \u2014 criterion-id parsing, capability narrowing, the criterion-source enum, and rejected-dispatch provenance \u2014 without weakening any authority the kernel actually enforces.\n\nDiagnosis items 2, 3, 4, 6. Evidence: `unknown task criterion: AC-\u2026` burned\ncoordinator turns in both orbit graph attempts and at least four flow-editor\nFR-20 attempts (pg85/90/98/99); a read-only salvage dispatch (`repo.read` \u2282\n`repo.read, repo.write`) was refused as a frozen-authority change; the\n`\"approved-plan\"` criterion source crashed a live launch; a rejected repair\ndispatch could not even be cited as provenance.\n\nAcceptance criteria:\n\n- AC-CB01-1: task.dispatch accepts acceptance_criteria entries of the form \"<id>\" or \"<id>: <text>\"; both resolve to the same declared criterion id, and an id unknown to the contract is still rejected.\n- AC-CB01-2: a superseding or repair dispatch may declare required_capabilities that are a strict subset of the superseded task's capabilities; widening or disjoint capability sets are still rejected as frozen-authority violations, and details_schema remains frozen.\n- AC-CB01-3: the controller kernel accepts criterion source \"plan\" alongside operator, repository, and coordinator, and tests/test_feature_run.py exercises the real kernel criterion path with a kernel-valid source instead of mocking past it.\n- AC-CB01-4: a rejected task.dispatch mints a referencable provenance identity recorded in the audit journal, and a later command citing that identity passes provenance validation.\n- AC-CB01-5: tests/test_relax_kernel.py fails against the frozen base harness and passes on the candidate, and the kernel and feature-run regression suites pass on the candidate.",
+    "CB-02": "## CB-02 \u2014 Plan-gate relaxation\n\nObjective: Remove the verbatim-substring plan gates from PlanGraph plan validation while preserving every referential integrity check the validator performs.\n\nDiagnosis item 1. Evidence: registration rejected a valid engineered plan until\n`assemble_decomposition` mechanically appended objective and criterion strings\nto the cited sections \u2014 zero semantic change, pure compliance transformation.\n\nAcceptance criteria:\n\n- AC-CB02-1: validate_plan_graph_plan accepts a decomposition whose cited plan sections describe each run without containing the run objective or the criterion statements verbatim.\n- AC-CB02-2: the validator still rejects unknown plan-section keys, criteria assigned to no run or to an unknown run, unknown or cyclic dependencies, empty allowed_paths, and path intents outside allowed_paths.\n- AC-CB02-3: tests/test_relax_plan_gates.py fails against the frozen base harness and passes on the candidate, and the plan-graph regression suite passes on the candidate.",
+    "CB-03": "## CB-03 \u2014 Verification failure classification\n\nObjective: Extend deterministic verification failure classification so timeouts, signal terminations, and browser or driver crashes are explicitly classified, and environment-class failures never consume the verification repair budget.\n\nDiagnosis item 8. Evidence: seven of fourteen terminal flow-editor FR-20\nattempts died on timeout (exit 124), SIGTERM (143 / \u221215), or a browser\nwalk-driver crash with pytest fully green; each charged the single repair\nallowance and blocked the node.\n\nAcceptance criteria:\n\n- AC-CB03-1: classify_verification_failure classifies a timed-out command result and a signal-terminated exit as environment_retryable with distinct rule identifiers, using the structured timed_out and exit_code evidence rather than output text alone.\n- AC-CB03-2: the deterministic verification loop retries environment_retryable failures within a bounded, audited environment-retry allowance without dispatching a repair executor and without consuming the repair budget.\n- AC-CB03-3: product-classified failures consume the repair budget exactly as before, and the classification of every failure is recorded in the audit journal.\n- AC-CB03-4: tests/test_relax_verification_classes.py fails against the frozen base harness and passes on the candidate, and the feature-run regression suite passes on the candidate.",
+    "CB-04": "## CB-04 \u2014 Delta-scoped verification repair budget\n\nObjective: Delta-scope the verification repair budget so a repair attempt that strictly shrinks the observed failure evidence renews the repair allowance, while non-improving repairs consume it and the loop remains bounded by a hard audited cap.\n\nDiagnosis item 7. Evidence: five FR-20 attempts blocked with a single-digit\nfailing-test count out of ~733 under `verification_repair_limit=1`; the pg99\nseesaw (repair fixes test A, test B fails, one repair short of convergence)\nrepeated across attempts.\n\nAcceptance criteria:\n\n- AC-CB04-1: the verification loop extracts a stable failing-identifier set from each failed command result, and a repair whose rerun produces a strictly smaller non-empty failing set does not count against the declared repair limit.\n- AC-CB04-2: a repair whose rerun produces an equal, larger, or non-comparable failing set consumes the repair limit as before, and total repair dispatches are bounded by a hard cap recorded in the audit journal.\n- AC-CB04-3: a two-step convergence in which the first repair fixes one failing test and surfaces another, and the second repair fixes the remainder, completes with a declared repair limit of one on the candidate harness and blocks on the base harness.\n- AC-CB04-4: tests/test_relax_delta_repair.py fails against the frozen base harness and passes on the candidate, and the feature-run regression suite passes on the candidate.",
+    "CB-05": "## CB-05 \u2014 Retry-with-adoption for writable dispatches\n\nObjective: Let a repair or superseding writable dispatch adopt the receipted dirty baseline left by a failed prior attempt in the same run, converting the constructor-frozen allow_dirty_baseline escape hatch into an audited runtime adoption grant.\n\nDiagnosis item 5 \u2014 highest value. Evidence: orbit exp-1's gate-passing candidate\nwas stranded behind `writable worker requires a clean repository baseline`; the\nflow-editor launcher hand-implements adoption in prose (\"FIRST ACTION:\nbyte-copy every changed path from the retained pg97 FR-20 worktree\u2026\") across\n101 graph attempts.\n\nAcceptance criteria:\n\n- AC-CB05-1: a writable executor preflight accepts a dirty baseline when the controller supplies an adoption grant naming the prior attempt's workspace-change receipt and every dirty path is covered by the receipted change set or the task's writable paths.\n- AC-CB05-2: a dirty baseline without an adoption grant, or with dirty paths outside the receipted set, is still refused with the existing clean-baseline message.\n- AC-CB05-3: verification-repair and review-fix dispatches launched by the feature run supply the adoption grant automatically from the prior attempt's workspace-change receipt, and the grant is recorded in the audit journal.\n- AC-CB05-4: tests/test_relax_adoption.py fails against the frozen base harness and passes on the candidate, and the executor and controller-live regression suites pass on the candidate.",
+    "CB-06": "## CB-06 \u2014 Gate-backed criteria adjudication\n\nObjective: Let the controller kernel adjudicate gate-backed acceptance criteria from its own deterministic verification outcome, so a build coordinator is never forced to block a completed implementation merely because gate evidence remains pending.\n\nDiagnosis item 10. Evidence: flow-editor pg88 \u2014 implementation and summary\ncomplete, no findings pending, yet the coordinator's only legal move was\n`run.block_request` because the remaining criteria required the verification,\nbrowser, and review gates the build segment is prohibited from dispatching.\n\nAcceptance criteria:\n\n- AC-CB06-1: a run-contract criterion may declare deterministic-verification adjudication, and the kernel marks such a criterion satisfied from the verification owner's passing command evidence rather than from a coordinator claim.\n- AC-CB06-2: the plan-graph bound completion path accepts a coordinator completion request when every non-gate criterion is satisfied and gate-backed criteria are pending, and the run reaches a successful terminal status only after the controller-owned command passes.\n- AC-CB06-3: a coordinator claim that attempts to satisfy a gate-backed criterion directly is rejected by the kernel.\n- AC-CB06-4: tests/test_relax_gate_criteria.py fails against the frozen base harness and passes on the candidate, and the kernel and feature-run regression suites pass on the candidate.",
+    "CB-07": "## CB-07 \u2014 Semantic deliverable floor\n\nObjective: Add a minimal deterministic deliverable-content gate at the semantic task executor boundary so placeholder worker output is refused mechanically instead of relying on coordinator judgment alone.\n\nThe diagnosis counterweight. Evidence: orbit exp-1's originating defect \u2014\n`\"summary\": \"test\"` passed the typed contract (`minLength: 1`) and only the\ncoordinator's judgment refused it, which then cascaded into the clean-baseline\ndead-end.\n\nAcceptance criteria:\n\n- AC-CB07-1: a structured worker result whose summary or deliverable fields are placeholder content \u2014 sub-minimal length, a known placeholder token such as \"test\", \"todo\", or \"n/a\", or a single repeated token \u2014 is refused at the executor boundary with an audited classified refusal.\n- AC-CB07-2: the floor is a closed deterministic rule set in harness_labs/deliverable_floor.py with no model judgment, and substantive worker results pass unchanged.\n- AC-CB07-3: tests/test_relax_semantic_floor.py fails against the frozen base harness because the placeholder result is accepted there, passes on the candidate because it is refused, and the executor regression suite passes on the candidate."
+  },
+  "protocol": "plan-graph-plan/1",
+  "referenced_artifacts": [
+    "docs/development/contract-burden-reduction.md",
+    "scripts/dev/red_green_check.py"
+  ],
+  "runs": [
+    {
+      "allowed_paths": [
+        "harness_labs/controller_kernel.py",
+        "tests/test_relax_kernel.py",
+        "tests/test_controller_kernel.py",
+        "tests/test_feature_run.py"
+      ],
+      "criteria": [
+        "AC-CB01-1",
+        "AC-CB01-2",
+        "AC-CB01-3",
+        "AC-CB01-4",
+        "AC-CB01-5"
+      ],
+      "depends_on": [],
+      "id": "CB-01",
+      "objective": "Relax four mechanical dispatch-time rejections in the controller kernel \u2014 criterion-id parsing, capability narrowing, the criterion-source enum, and rejected-dispatch provenance \u2014 without weakening any authority the kernel actually enforces.",
+      "path_intents": [
+        {
+          "action": "modify",
+          "path": "harness_labs/controller_kernel.py"
+        },
+        {
+          "action": "create",
+          "path": "tests/test_relax_kernel.py"
+        },
+        {
+          "action": "modify",
+          "path": "tests/test_controller_kernel.py"
+        },
+        {
+          "action": "modify",
+          "path": "tests/test_feature_run.py"
+        }
+      ],
+      "plan_sections": [
+        "CB-01"
+      ],
+      "verification_argv": [
+        "python3",
+        "scripts/dev/red_green_check.py",
+        "--base",
+        "6fb1fd1c748d65c65d06b3a115887e9045f3e5d0",
+        "--finding-tests",
+        "tests/test_relax_kernel.py",
+        "--regression",
+        "tests/test_controller_kernel.py",
+        "tests/test_feature_run.py"
+      ],
+      "verification_required_paths": [
+        {
+          "availability": "base",
+          "path": "scripts/dev/red_green_check.py"
+        }
+      ],
+      "verification_timeout_seconds": 1800
+    },
+    {
+      "allowed_paths": [
+        "harness_labs/plan_graph.py",
+        "tests/test_relax_plan_gates.py",
+        "tests/test_plan_graph.py"
+      ],
+      "criteria": [
+        "AC-CB02-1",
+        "AC-CB02-2",
+        "AC-CB02-3"
+      ],
+      "depends_on": [
+        "CB-01"
+      ],
+      "id": "CB-02",
+      "objective": "Remove the verbatim-substring plan gates from PlanGraph plan validation while preserving every referential integrity check the validator performs.",
+      "path_intents": [
+        {
+          "action": "modify",
+          "path": "harness_labs/plan_graph.py"
+        },
+        {
+          "action": "create",
+          "path": "tests/test_relax_plan_gates.py"
+        },
+        {
+          "action": "modify",
+          "path": "tests/test_plan_graph.py"
+        }
+      ],
+      "plan_sections": [
+        "CB-02"
+      ],
+      "verification_argv": [
+        "python3",
+        "scripts/dev/red_green_check.py",
+        "--base",
+        "6fb1fd1c748d65c65d06b3a115887e9045f3e5d0",
+        "--finding-tests",
+        "tests/test_relax_plan_gates.py",
+        "--regression",
+        "tests/test_plan_graph.py"
+      ],
+      "verification_required_paths": [
+        {
+          "availability": "base",
+          "path": "scripts/dev/red_green_check.py"
+        }
+      ],
+      "verification_timeout_seconds": 1800
+    },
+    {
+      "allowed_paths": [
+        "harness_labs/feature_run.py",
+        "tests/test_relax_verification_classes.py",
+        "tests/test_feature_run.py"
+      ],
+      "criteria": [
+        "AC-CB03-1",
+        "AC-CB03-2",
+        "AC-CB03-3",
+        "AC-CB03-4"
+      ],
+      "depends_on": [
+        "CB-02"
+      ],
+      "id": "CB-03",
+      "objective": "Extend deterministic verification failure classification so timeouts, signal terminations, and browser or driver crashes are explicitly classified, and environment-class failures never consume the verification repair budget.",
+      "path_intents": [
+        {
+          "action": "modify",
+          "path": "harness_labs/feature_run.py"
+        },
+        {
+          "action": "create",
+          "path": "tests/test_relax_verification_classes.py"
+        },
+        {
+          "action": "modify",
+          "path": "tests/test_feature_run.py"
+        }
+      ],
+      "plan_sections": [
+        "CB-03"
+      ],
+      "verification_argv": [
+        "python3",
+        "scripts/dev/red_green_check.py",
+        "--base",
+        "6fb1fd1c748d65c65d06b3a115887e9045f3e5d0",
+        "--finding-tests",
+        "tests/test_relax_verification_classes.py",
+        "--regression",
+        "tests/test_feature_run.py"
+      ],
+      "verification_required_paths": [
+        {
+          "availability": "base",
+          "path": "scripts/dev/red_green_check.py"
+        }
+      ],
+      "verification_timeout_seconds": 1800
+    },
+    {
+      "allowed_paths": [
+        "harness_labs/feature_run.py",
+        "tests/test_relax_delta_repair.py",
+        "tests/test_feature_run.py"
+      ],
+      "criteria": [
+        "AC-CB04-1",
+        "AC-CB04-2",
+        "AC-CB04-3",
+        "AC-CB04-4"
+      ],
+      "depends_on": [
+        "CB-03"
+      ],
+      "id": "CB-04",
+      "objective": "Delta-scope the verification repair budget so a repair attempt that strictly shrinks the observed failure evidence renews the repair allowance, while non-improving repairs consume it and the loop remains bounded by a hard audited cap.",
+      "path_intents": [
+        {
+          "action": "modify",
+          "path": "harness_labs/feature_run.py"
+        },
+        {
+          "action": "create",
+          "path": "tests/test_relax_delta_repair.py"
+        },
+        {
+          "action": "modify",
+          "path": "tests/test_feature_run.py"
+        }
+      ],
+      "plan_sections": [
+        "CB-04"
+      ],
+      "verification_argv": [
+        "python3",
+        "scripts/dev/red_green_check.py",
+        "--base",
+        "6fb1fd1c748d65c65d06b3a115887e9045f3e5d0",
+        "--finding-tests",
+        "tests/test_relax_delta_repair.py",
+        "--regression",
+        "tests/test_feature_run.py"
+      ],
+      "verification_required_paths": [
+        {
+          "availability": "base",
+          "path": "scripts/dev/red_green_check.py"
+        }
+      ],
+      "verification_timeout_seconds": 1800
+    },
+    {
+      "allowed_paths": [
+        "harness_labs/claude_task_executor.py",
+        "harness_labs/controller_live.py",
+        "harness_labs/feature_run.py",
+        "tests/test_relax_adoption.py",
+        "tests/test_claude_task_executor.py",
+        "tests/test_controller_live.py"
+      ],
+      "criteria": [
+        "AC-CB05-1",
+        "AC-CB05-2",
+        "AC-CB05-3",
+        "AC-CB05-4"
+      ],
+      "depends_on": [
+        "CB-04"
+      ],
+      "id": "CB-05",
+      "objective": "Let a repair or superseding writable dispatch adopt the receipted dirty baseline left by a failed prior attempt in the same run, converting the constructor-frozen allow_dirty_baseline escape hatch into an audited runtime adoption grant.",
+      "path_intents": [
+        {
+          "action": "modify",
+          "path": "harness_labs/claude_task_executor.py"
+        },
+        {
+          "action": "modify",
+          "path": "harness_labs/controller_live.py"
+        },
+        {
+          "action": "modify",
+          "path": "harness_labs/feature_run.py"
+        },
+        {
+          "action": "create",
+          "path": "tests/test_relax_adoption.py"
+        },
+        {
+          "action": "modify",
+          "path": "tests/test_claude_task_executor.py"
+        },
+        {
+          "action": "modify",
+          "path": "tests/test_controller_live.py"
+        }
+      ],
+      "plan_sections": [
+        "CB-05"
+      ],
+      "verification_argv": [
+        "python3",
+        "scripts/dev/red_green_check.py",
+        "--base",
+        "6fb1fd1c748d65c65d06b3a115887e9045f3e5d0",
+        "--finding-tests",
+        "tests/test_relax_adoption.py",
+        "--regression",
+        "tests/test_claude_task_executor.py",
+        "tests/test_controller_live.py",
+        "tests/test_feature_run.py"
+      ],
+      "verification_required_paths": [
+        {
+          "availability": "base",
+          "path": "scripts/dev/red_green_check.py"
+        }
+      ],
+      "verification_timeout_seconds": 1800
+    },
+    {
+      "allowed_paths": [
+        "harness_labs/controller_kernel.py",
+        "harness_labs/feature_run.py",
+        "tests/test_relax_gate_criteria.py",
+        "tests/test_controller_kernel.py",
+        "tests/test_feature_run.py"
+      ],
+      "criteria": [
+        "AC-CB06-1",
+        "AC-CB06-2",
+        "AC-CB06-3",
+        "AC-CB06-4"
+      ],
+      "depends_on": [
+        "CB-05"
+      ],
+      "id": "CB-06",
+      "objective": "Let the controller kernel adjudicate gate-backed acceptance criteria from its own deterministic verification outcome, so a build coordinator is never forced to block a completed implementation merely because gate evidence remains pending.",
+      "path_intents": [
+        {
+          "action": "modify",
+          "path": "harness_labs/controller_kernel.py"
+        },
+        {
+          "action": "modify",
+          "path": "harness_labs/feature_run.py"
+        },
+        {
+          "action": "create",
+          "path": "tests/test_relax_gate_criteria.py"
+        },
+        {
+          "action": "modify",
+          "path": "tests/test_controller_kernel.py"
+        },
+        {
+          "action": "modify",
+          "path": "tests/test_feature_run.py"
+        }
+      ],
+      "plan_sections": [
+        "CB-06"
+      ],
+      "verification_argv": [
+        "python3",
+        "scripts/dev/red_green_check.py",
+        "--base",
+        "6fb1fd1c748d65c65d06b3a115887e9045f3e5d0",
+        "--finding-tests",
+        "tests/test_relax_gate_criteria.py",
+        "--regression",
+        "tests/test_controller_kernel.py",
+        "tests/test_feature_run.py"
+      ],
+      "verification_required_paths": [
+        {
+          "availability": "base",
+          "path": "scripts/dev/red_green_check.py"
+        }
+      ],
+      "verification_timeout_seconds": 1800
+    },
+    {
+      "allowed_paths": [
+        "harness_labs/deliverable_floor.py",
+        "harness_labs/claude_task_executor.py",
+        "tests/test_relax_semantic_floor.py",
+        "tests/test_claude_task_executor.py"
+      ],
+      "criteria": [
+        "AC-CB07-1",
+        "AC-CB07-2",
+        "AC-CB07-3"
+      ],
+      "depends_on": [
+        "CB-06"
+      ],
+      "id": "CB-07",
+      "objective": "Add a minimal deterministic deliverable-content gate at the semantic task executor boundary so placeholder worker output is refused mechanically instead of relying on coordinator judgment alone.",
+      "path_intents": [
+        {
+          "action": "create",
+          "path": "harness_labs/deliverable_floor.py"
+        },
+        {
+          "action": "modify",
+          "path": "harness_labs/claude_task_executor.py"
+        },
+        {
+          "action": "create",
+          "path": "tests/test_relax_semantic_floor.py"
+        },
+        {
+          "action": "modify",
+          "path": "tests/test_claude_task_executor.py"
+        }
+      ],
+      "plan_sections": [
+        "CB-07"
+      ],
+      "verification_argv": [
+        "python3",
+        "scripts/dev/red_green_check.py",
+        "--base",
+        "6fb1fd1c748d65c65d06b3a115887e9045f3e5d0",
+        "--finding-tests",
+        "tests/test_relax_semantic_floor.py",
+        "--regression",
+        "tests/test_claude_task_executor.py"
+      ],
+      "verification_required_paths": [
+        {
+          "availability": "base",
+          "path": "scripts/dev/red_green_check.py"
+        }
+      ],
+      "verification_timeout_seconds": 1800
+    }
+  ]
+}
