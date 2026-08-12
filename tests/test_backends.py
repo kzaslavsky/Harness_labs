@@ -14,6 +14,7 @@ from unittest.mock import patch
 from harness_labs import (
     AuditActor,
     AuditJournal,
+    ClaudePrintBackend,
     CodexExecBackend,
     OmlxBackend,
     PoemBackend,
@@ -72,6 +73,91 @@ class BackendTests(unittest.TestCase):
 
         with self.assertRaisesRegex(TextBackendError, "backend unavailable"):
             CodexExecBackend().generate("task", {})
+
+    @patch("harness_labs.backends.shutil.which", return_value="/fake/claude")
+    @patch("harness_labs.backends.subprocess.run")
+    def test_claude_backend_invokes_isolated_toolless_cli(
+        self,
+        run_mock,
+        which_mock,
+    ) -> None:
+        run_mock.return_value = subprocess.CompletedProcess(
+            ["/fake/claude"],
+            0,
+            json.dumps(
+                {
+                    "type": "result",
+                    "subtype": "success",
+                    "is_error": False,
+                    "result": "A generated poem.",
+                    "usage": {
+                        "input_tokens": 10,
+                        "cache_read_input_tokens": 5,
+                        "cache_creation_input_tokens": 100,
+                        "output_tokens": 50,
+                    },
+                    "total_cost_usd": 0.01,
+                }
+            ),
+            "",
+        )
+
+        backend = ClaudePrintBackend()
+        text = backend.generate(
+            "write a poem about the operator",
+            {"subject": "the operator"},
+        )
+
+        self.assertEqual(text, "A generated poem.")
+        argv = run_mock.call_args.args[0]
+        prompt = run_mock.call_args.kwargs["input"]
+        self.assertIn("-p", argv)
+        self.assertEqual(argv[argv.index("--output-format") + 1], "json")
+        self.assertEqual(argv[argv.index("--tools") + 1], "")
+        self.assertEqual(argv[argv.index("--setting-sources") + 1], "")
+        self.assertIn("--strict-mcp-config", argv)
+        self.assertIn("--no-session-persistence", argv)
+        self.assertIn("write a poem about the operator", prompt)
+        self.assertIn('"subject": "the operator"', prompt)
+        self.assertEqual(backend.last_usage.input_tokens, 115)
+        self.assertEqual(backend.last_usage.cached_input_tokens, 5)
+        self.assertEqual(backend.last_usage.output_tokens, 50)
+        which_mock.assert_called_once_with("claude")
+
+    @patch("harness_labs.backends.shutil.which", return_value="/fake/claude")
+    @patch("harness_labs.backends.subprocess.run")
+    def test_claude_backend_reports_error_envelope(
+        self, run_mock, _which_mock
+    ) -> None:
+        run_mock.return_value = subprocess.CompletedProcess(
+            ["/fake/claude"],
+            0,
+            json.dumps(
+                {
+                    "is_error": True,
+                    "result": "Not logged in · Please run /login",
+                }
+            ),
+            "",
+        )
+
+        with self.assertRaisesRegex(TextBackendError, "Not logged in"):
+            ClaudePrintBackend().generate("task", {})
+
+    @patch("harness_labs.backends.shutil.which", return_value="/fake/claude")
+    @patch("harness_labs.backends.subprocess.run")
+    def test_claude_backend_reports_nonzero_exit(
+        self, run_mock, _which_mock
+    ) -> None:
+        run_mock.return_value = subprocess.CompletedProcess(
+            ["/fake/claude"],
+            3,
+            "",
+            "backend unavailable",
+        )
+
+        with self.assertRaisesRegex(TextBackendError, "backend unavailable"):
+            ClaudePrintBackend().generate("task", {})
 
     @patch("harness_labs.backends.urllib.request.urlopen")
     def test_omlx_backend_calls_qwen_over_loopback(self, urlopen_mock) -> None:
