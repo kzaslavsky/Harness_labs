@@ -2,12 +2,12 @@
   "protocol": "plan-graph-plan/1",
   "plan": "docs/development/RETRY_BUDGET_RECOVERY_AUTHORITY_PLAN.md",
   "plan_sections": {
-    "RB-01": "Preserve obligation transfer through the production FeatureRun seam, make transfer conflicts resumable, and inventory existing recovery machinery.",
-    "RB-02": "Add a fail-closed append-only lineage retry-budget ledger with atomic reservations, cumulative accounting, crash reconciliation, and operator relief commands.",
-    "RB-03": "Classify failures and import structured verification, repair, invocation, and token evidence without duplicate counting.",
-    "RB-04": "Centralize blocked transitions, emit bounded escalation artifacts, add detached notification hooks, and expose structured terminal status flags.",
-    "RB-05": "Bind bounded recovery authority to immutable registration, validate typed recovery decisions, and support explicit plan-version transitions.",
-    "RB-06": "Add an external recovery coordinator that consumes escalation artifacts and launches fresh, allowance-bounded resume processes."
+    "RB-01": "Preserve obligation-transfer state and establish the recovery machinery inventory.",
+    "RB-02": "Implement the lineage ledger, atomic retry reservations, and operator relief commands.",
+    "RB-03": "Add failure classification and idempotent structured child-evidence accounting.",
+    "RB-04": "Centralize blocked finalization and add escalation, status, and notification contracts.",
+    "RB-05": "Bind bounded recovery authority to registration and implement typed recovery actions and plan-version transitions.",
+    "RB-06": "Implement the external recovery coordinator and prove bounded end-to-end recovery."
   },
   "acceptance_criteria": {
     "AC-RB-01": "Production obligation transfer is preserved across review recovery; transfer conflicts checkpoint verified candidates and block resumably; the recovery inventory is committed.",
