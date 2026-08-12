@@ -1,0 +1,520 @@
+"""Tests for the Claude-backed semantic worker boundary without invoking a model."""
+
+from __future__ import annotations
+
+import json
+import subprocess
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+from harness_labs.attempts import TaskAttempt
+from harness_labs.claude_task_executor import ClaudeSemanticTaskExecutor
+from harness_labs.controller_evidence import EvidenceCatalog
+from harness_labs.controller_results import validate_semantic_result
+
+
+def _raw_result(**overrides):
+    raw = {
+        "summary": "Inspection complete.",
+        "deliverable_markdown": "# Inspection\nEvidence-backed result.",
+        "details_json": json.dumps({"head": "abc"}),
+        "claims": [],
+        "findings": [],
+        "recommendations": [],
+        "unresolved_questions": [],
+        "satisfied_criteria": [],
+    }
+    raw.update(overrides)
+    return raw
+
+
+def _envelope(raw, **overrides):
+    envelope = {
+        "type": "result",
+        "subtype": "success",
+        "is_error": False,
+        "result": json.dumps(raw),
+        "structured_output": raw,
+        "usage": {
+            "input_tokens": 10,
+            "cache_read_input_tokens": 5,
+            "cache_creation_input_tokens": 100,
+            "output_tokens": 50,
+        },
+        "total_cost_usd": 0.01,
+        "permission_denials": [],
+    }
+    envelope.update(overrides)
+    return envelope
+
+
+def _snapshot(changed_paths=(), files=None):
+    return {
+        "head": "abc",
+        "branch": "feature",
+        "changed_paths": list(changed_paths),
+        "files": dict(files or {}),
+    }
+
+
+class ClaudeSemanticTaskExecutorTests(unittest.TestCase):
+    def test_repository_change_policy_requires_writable_sandbox(self) -> None:
+        with self.assertRaisesRegex(ValueError, "workspace-write"):
+            ClaudeSemanticTaskExecutor(
+                {},
+                Path("."),
+                EvidenceCatalog(),
+                "Build.",
+                require_repository_change=True,
+            )
+        with self.assertRaisesRegex(ValueError, "preflight"):
+            ClaudeSemanticTaskExecutor(
+                {},
+                Path("."),
+                EvidenceCatalog(),
+                "Verify.",
+                require_preflight_success=True,
+            )
+        with self.assertRaisesRegex(ValueError, "writable_paths"):
+            ClaudeSemanticTaskExecutor(
+                {},
+                Path("."),
+                EvidenceCatalog(),
+                "Build.",
+                sandbox="workspace-write",
+            )
+        with self.assertRaisesRegex(ValueError, "required and forbidden"):
+            ClaudeSemanticTaskExecutor(
+                {},
+                Path("."),
+                EvidenceCatalog(),
+                "Verify.",
+                sandbox="workspace-write",
+                writable_paths=("tests",),
+                require_repository_change=True,
+                forbid_repository_change=True,
+            )
+
+    def test_read_only_worker_gets_no_shell_and_produces_semantic_evidence(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repository = Path(temporary) / "repo"
+            repository.mkdir()
+            (repository / ".git").write_text("gitdir: elsewhere\n", encoding="utf-8")
+            evidence = EvidenceCatalog()
+            task = {
+                "id": "inspect",
+                "objective": "Inspect the repository",
+                "context": json.dumps({"artifact_kind": "inspection-report"}),
+                "details_schema": "inspection-details/1",
+                "acceptance_criteria": ["inspected"],
+                "required_capabilities": ["repo.read"],
+            }
+            attempt = TaskAttempt(
+                "inspect/attempt-1",
+                "task:inspect",
+                "context:inspect",
+                "profile:inspector",
+            )
+            raw = _raw_result(
+                claims=[
+                    {
+                        "id": "head",
+                        "statement": "The head is abc.",
+                        "kind": "observed",
+                    }
+                ],
+                satisfied_criteria=["inspected"],
+            )
+            prompts: list[str] = []
+            argvs: list[list[str]] = []
+
+            def run(argv, **kwargs):
+                if argv[0] == "safe-check":
+                    return subprocess.CompletedProcess(
+                        argv,
+                        0,
+                        stdout="CHECK PASSED\n",
+                        stderr="",
+                    )
+                argvs.append(argv)
+                prompts.append(kwargs["input"])
+                schema = json.loads(argv[argv.index("--json-schema") + 1])
+                finding_schema = schema["properties"]["findings"]["items"]
+                self.assertEqual(
+                    set(finding_schema["required"]),
+                    set(finding_schema["properties"]),
+                )
+                return subprocess.CompletedProcess(
+                    argv,
+                    0,
+                    stdout=json.dumps(_envelope(raw)),
+                    stderr="",
+                )
+
+            executor = ClaudeSemanticTaskExecutor(
+                task,
+                repository,
+                evidence,
+                "Inspect precisely.",
+                preflight_argv=("safe-check",),
+            )
+            with (
+                patch(
+                    "harness_labs.claude_task_executor.shutil.which",
+                    return_value="claude",
+                ),
+                patch(
+                    "harness_labs.claude_task_executor.subprocess.run",
+                    side_effect=run,
+                ),
+                patch(
+                    "harness_labs.claude_task_executor.workspace_snapshot",
+                    side_effect=(_snapshot(), _snapshot()),
+                ),
+            ):
+                result = executor.execute(attempt)
+
+            self.assertEqual(result.status, "succeeded", result.payload)
+            semantic = validate_semantic_result(
+                result,
+                expected_details_schema="inspection-details/1",
+            )
+            self.assertEqual(semantic.summary, "Inspection complete.")
+            self.assertEqual(
+                {item["kind"] for item in semantic.artifacts},
+                {"inspection-report", "verified-command-output"},
+            )
+            self.assertIn("CHECK PASSED", prompts[0])
+            self.assertIn("model-backend:claude-print", result.evidence)
+            argv = argvs[0]
+            self.assertEqual(argv[argv.index("--tools") + 1], "Read,Glob,Grep")
+            self.assertEqual(argv[argv.index("--output-format") + 1], "json")
+            self.assertEqual(argv[argv.index("--setting-sources") + 1], "")
+            self.assertIn("-p", argv)
+            self.assertIn("--no-session-persistence", argv)
+            self.assertIn("--strict-mcp-config", argv)
+            self.assertNotIn("--dangerously-skip-permissions", argv)
+            for ref in result.evidence[:2]:
+                self.assertTrue(evidence.contains(ref))
+
+    def test_read_only_worker_fails_when_repository_state_changes(self) -> None:
+        task = {
+            "id": "inspect",
+            "objective": "Inspect",
+            "context": "{}",
+            "details_schema": "inspection/1",
+            "acceptance_criteria": [],
+            "required_capabilities": ["repo.read"],
+        }
+        executor = ClaudeSemanticTaskExecutor(
+            task,
+            Path("."),
+            EvidenceCatalog(),
+            "Inspect only.",
+        )
+        snapshots = (
+            _snapshot(),
+            _snapshot(
+                changed_paths=["index.html"],
+                files={"index.html": {"kind": "file", "sha256": "bad"}},
+            ),
+        )
+
+        def run(argv, **kwargs):
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                stdout=json.dumps(_envelope(_raw_result())),
+                stderr="",
+            )
+
+        with (
+            patch(
+                "harness_labs.claude_task_executor.shutil.which",
+                return_value="claude",
+            ),
+            patch(
+                "harness_labs.claude_task_executor.subprocess.run",
+                side_effect=run,
+            ),
+            patch(
+                "harness_labs.claude_task_executor.workspace_snapshot",
+                side_effect=snapshots,
+            ),
+            patch.object(Path, "exists", return_value=True),
+        ):
+            result = executor.execute(
+                TaskAttempt(
+                    "inspect/attempt-1",
+                    "task:inspect",
+                    "context:inspect",
+                    "profile:inspector",
+                )
+            )
+        self.assertEqual(result.status, "failed")
+        self.assertIn("read-only worker changed", result.payload["error"])
+
+    def test_writable_worker_skips_permissions_and_requires_a_change(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repository = Path(temporary) / "repo"
+            repository.mkdir()
+            (repository / ".git").write_text("gitdir: elsewhere\n", encoding="utf-8")
+            task = {
+                "id": "build",
+                "objective": "Build the feature",
+                "context": json.dumps({"artifact_kind": "implementation-summary"}),
+                "details_schema": "implementation-details/1",
+                "acceptance_criteria": ["built"],
+                "required_capabilities": ["repo.write"],
+            }
+            raw = _raw_result(
+                summary="Built.",
+                deliverable_markdown="# Build\nComplete.",
+                details_json=json.dumps({"files": ["index.html"]}),
+                satisfied_criteria=["built"],
+            )
+
+            def run(argv, **kwargs):
+                self.assertEqual(
+                    argv[argv.index("--tools") + 1],
+                    "Read,Glob,Grep,Edit,Write,Bash",
+                )
+                self.assertIn("--dangerously-skip-permissions", argv)
+                return subprocess.CompletedProcess(
+                    argv,
+                    0,
+                    stdout=json.dumps(_envelope(raw)),
+                    stderr="",
+                )
+
+            evidence = EvidenceCatalog()
+            executor = ClaudeSemanticTaskExecutor(
+                task,
+                repository,
+                evidence,
+                "Build precisely.",
+                sandbox="workspace-write",
+                require_repository_change=True,
+                writable_paths=("index.html",),
+            )
+            snapshots = (
+                _snapshot(),
+                _snapshot(
+                    changed_paths=["index.html"],
+                    files={
+                        "index.html": {
+                            "kind": "file",
+                            "sha256": "deadbeef",
+                            "size_bytes": 10,
+                        }
+                    },
+                ),
+            )
+            with (
+                patch(
+                    "harness_labs.claude_task_executor.shutil.which",
+                    return_value="claude",
+                ),
+                patch(
+                    "harness_labs.claude_task_executor.subprocess.run",
+                    side_effect=run,
+                ),
+                patch(
+                    "harness_labs.claude_task_executor.workspace_snapshot",
+                    side_effect=snapshots,
+                ),
+            ):
+                result = executor.execute(
+                    TaskAttempt(
+                        "build/attempt-1",
+                        "task:build",
+                        "context:build",
+                        "profile:builder",
+                    )
+                )
+            self.assertEqual(result.status, "succeeded", result.payload)
+            semantic = validate_semantic_result(
+                result,
+                expected_details_schema="implementation-details/1",
+            )
+            self.assertEqual(
+                {item["kind"] for item in semantic.artifacts},
+                {"implementation-summary", "workspace-change-receipt"},
+            )
+
+    def test_writable_worker_fails_when_change_escapes_grant(self) -> None:
+        task = {
+            "id": "build",
+            "objective": "Build",
+            "context": "{}",
+            "details_schema": "implementation/1",
+            "acceptance_criteria": [],
+            "required_capabilities": ["repo.write"],
+        }
+        executor = ClaudeSemanticTaskExecutor(
+            task,
+            Path("."),
+            EvidenceCatalog(),
+            "Build.",
+            sandbox="workspace-write",
+            writable_paths=("src",),
+        )
+        snapshots = (
+            _snapshot(),
+            _snapshot(
+                changed_paths=["AGENTS.md"],
+                files={"AGENTS.md": {"kind": "file", "sha256": "bad"}},
+            ),
+        )
+
+        def run(argv, **kwargs):
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                stdout=json.dumps(_envelope(_raw_result())),
+                stderr="",
+            )
+
+        with (
+            patch(
+                "harness_labs.claude_task_executor.shutil.which",
+                return_value="claude",
+            ),
+            patch(
+                "harness_labs.claude_task_executor.subprocess.run",
+                side_effect=run,
+            ),
+            patch(
+                "harness_labs.claude_task_executor.workspace_snapshot",
+                side_effect=snapshots,
+            ),
+            patch.object(Path, "exists", return_value=True),
+        ):
+            result = executor.execute(
+                TaskAttempt(
+                    "build/attempt-1",
+                    "task:build",
+                    "context:build",
+                    "profile:builder",
+                )
+            )
+        self.assertEqual(result.status, "failed")
+        self.assertIn("outside its grant", result.payload["error"])
+
+    def test_error_envelope_fails_the_attempt(self) -> None:
+        task = {
+            "id": "inspect",
+            "objective": "Inspect",
+            "context": "{}",
+            "details_schema": "inspection/1",
+            "acceptance_criteria": [],
+            "required_capabilities": ["repo.read"],
+        }
+        executor = ClaudeSemanticTaskExecutor(
+            task,
+            Path("."),
+            EvidenceCatalog(),
+            "Inspect.",
+        )
+
+        def run(argv, **kwargs):
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                stdout=json.dumps(
+                    _envelope(
+                        _raw_result(),
+                        is_error=True,
+                        result="Not logged in",
+                        structured_output=None,
+                    )
+                ),
+                stderr="",
+            )
+
+        with (
+            patch(
+                "harness_labs.claude_task_executor.shutil.which",
+                return_value="claude",
+            ),
+            patch(
+                "harness_labs.claude_task_executor.subprocess.run",
+                side_effect=run,
+            ),
+            patch(
+                "harness_labs.claude_task_executor.workspace_snapshot",
+                side_effect=(_snapshot(), _snapshot()),
+            ),
+            patch.object(Path, "exists", return_value=True),
+        ):
+            result = executor.execute(
+                TaskAttempt(
+                    "inspect/attempt-1",
+                    "task:inspect",
+                    "context:inspect",
+                    "profile:inspector",
+                )
+            )
+        self.assertEqual(result.status, "failed")
+        self.assertIn("execution error", result.payload["error"])
+        self.assertIn("Not logged in", result.payload["error"])
+
+    def test_structured_output_falls_back_to_result_text(self) -> None:
+        task = {
+            "id": "inspect",
+            "objective": "Inspect",
+            "context": "{}",
+            "details_schema": "inspection/1",
+            "acceptance_criteria": [],
+            "required_capabilities": ["repo.read"],
+        }
+        executor = ClaudeSemanticTaskExecutor(
+            task,
+            Path("."),
+            EvidenceCatalog(),
+            "Inspect.",
+        )
+        raw = _raw_result()
+
+        def run(argv, **kwargs):
+            envelope = _envelope(raw)
+            del envelope["structured_output"]
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                stdout=json.dumps(envelope),
+                stderr="",
+            )
+
+        with (
+            patch(
+                "harness_labs.claude_task_executor.shutil.which",
+                return_value="claude",
+            ),
+            patch(
+                "harness_labs.claude_task_executor.subprocess.run",
+                side_effect=run,
+            ),
+            patch(
+                "harness_labs.claude_task_executor.workspace_snapshot",
+                side_effect=(_snapshot(), _snapshot()),
+            ),
+            patch.object(Path, "exists", return_value=True),
+        ):
+            result = executor.execute(
+                TaskAttempt(
+                    "inspect/attempt-1",
+                    "task:inspect",
+                    "context:inspect",
+                    "profile:inspector",
+                )
+            )
+        self.assertEqual(result.status, "succeeded", result.payload)
+
+
+if __name__ == "__main__":
+    unittest.main()
