@@ -7,6 +7,9 @@ import unittest
 from pathlib import Path
 
 from harness_labs import (
+    ClaudeAgentSession,
+    CodexAppServerSession,
+    build_coordinator_session,
     BackendSpec,
     ClaudeSemanticTaskExecutor,
     CodexSemanticTaskExecutor,
@@ -190,6 +193,36 @@ class TaskArtifactKindTests(unittest.TestCase):
         context = json.loads(bound["context"])
         self.assertEqual(context["supplied_context"], "free text")
         self.assertEqual(context["artifact_kind"], "kind")
+
+
+class CoordinatorSessionTests(unittest.TestCase):
+    def test_claude_spec_builds_a_claude_agent_session(self) -> None:
+        session = build_coordinator_session(
+            "claude:claude-opus-5@high",
+            base_instructions="coordinate",
+            timeout_seconds=42.0,
+        )
+        self.assertIsInstance(session, ClaudeAgentSession)
+        self.assertEqual(session.model, "claude-opus-5")
+        self.assertEqual(session.effort, "high")
+        self.assertEqual(session.executable, "claude")
+        self.assertEqual(session.base_instructions, "coordinate")
+        self.assertEqual(session.timeout_seconds, 42.0)
+
+    def test_codex_spec_builds_a_codex_app_server_session(self) -> None:
+        session = build_coordinator_session("codex:gpt-5.6-terra@low")
+        self.assertIsInstance(session, CodexAppServerSession)
+        self.assertEqual(session.model, "gpt-5.6-terra")
+        self.assertEqual(session.reasoning, "low")
+        self.assertEqual(session.executable, "codex")
+
+    def test_executable_override_and_bad_spec(self) -> None:
+        session = build_coordinator_session(
+            "claude:claude-sonnet-5", executable="/opt/bin/claude"
+        )
+        self.assertEqual(session.executable, "/opt/bin/claude")
+        with self.assertRaises(ValueError):
+            build_coordinator_session("gemini:pro")
 
 
 if __name__ == "__main__":

@@ -16,8 +16,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
+from .agent_sessions import AgentSession
 from .audit import AuditJournal
+from .claude_agent_session import ClaudeAgentSession
 from .claude_task_executor import ClaudeSemanticTaskExecutor
+from .codex_agent_session import CodexAppServerSession
 from .controller_evidence import EvidenceCatalog
 from .controller_live import CodexSemanticTaskExecutor
 from .controller_scheduler import RoleProfile
@@ -263,9 +266,42 @@ def _executor_factory(
     return factory
 
 
+def build_coordinator_session(
+    spec: str | BackendSpec,
+    *,
+    base_instructions: str | None = None,
+    audit: AuditJournal | None = None,
+    executable: str | None = None,
+    pricing: ModelPrice | None = None,
+    timeout_seconds: float | None = None,
+) -> AgentSession:
+    """Bind one backend spec to the coordinator seat as an AgentSession.
+
+    The worker seats resolve through :func:`build_role_profiles`; this covers
+    the remaining seat so a FeatureRun's ``session_factory`` can be declared
+    with the same ``provider:model[@effort]`` vocabulary.
+    """
+
+    resolved = parse_backend_spec(spec)
+    options: dict[str, Any] = {
+        "model": resolved.model,
+        "executable": executable
+        or _PROVIDER_EXECUTABLES[resolved.provider],
+        "base_instructions": base_instructions,
+        "audit": audit,
+        "pricing": pricing,
+    }
+    if timeout_seconds is not None:
+        options["timeout_seconds"] = timeout_seconds
+    if resolved.provider == "claude":
+        return ClaudeAgentSession(effort=resolved.effort, **options)
+    return CodexAppServerSession(reasoning=resolved.effort, **options)
+
+
 __all__ = [
     "BackendSpec",
     "WorkerRole",
+    "build_coordinator_session",
     "build_role_profiles",
     "parse_backend_spec",
     "resolve_backend_spec",
