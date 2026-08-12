@@ -813,13 +813,14 @@ def resume_graph(
             (REPO / DECOMPOSITION_PATH).read_text(encoding="utf-8")
         )["acceptance_criteria"]
     )
+    # PlanGraph.resume mints the successor attempt id itself
+    # (<logical_graph_id>-attempt-N); run_id is not used for identity here.
     graph = PlanGraph.resume(
         REPO,
         registration,
         lambda request: _launch_node(request, acceptance),
         run_root=ROOT / "logs" / "runs" / "cb-graph",
         directive=directive,
-        graph_run_id=f"cb-graph-{run_id}",
         approval_validator=admission.approval_validator(),
         max_parallelism=2,
     )
