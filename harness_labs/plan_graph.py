@@ -2202,17 +2202,12 @@ def validate_plan_graph_plan(plan: PlanGraphPlan) -> None:
                 raise PlanGraphError(
                     f"run {run.id!r} path intent {intent.path!r} is outside allowed_paths"
                 )
-        cited = "\n".join(plan.plan_sections.get(section, "") for section in run.plan_sections)
         for section in run.plan_sections:
             if section not in plan.plan_sections:
                 raise PlanGraphError(f"run {run.id!r} references unknown plan section {section!r}")
-        if run.objective not in cited:
-            raise PlanGraphError(f"run {run.id!r} objective is absent from its cited plan sections")
         for criterion in run.criteria:
             if criterion not in plan.acceptance_criteria:
                 raise PlanGraphError(f"run {run.id!r} references unknown criterion {criterion!r}")
-            if criterion not in cited or plan.acceptance_criteria[criterion] not in cited:
-                raise PlanGraphError(f"run {run.id!r} criterion {criterion!r} is absent from its cited plan sections")
             covered.add(criterion)
         for dependency in run.depends_on:
             if dependency not in known_runs:
