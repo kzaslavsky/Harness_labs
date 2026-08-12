@@ -77,7 +77,9 @@ class PlanGraphAudit:
         registration_binding: Mapping[str, str],
         objective: str,
         nodes: Mapping[str, Mapping[str, object]],
-        functionality_tests: tuple[str, ...],
+        functionality_tests: tuple[object, ...],
+        repository_id: str | None = None,
+        approval: Mapping[str, object] | None = None,
         plan_sections: Mapping[str, str] | None = None,
         acceptance_criteria: Mapping[str, str] | None = None,
         logical_graph_id: str | None = None,
@@ -137,7 +139,9 @@ class PlanGraphAudit:
             "plan": plan,
             "plan_digest": plan_sha256,
             "base_commit": base_commit,
+            "repository_id": repository_id,
             "plan_graph_digest": plan_graph_digest,
+            "approval": dict(approval) if approval is not None else None,
             "current_candidate_commit": base_commit,
             "ordered_node_ids": list(nodes),
             "nodes": {
@@ -928,7 +932,7 @@ class PlanGraphAudit:
             "event_hash": committed["event"]["event_hash"],
         }
 
-    def functionality_completed(self, command: str, candidate_commit: str) -> None:
+    def functionality_completed(self, command: object, candidate_commit: str) -> None:
         state = self.state
         state["functionality_test"] = {
             "state": "succeeded",
@@ -944,7 +948,7 @@ class PlanGraphAudit:
         )
         self.journal.checkpoint("running", state)
 
-    def functionality_failed(self, command: str, candidate_commit: str, error: str) -> None:
+    def functionality_failed(self, command: object, candidate_commit: str, error: str) -> None:
         state = self.state
         artifact = self.journal.write_artifact(
             "plan-graph-functionality-failure-evidence",

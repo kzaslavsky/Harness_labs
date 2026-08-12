@@ -17,3 +17,4 @@ is immutable after acceptance except for status and links to superseding records
 - [`0003 — Pass-through child context`](0003-pass-through-child-context.md)
 - [`0004 — Hybrid controller command kernel`](0004-hybrid-controller-command-kernel.md)
 - [`0005 — Ledger-backed review/fix gate`](0005-ledger-backed-review-fix.md)
+- [`0006 — Repository-bound PlanGraph approval`](0006-repository-bound-plan-approval.md)

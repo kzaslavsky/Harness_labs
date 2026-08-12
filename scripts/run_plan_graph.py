@@ -12,9 +12,11 @@ from typing import Callable
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from harness_labs.plan_approval import PlanApprovalAdmission, PlanApprovalError
 from harness_labs.plan_graph import (
     FeatureRunOutcome,
     PlanGraph,
+    PlanGraphError,
     RepairResumeDirective,
     SubprocessFeatureRunLauncher,
     load_registration,
@@ -50,7 +52,10 @@ def _parser() -> argparse.ArgumentParser:
 
     run = modes.add_parser("run")
     run.add_argument("--repository", type=Path, required=True)
-    run.add_argument("--registration", type=Path, required=True)
+    source_group = run.add_mutually_exclusive_group(required=True)
+    source_group.add_argument("--registration", type=Path)
+    source_group.add_argument("--approval-receipt", type=Path)
+    run.add_argument("--decomposition", type=Path)
     run.add_argument("--graph-attempt-id", required=True)
     launcher_group = run.add_mutually_exclusive_group(required=True)
     launcher_group.add_argument("--launcher")
@@ -101,8 +106,47 @@ def main() -> int:
         )
         return 0
 
-    registration_path = _repository_path(repository, arguments.registration, "")
-    registration = load_registration(registration_path)
+    approval_validator = None
+    if arguments.approval_receipt is not None:
+        try:
+            admission = PlanApprovalAdmission(
+                repository=repository,
+                receipt_path=arguments.approval_receipt,
+            )
+            approved = admission.validate()
+            if arguments.decomposition is not None:
+                decomposition_path = arguments.decomposition.resolve()
+                try:
+                    relative = decomposition_path.relative_to(repository).as_posix()
+                except ValueError as exc:
+                    raise PlanApprovalError(
+                        "decomposition must be inside the repository"
+                    ) from exc
+                if relative != approved.decomposition_path:
+                    raise PlanApprovalError(
+                        "decomposition path does not match the approved subject"
+                    )
+            registration = register_plan_graph(
+                repository=repository,
+                logical_graph_id=arguments.logical_graph_id
+                or arguments.graph_attempt_id,
+                decomposition=approved.decomposition,
+                base_commit=approved.base_commit,
+                repository_id=approved.repository_id,
+            )
+            if registration.plan_sha256 != approved.plan_sha256:
+                raise PlanApprovalError(
+                    "approved plan hash does not match the registered plan"
+                )
+            approval_validator = admission.approval_validator()
+        except (OSError, PlanApprovalError, PlanGraphError, ValueError) as exc:
+            print(f"PlanGraph admission failed: {exc}", file=sys.stderr)
+            return 1
+    else:
+        if arguments.decomposition is not None:
+            parser.error("--decomposition requires --approval-receipt")
+        registration_path = _repository_path(repository, arguments.registration, "")
+        registration = load_registration(registration_path)
     run_root = _repository_path(repository, arguments.run_root, "logs/runs")
     launcher_cwd = (
         _repository_path(repository, arguments.launcher_cwd, "")
@@ -126,6 +170,29 @@ def main() -> int:
             return FeatureRunOutcome(**result)
         raise TypeError("launcher must return FeatureRunOutcome or a mapping")
 
+    try:
+        graph = _build_graph(arguments, parser, repository, registration, launch, run_root, approval_validator)
+        result = graph.run()
+    except PlanGraphError as exc:
+        print(f"PlanGraph failed: {exc}", file=sys.stderr)
+        return 1
+    print(
+        json.dumps(
+            {
+                "status": result.status,
+                "candidate_commit": result.candidate_commit,
+                "failed_run_id": result.failed_run_id,
+                "logical_graph_id": registration.logical_graph_id,
+                "graph_attempt_id": graph.graph_run_id,
+                "registration_digest": registration.graph_digest,
+            },
+            sort_keys=True,
+        )
+    )
+    return 0 if result.status == "succeeded" else 1
+
+
+def _build_graph(arguments, parser, repository, registration, launch, run_root, approval_validator):
     if arguments.resume:
         if not all(
             (
@@ -149,7 +216,9 @@ def main() -> int:
                 tuple(arguments.retry_frontier),
                 arguments.blocker_evidence_ref,
             ),
+            approval_validator=approval_validator,
         )
+        return graph
     else:
         if any(
             (
@@ -166,22 +235,9 @@ def main() -> int:
             launch,
             run_root=run_root,
             graph_run_id=arguments.graph_attempt_id,
+            approval_validator=approval_validator,
         )
-    result = graph.run()
-    print(
-        json.dumps(
-            {
-                "status": result.status,
-                "candidate_commit": result.candidate_commit,
-                "failed_run_id": result.failed_run_id,
-                "logical_graph_id": registration.logical_graph_id,
-                "graph_attempt_id": graph.graph_run_id,
-                "registration_digest": registration.graph_digest,
-            },
-            sort_keys=True,
-        )
-    )
-    return 0 if result.status == "succeeded" else 1
+    return graph
 
 
 if __name__ == "__main__":

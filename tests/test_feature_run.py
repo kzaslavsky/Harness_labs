@@ -243,6 +243,9 @@ class FeatureRunTests(unittest.TestCase):
             plan="docs/plan.md",
             plan_base_commit="a" * 40,
             plan_sha256=plan_sha256,
+            allowed_paths=("feature.txt",),
+            verification_argv=("python3", "-m", "unittest"),
+            verification_timeout_seconds=1200,
         )
         normal_schema = standard_feature_run_dispatch_schema()
         normal_phases = tuple(
@@ -270,7 +273,6 @@ class FeatureRunTests(unittest.TestCase):
                 contract_factory=contract_factory,
                 review_fix_policy=ReviewFixPolicy(),
                 base_repository=Path("repository"),
-                verification_argv=("python3", "-m", "unittest"),
                 verification_repair_executor_factory=lambda attempt: None,
             )
         self.assertEqual(
@@ -298,6 +300,11 @@ class FeatureRunTests(unittest.TestCase):
             [artifact.kind for artifact in options["initial_evidence"]],
             ["engineering-plan", "source-binding-report", "build-briefing"],
         )
+        self.assertEqual(options["allowed_paths"], ("feature.txt",))
+        self.assertEqual(
+            options["verification_argv"], ("python3", "-m", "unittest")
+        )
+        self.assertEqual(options["verification_timeout_seconds"], 1200)
         handoff = options["initial_evidence"][0].content
         self.assertEqual(handoff["plan_graph_id"], "graph-1")
         self.assertEqual(handoff["plan_node_id"], "FR-01")
@@ -307,6 +314,23 @@ class FeatureRunTests(unittest.TestCase):
         )
         self.assertEqual(bound_contract.phases, bound_phases)
         self.assertEqual(bound_contract.criteria, criteria)
+
+        with patch("harness_labs.feature_run.subprocess.run") as git_show:
+            git_show.return_value = subprocess.CompletedProcess(
+                [], 0, stdout=plan_bytes, stderr=b""
+            )
+            with self.assertRaisesRegex(
+                ValueError, "override controller-owned values"
+            ):
+                run_plan_graph_feature_worktree(
+                    binding=binding,
+                    schema=normal_schema,
+                    contract_factory=contract_factory,
+                    review_fix_policy=ReviewFixPolicy(),
+                    base_repository=Path("repository"),
+                    allowed_paths=("everything",),
+                    verification_repair_executor_factory=lambda attempt: None,
+                )
 
     def test_plan_graph_mode_refuses_disabled_review_ledger(self) -> None:
         criteria = ({"id": "AC-1", "statement": "Works", "source": "plan"},)
@@ -322,6 +346,9 @@ class FeatureRunTests(unittest.TestCase):
             "plan.md",
             "a" * 40,
             plan_sha256,
+            ("feature.txt",),
+            ("python3", "-m", "unittest"),
+            1200,
         )
         with patch("harness_labs.feature_run.subprocess.run") as git_show:
             git_show.return_value = subprocess.CompletedProcess(
@@ -334,7 +361,6 @@ class FeatureRunTests(unittest.TestCase):
                     contract_factory=lambda worktree, receipt: None,
                     review_fix_policy=ReviewFixPolicy(ledger_enabled=False),
                     base_repository=Path("repository"),
-                    verification_argv=("python3", "-m", "unittest"),
                     verification_repair_executor_factory=lambda attempt: None,
                 )
 
@@ -352,6 +378,9 @@ class FeatureRunTests(unittest.TestCase):
             "docs/plan.md",
             "a" * 40,
             plan_sha256,
+            ("feature.txt",),
+            ("python3", "-m", "unittest"),
+            1200,
         )
         with patch("harness_labs.feature_run.subprocess.run") as git_show:
             git_show.return_value = subprocess.CompletedProcess(
@@ -364,7 +393,6 @@ class FeatureRunTests(unittest.TestCase):
                     contract_factory=lambda worktree, receipt: None,
                     review_fix_policy=ReviewFixPolicy(),
                     base_repository=Path("repository"),
-                    verification_argv=("python3", "-m", "unittest"),
                     verification_repair_executor_factory=lambda attempt: None,
                 )
         run_feature.assert_not_called()
@@ -383,6 +411,9 @@ class FeatureRunTests(unittest.TestCase):
             "plan.md",
             "a" * 40,
             _PLAN_SHA,
+            ("feature.txt",),
+            ("python3", "-m", "unittest"),
+            1200,
             "a" * 40,
             "lane/FR-10",
             Path("lane"),
@@ -408,9 +439,7 @@ class FeatureRunTests(unittest.TestCase):
                 feature_branch="lane/FR-10",
                 worktree_path=Path("lane"),
                 run_dir=Path("run"),
-                allowed_paths=("feature.txt",),
                 commit_message="Build lane",
-                verification_argv=("python3", "-m", "unittest"),
                 verification_repair_executor_factory=lambda attempt: None,
             )
 
@@ -425,6 +454,7 @@ class FeatureRunTests(unittest.TestCase):
             "graph-1", "FR-10", "Build a lane", criteria, {"path": "plan.md", "sha256": _PLAN_SHA},
             {"claims": ["bound"]}, {"allowed_paths": ["feature.txt"]},
             "plan.md", "a" * 40, _PLAN_SHA,
+            ("feature.txt",), ("python3", "-m", "unittest"), 1200,
             "a" * 40, "lane/FR-10", Path("lane"), 1, "alloc-fr-10", 1, "a" * 40,
             "batch-1", (), ("feature.txt",),
         )
@@ -440,9 +470,8 @@ class FeatureRunTests(unittest.TestCase):
                     review_fix_policy=ReviewFixPolicy(),
                     base_repository=Path("repository"), base_branch="main",
                     feature_branch="lane/FR-10", worktree_path=Path("lane"),
-                    run_dir=Path("run"), allowed_paths=("feature.txt",),
+                    run_dir=Path("run"),
                     commit_message="Build lane", merge=True,
-                    verification_argv=("python3", "-m", "unittest"),
                     verification_repair_executor_factory=lambda attempt: None,
                 )
 
@@ -455,6 +484,7 @@ class FeatureRunTests(unittest.TestCase):
             "graph-1", "FR-10", "Build a lane", criteria, {"path": "plan.md", "sha256": _PLAN_SHA},
             {"claims": ["bound"]}, {"allowed_paths": ["feature.txt"]},
             "plan.md", "a" * 40, _PLAN_SHA,
+            ("feature.txt",), ("python3", "-m", "unittest"), 1200,
             "a" * 40, "lane/FR-10", Path("lane"), 3, "alloc-fr-10", 7, "a" * 40,
             "batch-3", (), ("feature.txt",),
         )
@@ -492,8 +522,8 @@ class FeatureRunTests(unittest.TestCase):
                 review_fix_policy=ReviewFixPolicy(),
                 base_repository=Path("repository"), base_branch="main",
                 feature_branch="lane/FR-10", worktree_path=Path("lane"),
-                run_dir=Path("run"), allowed_paths=("feature.txt",),
-                commit_message="Build lane", verification_argv=("python3", "-m", "unittest"),
+                run_dir=Path("run"),
+                commit_message="Build lane",
                 verification_repair_executor_factory=lambda attempt: None,
             )
 
@@ -530,6 +560,7 @@ class FeatureRunTests(unittest.TestCase):
             "graph-1", "FR-20", "Join lanes", criteria, {"path": "plan.md", "sha256": _PLAN_SHA},
             {"claims": ["bound"]}, {"allowed_paths": ["integration"]},
             "plan.md", "a" * 40, _PLAN_SHA,
+            ("integration",), ("python3", "-m", "unittest"), 1200,
             "a" * 40, "lane/FR-20", Path("lane"), 8, "alloc-fr-20", 8, "a" * 40,
             "batch-2", dependencies, ("integration",),
         )
@@ -547,8 +578,9 @@ class FeatureRunTests(unittest.TestCase):
         criteria = ({"id": "AC-1", "statement": "Works", "source": "plan"},)
         binding = PlanGraphFeatureRunBinding(
             "graph-1", "FR-10", "Build a lane", criteria, {"path": "plan.md", "sha256": _PLAN_SHA},
-            {"claims": ["bound"]}, {"allowed_paths": ["feature.txt"]},
+            {"claims": ["bound"]}, {"allowed_paths": ["substituted.txt"]},
             "plan.md", "a" * 40, _PLAN_SHA,
+            ("substituted.txt",), ("python3", "-m", "unittest"), 1200,
             "a" * 40, "lane/FR-10", Path("lane"), 1, "alloc-fr-10", 1, "a" * 40,
             "batch-1", (), ("feature.txt",),
         )
@@ -562,8 +594,8 @@ class FeatureRunTests(unittest.TestCase):
                     contract_factory=lambda worktree, receipt: None,
                     review_fix_policy=ReviewFixPolicy(), base_repository=Path("repository"),
                     base_branch="main", feature_branch="lane/FR-10", worktree_path=Path("lane"),
-                    run_dir=Path("run"), allowed_paths=("substituted.txt",),
-                    commit_message="Build lane", verification_argv=("python3", "-m", "unittest"),
+                    run_dir=Path("run"),
+                    commit_message="Build lane",
                     verification_repair_executor_factory=lambda attempt: None,
                 )
 
@@ -606,6 +638,9 @@ class FeatureRunTests(unittest.TestCase):
                     "plan": "plan.md",
                     "plan_base_commit": "a" * 40,
                     "plan_sha256": _PLAN_SHA,
+                    "allowed_paths": ("feature.txt",),
+                    "verification_argv": ("python3", "-m", "unittest"),
+                    "verification_timeout_seconds": 1200,
                 } | child_fields | overrides))
 
     def test_plan_graph_child_rejects_an_unallocated_worktree(self) -> None:
@@ -614,6 +649,7 @@ class FeatureRunTests(unittest.TestCase):
             "graph-1", "FR-10", "Build a lane", criteria, {"path": "plan.md", "sha256": _PLAN_SHA},
             {"claims": ["bound"]}, {"allowed_paths": ["feature.txt"]},
             "plan.md", "a" * 40, _PLAN_SHA,
+            ("feature.txt",), ("python3", "-m", "unittest"), 1200,
             "a" * 40, "lane/FR-10", Path("allocated-lane"), 1, "alloc-fr-10", 1, "a" * 40,
             "batch-1", (), ("feature.txt",),
         )
@@ -629,8 +665,8 @@ class FeatureRunTests(unittest.TestCase):
                     review_fix_policy=ReviewFixPolicy(),
                     base_repository=Path("repository"), base_branch="main",
                     feature_branch="lane/FR-10", worktree_path=Path("substituted-lane"),
-                    run_dir=Path("run"), allowed_paths=("feature.txt",),
-                    commit_message="Build lane", verification_argv=("python3", "-m", "unittest"),
+                    run_dir=Path("run"),
+                    commit_message="Build lane",
                     verification_repair_executor_factory=lambda attempt: None,
                 )
 

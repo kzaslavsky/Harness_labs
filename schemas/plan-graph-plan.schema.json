@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://harness-labs.local/schemas/plan-graph-plan.schema.json",
+  "title": "Canonical approved PlanGraph decomposition",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["protocol", "plan", "plan_sections", "acceptance_criteria", "runs", "functionality_tests", "referenced_artifacts"],
+  "properties": {
+    "protocol": {"const": "plan-graph-plan/1"},
+    "plan": {"$ref": "#/$defs/path"},
+    "plan_sections": {"$ref": "#/$defs/string_map"},
+    "acceptance_criteria": {"$ref": "#/$defs/string_map"},
+    "runs": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/run"}},
+    "functionality_tests": {"type": "array", "items": {"$ref": "#/$defs/command"}},
+    "referenced_artifacts": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/path"}}
+  },
+  "$defs": {
+    "path": {"type": "string", "minLength": 1, "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!\\./).+$"},
+    "string_map": {"type": "object", "minProperties": 1, "additionalProperties": {"type": "string", "minLength": 1}},
+    "string_array": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+    "path_intent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "action"],
+      "properties": {"path": {"$ref": "#/$defs/path"}, "action": {"enum": ["create", "modify"]}}
+    },
+    "required_path": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path", "availability"],
+          "properties": {"path": {"$ref": "#/$defs/path"}, "availability": {"const": "base"}}
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path", "availability", "producer_run_id"],
+          "properties": {"path": {"$ref": "#/$defs/path"}, "availability": {"const": "created_by"}, "producer_run_id": {"type": "string", "minLength": 1}}
+        }
+      ]
+    },
+    "command": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["argv", "timeout_seconds", "required_paths"],
+      "properties": {
+        "argv": {"$ref": "#/$defs/string_array"},
+        "timeout_seconds": {"type": "number", "exclusiveMinimum": 0},
+        "required_paths": {"type": "array", "items": {"$ref": "#/$defs/required_path"}}
+      }
+    },
+    "run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "objective", "plan_sections", "criteria", "depends_on", "allowed_paths", "path_intents", "verification_argv", "verification_timeout_seconds", "verification_required_paths"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "objective": {"type": "string", "minLength": 1},
+        "plan_sections": {"$ref": "#/$defs/string_array"},
+        "criteria": {"$ref": "#/$defs/string_array"},
+        "depends_on": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+        "allowed_paths": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/path"}},
+        "path_intents": {"type": "array", "items": {"$ref": "#/$defs/path_intent"}},
+        "verification_argv": {"$ref": "#/$defs/string_array"},
+        "verification_timeout_seconds": {"type": "number", "exclusiveMinimum": 0},
+        "verification_required_paths": {"type": "array", "items": {"$ref": "#/$defs/required_path"}}
+      }
+    }
+  }
+}

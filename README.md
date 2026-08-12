@@ -85,6 +85,17 @@ verification command with bounded same-worktree repair on failure, optionally
 runs the ledger-backed review/fix loop, commits only declared paths, and either
 leaves a merge-ready candidate or performs a guarded merge.
 
+The shipped PlanGraph CLI admits a committed canonical `plan-graph-plan/1`
+decomposition only with an operator-attested approval receipt. Use
+`scripts/approve_plan.py prepare` to freeze and gate the subject, record an
+operator attestation using `schemas/plan-operator-approval.schema.json`, then
+use `scripts/approve_plan.py issue` and pass the resulting receipt to
+`scripts/run_plan_graph.py run --approval-receipt` (registration of the
+approved decomposition happens under the receipt; legacy decompositions still
+use `register` plus `run --registration`). The receipt binds the exact Git
+revision, scope grants, verification commands and timeouts, repository identity,
+and local executable evidence.
+
 The portable implement-v13 policy adds source binding, FRAME/NECESSITY/MECHANISM
 plan refutation, build-handoff, and risk-shaped review obligations. Required
 segment exit artifacts make them deterministic gates rather than prompt-only

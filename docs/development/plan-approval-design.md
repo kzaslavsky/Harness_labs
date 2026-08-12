@@ -1,6 +1,18 @@
 # PlanApproval: repository-bound admission for PlanGraph
 
-**Status:** revised design draft — 2026-08-10
+**Status:** Slices 0–1 implemented; Slices 2–3 deferred — 2026-08-10
+
+**Merge note (2026-08-11):** this subsystem was reconciled with the
+registration-mandatory PlanGraph (`Impl-redo`). Approval does not replace
+registration: the CLI validates the receipt, registers the approved canonical
+decomposition (`register_plan_graph(..., base_commit=, repository_id=)`), and
+constructs `PlanGraph(repository, registration, ..., approval_validator=...)`.
+`PlanGraph` recomputes the canonical `plan-graph-identity/1` digest from the
+registration-verified plan and refuses to run a canonical
+(`plan-graph-plan/1`) plan without a matching, freshly revalidated receipt.
+The audit checkpoint keeps its own computed contract digest (used for repair
+predecessor matching) and records the approval audit record as a separate
+`approval` field.
 
 **Origin:** flow-editor plan review (source-binding and decomposition reviewers
 run against `FLOW_EDITOR_AUTHORING_AND_NODE_EXECUTION_UX_PLAN.md`,
@@ -184,12 +196,24 @@ Likewise, all final functionality commands belong in the canonical
 decomposition; the production CLI must not append unbound commands after
 approval.
 
+`base_commit` is deliberately absent from the committed
+`plan-graph-plan/1` artifact. A file cannot contain the hash of the commit that
+contains that same file without a circular identity problem. The approval
+subject supplies `base_commit` and binds the decomposition blob found there;
+PlanGraph constructs its executable plan only from that validated pair.
+
 The plan, decomposition, and reviewable referenced artifacts must exist as Git
 objects at `base_commit`. “Tracked and clean at a commit” is not meaningful;
 the check is that the named path resolves to the recorded blob in the recorded
 commit and that the reviewed bytes equal that blob. If draft revision changes
 those bytes, a new commit, subject, and approval attempt are required before
 execution.
+
+Because `base_commit` already binds the complete Git tree, the
+`referenced_artifacts` list does not add integrity coverage. It explicitly
+enumerates reviewer inputs, explains their relevance, and supports minimal
+context assembly. An unlisted tree path remains protected by the commit; it is
+not thereby represented as a reviewed input.
 
 Path intent must be explicit in the decomposition or plan metadata. A path
 expected to be created cannot be validated with the same existence rule as a
@@ -230,6 +254,17 @@ must precede every consuming run transitively, or precede graph completion for
 a final test. Runtime verification remains authoritative that the producer
 actually created the path. The controller must not guess path semantics from
 arbitrary argv values.
+
+Command dependencies distinguish three location classes. Repository-relative
+paths resolve inside the verified snapshot and participate in base-versus-create
+intent checks. Host-absolute executables resolve on the admission host and must
+exist and be executable; gate evidence records their absolute path, SHA-256,
+size, and modification time. Bare executable names resolve through the recorded
+admission `PATH`, and the evidence records the resolved absolute executable with
+the same identity fields. PlanGraph re-resolves and compares every host
+executable before first launch and on resume. An identity mismatch invalidates
+admission. This is an explicit local environment dependency, not repository
+reproducibility; portable plans should prefer stable toolchain entrypoints.
 
 These checks are useful diagnostics but **not** approval gates by themselves:
 
@@ -289,6 +324,13 @@ severity and finding class. Every ledger entry records the acting identity,
 role, authority rule, timestamp, rationale, and evidence. A reviewer may not
 dispose of its own finding unless an explicit policy rule grants that authority;
 the default policy does not.
+
+A superseding attempt carries a disposition forward only when the finding's
+stable identity and complete evidence digest are unchanged and the bound
+authority policy still permits that disposition. Changed or missing evidence,
+changed policy, or changed finding identity voids the prior disposition and
+requires a fresh authorized action. Carry-forward is recorded as a new ledger
+event referencing the prior disposition; history is never copied silently.
 
 The decomposition reviewer has a required
 `undeclared_operator_decision` check. Its result envelope must attest that this
@@ -381,6 +423,14 @@ Invalid schema, failed deterministic checks, invalid reviewer output after the
 attempt limit, and exhausted runtime budgets terminate as `failed` with
 evidence. Retry and runtime limits must be finite in the production profile.
 
+Approval supersession never grafts completed nodes from an old graph onto a new
+subject. In the initial policy, a mid-graph plan correction creates a new
+approval attempt and a new PlanGraph execution from its newly approved base;
+all nodes are executed again. The old candidate lineage is retained as evidence
+but is not automatic input. Preserving completed work would require a separately
+approved subject based on the last good candidate plus an explicit remaining-work
+decomposition and lineage-transfer contract; that recovery is deferred.
+
 ## Approval receipt and PlanGraph consumption
 
 The controller writes an immutable `plan-approval-receipt/1` only after approval
@@ -409,7 +459,7 @@ them.
 
 ## Incremental build plan
 
-### Slice 0: decision and canonical identity
+### Slice 0: decision and canonical identity — implemented
 
 - Amend `plan-projection-design.md` or add an ADR authorizing this narrow
   exception to its exclusions.
@@ -429,7 +479,7 @@ them.
 - Add a cross-component test proving both consumers produce the same identity
   and fail together when any bound input changes.
 
-### Slice 1: deterministic admission
+### Slice 1: deterministic admission — implemented
 
 - Add subject and receipt schemas.
 - Make the Slice 1 policy explicitly operator-attested. Controller issuance
@@ -441,7 +491,7 @@ them.
 - Prove that changed plan bytes, decomposition, base commit, policy, or evidence
   cause zero FeatureRun launches, including on resume.
 
-### Slice 2: demonstrated reviewers
+### Slice 2: demonstrated reviewers — deferred
 
 - Add the findings schema, source-binding reviewer, decomposition reviewer, and
   disposition ledger.
@@ -454,7 +504,7 @@ them.
   receipt, except where the controller records a valid byte-identical reuse
   proof under the declared-input policy.
 
-### Slice 3: optional bounded revision
+### Slice 3: optional bounded revision — deferred
 
 - Admit only after production evidence shows manual correction is the material
   bottleneck.
@@ -506,11 +556,19 @@ The design is implemented only when the production entrypoint demonstrates:
 17. Two worktrees or clones with the same repository-owned identifier and
     commit validate as the same repository; matching filesystem paths or remote
     URLs alone do not establish identity.
+18. Host-absolute and `PATH`-resolved executables record identity evidence at
+    admission; a changed executable fails pre-launch or resume validation.
+19. A disposition carries into a superseding attempt only when finding identity,
+    evidence digest, and authority policy are unchanged.
+20. A superseding subject cannot resume or import completed nodes from the old
+    PlanGraph; the initial policy starts a new graph and retains the old lineage
+    only as evidence.
 
 ## Recommendation
 
-Proceed with Slices 0 and 1. They provide the highest-value property—fail-closed
-execution of only the exact admitted subject—without committing to a generalized
-review/revision framework. Proceed with Slice 2 only after the deterministic
-path works end to end. Do not build Slice 3 until observed approval runs justify
-its additional authority and complexity.
+Slices 0 and 1 now provide the highest-value property—fail-closed execution of
+only the exact admitted subject—without committing to a generalized
+review/revision framework. Proceed with Slice 2 only after production use of the
+operator-attested path demonstrates that model review is the next material gap.
+Do not build Slice 3 until observed approval runs justify its additional
+authority and complexity.

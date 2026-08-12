@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://harness-labs.local/schemas/plan-approval-gates.schema.json",
+  "title": "Deterministic PlanGraph admission evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["protocol", "status", "subject_sha256", "plan_graph_digest", "host_path", "host_executables", "checked_at"],
+  "properties": {
+    "protocol": {"const": "plan-approval-gates/1"},
+    "status": {"const": "passed"},
+    "subject_sha256": {"$ref": "#/$defs/sha256"},
+    "plan_graph_digest": {"$ref": "#/$defs/sha256"},
+    "host_path": {"type": "string"},
+    "host_executables": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["consumer", "path", "sha256", "size_bytes", "mtime_ns"],
+        "properties": {"consumer": {"type": "string", "minLength": 1}, "requested": {"type": "string", "minLength": 1}, "path": {"type": "string", "minLength": 1}, "sha256": {"$ref": "#/$defs/sha256"}, "size_bytes": {"type": "integer", "minimum": 0}, "mtime_ns": {"type": "integer", "minimum": 0}},
+        "additionalProperties": false
+      }
+    },
+    "checked_at": {"type": "string", "format": "date-time"}
+  },
+  "$defs": {"sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}}
+}

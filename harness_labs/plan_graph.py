@@ -16,9 +16,18 @@ from uuid import uuid4
 
 from .audit import AuditError
 from .plan_graph_audit import PlanGraphAudit, validate_plan_graph_id
+from .plan_graph_contract import (
+    PLAN_GRAPH_PROTOCOL,
+    PlanGraphContractError,
+    canonical_plan_graph_payload,
+    path_is_allowed,
+    plan_graph_identity,
+    sha256_json,
+)
 
 
 REGISTRATION_PROTOCOL = "plan-graph-registration/1"
+LEGACY_PLAN_PROTOCOL = "component-plan/0"
 FEATURE_RUN_REQUEST_PROTOCOL = "plan-graph-feature-run-request/1"
 _REGISTRATION_FIELDS = frozenset(
     {
@@ -31,18 +40,44 @@ _REGISTRATION_FIELDS = frozenset(
         "definition_json",
     }
 )
-_NODE_DEFINITION_FIELDS = (
-    "objective",
-    "plan_sections",
-    "criteria",
-    "depends_on",
-    "verification_argv",
-    "allowed_paths",
-)
-
-
 class PlanGraphError(ValueError):
     """Raised when a PlanGraph cannot be registered or executed safely."""
+
+
+@dataclass(frozen=True)
+class RequiredPath:
+    """One repository path needed by a verification command."""
+
+    path: str
+    availability: str = "base"
+    producer_run_id: str | None = None
+
+
+@dataclass(frozen=True)
+class PathIntent:
+    """One path a FeatureRun is approved to create or modify."""
+
+    path: str
+    action: str
+
+
+@dataclass(frozen=True)
+class FunctionalityCommand:
+    """One final command with an explicit timeout and path dependencies."""
+
+    argv: tuple[str, ...]
+    timeout_seconds: float = 1200.0
+    required_paths: tuple[RequiredPath, ...] = ()
+
+
+@dataclass(frozen=True)
+class ApprovalEvidence:
+    """Revalidated approval identity supplied by the admission controller."""
+
+    subject_sha256: str
+    receipt_sha256: str
+    plan_graph_digest: str
+    audit_record: Mapping[str, object] | None = None
 
 
 @dataclass(frozen=True)
@@ -54,6 +89,9 @@ class PlanRun:
     depends_on: tuple[str, ...] = ()
     verification_argv: tuple[str, ...] = ()
     allowed_paths: tuple[str, ...] = ()
+    path_intents: tuple[PathIntent, ...] = ()
+    verification_timeout_seconds: float = 1200.0
+    verification_required_paths: tuple[RequiredPath, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -275,7 +313,11 @@ class PlanGraphPlan:
     runs: tuple[PlanRun, ...]
     plan_sections: Mapping[str, str]
     acceptance_criteria: Mapping[str, str]
-    functionality_tests: tuple[str, ...] = ()
+    functionality_tests: tuple[FunctionalityCommand | str, ...] = ()
+    repository_id: str = "component-plan"
+    protocol: str = LEGACY_PLAN_PROTOCOL
+    plan_sha256: str | None = None
+    canonical_decomposition: Mapping[str, object] | None = None
 
 
 @dataclass(frozen=True)
@@ -340,7 +382,8 @@ class RepairResumeDirective:
 
 
 FeatureRunLauncher = Callable[[FeatureRunRequest], FeatureRunOutcome]
-FunctionalityTestRunner = Callable[[str, str], None]
+FunctionalityTestRunner = Callable[[FunctionalityCommand | str, str], None]
+ApprovalValidator = Callable[[], ApprovalEvidence]
 
 
 class SubprocessFeatureRunLauncher:
@@ -372,6 +415,17 @@ class SubprocessFeatureRunLauncher:
                 "depends_on": list(request.run.depends_on),
                 "verification_argv": list(request.run.verification_argv),
                 "allowed_paths": list(request.run.allowed_paths),
+                "path_intents": [
+                    {"path": value.path, "action": value.action}
+                    for value in request.run.path_intents
+                ],
+                "verification_timeout_seconds": (
+                    request.run.verification_timeout_seconds
+                ),
+                "verification_required_paths": [
+                    _required_path_mapping(value)
+                    for value in request.run.verification_required_paths
+                ],
             },
             "base_commit": request.base_commit,
             "plan": request.plan,
@@ -449,23 +503,77 @@ def canonical_json(value: object) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
-def canonical_definition(plan: PlanGraphPlan) -> dict[str, object]:
+def _required_path_mapping(value: RequiredPath) -> dict[str, object]:
+    result: dict[str, object] = {
+        "path": value.path,
+        "availability": value.availability,
+    }
+    if value.producer_run_id is not None:
+        result["producer_run_id"] = value.producer_run_id
+    return result
+
+
+def _command_mapping(value: FunctionalityCommand) -> dict[str, object]:
     return {
-        "runs": [
-            {
-                "id": run.id,
-                "objective": run.objective,
-                "plan_sections": list(run.plan_sections),
-                "criteria": list(run.criteria),
-                "depends_on": list(run.depends_on),
-                "verification_argv": list(run.verification_argv),
-                "allowed_paths": list(run.allowed_paths),
-            }
-            for run in plan.runs
+        "argv": list(value.argv),
+        "timeout_seconds": value.timeout_seconds,
+        "required_paths": [
+            _required_path_mapping(item) for item in value.required_paths
         ],
+    }
+
+
+def _functionality_test_payload(value: FunctionalityCommand | str) -> object:
+    return _command_mapping(value) if isinstance(value, FunctionalityCommand) else value
+
+
+def _run_mapping(value: PlanRun) -> dict[str, object]:
+    return {
+        "id": value.id,
+        "objective": value.objective,
+        "plan_sections": list(value.plan_sections),
+        "criteria": list(value.criteria),
+        "depends_on": list(value.depends_on),
+        "verification_argv": list(value.verification_argv),
+        "allowed_paths": list(value.allowed_paths),
+        "path_intents": [
+            {"path": item.path, "action": item.action}
+            for item in value.path_intents
+        ],
+        "verification_timeout_seconds": value.verification_timeout_seconds,
+        "verification_required_paths": [
+            _required_path_mapping(item)
+            for item in value.verification_required_paths
+        ],
+    }
+
+
+def _normalize_functionality_command(
+    value: FunctionalityCommand | str,
+) -> FunctionalityCommand:
+    if isinstance(value, FunctionalityCommand):
+        return value
+    return FunctionalityCommand(("sh", "-c", value))
+
+
+def canonical_definition(plan: PlanGraphPlan) -> dict[str, object]:
+    if plan.protocol == PLAN_GRAPH_PROTOCOL:
+        if plan.canonical_decomposition is None:
+            raise PlanGraphError(
+                "approved PlanGraph plan is missing its canonical decomposition"
+            )
+        return {
+            "protocol": PLAN_GRAPH_PROTOCOL,
+            "repository_id": plan.repository_id,
+            "canonical_decomposition": dict(plan.canonical_decomposition),
+        }
+    return {
+        "runs": [_run_mapping(run) for run in plan.runs],
         "plan_sections": dict(plan.plan_sections),
         "acceptance_criteria": dict(plan.acceptance_criteria),
-        "functionality_tests": list(plan.functionality_tests),
+        "functionality_tests": [
+            _functionality_test_payload(value) for value in plan.functionality_tests
+        ],
     }
 
 
@@ -530,14 +638,45 @@ def register_plan_graph(
     repository: Path,
     logical_graph_id: str,
     decomposition: Mapping[str, object],
+    base_commit: str | None = None,
+    repository_id: str | None = None,
 ) -> PlanGraphRegistration:
     repository = repository.resolve()
     validate_plan_graph_id(logical_graph_id)
-    plan = plan_from_mapping(decomposition)
+    if decomposition.get("protocol") == PLAN_GRAPH_PROTOCOL:
+        if base_commit is None or repository_id is None:
+            raise PlanGraphError(
+                "canonical PlanGraph registration requires approval-bound "
+                "base_commit and repository_id"
+            )
+        base_commit = _verify_commit(repository, base_commit)
+        try:
+            canonical = canonical_plan_graph_payload(decomposition)
+        except PlanGraphContractError as exc:
+            raise PlanGraphError(f"invalid PlanGraph decomposition: {exc}") from exc
+        plan_path = _normalize_plan_path(repository, str(canonical["plan"]))
+        plan_sha256 = hashlib.sha256(
+            _plan_bytes(repository, base_commit, plan_path)
+        ).hexdigest()
+        plan = plan_from_mapping(
+            decomposition,
+            base_commit=base_commit,
+            repository_id=repository_id,
+            plan_sha256=plan_sha256,
+        )
+    else:
+        if base_commit is not None or repository_id is not None:
+            raise PlanGraphError(
+                "base_commit and repository_id are approval-bound and only "
+                "accepted for canonical PlanGraph payloads"
+            )
+        plan = plan_from_mapping(decomposition)
+        base_commit = _verify_commit(repository, plan.base_commit)
+        plan_path = _normalize_plan_path(repository, plan.plan)
+        plan_sha256 = hashlib.sha256(
+            _plan_bytes(repository, base_commit, plan_path)
+        ).hexdigest()
     validate_plan_graph_plan(plan)
-    base_commit = _verify_commit(repository, plan.base_commit)
-    plan_path = _normalize_plan_path(repository, plan.plan)
-    plan_sha256 = hashlib.sha256(_plan_bytes(repository, base_commit, plan_path)).hexdigest()
     definition_json = canonical_json(canonical_definition(plan))
     fields: dict[str, object] = {
         "protocol": REGISTRATION_PROTOCOL,
@@ -636,6 +775,25 @@ def plan_from_registration(registration: PlanGraphRegistration) -> PlanGraphPlan
         raise PlanGraphError(f"invalid registration definition: {exc}") from exc
     if not isinstance(definition, dict):
         raise PlanGraphError("registration definition must be an object")
+    if definition.get("protocol") == PLAN_GRAPH_PROTOCOL:
+        canonical = definition.get("canonical_decomposition")
+        repository_id = definition.get("repository_id")
+        if not isinstance(canonical, dict) or not isinstance(repository_id, str):
+            raise PlanGraphError(
+                "canonical registration definition must carry repository_id "
+                "and canonical_decomposition"
+            )
+        plan = plan_from_mapping(
+            canonical,
+            base_commit=registration.base_commit,
+            repository_id=repository_id,
+            plan_sha256=registration.plan_sha256,
+        )
+        if plan.plan != registration.plan_path:
+            raise PlanGraphError(
+                "canonical registration plan path does not match its decomposition"
+            )
+        return plan
     return plan_from_mapping(
         {"plan": registration.plan_path, "base_commit": registration.base_commit, **definition}
     )
@@ -686,6 +844,7 @@ class PlanGraph:
         run_root: Path,
         graph_run_id: str | None = None,
         functionality_test_runner: FunctionalityTestRunner | None = None,
+        approval_validator: ApprovalValidator | None = None,
         child_liveness_probe: Callable[[int], str | None] | None = None,
         force_reconcile_records: Sequence[Mapping[str, object]] = (),
         logical_graph_id: str | None = None,
@@ -710,6 +869,10 @@ class PlanGraph:
                 self.repository, command, commit
             )
         )
+        self.approval_validator = approval_validator
+        self._approval: ApprovalEvidence | None = None
+        if self.plan.protocol == PLAN_GRAPH_PROTOCOL and approval_validator is None:
+            raise PlanGraphError("approved PlanGraph requires an approval receipt")
         self.child_liveness_probe = child_liveness_probe or _local_process_start_token
         self.force_reconcile_records = tuple(force_reconcile_records)
         self.logical_graph_id = logical_graph_id or self.graph_run_id
@@ -750,7 +913,10 @@ class PlanGraph:
         with (lock_dir / f"{lock_id}.lock").open("a+") as lock:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
             try:
-                supplied_tests = tuple(plan.functionality_tests)
+                supplied_tests = tuple(
+                    _functionality_test_payload(command)
+                    for command in plan.functionality_tests
+                )
                 contract_nodes = cls._contract_nodes(plan)
                 predecessor = PlanGraphAudit.open_repair_predecessor(
                     run_root=run_root,
@@ -783,6 +949,7 @@ class PlanGraph:
                     **kwargs,
                 )
                 graph.validate()
+                graph._revalidate_approval()
                 graph._audit_for_run()
                 return graph
             except (AuditError, OSError, ValueError) as exc:
@@ -805,6 +972,7 @@ class PlanGraph:
 
 
     def run(self) -> PlanGraphResult:
+        self._revalidate_approval()
         audit = self._audit_for_run()
         if audit.terminal:
             return self._result_from_audit(audit)
@@ -830,10 +998,14 @@ class PlanGraph:
         ordered_runs = _ordered_runs(self.plan)
         self._validate_completed_dependencies(ordered_runs, completed)
         candidate_commit = self.plan.base_commit
+        admission_rechecked = False
         for run in ordered_runs:
             if run.id in completed:
                 candidate_commit = completed[run.id]
                 continue
+            if not admission_rechecked:
+                self._revalidate_approval()
+                admission_rechecked = True
             request = self._request_for_run(
                 run,
                 candidate_commit,
@@ -887,6 +1059,12 @@ class PlanGraph:
             )
 
         for command in self.functionality_tests:
+            recorded = _functionality_test_payload(command)
+            rendered = (
+                json.dumps(list(command.argv))
+                if isinstance(command, FunctionalityCommand)
+                else command
+            )
             try:
                 self.functionality_test_runner(command, candidate_commit)
             except Exception as exc:
@@ -894,22 +1072,75 @@ class PlanGraph:
                     "failed",
                     candidate_commit,
                     dict(completed),
-                    functionality_failure=f"{command}: {exc}",
+                    functionality_failure=f"{rendered}: {exc}",
                 )
-                audit.functionality_failed(command, candidate_commit, str(exc))
+                audit.functionality_failed(recorded, candidate_commit, str(exc))
                 audit.finalize("failed", self._result_payload(result))
                 return result
-            audit.functionality_completed(command, candidate_commit)
+            audit.functionality_completed(recorded, candidate_commit)
         result = PlanGraphResult("succeeded", candidate_commit, dict(completed))
         audit.finalize("succeeded", self._result_payload(result))
         return result
+
+    def _revalidate_approval(self) -> ApprovalEvidence | None:
+        if self.approval_validator is None:
+            return None
+        try:
+            evidence = self.approval_validator()
+        except Exception as exc:
+            raise PlanGraphError(f"PlanGraph approval validation failed: {exc}") from exc
+        if not isinstance(evidence, ApprovalEvidence):
+            raise PlanGraphError("approval validator returned invalid evidence")
+        expected = self._identity_digest()
+        if evidence.plan_graph_digest != expected:
+            raise PlanGraphError("approval does not match the supplied PlanGraph")
+        self._approval = evidence
+        return evidence
+
+    def _identity_digest(self) -> str:
+        if (
+            self.plan.protocol == PLAN_GRAPH_PROTOCOL
+            and self.plan.canonical_decomposition is not None
+        ):
+            try:
+                return plan_graph_identity(
+                    repository_id=self.plan.repository_id,
+                    base_commit=self.registration.base_commit,
+                    plan_sha256=self.registration.plan_sha256,
+                    decomposition=self.plan.canonical_decomposition,
+                )
+            except PlanGraphContractError as exc:
+                raise PlanGraphError(f"invalid canonical PlanGraph: {exc}") from exc
+        return sha256_json(
+            {
+                "protocol": "component-plan-identity/0",
+                "repository_id": self.plan.repository_id,
+                "base_commit": self.registration.base_commit,
+                "plan_sha256": self.registration.plan_sha256,
+                "runs": [_run_mapping(run) for run in self.plan.runs],
+                "functionality_tests": [
+                    _functionality_test_payload(command)
+                    for command in self.functionality_tests
+                ],
+            }
+        )
+
+    def _approval_record(self) -> dict[str, object] | None:
+        if self._approval is None:
+            return None
+        if self._approval.audit_record is not None:
+            return dict(self._approval.audit_record)
+        return {
+            "subject_sha256": self._approval.subject_sha256,
+            "receipt_sha256": self._approval.receipt_sha256,
+        }
 
     def _audit_for_run(self) -> PlanGraphAudit:
         if self._audit is None:
             nodes = {
                 run.id: {
                     "status": "succeeded" if run.id in self.reused_completed else "queued",
-                    **{name: list(getattr(run, name)) if name != "objective" else run.objective for name in _NODE_DEFINITION_FIELDS},
+                    **_run_mapping(run),
                     "feature_run_id": self._feature_run_id(run.id),
                     "run_dir": str((self.run_root / self._feature_run_id(run.id)).resolve()),
                     "started_at": None,
@@ -919,6 +1150,8 @@ class PlanGraph:
                 }
                 for run in _ordered_runs(self.plan)
             }
+            for node in nodes.values():
+                node.pop("id", None)
             binding = {
                 "logical_graph_id": self.registration.logical_graph_id,
                 "registration_protocol": self.registration.protocol,
@@ -934,9 +1167,14 @@ class PlanGraph:
                     plan_sha256=self.registration.plan_sha256,
                     base_commit=self.registration.base_commit,
                     registration_binding=binding,
+                    repository_id=self.plan.repository_id,
+                    approval=self._approval_record(),
                     objective="; ".join(run.objective for run in self.plan.runs),
                     nodes=nodes,
-                    functionality_tests=self.functionality_tests,
+                    functionality_tests=tuple(
+                        _functionality_test_payload(command)
+                        for command in self.functionality_tests
+                    ),
                     plan_sections=self.plan.plan_sections,
                     acceptance_criteria=self.plan.acceptance_criteria,
                     logical_graph_id=self.logical_graph_id,
@@ -1197,6 +1435,7 @@ def _ordered_runs(plan: PlanGraphPlan) -> tuple[PlanRun, ...]:
 def validate_plan_graph_plan(plan: PlanGraphPlan) -> None:
     if not plan.plan or not plan.base_commit:
         raise PlanGraphError("plan and base_commit must be non-empty")
+    strict = plan.protocol == PLAN_GRAPH_PROTOCOL
     seen: set[str] = set()
     known_runs = {run.id for run in plan.runs}
     covered: set[str] = set()
@@ -1208,8 +1447,27 @@ def validate_plan_graph_plan(plan: PlanGraphPlan) -> None:
             raise PlanGraphError(f"run {run.id!r} has incomplete approved context")
         if any(not value for value in run.verification_argv):
             raise PlanGraphError(f"run {run.id!r} verification_argv contains an empty value")
+        if strict and not run.verification_argv:
+            raise PlanGraphError(
+                f"run {run.id!r} requires controller-owned verification"
+            )
         if any(not value for value in run.allowed_paths):
             raise PlanGraphError(f"run {run.id!r} allowed_paths contains an empty value")
+        if strict and not run.allowed_paths:
+            raise PlanGraphError(f"run {run.id!r} has no allowed_paths")
+        if run.verification_timeout_seconds <= 0:
+            raise PlanGraphError(
+                f"run {run.id!r} verification timeout must be positive"
+            )
+        for intent in run.path_intents:
+            if intent.action not in {"create", "modify"}:
+                raise PlanGraphError(
+                    f"run {run.id!r} has invalid path intent {intent.action!r}"
+                )
+            if not path_is_allowed(intent.path, run.allowed_paths):
+                raise PlanGraphError(
+                    f"run {run.id!r} path intent {intent.path!r} is outside allowed_paths"
+                )
         cited = "\n".join(plan.plan_sections.get(section, "") for section in run.plan_sections)
         for section in run.plan_sections:
             if section not in plan.plan_sections:
@@ -1230,9 +1488,72 @@ def validate_plan_graph_plan(plan: PlanGraphPlan) -> None:
     missing = set(plan.acceptance_criteria) - covered
     if missing:
         raise PlanGraphError("acceptance criteria are not assigned to a FeatureRun: " + ", ".join(sorted(missing)))
-    if any(not command.strip() for command in plan.functionality_tests):
-        raise PlanGraphError("functionality_tests contains an empty command")
+    for command in plan.functionality_tests:
+        if isinstance(command, FunctionalityCommand):
+            if not command.argv or any(not value for value in command.argv):
+                raise PlanGraphError("functionality_tests contains an empty command")
+            if command.timeout_seconds <= 0:
+                raise PlanGraphError("functionality test timeout must be positive")
+        elif not command.strip():
+            raise PlanGraphError("functionality_tests contains an empty command")
     _ordered_runs(plan)
+    _validate_command_dependencies(plan)
+
+
+def _validate_command_dependencies(plan: PlanGraphPlan) -> None:
+    """Require every created-path consumer to name an ordered, declared producer."""
+
+    by_id = {run.id: run for run in plan.runs}
+
+    def ancestors(run_id: str) -> set[str]:
+        result: set[str] = set()
+        pending = list(by_id[run_id].depends_on)
+        while pending:
+            dependency = pending.pop()
+            if dependency in result or dependency not in by_id:
+                continue
+            result.add(dependency)
+            pending.extend(by_id[dependency].depends_on)
+        return result
+
+    def validate_required(required: RequiredPath, consumer: str | None) -> None:
+        if required.availability == "base":
+            if required.producer_run_id is not None:
+                raise PlanGraphError(
+                    f"base path {required.path!r} names a producer"
+                )
+            return
+        if required.availability != "created_by" or not required.producer_run_id:
+            raise PlanGraphError(
+                f"required path {required.path!r} has invalid availability"
+            )
+        producer = by_id.get(required.producer_run_id)
+        if producer is None:
+            raise PlanGraphError(
+                f"required path {required.path!r} has missing producer "
+                f"{required.producer_run_id!r}"
+            )
+        if not any(
+            intent.path == required.path and intent.action == "create"
+            for intent in producer.path_intents
+        ):
+            raise PlanGraphError(
+                f"run {producer.id!r} does not declare creation of "
+                f"{required.path!r}"
+            )
+        if consumer is not None and producer.id not in ancestors(consumer):
+            raise PlanGraphError(
+                f"run {consumer!r} consumes {required.path!r} before producer "
+                f"{producer.id!r}"
+            )
+
+    for run in plan.runs:
+        for required in run.verification_required_paths:
+            validate_required(required, run.id)
+    for command in plan.functionality_tests:
+        if isinstance(command, FunctionalityCommand):
+            for required in command.required_paths:
+                validate_required(required, None)
 
 
 def _local_process_start_token(pid: int) -> str | None:
@@ -1255,7 +1576,11 @@ def _local_process_start_token(pid: int) -> str | None:
     return observed.stdout.strip() or None
 
 
-def _run_functionality_test(repository: Path, command: str, candidate_commit: str) -> None:
+def _run_functionality_test(
+    repository: Path,
+    command: FunctionalityCommand | str,
+    candidate_commit: str,
+) -> None:
     with tempfile.TemporaryDirectory(prefix="plan-graph-") as temporary:
         candidate_path = Path(temporary) / "candidate"
         clone = subprocess.run(
@@ -1274,19 +1599,65 @@ def _run_functionality_test(repository: Path, command: str, candidate_commit: st
         )
         if checkout.returncode:
             raise RuntimeError((checkout.stdout + checkout.stderr).strip() or f"could not check out {candidate_commit}")
-        completed = subprocess.run(
-            command,
-            shell=True,
-            cwd=candidate_path,
-            text=True,
-            capture_output=True,
-            check=False,
-        )
+        if isinstance(command, FunctionalityCommand):
+            completed = subprocess.run(
+                command.argv,
+                cwd=candidate_path,
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=command.timeout_seconds,
+            )
+        else:
+            completed = subprocess.run(
+                command,
+                shell=True,
+                cwd=candidate_path,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
         if completed.returncode:
             raise RuntimeError((completed.stdout + completed.stderr).strip() or f"exit status {completed.returncode}")
 
 
-def plan_from_mapping(payload: Mapping[str, object]) -> PlanGraphPlan:
+def plan_from_mapping(
+    payload: Mapping[str, object],
+    *,
+    base_commit: str | None = None,
+    repository_id: str | None = None,
+    plan_sha256: str | None = None,
+) -> PlanGraphPlan:
+    if payload.get("protocol") == PLAN_GRAPH_PROTOCOL:
+        if base_commit is None or repository_id is None or plan_sha256 is None:
+            raise PlanGraphError(
+                "canonical PlanGraph requires approval-bound repository metadata"
+            )
+        try:
+            canonical = canonical_plan_graph_payload(payload)
+        except PlanGraphContractError as exc:
+            raise PlanGraphError(f"invalid PlanGraph decomposition: {exc}") from exc
+        runs = tuple(_run_from_mapping(item) for item in canonical["runs"])
+        return PlanGraphPlan(
+            plan=str(canonical["plan"]),
+            base_commit=base_commit,
+            runs=runs,
+            plan_sections=dict(canonical["plan_sections"]),
+            acceptance_criteria=dict(canonical["acceptance_criteria"]),
+            functionality_tests=tuple(
+                _command_from_mapping(value)
+                for value in canonical["functionality_tests"]
+            ),
+            repository_id=repository_id,
+            protocol=PLAN_GRAPH_PROTOCOL,
+            plan_sha256=plan_sha256,
+            canonical_decomposition=canonical,
+        )
+    if base_commit is not None or repository_id is not None or plan_sha256 is not None:
+        raise PlanGraphError(
+            "approval-bound repository metadata is only accepted for canonical "
+            "PlanGraph payloads"
+        )
     try:
         runs = tuple(
             PlanRun(
@@ -1297,6 +1668,17 @@ def plan_from_mapping(payload: Mapping[str, object]) -> PlanGraphPlan:
                 depends_on=tuple(str(value) for value in item.get("depends_on", ())),
                 verification_argv=tuple(str(value) for value in item.get("verification_argv", ())),
                 allowed_paths=tuple(str(value) for value in item.get("allowed_paths", ())),
+                path_intents=tuple(
+                    PathIntent(str(intent["path"]), str(intent["action"]))
+                    for intent in item.get("path_intents", ())
+                ),
+                verification_timeout_seconds=float(
+                    item.get("verification_timeout_seconds", 1200.0)
+                ),
+                verification_required_paths=tuple(
+                    _required_path_from_mapping(value)
+                    for value in item.get("verification_required_paths", ())
+                ),
             )
             for item in payload["runs"]  # type: ignore[index]
         )
@@ -1308,10 +1690,54 @@ def plan_from_mapping(payload: Mapping[str, object]) -> PlanGraphPlan:
             runs=runs,
             plan_sections=sections,
             acceptance_criteria=criteria,
-            functionality_tests=tuple(str(value) for value in payload.get("functionality_tests", ())),
+            functionality_tests=tuple(
+                _command_from_mapping(value) if isinstance(value, Mapping) else str(value)
+                for value in payload.get("functionality_tests", ())
+            ),
         )
-    except (KeyError, TypeError) as exc:
+    except (KeyError, TypeError, ValueError) as exc:
         raise PlanGraphError(f"invalid PlanGraph decomposition: {exc}") from exc
+
+
+def _run_from_mapping(value: Mapping[str, object]) -> PlanRun:
+    return PlanRun(
+        id=str(value["id"]),
+        objective=str(value["objective"]),
+        plan_sections=tuple(str(item) for item in value["plan_sections"]),  # type: ignore[union-attr]
+        criteria=tuple(str(item) for item in value["criteria"]),  # type: ignore[union-attr]
+        depends_on=tuple(str(item) for item in value["depends_on"]),  # type: ignore[union-attr]
+        verification_argv=tuple(str(item) for item in value["verification_argv"]),  # type: ignore[union-attr]
+        allowed_paths=tuple(str(item) for item in value["allowed_paths"]),  # type: ignore[union-attr]
+        path_intents=tuple(
+            PathIntent(str(item["path"]), str(item["action"]))
+            for item in value["path_intents"]  # type: ignore[union-attr]
+        ),
+        verification_timeout_seconds=float(value["verification_timeout_seconds"]),  # type: ignore[arg-type]
+        verification_required_paths=tuple(
+            _required_path_from_mapping(item)
+            for item in value["verification_required_paths"]  # type: ignore[union-attr]
+        ),
+    )
+
+
+def _command_from_mapping(value: Mapping[str, object]) -> FunctionalityCommand:
+    return FunctionalityCommand(
+        argv=tuple(str(item) for item in value["argv"]),  # type: ignore[union-attr]
+        timeout_seconds=float(value["timeout_seconds"]),  # type: ignore[arg-type]
+        required_paths=tuple(
+            _required_path_from_mapping(item)
+            for item in value.get("required_paths", ())  # type: ignore[union-attr]
+        ),
+    )
+
+
+def _required_path_from_mapping(value: Mapping[str, object]) -> RequiredPath:
+    producer = value.get("producer_run_id")
+    return RequiredPath(
+        path=str(value["path"]),
+        availability=str(value.get("availability", "base")),
+        producer_run_id=str(producer) if producer is not None else None,
+    )
 
 
 def _target_for_path(path: str, targets: Mapping[str, str]) -> str | None:
@@ -1329,10 +1755,15 @@ def _target_for_path(path: str, targets: Mapping[str, str]) -> str | None:
 
 __all__ = [
     "FEATURE_RUN_REQUEST_PROTOCOL",
+    "PLAN_GRAPH_PROTOCOL",
     "REGISTRATION_PROTOCOL",
+    "ApprovalEvidence",
     "FeatureRunOutcome",
     "FeatureRunRequest",
+    "FunctionalityCommand",
+    "PathIntent",
     "PlanGraph",
+    "RequiredPath",
     "PlanGraphError",
     "PlanGraphPlan",
     "PlanGraphRegistration",

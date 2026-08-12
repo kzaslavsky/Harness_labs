@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://harness-labs.local/schemas/plan-approval-subject.schema.json",
+  "title": "Repository-bound PlanGraph approval subject",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["protocol", "repository", "plan", "decomposition", "referenced_artifacts", "review_policy", "plan_graph_digest"],
+  "properties": {
+    "protocol": {"const": "plan-approval-subject/1"},
+    "repository": {
+      "type": "object", "additionalProperties": false,
+      "required": ["identity", "base_commit"],
+      "properties": {
+        "identity": {
+          "type": "object", "additionalProperties": false,
+          "required": ["id", "path", "git_blob", "sha256"],
+          "properties": {"id": {"type": "string", "minLength": 1}, "path": {"type": "string", "minLength": 1}, "git_blob": {"$ref": "#/$defs/git_object"}, "sha256": {"$ref": "#/$defs/sha256"}}
+        },
+        "base_commit": {"$ref": "#/$defs/git_object"}
+      }
+    },
+    "plan": {"$ref": "#/$defs/git_artifact"},
+    "decomposition": {
+      "type": "object", "additionalProperties": false,
+      "required": ["protocol", "path", "git_blob", "sha256", "canonical_sha256"],
+      "properties": {
+        "protocol": {"const": "plan-graph-plan/1"},
+        "path": {"type": "string", "minLength": 1},
+        "git_blob": {"$ref": "#/$defs/git_object"},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "canonical_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "referenced_artifacts": {"type": "array", "items": {"$ref": "#/$defs/git_artifact"}},
+    "review_policy": {
+      "type": "object", "additionalProperties": false,
+      "required": ["policy_id", "reviewer_profile_digests", "max_timeout_seconds", "policy_sha256"],
+      "properties": {"policy_id": {"const": "operator-attested-plan-approval/1"}, "reviewer_profile_digests": {"type": "array", "items": {"$ref": "#/$defs/sha256"}}, "max_timeout_seconds": {"type": "number", "exclusiveMinimum": 0}, "policy_sha256": {"$ref": "#/$defs/sha256"}}
+    },
+    "plan_graph_digest": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "git_object": {"type": "string", "pattern": "^[a-f0-9]{40,64}$"},
+    "git_artifact": {
+      "type": "object", "additionalProperties": false,
+      "required": ["path", "git_blob", "sha256"],
+      "properties": {"path": {"type": "string", "minLength": 1}, "git_blob": {"$ref": "#/$defs/git_object"}, "sha256": {"$ref": "#/$defs/sha256"}}
+    }
+  }
+}
