@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 import errno
 import fcntl
 import hashlib
@@ -17,6 +17,7 @@ from uuid import uuid4
 from .audit import AuditError
 from .plan_graph_audit import PlanGraphAudit, validate_plan_graph_id
 from .plan_graph_budget import BudgetError, RetryBudgetLedger, gate_digest
+from .plan_graph_authority import AutomaticRecoveryAuthority, RecoveryAuthorityError
 from .plan_graph_contract import (
     PLAN_GRAPH_PROTOCOL,
     PlanGraphContractError,
@@ -28,9 +29,10 @@ from .plan_graph_contract import (
 
 
 REGISTRATION_PROTOCOL = "plan-graph-registration/2"
+RECOVERY_REGISTRATION_PROTOCOL = "plan-graph-registration/3"
 LEGACY_PLAN_PROTOCOL = "component-plan/0"
 FEATURE_RUN_REQUEST_PROTOCOL = "plan-graph-feature-run-request/1"
-_REGISTRATION_FIELDS = frozenset(
+_REGISTRATION_FIELDS_V2 = frozenset(
     {
         "protocol",
         "logical_graph_id",
@@ -40,6 +42,13 @@ _REGISTRATION_FIELDS = frozenset(
         "graph_digest",
         "definition_json",
         "plan_lineage_id",
+    }
+)
+_REGISTRATION_FIELDS = frozenset(
+    {
+        *_REGISTRATION_FIELDS_V2,
+        "automatic_recovery",
+        "plan_version_transition",
     }
 )
 class PlanGraphError(ValueError):
@@ -332,6 +341,8 @@ class PlanGraphRegistration:
     graph_digest: str
     definition_json: str
     plan_lineage_id: str
+    automatic_recovery: Mapping[str, object] | None = None
+    plan_version_transition: Mapping[str, object] | None = None
 
 
 @dataclass(frozen=True)
@@ -375,6 +386,19 @@ class PlanGraphResult:
     completed: Mapping[str, str]
     failed_run_id: str | None = None
     functionality_failure: str | None = None
+    deviation_records: tuple[Mapping[str, object], ...] = ()
+
+    def __post_init__(self) -> None:
+        """Keep successful terminal reporting bound to durable deviations."""
+        if self.status not in {
+            "succeeded", "completed_with_deviations", "completed_under_full_autonomy",
+        }:
+            return
+        expected_status = PlanGraph._completion_status(self.deviation_records)
+        if self.status != expected_status:
+            raise PlanGraphError(
+                "successful terminal status does not match recovery deviation records"
+            )
 
 
 @dataclass(frozen=True)
@@ -630,7 +654,7 @@ def _plan_bytes(repository: Path, base_commit: str, plan_path: str) -> bytes:
 def _digest_input(
     registration_fields: Mapping[str, object], definition: Mapping[str, object]
 ) -> dict[str, object]:
-    return {
+    result = {
         "protocol": registration_fields["protocol"],
         "logical_graph_id": registration_fields["logical_graph_id"],
         "plan_path": registration_fields["plan_path"],
@@ -639,6 +663,10 @@ def _digest_input(
         "plan_lineage_id": registration_fields["plan_lineage_id"],
         "definition": dict(definition),
     }
+    if registration_fields["protocol"] == RECOVERY_REGISTRATION_PROTOCOL:
+        result["automatic_recovery"] = registration_fields.get("automatic_recovery")
+        result["plan_version_transition"] = registration_fields.get("plan_version_transition")
+    return result
 
 
 def register_plan_graph(
@@ -649,6 +677,8 @@ def register_plan_graph(
     base_commit: str | None = None,
     repository_id: str | None = None,
     plan_lineage_id: str | None = None,
+    automatic_recovery: Mapping[str, object] | None = None,
+    plan_version_transition: Mapping[str, object] | None = None,
 ) -> PlanGraphRegistration:
     repository = repository.resolve()
     validate_plan_graph_id(logical_graph_id)
@@ -698,19 +728,30 @@ def register_plan_graph(
             }
         ).encode("utf-8")
     ).hexdigest()
+    try:
+        authority = AutomaticRecoveryAuthority.from_mapping(automatic_recovery)
+    except RecoveryAuthorityError as exc:
+        raise PlanGraphError(str(exc)) from exc
+    registration_protocol = (
+        RECOVERY_REGISTRATION_PROTOCOL
+        if automatic_recovery is not None or plan_version_transition is not None
+        else REGISTRATION_PROTOCOL
+    )
     fields: dict[str, object] = {
-        "protocol": REGISTRATION_PROTOCOL,
+        "protocol": registration_protocol,
         "logical_graph_id": logical_graph_id,
         "plan_path": plan_path,
         "plan_sha256": plan_sha256,
         "base_commit": base_commit,
         "plan_lineage_id": lineage_id,
+        "automatic_recovery": authority.as_mapping(),
+        "plan_version_transition": dict(plan_version_transition) if plan_version_transition is not None else None,
     }
     graph_digest = hashlib.sha256(
         canonical_json(_digest_input(fields, json.loads(definition_json))).encode("utf-8")
     ).hexdigest()
     return PlanGraphRegistration(
-        protocol=REGISTRATION_PROTOCOL,
+        protocol=registration_protocol,
         logical_graph_id=logical_graph_id,
         plan_path=plan_path,
         plan_sha256=plan_sha256,
@@ -718,19 +759,33 @@ def register_plan_graph(
         graph_digest=graph_digest,
         definition_json=definition_json,
         plan_lineage_id=str(fields["plan_lineage_id"]),
+        automatic_recovery=(authority.as_mapping()
+                            if registration_protocol == RECOVERY_REGISTRATION_PROTOCOL else None),
+        plan_version_transition=(dict(plan_version_transition)
+                                 if registration_protocol == RECOVERY_REGISTRATION_PROTOCOL
+                                 and plan_version_transition is not None else None),
     )
 
 
 def registration_bytes(registration: PlanGraphRegistration) -> bytes:
-    return (canonical_json(asdict(registration)) + "\n").encode("utf-8")
+    fields = asdict(registration)
+    if registration.protocol == REGISTRATION_PROTOCOL:
+        fields = {name: fields[name] for name in _REGISTRATION_FIELDS_V2}
+    return (canonical_json(fields) + "\n").encode("utf-8")
 
 
 def registration_from_mapping(payload: Mapping[str, object]) -> PlanGraphRegistration:
-    if set(payload) != _REGISTRATION_FIELDS:
+    protocol = payload.get("protocol")
+    fields = _REGISTRATION_FIELDS_V2 if protocol == REGISTRATION_PROTOCOL else _REGISTRATION_FIELDS
+    if set(payload) != fields:
         raise PlanGraphError("registration must contain exactly the protocol fields")
-    if not all(isinstance(payload.get(name), str) for name in _REGISTRATION_FIELDS):
+    if not all(isinstance(payload.get(name), str) for name in fields - {"automatic_recovery", "plan_version_transition"}):
         raise PlanGraphError("registration fields must be strings")
-    return PlanGraphRegistration(**{name: payload[name] for name in _REGISTRATION_FIELDS})  # type: ignore[arg-type]
+    values = {name: payload[name] for name in fields}
+    if protocol == REGISTRATION_PROTOCOL:
+        values["automatic_recovery"] = None
+        values["plan_version_transition"] = None
+    return PlanGraphRegistration(**values)  # type: ignore[arg-type]
 
 
 def load_registration(path: Path) -> PlanGraphRegistration:
@@ -825,9 +880,19 @@ def verify_registration(
     repository: Path, registration: PlanGraphRegistration
 ) -> PlanGraphPlan:
     repository = repository.resolve()
-    if registration.protocol != REGISTRATION_PROTOCOL:
+    if registration.protocol not in {REGISTRATION_PROTOCOL, RECOVERY_REGISTRATION_PROTOCOL}:
         raise PlanGraphError("unsupported PlanGraph registration protocol")
+    if (registration.protocol == REGISTRATION_PROTOCOL
+            and (registration.automatic_recovery is not None
+                 or registration.plan_version_transition is not None)):
+        raise PlanGraphError("registration protocol v2 cannot carry recovery authority")
     validate_plan_graph_id(registration.logical_graph_id)
+    try:
+        AutomaticRecoveryAuthority.from_mapping(registration.automatic_recovery)
+    except RecoveryAuthorityError as exc:
+        raise PlanGraphError(str(exc)) from exc
+    if registration.plan_version_transition is not None and not isinstance(registration.plan_version_transition, Mapping):
+        raise PlanGraphError("plan-version transition must be an object")
     if _normalize_plan_path(repository, registration.plan_path) != registration.plan_path:
         raise PlanGraphError("registration plan path is not normalized")
     try:
@@ -919,6 +984,8 @@ class PlanGraph:
             self.budget.register(
                 plan_sha256=registration.plan_sha256,
                 gates={run.id: gate_digest(run.verification_argv) for run in self.plan.runs},
+                automatic_recovery=registration.automatic_recovery,
+                transition=registration.plan_version_transition,
             )
         except BudgetError as exc:
             raise PlanGraphError(str(exc)) from exc
@@ -1031,7 +1098,10 @@ class PlanGraph:
     def run(self) -> PlanGraphResult:
         self._revalidate_approval()
         audit = self._audit_for_run()
-        if audit.terminal:
+        if audit.terminal or audit.state.get("terminal_graph_status") in {
+            "completed_with_deviations", "completed_under_full_autonomy",
+            "externally_blocked", "operator_intervention_required",
+        }:
             return self._result_from_audit(audit)
         recovery = audit.reconcile_interrupted_attempts(
             process_probe=self.child_liveness_probe,
@@ -1128,12 +1198,12 @@ class PlanGraph:
                     raise PlanGraphError(str(exc)) from exc
             if outcome.status != "succeeded":
                 self.budget.completed(reservation, outcome.status if outcome.status == "blocked" else "failed")
-                result = PlanGraphResult(
+                result = self._with_deviation_records(PlanGraphResult(
                     status=outcome.status if outcome.status == "blocked" else "failed",
                     candidate_commit=None,
                     completed=dict(completed),
                     failed_run_id=run.id,
-                )
+                ))
                 audit.node_failed(run.id, result.status, outcome.evidence)
                 if result.status == "blocked":
                     return self._transition_to_blocked(
@@ -1162,12 +1232,12 @@ class PlanGraph:
             except PlanGraphError as exc:
                 self.budget.completed(reservation, "blocked")
                 conflict_ref = audit.transfer_conflict_blocked(run.id, str(exc))
-                result = PlanGraphResult(
+                result = self._with_deviation_records(PlanGraphResult(
                     status="blocked",
                     candidate_commit=outcome.candidate_commit,
                     completed=dict(completed),
                     failed_run_id=run.id,
-                )
+                ))
                 return self._transition_to_blocked(
                     audit, result, reason=str(exc), evidence_ref=conflict_ref
                 )
@@ -1190,18 +1260,22 @@ class PlanGraph:
             try:
                 self.functionality_test_runner(command, candidate_commit)
             except Exception as exc:
-                result = PlanGraphResult(
+                result = self._with_deviation_records(PlanGraphResult(
                     "failed",
                     candidate_commit,
                     dict(completed),
                     functionality_failure=f"{rendered}: {exc}",
-                )
+                ))
                 audit.functionality_failed(recorded, candidate_commit, str(exc))
                 audit.finalize("failed", self._result_payload(result))
                 return result
             audit.functionality_completed(recorded, candidate_commit)
-        result = PlanGraphResult("succeeded", candidate_commit, dict(completed))
-        audit.finalize("succeeded", self._result_payload(result))
+        deviation_records = self._deviation_records()
+        result = PlanGraphResult(
+            self._completion_status(deviation_records),
+            candidate_commit, dict(completed), deviation_records=deviation_records,
+        )
+        audit.finalize(result.status, self._result_payload(result))
         return result
 
     def _revalidate_approval(self) -> ApprovalEvidence | None:
@@ -1526,6 +1600,7 @@ class PlanGraph:
 
     @staticmethod
     def _result_payload(result: PlanGraphResult) -> dict[str, object]:
+        deviation_records = [dict(record) for record in result.deviation_records]
         return {
             "status": result.status,
             "candidate_commit": result.candidate_commit,
@@ -1533,15 +1608,57 @@ class PlanGraph:
             "failed_run_id": result.failed_run_id,
             "functionality_failure": result.functionality_failure,
             "status_flags": PlanGraph._status_flags(result.status),
+            "deviation_records": deviation_records,
+            "deviation_summary": {
+                "record_count": len(deviation_records),
+                "terminal_status": result.status,
+                "records": deviation_records,
+            },
         }
+
+    def _deviation_records(self) -> tuple[Mapping[str, object], ...]:
+        """Read validated durable deviation records for every terminal result."""
+        try:
+            return self.budget.deviation_records()
+        except BudgetError as exc:
+            raise PlanGraphError("could not read recovery deviation records") from exc
+
+    def _with_deviation_records(self, result: PlanGraphResult) -> PlanGraphResult:
+        if result.deviation_records:
+            return result
+        return replace(result, deviation_records=self._deviation_records())
+
+    @staticmethod
+    def _completion_status(records: Sequence[Mapping[str, object]]) -> str:
+        if not records:
+            return "succeeded"
+        kinds: set[str] = set()
+        for record in records:
+            kind = record.get("kind")
+            if not isinstance(kind, str) or kind not in {"recovery_decision", "plan_version_transition"}:
+                raise PlanGraphError("recovery deviation record has an unsupported kind")
+            kinds.add(kind)
+        if "plan_version_transition" in kinds:
+            return "completed_with_deviations"
+        if kinds == {"recovery_decision"}:
+            return "completed_under_full_autonomy"
+        raise PlanGraphError("recovery deviation record does not determine a terminal status")
 
     @staticmethod
     def _status_flags(status: str) -> dict[str, bool]:
         return {
-            "complete": status in {"succeeded", "failed", "blocked"},
-            "success": status == "succeeded",
-            "resumable": status == "blocked",
-            "deviated": status in {"failed", "blocked"},
+            "complete": status in {
+                "succeeded", "failed", "blocked", "completed_with_deviations",
+                "completed_under_full_autonomy", "externally_blocked",
+                "operator_intervention_required",
+            },
+            "success": status in {"succeeded", "completed_with_deviations", "completed_under_full_autonomy"},
+            "resumable": status in {"blocked", "externally_blocked"},
+            "deviated": status in {
+                "failed", "blocked", "completed_with_deviations",
+                "completed_under_full_autonomy", "externally_blocked",
+                "operator_intervention_required",
+            },
         }
 
     def _transition_to_blocked(
@@ -1554,6 +1671,7 @@ class PlanGraph:
         evidence_ref: str | None = None,
     ) -> PlanGraphResult:
         """Finalize every block through one checkpointed escalation transition."""
+        result = self._with_deviation_records(result)
         flags = self._status_flags("blocked")
         with self.budget._locked(shared=True) as handle:  # read-through of the append-only ledger
             budget_state = self.budget._fold(handle)
@@ -1684,8 +1802,7 @@ class PlanGraph:
                 "error": str(exc),
             }
 
-    @staticmethod
-    def _result_from_audit(audit: PlanGraphAudit) -> PlanGraphResult:
+    def _result_from_audit(self, audit: PlanGraphAudit) -> PlanGraphResult:
         state = audit.state
         nodes = state.get("nodes", {})
         completed = {
@@ -1706,13 +1823,14 @@ class PlanGraph:
         functionality = state.get("functionality_test", {})
         candidate_commit = state.get("current_candidate_commit")
         if state.get("terminal_graph_status") == "blocked" and failed is not None:
-            candidate_commit = PlanGraph._pending_candidate_commit(audit, failed)
+            candidate_commit = self._pending_candidate_commit(audit, failed)
         return PlanGraphResult(
             status=str(state.get("terminal_graph_status")),
             candidate_commit=candidate_commit if isinstance(candidate_commit, str) else None,
             completed=completed,
             failed_run_id=failed,
             functionality_failure=functionality.get("error") if isinstance(functionality, dict) and isinstance(functionality.get("error"), str) else None,
+            deviation_records=self._deviation_records(),
         )
 
     @staticmethod

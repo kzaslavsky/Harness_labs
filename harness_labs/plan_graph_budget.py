@@ -15,6 +15,12 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 from uuid import uuid4
 
+from .plan_graph_authority import (
+    AutomaticRecoveryAuthority, RecoveryAuthorityError, REVISION_ACTIONS,
+    STRUCTURAL_ACTIONS, validate_plan_version_transition,
+    validate_recovery_decision,
+)
+
 
 class BudgetError(ValueError):
     pass
@@ -68,20 +74,47 @@ class RetryBudgetLedger:
         self.path = run_root.resolve() / ".plan-graph-budgets" / f"{lineage_id}.jsonl"
         self.lineage_id = lineage_id
 
-    def register(self, *, plan_sha256: str, gates: Mapping[str, str]) -> None:
+    def register(self, *, plan_sha256: str, gates: Mapping[str, str], automatic_recovery: Mapping[str, object] | None = None, transition: Mapping[str, object] | None = None) -> None:
         """Bind a plan version, requiring digest-bound operator relief for changes."""
         self._validate_registration(plan_sha256, gates)
+        try:
+            authority = AutomaticRecoveryAuthority.from_mapping(automatic_recovery)
+        except RecoveryAuthorityError as exc:
+            raise BudgetError(str(exc)) from exc
         with self._locked() as handle:
             state = self._fold(handle)
             versions = state["plan_sha256"]
             changed_plan = bool(versions and plan_sha256 not in versions)
-            if changed_plan and state["accepted_plan_sha256"] != plan_sha256:
-                raise BudgetError(
-                    "changed-plan lineage registration is blocked; "
-                    "operator relief required for this plan digest"
-                )
+            if state["authority"] is not None and state["authority"] != authority.as_mapping():
+                raise BudgetError("automatic recovery authority is registration-immutable; re-register a new lineage")
+            if transition is not None and not changed_plan:
+                # A transition is the sole authorization for a new plan
+                # version.  Ignoring one on a same-version registration would
+                # silently discard a typed authority record.
+                raise BudgetError("plan-version transition requires a changed plan digest")
+            if changed_plan:
+                if transition is not None:
+                    try:
+                        checked_transition = validate_plan_version_transition(transition, authority)
+                    except RecoveryAuthorityError as exc:
+                        # A caller that supplied a typed transition must not
+                        # obtain the legacy relief path if it is malformed or
+                        # unauthorized.  The two authorization mechanisms are
+                        # intentionally disjoint.
+                        raise BudgetError("plan-version transition is invalid") from exc
+                    if (checked_transition["predecessor_plan_sha256"] != state["active_plan_sha256"]
+                            or checked_transition["successor_plan_sha256"] != plan_sha256
+                            or set(checked_transition["node_correspondence"]) != set(gates)
+                            or not set(checked_transition["node_correspondence"]).issubset(state["gates"])):
+                        raise BudgetError("plan-version transition does not bind the active lineage registration")
+                    if state["automatic_recovery_structural_decisions"] >= authority.max_structural_decisions:
+                        raise BudgetError("structural recovery allowance exhausted")
+                else:
+                    checked_transition = None
+                if checked_transition is None and state["accepted_plan_sha256"] != plan_sha256:
+                    raise BudgetError("changed-plan lineage registration is blocked; operator relief required for this plan digest")
             if not versions:
-                self._append(handle, {"event": "registered", "plan_sha256": plan_sha256, "gates": dict(gates)})
+                self._append(handle, {"event": "registered", "plan_sha256": plan_sha256, "gates": dict(gates), "automatic_recovery": authority.as_mapping()})
                 return
             # Validate the full re-registration before consuming any operator
             # authorization.  Otherwise an approved change earlier in the
@@ -98,10 +131,95 @@ class RetryBudgetLedger:
             if changed_plan:
                 # This append records the revised plan and consumes precisely
                 # the authorization bound to its digest.
+                if checked_transition is not None:
+                    self._append(handle, {
+                        "event": "structural_decision",
+                        "decision": checked_transition["authorizing_decision"],
+                        "prior_digest": checked_transition["predecessor_plan_sha256"],
+                    })
                 self._append(handle, {
                     "event": "registered", "plan_sha256": plan_sha256,
-                    "gates": dict(gates), "consumes_plan_change_authorization": True,
+                    "gates": dict(gates), "automatic_recovery": authority.as_mapping(), "transition": checked_transition,
+                    "consumes_plan_change_authorization": checked_transition is None,
                 })
+                if checked_transition is not None:
+                    for node_id, carryover in checked_transition["budget_carryover"].items():
+                        self._append(handle, {
+                            "event": "transition_carryover", "node_id": node_id,
+                            "carryover": carryover,
+                            "transition_successor_plan_sha256": plan_sha256,
+                        })
+
+    def apply_recovery_decision(self, decision: Mapping[str, object], *, prior_digest: str) -> None:
+        """Append a typed, allowance-bounded recovery action; never mutate authority."""
+        with self._locked() as handle:
+            state = self._fold(handle)
+            if state["authority"] is None:
+                raise BudgetError("retry lineage has no registered recovery authority")
+            try:
+                authority = AutomaticRecoveryAuthority.from_mapping(state["authority"])
+                checked = validate_recovery_decision(decision, authority)
+            except RecoveryAuthorityError as exc:
+                raise BudgetError(str(exc)) from exc
+            if checked["expected_prior_digest"] != prior_digest:
+                raise BudgetError("recovery decision expected prior digest mismatch")
+            action, target, payload = checked["action"], checked["target"], checked["payload"]
+            if action in STRUCTURAL_ACTIONS:
+                if state["automatic_recovery_structural_decisions"] >= authority.max_structural_decisions:
+                    raise BudgetError("structural recovery allowance exhausted")
+                if action in REVISION_ACTIONS:
+                    raise BudgetError("plan revision actions require a plan-version transition")
+            if target not in state["gates"]:
+                raise BudgetError("recovery decision target is not registered")
+            if action == "extend_budget":
+                launches = payload["launches"]
+                spent = state["automatic_recovery_extra_launches"]
+                if spent + launches > authority.max_extra_node_launches:
+                    raise BudgetError("recovery allowance exhausted")
+                self._append(handle, {"event": "recovery_decision", "decision": checked, "prior_digest": prior_digest})
+                self._append(handle, {"event": "extended", "node_id": target, "launches": launches, "reason": "registration-authorized recovery decision"})
+            elif action == "resume":
+                self._append(handle, {"event": "recovery_decision", "decision": checked, "prior_digest": prior_digest})
+                self._append(handle, {"event": "resumed", "node_id": target,
+                                      "reverification_required": True})
+            elif action == "transfer_ownership":
+                receiving_node = payload["receiving_node"]
+                if receiving_node not in state["gates"]:
+                    raise BudgetError("recovery decision receiving node is not registered")
+                self._append(handle, {"event": "recovery_decision", "decision": checked, "prior_digest": prior_digest})
+                self._append(handle, {
+                    "event": "obligation_transferred", "source_node": target,
+                    "receiving_node": receiving_node,
+                    "reverification_required": True,
+                })
+            elif action == "ratify_gate_change":
+                self._append(handle, {"event": "recovery_decision", "decision": checked, "prior_digest": prior_digest})
+                self._append(handle, {
+                    "event": "gate_lineage", "node_id": target,
+                    "predecessor_gate": state["gates"][target],
+                    "successor_gate": payload["gate"],
+                    "identity": "gate_identity_v1_incomplete",
+                    "budget_carryover": payload["budget_carryover"],
+                    "reverification_required": True,
+                })
+            else:
+                # These actions have no state transition in this standalone
+                # ledger.  Do not write an authoritative-looking no-op.
+                raise BudgetError(f"recovery action {action!r} has no v1 applicator")
+
+    def deviation_records(self) -> tuple[dict[str, object], ...]:
+        """Return durable recovery decisions and consumed plan deviations."""
+        with self._locked(shared=True) as handle:
+            self._fold(handle)  # validate the entire ledger before exposing it
+            handle.seek(0)
+            records: list[dict[str, object]] = []
+            for line in handle:
+                event = json.loads(line)
+                if event.get("event") == "recovery_decision":
+                    records.append({"kind": "recovery_decision", "decision": event["decision"]})
+                elif event.get("event") == "registered" and event.get("transition") is not None:
+                    records.append({"kind": "plan_version_transition", "transition": event["transition"]})
+            return tuple(records)
 
     def reserve(
         self,
@@ -441,7 +559,7 @@ class RetryBudgetLedger:
         return _Lock(handle, ledger_was_missing=ledger_was_missing)
 
     def _fold(self, handle) -> dict[str, Any]:
-        state: dict[str, Any] = {"plan_sha256": set(), "gates": {}, "nodes": {}, "reservations": {}, "finding_keys": {}, "accepted_plan_sha256": None, "imported_invocations": set()}
+        state: dict[str, Any] = {"plan_sha256": set(), "active_plan_sha256": None, "gates": {}, "nodes": {}, "reservations": {}, "finding_keys": {}, "accepted_plan_sha256": None, "imported_invocations": set(), "authority": None, "automatic_recovery_extra_launches": 0, "automatic_recovery_structural_decisions": 0, "pending_plan_transition_decision": None}
         handle.seek(0)
         for line in handle:
             try:
@@ -455,16 +573,28 @@ class RetryBudgetLedger:
                 kind = event["event"]
                 if kind == "registered":
                     changed_plan = bool(state["plan_sha256"] and event["plan_sha256"] not in state["plan_sha256"])
+                    authority = AutomaticRecoveryAuthority.from_mapping(event.get("automatic_recovery"))
+                    if state["authority"] is not None and state["authority"] != authority.as_mapping(): raise ValueError
+                    if event.get("transition") is not None and not changed_plan: raise ValueError
                     if changed_plan:
-                        if (
-                            not event.get("consumes_plan_change_authorization")
-                            or state["accepted_plan_sha256"] != event["plan_sha256"]
-                        ):
-                            raise ValueError
+                        if event.get("transition") is not None:
+                            checked_transition = validate_plan_version_transition(event["transition"], authority)
+                            if (checked_transition["predecessor_plan_sha256"] != state["active_plan_sha256"]
+                                    or checked_transition["successor_plan_sha256"] != event["plan_sha256"]
+                                    or set(checked_transition["node_correspondence"]) != set(event["gates"])
+                                    or not set(checked_transition["node_correspondence"]).issubset(state["gates"])
+                                    or state["pending_plan_transition_decision"] != checked_transition["authorizing_decision"]): raise ValueError
+                            state["pending_plan_transition_decision"] = None
+                        elif not event.get("consumes_plan_change_authorization") or state["accepted_plan_sha256"] != event["plan_sha256"]: raise ValueError
                         state["accepted_plan_sha256"] = None
-                    elif event.get("consumes_plan_change_authorization"):
-                        raise ValueError
-                    state["plan_sha256"].add(event["plan_sha256"]); state["gates"].update(event["gates"])
+                    state["authority"] = authority.as_mapping()
+                    state["plan_sha256"].add(event["plan_sha256"]); state["active_plan_sha256"] = event["plan_sha256"]
+                    if changed_plan:
+                        # Removed nodes leave their accounting history in
+                        # ``nodes`` but must not remain launchable.
+                        state["gates"] = dict(event["gates"])
+                    else:
+                        state["gates"].update(event["gates"])
                 elif kind == "gate_changed":
                     state["gates"][event["node_id"]] = event["gate"]
                     self._node(state, event["node_id"])["accept_gate_change"] = False
@@ -529,6 +659,65 @@ class RetryBudgetLedger:
                 elif kind == "blocked": self._node(state, event["node_id"])["blocked"] = True
                 elif kind == "extended":
                     node = self._node(state, event["node_id"]); node["extra"] += event["launches"]; node["blocked"] = False
+                elif kind == "recovery_decision":
+                    authority = AutomaticRecoveryAuthority.from_mapping(state["authority"])
+                    decision = validate_recovery_decision(event["decision"], authority)
+                    if not isinstance(event.get("prior_digest"), str) or decision["expected_prior_digest"] != event["prior_digest"]: raise ValueError
+                    if decision["action"] == "extend_budget": state["automatic_recovery_extra_launches"] += decision["payload"]["launches"]
+                    if decision["action"] in STRUCTURAL_ACTIONS: state["automatic_recovery_structural_decisions"] += 1
+                    if (state["automatic_recovery_extra_launches"] > authority.max_extra_node_launches
+                            or state["automatic_recovery_structural_decisions"] > authority.max_structural_decisions): raise ValueError
+                elif kind == "structural_decision":
+                    authority = AutomaticRecoveryAuthority.from_mapping(state["authority"])
+                    decision = validate_recovery_decision(event["decision"], authority, allow_plan_revision=True)
+                    if (decision["action"] not in REVISION_ACTIONS
+                            or event.get("prior_digest") != decision["expected_prior_digest"]): raise ValueError
+                    state["automatic_recovery_structural_decisions"] += 1
+                    if state["automatic_recovery_structural_decisions"] > authority.max_structural_decisions: raise ValueError
+                    if state["pending_plan_transition_decision"] is not None: raise ValueError
+                    state["pending_plan_transition_decision"] = decision
+                elif kind == "resumed":
+                    if event.get("node_id") not in state["gates"] or event.get("reverification_required") is not True: raise ValueError
+                    node = self._node(state, event["node_id"])
+                    node["blocked"] = False
+                    node["reverification_required"] = True
+                elif kind == "obligation_transferred":
+                    source, receiving = event.get("source_node"), event.get("receiving_node")
+                    if (source not in state["gates"] or receiving not in state["gates"]
+                            or source == receiving or event.get("reverification_required") is not True): raise ValueError
+                    state.setdefault("obligation_transfers", []).append({
+                        "source_node": source, "receiving_node": receiving,
+                    })
+                    self._node(state, receiving)["reverification_required"] = True
+                elif kind == "gate_lineage":
+                    node_id, predecessor, successor, carryover = (
+                        event.get("node_id"), event.get("predecessor_gate"),
+                        event.get("successor_gate"), event.get("budget_carryover"),
+                    )
+                    if (node_id not in state["gates"] or predecessor != state["gates"][node_id]
+                            or not isinstance(successor, str) or not successor
+                            or carryover not in {"full", "reset"}
+                            or event.get("identity") != "gate_identity_v1_incomplete"
+                            or event.get("reverification_required") is not True): raise ValueError
+                    state["gates"][node_id] = successor
+                    node = self._node(state, node_id)
+                    node["accept_gate_change"] = False
+                    node["reverification_required"] = True
+                    if carryover == "reset":
+                        self._reset_node_accounting(state, node)
+                elif kind == "transition_carryover":
+                    if (event.get("transition_successor_plan_sha256") != state["active_plan_sha256"]
+                            or event.get("carryover") not in {"full", "reset"}
+                            or event.get("node_id") not in state["gates"]): raise ValueError
+                    if event["carryover"] == "reset":
+                        node = self._node(state, event["node_id"])
+                        node["launches"] = 0; node["extra"] = 0; node["counters"] = {}
+                        node["attempt_counters"] = {name: 0 for name in _ATTEMPT_COUNTERS}
+                        for key, count in node["finding_keys"].items():
+                            remaining = state["finding_keys"].get(key, 0) - count
+                            if remaining > 0: state["finding_keys"][key] = remaining
+                            else: state["finding_keys"].pop(key, None)
+                        node["finding_keys"] = {}
                 elif kind == "reset":
                     node = self._node(state, event["node_id"]); node["blocked"] = False
                     node["accept_gate_change"] = bool(event.get("accept_gate_change"))
@@ -554,6 +743,21 @@ class RetryBudgetLedger:
             except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
                 raise BudgetError("retry budget ledger is corrupt; operator intervention required") from exc
         return state
+
+    @staticmethod
+    def _reset_node_accounting(state: dict[str, Any], node: dict[str, Any]) -> None:
+        """Reset a node's carryover without leaving its finding charges global."""
+        node["launches"] = 0
+        node["extra"] = 0
+        node["counters"] = {}
+        node["attempt_counters"] = {name: 0 for name in _ATTEMPT_COUNTERS}
+        for key, count in node["finding_keys"].items():
+            remaining = state["finding_keys"].get(key, 0) - count
+            if remaining > 0:
+                state["finding_keys"][key] = remaining
+            else:
+                state["finding_keys"].pop(key, None)
+        node["finding_keys"] = {}
 
     def _append(self, handle, event: dict[str, Any]) -> None:
         event = {"protocol": self.protocol, "lineage_id": self.lineage_id, **event}

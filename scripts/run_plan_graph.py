@@ -74,6 +74,8 @@ def _parser() -> argparse.ArgumentParser:
     register.add_argument("--logical-graph-id", required=True)
     register.add_argument("--registration-root", type=Path)
     register.add_argument("--lineage-id")
+    register.add_argument("--automatic-recovery", type=Path)
+    register.add_argument("--transition", type=Path)
 
     budget = modes.add_parser("budget")
     budget.add_argument("operation", choices=("extend", "reset"))
@@ -130,11 +132,23 @@ def main() -> int:
         payload = json.loads(arguments.decomposition.read_text(encoding="utf-8"))
         if not isinstance(payload, dict):
             raise ValueError("decomposition must be a JSON object")
+        authority = None
+        if arguments.automatic_recovery is not None:
+            authority = json.loads(arguments.automatic_recovery.read_text(encoding="utf-8"))
+            if not isinstance(authority, dict):
+                raise ValueError("automatic recovery authority must be a JSON object")
+        transition = None
+        if arguments.transition is not None:
+            transition = json.loads(arguments.transition.read_text(encoding="utf-8"))
+            if not isinstance(transition, dict):
+                raise ValueError("plan-version transition must be a JSON object")
         registration = register_plan_graph(
             repository=repository,
             logical_graph_id=arguments.logical_graph_id,
             decomposition=payload,
             plan_lineage_id=arguments.lineage_id,
+            automatic_recovery=authority,
+            plan_version_transition=transition,
         )
         registration_root = _repository_path(
             repository,
@@ -258,6 +272,8 @@ def main() -> int:
                 "graph_attempt_id": graph.graph_run_id,
                 "registration_digest": registration.graph_digest,
                 "status_flags": PlanGraph._status_flags(result.status),
+                "deviation_records": [dict(record) for record in result.deviation_records],
+                "deviation_summary": PlanGraph._result_payload(result)["deviation_summary"],
                 "blocker_evidence_ref": graph._audit_for_run().state.get("block_escalation_ref"),
                 "on_block_hook_log": str((run_root / graph.graph_run_id / "on-block-hook.log")) if graph.on_block_argv else None,
                 "on_block_hook": graph.on_block_hook,
@@ -265,7 +281,7 @@ def main() -> int:
             sort_keys=True,
         )
     )
-    return 0 if result.status == "succeeded" else 1
+    return 0 if result.status in {"succeeded", "completed_with_deviations", "completed_under_full_autonomy"} else 1
 
 
 def _build_graph(arguments, parser, repository, registration, launch, run_root, approval_validator, on_block_argv=None):
