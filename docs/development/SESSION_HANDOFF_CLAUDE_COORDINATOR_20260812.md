@@ -1,6 +1,6 @@
-# Session Handoff — claude -p worker adapters landed; next: ClaudeAgentSession coordinator
+# Session Handoff — claude -p worker adapters + ClaudeAgentSession coordinator landed
 
-**Date:** 2026-08-12 · **Worktree:** `~/Documents/harness_labs_feature_worktrees/claude-p-adapters` · **Branch:** `claude-p-adapters` (branched from `Impl-redo` @ `60b2c7c`) · **HEAD:** `edb5452`
+**Date:** 2026-08-12 · **Worktree:** `~/Documents/harness_labs_feature_worktrees/claude-p-adapters` · **Branch:** `claude-p-adapters` (branched from `Impl-redo` @ `60b2c7c`) · **HEAD:** `ec53bd4`
 
 ## Standing rules (user-stated, non-negotiable)
 
@@ -24,49 +24,26 @@ Three pieces making FeatureRun/PlanGraph workers `claude -p` compatible, plus te
 - Usage normalization (implemented in `parse_claude_result_usage`): harness `input_tokens` = uncached + cache_read + cache_creation; `cached_input_tokens` = cache_read only.
 - Relevant flags confirmed in `claude --help`: `--effort <low|medium|high|xhigh|max>`, `--input-format stream-json`, `--output-format stream-json`, `--replay-user-messages`, `--session-id <uuid>`, `--resume`, `--fork-session`, `--mcp-config`, `--strict-mcp-config`, `--tools`, `--permission-mode`, `--dangerously-skip-permissions`, `--json-schema`, `--max-budget-usd`, `--no-session-persistence`.
 
-## NEXT TASK: `ClaudeAgentSession` — the coordinator seat
+## DONE (2026-08-12, commit `ec53bd4`): `ClaudeAgentSession` — the coordinator seat
 
-Goal: a Claude-backed implementation of the `AgentSession` protocol so `run_feature_worktree(session_factory=...)` can put Claude in the coordinator seat (the phase coordinator that "cannot read files or run commands; uses only typed controller tools").
+Implemented in `harness_labs/claude_agent_session.py` as architecture (1) from the original handoff: resident `claude -p --output-format stream-json` plus a **stdlib loopback HTTP MCP bridge** owned by the session. Each controller `ToolSpec` is served as MCP tool `mcp__controller__<name>`; the `tools/call` handler blocks until `step()` delivers the matching `ToolResult`. No third-party deps.
 
-### The contract to implement (`harness_labs/agent_sessions.py:96`)
+- **The design-critical fact was live-verified before coding** (claude 2.1.226): the assistant `tool_use` event reaches stdout *before* the MCP reply is awaited (probe: tool_use at ~3.0s vs. bridge response at ~6.0s with a deliberately stalled handler), so the blocking bridge cannot deadlock. Architecture (2) (Agent SDK dependency) was never needed.
+- **New live contract fact:** with `--json-schema`, claude emits the final object through an internal `StructuredOutput` tool call on the stream before the `result` envelope. The session skips that block (the envelope's `structured_output` carries the same object); do not treat it as an unauthorized tool.
+- Flags used per session: `--tools "" --setting-sources "" --mcp-config <loopback> --strict-mcp-config --allowedTools mcp__controller__... --json-schema <answer> --system-prompt <base instructions> --no-session-persistence --effort <e>`; `MCP_TOOL_TIMEOUT` env is set to `tool_timeout_seconds` (default 24h) so long child dispatches don't trip the MCP client.
+- Audit parity with `CodexAppServerSession`: executable SHA-256 identity artifact, prompt artifact, per-line inbound stream + outbound bridge `transport_message` events, stderr artifact and `backend_process_terminated` on cleanup.
+- Mixture layer: `build_coordinator_session("claude:claude-opus-5@high" | "codex:gpt-5.6-terra@low", base_instructions=..., audit=...)` covers the coordinator seat with the same `provider:model[@effort]` vocabulary as workers; exported through `harness_labs/__init__.py`.
+- Tests: `tests/test_claude_agent_session.py` uses a fake `claude` executable that genuinely speaks the bridge's HTTP MCP protocol and emits real stream-json (two-tool round-trip, unknown-tool refusal text, error/death/schema failures, mismatched results, identity/reopen checks). Full suite: **287 passed** in this worktree.
+- Live acceptance: one end-to-end `haiku` coordinator smoke — `open` → `spawn_child` ToolCall → bridged ToolResult → `FinalOutput` with normalized usage (2638 in / 331 out) → clean close.
 
-```
-capabilities -> BackendCapabilities   # frozen transport description
-open(ModelRequest) -> session_id      # ModelRequest: task, context, tools: tuple[ToolSpec,...], unavailable_tool_response
-step(session_id, tool_result: ToolResult | None) -> ToolCall | FinalOutput | BackendFailure
-close(session_id)
-```
+## REMAINING / NEXT
 
-`SessionToolExecutor` (same file) drives the loop: it opens the session, calls `step()` repeatedly, executes each `ToolCall` itself (child dispatch etc.), and feeds the `ToolResult` back into the next `step()`. The session never executes tools — it only surfaces the model's tool intents and final output. `FinalOutput.usage` carries the normalized `Usage`.
+- `resumable_sessions=False` for now; `--resume`/`--fork-session` support is unimplemented.
+- A FeatureRun script swap (`CodexAppServerSession` → `ClaudeAgentSession` or `build_coordinator_session(...)` in `session_factory`) has not been exercised against a full `run_feature_worktree` live run — only the direct session loop. That is the natural next live test (haiku-tier, `max_budget_usd` set).
+- Merge back to the canonical base (`Impl-redo`) is the user's call; the suite is green and the live smoke has run.
 
-### Reference implementations, in order of usefulness
-
-- **`harness_labs/omlx_agent_session.py` (`OmlxAgentSession`)** — the simpler shape: message-list state per session, one HTTP call per `step()`, tool calls parsed from the response, tool results appended as messages. Behaviorally closest to what a claude stream-json bridge looks like.
-- **`harness_labs/codex_agent_session.py` (`CodexAppServerSession`)** — the resident-subprocess shape: one long-lived `codex app-server --stdio` process, JSON-RPC framing, reader threads, `_SessionState`, executable SHA-256 identity artifact, audit events per step. Steal its process-lifecycle hygiene (`_cleanup`, stderr drain, `_require_state`).
-- **`tests/test_agent_sessions.py`** — how sessions are exercised without real processes; `test_omlx_transport_emulates_two_tool_turns` is the pattern to mirror for multi-turn tool loops.
-
-### The central design decision (resolve before coding)
-
-`ModelRequest.tools` are **controller-defined tools whose execution must round-trip through `step()`**. Claude Code executes its own tools internally — including MCP tools — so the naive approach (register controller tools as an MCP server) inverts control: claude would block awaiting the MCP server's reply while the harness blocks awaiting `step()`. Two viable architectures:
-
-1. **Resident `claude -p --input-format stream-json --output-format stream-json` + loopback MCP bridge owned by the session object.** `ClaudeAgentSession` hosts a minimal loopback HTTP MCP server (stdlib only, matching repo conventions — this repo deliberately has zero third-party deps, `urllib` not `requests`). Each controller `ToolSpec` is exposed as an MCP tool; the bridge handler *blocks* until the harness supplies the matching `ToolResult` via `step(session_id, tool_result)`, then returns it to claude. `step()` = read claude's stream until either an MCP tool-call event for one of our tools (→ return `ToolCall`) or the `result` message (→ `FinalOutput`). Flags: `--tools ""` (no built-ins), `--mcp-config <bridge>`, `--strict-mcp-config`, `--setting-sources ""`, `--effort`, per-session `--session-id`. Caveats: MCP tool-call/tool-result events must be observable in the stream (verify with `--include-partial-messages` or the default stream events — **test this live before committing to the design**); MCP client timeout config (`MCP_TIMEOUT`/`MCP_TOOL_TIMEOUT` env) must exceed the longest child dispatch.
-2. **Claude Agent SDK (`claude-agent-sdk` Python package) with in-process `create_sdk_mcp_server` tools.** Handlers run inside the harness process, so blocking/unblocking is plain Python. Cleaner control flow, but adds the repo's first third-party dependency and an async runtime. If chosen, isolate it in one module and keep the import lazy so the rest of `harness_labs` stays stdlib-pure.
-
-The stdlib-purity convention argues for (1); the control-flow simplicity argues for (2). Either way, prototype the tool round-trip against the real CLI *first* (one cheap `haiku` run, like the smoke tests that pinned the `-p` envelope) — the stream-json event shapes for MCP tool calls are the one thing this handoff could not verify.
-
-### Capabilities mapping (initial position, adjust to reality)
-
-`persistent_sessions=True` (resident process or `--resume`), `native_tool_calls=True` (via MCP bridge), `resumable_sessions` = whether you implement `--resume`/`--fork-session` (start `False`), `cached_input_reporting=True` (envelope reports cache reads), `structured_output=True` (`--json-schema`).
-
-### Wiring and acceptance
-
-- A FeatureRun script should be able to swap `CodexAppServerSession` → `ClaudeAgentSession` in its `session_factory` with no other changes (see `experiments/run_archimedes_feature.py:349` for the current factory shape and `BASE_INSTRUCTIONS` coordinator constraints).
-- Audit parity with the codex session: executable identity artifact, per-step transport events with usage, prompt/stdout/stderr artifacts.
-- Tests: fake the claude subprocess (or SDK client) the way `test_agent_sessions.py` fakes transports; cover open→tool-call→tool-result→final-output, backend failure surfacing, and close/cleanup. Extending `agent_mixture` to place `claude` in the *coordinator* seat (today it only covers workers) is in scope if it stays small.
-- Before proposing the merge back to the canonical base: run the full suite in this worktree (`python3 -m pytest tests/` — expect 273+ green) and do one live end-to-end `haiku` coordinator smoke.
-
-## Cautions
+## Cautions (unchanged)
 
 - `experiments/run_*_feature.py` scripts insert `HARNESS_LABS_SOURCE` (default: a *different* worktree, `review-fix-ledger`) into `sys.path` — when live-testing from this worktree, set `HARNESS_LABS_SOURCE` to this worktree's path or you will import someone else's harness.
-- Worker-seat live smokes cost real tokens; use `--model haiku`-tier and `--max-budget-usd` where sensible.
+- Live smokes cost real tokens; use `--model haiku`-tier and `--max-budget-usd` where sensible.
 - `Impl-redo` tracks `origin/featureRun` with many unpushed commits; pushing is the user's call, never yours.
