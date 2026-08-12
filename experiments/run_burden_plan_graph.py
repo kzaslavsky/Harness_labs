@@ -762,6 +762,7 @@ def run_graph(run_id: str, receipt_path: Path) -> int:
         lambda request: _launch_node(request, acceptance),
         run_root=ROOT / "logs" / "runs" / "cb-graph",
         graph_run_id=f"cb-graph-{run_id}",
+        logical_graph_id="contract-burden-relaxation",
         approval_validator=admission.approval_validator(),
         # Ready-set execution: the CB DAG is width 2 (CB-01 ∥ CB-02 at the
         # roots, CB-06 ∥ CB-07 after CB-05). Each node still owns its own
@@ -798,8 +799,11 @@ def resume_graph(
     registration = load_registration(
         ROOT / "logs" / "registration" / "contract-burden-relaxation.json"
     )
+    # NOTE: the cb-exp-1 attempt predates run_graph passing logical_graph_id,
+    # so its descriptor recorded the attempt id as its logical id; the
+    # directive must match what the predecessor durably recorded.
     directive = RepairResumeDirective(
-        logical_graph_id="contract-burden-relaxation",
+        logical_graph_id=predecessor,
         predecessor_attempt_id=predecessor,
         retry_frontier=tuple(frontier),
         blocker_evidence_ref=blocker,
