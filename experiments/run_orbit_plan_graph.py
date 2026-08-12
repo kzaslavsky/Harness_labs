@@ -5,10 +5,10 @@ Pipeline, in the implement-v13 spirit but at the PlanGraph admission boundary:
 
 1. ``plan``    — a Sonnet plan author drafts the plan and the two-node
                  decomposition; three independent Opus lenses (FRAME,
-                 NECESSITY, MECHANISM) and one Opus adversarial refuter
-                 attack it; Sonnet revises until no critical finding
-                 survives (bounded cycles). All review artifacts are
-                 committed with the plan so approval binds to them.
+                 NECESSITY, MECHANISM) attack it; Sonnet revises until no
+                 critical finding survives (bounded cycles). All review
+                 artifacts are committed with the plan so approval binds
+                 to them.
 2. ``approve`` — deterministic admission gates run against the committed
                  plan (prepare_approval), then an operator attestation
                  issues the immutable receipt.
@@ -20,8 +20,7 @@ Pipeline, in the implement-v13 spirit but at the PlanGraph admission boundary:
 Agent mixture (operator-fixed for this experiment):
   coordinator   claude:claude-fable-5@medium
   implementers  claude-sonnet-5   (builder, fixer, verification repair)
-  reviewers     claude-opus-5     (plan lenses, adversarial refuter,
-                                   review/verify stages)
+  reviewers     claude-opus-5     (plan lenses, review/verify stages)
 """
 
 from __future__ import annotations
@@ -126,16 +125,6 @@ PLAN_LENSES = (
     ),
 )
 
-ADVERSARIAL_CHARGE = (
-    "You are the adversarial plan refuter. Your default position is REJECT. "
-    "Construct concrete failure scenarios: a bounded implementation worker "
-    "that follows this plan exactly and still fails its deterministic gate, a "
-    "node boundary that forces an out-of-scope edit, an acceptance criterion "
-    "no declared verification can prove, or a dependency/path conflict "
-    "between the nodes. Approve only when you genuinely cannot construct a "
-    "material failure scenario. Do not report taste."
-)
-
 FINDINGS_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
@@ -156,17 +145,6 @@ FINDINGS_SCHEMA: dict[str, Any] = {
                 },
             },
         },
-    },
-}
-
-VERDICT_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": ["verdict", "summary", "refutations"],
-    "properties": {
-        "verdict": {"enum": ["approve", "reject"]},
-        "summary": {"type": "string", "minLength": 1},
-        "refutations": FINDINGS_SCHEMA["properties"]["findings"],
     },
 }
 
@@ -459,50 +437,26 @@ Timestamp context: {run_id}.
                 json.dumps(reviews[lens_id], indent=2, sort_keys=True) + "\n",
                 encoding="utf-8",
             )
-        print(f"plan-engineering: cycle {cycle} adversarial refuter", flush=True)
-        adversarial = claude_structured(
-            ADVERSARIAL_CHARGE
-            + "\nRead README.md, verify_physics.py, and verify_ui.py yourself "
-            "before judging.\n\n"
-            + context,
-            VERDICT_SCHEMA,
-            model=REVIEWER_MODEL,
-            effort="high",
-            budget_usd=2.5,
-        )
-        (cycle_dir / "adversarial.json").write_text(
-            json.dumps(adversarial, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
-
         blocking = [
             {"lens": lens_id, **finding}
             for lens_id, review in reviews.items()
             for finding in review["findings"]
             if finding["severity"] == "critical"
-        ] + [
-            {"lens": "adversarial", **finding}
-            for finding in adversarial["refutations"]
-            if finding["severity"] == "critical"
         ]
-        verdict = adversarial["verdict"]
         history.append(
             {
                 "cycle": cycle,
-                "verdict": verdict,
                 "blocking_findings": len(blocking),
                 "total_findings": sum(
                     len(review["findings"]) for review in reviews.values()
-                )
-                + len(adversarial["refutations"]),
+                ),
             }
         )
         print(
-            f"plan-engineering: cycle {cycle} verdict={verdict} "
-            f"blocking={len(blocking)}",
+            f"plan-engineering: cycle {cycle} blocking={len(blocking)}",
             flush=True,
         )
-        if verdict == "approve" and not blocking:
+        if not blocking:
             break
         if cycle == MAX_PLAN_CYCLES:
             (review_root / "resolution.json").write_text(
@@ -519,10 +473,7 @@ Timestamp context: {run_id}.
                 f"{len(blocking)} blocking findings; artifacts in {review_root}"
             )
         print(f"plan-engineering: cycle {cycle} revision", flush=True)
-        materials = {
-            "lens_reviews": reviews,
-            "adversarial": adversarial,
-        }
+        materials = {"lens_reviews": reviews}
         draft = claude_structured(
             "Revise the candidate plan to resolve every critical finding and "
             "as many material findings as possible without expanding scope. "
@@ -599,9 +550,9 @@ def approve(run_id: str) -> Path:
                 "statement": (
                     "Operator-directed experiment approval. The plan passed "
                     "three independent review lenses (FRAME, NECESSITY, "
-                    "MECHANISM) and an adversarial refuter before admission; "
-                    "the committed review artifacts are bound into the "
-                    "approval subject as referenced_artifacts."
+                    "MECHANISM) before admission; the committed review "
+                    "artifacts are bound into the approval subject as "
+                    "referenced_artifacts."
                 ),
             },
             indent=2,
@@ -821,8 +772,8 @@ def _launch_node(
         approved_plan={"path": request.plan, "sha256": request.plan_sha256},
         source_binding_report={
             "claims": [
-                "Plan admitted through FRAME/NECESSITY/MECHANISM lenses and "
-                "an adversarial refuter; review artifacts are committed under "
+                "Plan admitted through FRAME/NECESSITY/MECHANISM lenses; "
+                "review artifacts are committed under "
                 f"{REVIEW_DIR} at the plan base commit."
             ]
         },
