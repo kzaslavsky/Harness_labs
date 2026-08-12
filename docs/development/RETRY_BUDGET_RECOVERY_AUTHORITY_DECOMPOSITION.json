@@ -70,8 +70,7 @@
       "path_intents": [
         {"path": "harness_labs/feature_run.py", "action": "modify"},
         {"path": "harness_labs/plan_graph.py", "action": "modify"},
-        {"path": "tests/test_feature_run.py", "action": "modify"},
-        {"path": "tests/test_plan_graph_budget.py", "action": "modify"}
+        {"path": "tests/test_feature_run.py", "action": "modify"}
       ],
       "verification_argv": ["python3", "-m", "unittest", "tests.test_feature_run", "tests.test_plan_graph_budget"],
       "verification_timeout_seconds": 1800,
@@ -106,7 +105,6 @@
       "allowed_paths": ["harness_labs/plan_graph_authority.py", "harness_labs/plan_graph_budget.py", "harness_labs/plan_graph.py", "scripts/run_plan_graph.py", "schemas/recovery-decision.json", "schemas/plan-version-transition.json", "tests/fixtures/recovery-decision.json", "tests/fixtures/plan-version-transition.json", "tests/test_plan_graph_authority.py", "tests/test_plan_graph_budget.py", "tests/test_plan_graph_observability.py"],
       "path_intents": [
         {"path": "harness_labs/plan_graph_authority.py", "action": "create"},
-        {"path": "harness_labs/plan_graph_budget.py", "action": "modify"},
         {"path": "harness_labs/plan_graph.py", "action": "modify"},
         {"path": "scripts/run_plan_graph.py", "action": "modify"},
         {"path": "schemas/recovery-decision.json", "action": "create"},
@@ -114,7 +112,6 @@
         {"path": "tests/fixtures/recovery-decision.json", "action": "create"},
         {"path": "tests/fixtures/plan-version-transition.json", "action": "create"},
         {"path": "tests/test_plan_graph_authority.py", "action": "create"},
-        {"path": "tests/test_plan_graph_budget.py", "action": "modify"},
         {"path": "tests/test_plan_graph_observability.py", "action": "modify"}
       ],
       "verification_argv": ["python3", "-m", "unittest", "tests.test_plan_graph_authority", "tests.test_plan_graph_budget", "tests.test_plan_graph_observability"],
