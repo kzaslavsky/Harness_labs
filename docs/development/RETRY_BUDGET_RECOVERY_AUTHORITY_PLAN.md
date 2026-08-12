@@ -53,7 +53,7 @@ Live layer: the `harness_labs/` package — NOT `skills/codex/implement-v13-code
 - Gate: `pytest tests/test_plan_graph_budget.py tests/test_plan_graph_observability.py` — cross-successor accumulation, cross-registration inheritance via lineage, reservation crash/concurrency cases, refusal fail-closed, changed-plan rejection, extend/reset relief round-trip.
 
 ### RB-03 — Failure classification + structured child counts
-*Paths: `harness_labs/feature_run.py`, `harness_labs/plan_graph.py` (evidence import only), tests.*
+*Paths: `harness_labs/feature_run.py`, `harness_labs/plan_graph.py`, `harness_labs/plan_graph_budget.py` (bounded evidence import/deduplication only), tests.*
 - `classify_verification_failure` → `product | infrastructure_transient | harness_or_configuration | policy_violation | indeterminate`; matched rule id + evidence excerpt recorded. Timeout/selector/browser failures default `indeterminate` unless a specific transient rule matches (they can be product defects). Budget effects: product + indeterminate → product budget; infra → `infra_limit` (default 3); config/policy → cap 1 then escalate (they recur deterministically — retrying without a config change is pure churn).
 - `infrastructure_transient` re-runs verification without repair dispatch (`env_retry_limit=2` keyword); no `repair_limit` consumption.
 - Thread `DeterministicVerificationResult` counts (`command_attempts`/`repair_attempts`, feature_run.py:340) + per-invocation globally unique ids + classification through the terminal payload (feature_run.py:775-790) → `FeatureRunOutcome.evidence` → ledger import; duplicate-id imports are no-ops.
