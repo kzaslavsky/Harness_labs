@@ -106,6 +106,52 @@ In pg99 the run view shows **all four acceptance criteria `satisfied`** and `run
 
 **Also observed, tracked under existing items:** item 2 recurrences (four+ attempts burned turns on `unknown task criterion: AC-FR20-1: <full text>`); item 5 at scale (hand-maintained 1,100-line launcher whose main content is per-node adoption/recovery prose — pinned recovery worktrees, "copy its exact eleven changed paths", per-attempt defect pinning).
 
+## CB relaxation PlanGraph live run (2026-08-13)
+
+The relaxation program itself (`cb-graph-cb-exp-1`, 8 nodes, claude backend, first live use of parallel dispatch and of the RB recovery system) succeeded on attempt-4 with final candidate `8afa0190`, all repairs performed through `PlanGraph.resume` with full reuse of sealed work — zero whole-graph relaunches, the failure mode that dominated the FR-20 audit. The run surfaced new specimens:
+
+### 11. Structured `claims` vocabulary treated as an authority violation
+
+- **Where:** executor claim validation — `worker claimed unassigned criteria`.
+- **Evidence:** killed CB-03 (fix stage) and CB-04 attempt-1 (review stage) on candidates whose red/green gates had already passed. Review/fix/verify tasks are dispatched with `acceptance_criteria=[]`; workers naturally echo criterion ids or prose in the structured `claims` field; the executor treats the vocabulary itself as claiming unassigned authority and fails the node. Worked around by pinning a `claims_rule` paragraph into every stage instruction — prompt-space compensation for a contract defect.
+- **Action:** ignore (or record as annotation) claim entries that name criteria outside the task's assignment instead of failing the node; a claim is untrusted input by the harness's own rules, so an unexpected claim is noise, not violation.
+- **Status:** open (workaround pinned in `experiments/run_burden_plan_graph.py`).
+
+### 12. Reuse custody decayed across successor chains
+
+- **Where:** `plan_graph_audit.py` repair_selection custody.
+- **Evidence:** attempt-2 initially re-ran sealed CB-01/CB-02 because attempt-1's checkpoint carried integration barriers only for the node it executed; custody of inherited reuse did not survive a second hop. Fixed two-sided during the run (`0ecc5ce`): predecessor barriers copied forward for reused nodes + digest-verified reuse receipts accepted as custody; chain test added.
+- **Status:** fixed in harness.
+
+### 13. Resume rejected checkpoints shaped by parallel dispatch
+
+- **Where:** `plan_graph.py` `_validate_completed_dependencies`.
+- **Evidence:** attempt-4 crashed at admission with `PlanGraph state marks 'CB-07' complete outside sequential candidate lineage` — the validator enforced a serial-era topological-prefix invariant, but CB-07 legitimately sealed in parallel while its earlier-ordered sibling CB-06 failed. Fixed (`60cc13f`): the checkpoint invariant is dependency-completeness only; commit custody remains with barriers and reuse receipts. Diamond regression test added.
+- **Status:** fixed in harness.
+
+### 14. Load-blind per-phase gate timeout under parallel dispatch
+
+- **Where:** node gate `red_green_check.py --timeout 700`, per phase.
+- **Evidence:** CB-06's red phase timed out at 701s while the finding tests were failing behaviorally (`FF.FFF` in the pytest tail) — the first concurrent gate execution (CB-06 ∥ CB-07, two full regression suites on one machine) roughly doubled wall cost. The identical node passed solo on attempt-4. A fixed wall-clock budget silently converts machine load into node failure.
+- **Action:** scale gate timeouts with admitted concurrency (or budget CPU time, not wall time), or serialize gate execution even when node work is parallel.
+- **Status:** open.
+
+### 15. Review cycle ceiling blocks gate-passing candidates on newly discovered findings
+
+- **Where:** `mechanical_cycle_limit: 3` in the review policy.
+- **Evidence:** CB-05 attempt-2: red/green proven, each of three cycles resolved its findings, but reviewers surfaced *new* findings each cycle and the ceiling blocked the node — process count overriding behavioral evidence, same family as item 11. A fresh retry of the identical objective passed within the limit, confirming the ceiling (not the candidate) was binding.
+- **Action:** count non-converging cycles (same finding key recurring) against the ceiling rather than cycles that each resolve their findings; or let a gate-passing candidate with only new-scope findings seal with findings recorded as obligations (cf. item 9).
+- **Status:** open.
+
+### 16. Recovery API usability gaps (operating notes from three live resumes)
+
+- **Where:** `PlanGraph.resume` / `RepairResumeDirective`.
+- **Evidence:** each first resume attempt failed on a discoverability edge: (a) `blocker_evidence_ref` must be an artifact recorded in the predecessor *graph* journal — the node-failure-evidence artifact, not the child run's richer evidence; (b) root attempts record their attempt id as `logical_graph_id`, so successors need an operator-supplied `--logical-id`; (c) resume mints its own attempt id and passing `graph_run_id` crashes; (d) a successor that crashes at admission leaves a partial run dir that must be manually deleted or the lineage skips an attempt number.
+- **Action:** resolve blocker refs from child journals transitively; record a stable logical id at root creation; reconcile partial successor dirs at admission.
+- **Status:** open.
+
+**Recovery-system verdict:** the RB machinery held. Three resumes (CB-05 block, CB-06 timeout, admission-crash relaunch) each reused every sealed node — six of eight on the final attempt — with ledger reservations, evidence import, and budget accounting all engaging as designed. The two harness defects found (items 12, 13) were in resume admission logic, not in custody or budgets, and both are now regression-tested.
+
 ## Explicit keep-list (earned their cost this run)
 
 - **Approval receipt / digest binding at admission** — the actual trust boundary; revalidated at graph start and cost nothing.
@@ -127,3 +173,4 @@ The originating defect of the blocked run was an **absence** of contract: the se
 
 - **2026-08-12** — document created from the orbit experiment diagnosis; all items open; RB-01–06 noted as merged baseline.
 - **2026-08-12 (later)** — flow-editor-authoring PlanGraph audit (Retinology, FR-20, attempts pg2–pg101): items 2 and 5 independently reconfirmed at scale; items 7–10 added (delta-scoped repair budget, environmental-failure classification, obligation transfer, build-segment verification dead-end). Item 5 + 7 jointly identified as the dominant cost driver — 101 whole-graph relaunches with hand-carried candidate lineage.
+- **2026-08-13** — CB relaxation PlanGraph completed (`cb-graph-cb-exp-1` attempt-4, candidate `8afa0190`): items 11–16 added from live operation (claims-vocabulary rejection, reuse custody decay [fixed], parallel-shape resume rejection [fixed], load-blind gate timeout, review cycle ceiling vs. gate evidence, recovery API usability). First live validation of resume-with-reuse recovery and parallel node dispatch; zero whole-graph relaunches.
