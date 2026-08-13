@@ -89,7 +89,7 @@ class RunCatalogTests(unittest.TestCase):
         self.assertEqual(projected["totals"]["cached_input_tokens"], 40)
         self.assertEqual(projected["totals"]["cost"]["usd"], 0.125)
         self.assertEqual(projected["by_phase"][0]["label"], "implement")
-        self.assertEqual(projected["by_agent"][0]["peak_input_tokens"], 100)
+        self.assertIsNone(projected["by_agent"][0]["peak_input_tokens"])  # claude-print usage is cumulative; no per-invocation peak
         self.assertEqual(projected["by_model"][0]["label"], "gpt-test")
         self.assertEqual(projected["by_effort"][0]["label"], "high")
         self.assertEqual(projected["quality"]["criteria_satisfied"], 1)

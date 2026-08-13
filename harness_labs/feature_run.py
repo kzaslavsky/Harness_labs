@@ -6,6 +6,7 @@ import hashlib
 import json
 import subprocess
 from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
 from pathlib import Path
 from time import monotonic_ns
 from typing import Callable, Literal, Mapping, Protocol
@@ -491,6 +492,8 @@ def run_feature_worktree(
     recovery_limit: int = 3,
     evidence_classification: str = "production_lifecycle",
     initial_evidence: tuple[FeatureRunHandoffArtifact, ...] = (),
+    descriptor_correlation: Mapping[str, str] | None = None,
+    descriptor_plan: Mapping[str, str] | None = None,
 ) -> FeatureRunResult:
     """Create, execute, commit, and optionally merge one isolated FeatureRun."""
 
@@ -539,6 +542,39 @@ def run_feature_worktree(
         contract.run_id,
         actor=AuditActor("kernel", "controller_kernel"),
         evidence_classification=evidence_classification,
+    )
+    # Bind a run descriptor so the catalog can correlate this run (dashboard
+    # metrics join graph nodes to FeatureRuns through parent_correlation);
+    # without it the run projects as an uncorrelated legacy record.
+    descriptor_raw = (
+        json.dumps(
+            {
+                "protocol": "harness-run-descriptor/1",
+                "run_kind": "feature_run",
+                "run_id": contract.run_id,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "objective": contract.objective,
+                "evidence_classification": evidence_classification,
+                "repository": {
+                    "path": str(transaction.worktree_path),
+                    "base_branch": base_branch,
+                    "base_commit": str(creation["base_commit"]),
+                },
+                "approved_plan": dict(descriptor_plan) if descriptor_plan else None,
+                "parent_correlation": (
+                    dict(descriptor_correlation) if descriptor_correlation else None
+                ),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+    ).encode("utf-8")
+    (audit.run_dir / "descriptor.json").write_bytes(descriptor_raw)
+    audit.append(
+        "run_descriptor_bound",
+        status="succeeded",
+        payload={"descriptor_sha256": hashlib.sha256(descriptor_raw).hexdigest()},
     )
     evidence = EvidenceCatalog(audit=audit)
     recovery = _RecoveryState(recovery_limit)
@@ -1087,6 +1123,16 @@ def run_plan_graph_feature_worktree(
         review_inherited_ledger_frozen=binding.inherited_ledger_frozen,
         verification_argv=binding.verification_argv,
         verification_timeout_seconds=binding.verification_timeout_seconds,
+        descriptor_correlation={
+            "plan_graph_id": binding.plan_graph_id,
+            "plan_node_id": binding.plan_node_id,
+            "parent_run_id": binding.plan_graph_id,
+        },
+        descriptor_plan=(
+            {"path": binding.plan, "sha256": binding.plan_sha256}
+            if binding.plan and binding.plan_sha256
+            else None
+        ),
         **child_options,
         **feature_run_options,
     )

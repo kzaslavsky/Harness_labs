@@ -397,7 +397,14 @@ def _merge_metric_totals(rows: list[Mapping[str, Any]]) -> dict[str, Any]:
         for key in ("calls", "input_tokens", "cached_input_tokens", "output_tokens", "duration_ms")
     }
     result["total_tokens"] = result["input_tokens"] + result["output_tokens"]
-    result["peak_input_tokens"] = max((int(row.get("peak_input_tokens", 0)) for row in rows), default=0)
+    # None means the backend reported only cumulative session usage; a peak
+    # is only meaningful when at least one row observed a real invocation.
+    known_peaks = [
+        row["peak_input_tokens"]
+        for row in rows
+        if isinstance(row.get("peak_input_tokens"), int)
+    ]
+    result["peak_input_tokens"] = max(known_peaks) if known_peaks else None
     wall = [row.get("wall_clock_ms") for row in rows]
     if any(value is not None for value in wall):
         result["wall_clock_ms"] = sum(int(value) for value in wall if type(value) is int)

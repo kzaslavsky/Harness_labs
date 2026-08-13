@@ -335,6 +335,11 @@ def _detail_metrics(metrics: Mapping[str, Any]) -> dict[str, Any]:
             "input_tokens": _nonnegative_int(usage.get("input_tokens")),
             "cached_input_tokens": _nonnegative_int(usage.get("cached_input_tokens")),
             "output_tokens": _nonnegative_int(usage.get("output_tokens")),
+            # claude-print result usage is CUMULATIVE across every API turn of
+            # the subprocess; a per-invocation context peak is not derivable
+            # from it, and reporting the cumulative sum as "peak" inflated the
+            # metric by the number of agentic turns.
+            "peak_input_tokens": None,
             "duration_ms": _nonnegative_int(event.get("duration_ms")),
             "cost_usd": recorded_cost if recorded_cost is not None else estimated_cost["usd"] if estimated_cost else None,
             "cost_kind": "authoritative" if recorded_cost is not None else "estimated" if estimated_cost else "unavailable",
@@ -386,7 +391,11 @@ def _detail_metrics(metrics: Mapping[str, Any]) -> dict[str, Any]:
         "provenance": {
             "usage_records": sum(record["calls"] for record in records),
             "collection_method": collection_method,
-            "peak_context_definition": "maximum observed input_tokens in one backend invocation",
+            "peak_context_definition": (
+                "maximum observed input_tokens in one backend invocation; "
+                "unavailable when every record reports only cumulative "
+                "session usage (claude-print results)"
+            ),
         },
     }
 
@@ -607,7 +616,16 @@ def _aggregate_metric_rows(rows: list[Mapping[str, Any]]) -> dict[str, Any]:
         "cached_input_tokens": sum(row["cached_input_tokens"] for row in rows),
         "output_tokens": sum(row["output_tokens"] for row in rows),
         "duration_ms": sum(row["duration_ms"] for row in rows),
-        "peak_input_tokens": max((row.get("peak_input_tokens", row["input_tokens"]) for row in rows), default=0),
+        "peak_input_tokens": max(
+            (
+                peak
+                for peak in (
+                    row.get("peak_input_tokens", row["input_tokens"]) for row in rows
+                )
+                if isinstance(peak, int)
+            ),
+            default=None,
+        ),
         "cost": {
             "state": cost_state,
             "usd": round(sum(row["cost_usd"] or 0 for row in rows), 6) if rows and missing_cost == 0 else None,
