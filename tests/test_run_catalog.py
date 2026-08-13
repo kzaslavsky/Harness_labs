@@ -155,6 +155,43 @@ class RunCatalogTests(unittest.TestCase):
         self.assertEqual(cost["long_context_records"], 0)
         self.assertIn("platform.claude.com", cost["sources"][0])
 
+    def test_detail_projects_claude_session_stream_coordinator_row(self) -> None:
+        # ClaudeAgentSession coordinators journal their stream-json transcript
+        # but never emit a backend_transport usage record; the projection must
+        # recover their tokens, authoritative cost, and per-request context
+        # peak from the stream — deduplicating repeated per-content-block
+        # assistant events and merging events journaled before the session id
+        # was identified.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); run = self._run(root, "claude-session-run")
+            journal = AuditJournal.open_existing(run, actor=AuditActor("claude-session", "backend"))
+            init = journal.write_artifact("claude-stream-inbound", {"type": "system", "subtype": "init", "model": "claude-fable-5", "session_id": "sess-1"}, media_type="application/x-ndjson")
+            journal.append("transport_message", status="received", backend_id="claude-session", artifacts=(init,), payload={"direction": "inbound", "type": "system", "subtype": "init"})
+            turn_one = {"type": "assistant", "session_id": "sess-1", "message": {"id": "msg_1", "model": "claude-fable-5", "usage": {"input_tokens": 10, "cache_read_input_tokens": 100, "cache_creation_input_tokens": 40, "output_tokens": 5}}}
+            for _ in range(2):  # stream repeats the event per content block
+                artifact = journal.write_artifact("claude-stream-inbound", turn_one, media_type="application/x-ndjson")
+                journal.append("transport_message", status="received", backend_id="claude-session", artifacts=(artifact,), payload={"direction": "inbound", "type": "assistant"})
+            turn_two = {"type": "assistant", "session_id": "sess-1", "message": {"id": "msg_2", "model": "claude-fable-5", "usage": {"input_tokens": 12, "cache_read_input_tokens": 400, "cache_creation_input_tokens": 0, "output_tokens": 9}}}
+            artifact = journal.write_artifact("claude-stream-inbound", turn_two, media_type="application/x-ndjson")
+            journal.append("transport_message", status="received", backend_id="claude-session", artifacts=(artifact,), payload={"direction": "inbound", "type": "assistant"})
+            result = {"type": "result", "session_id": "sess-1", "num_turns": 2, "total_cost_usd": 1.25, "usage": {"input_tokens": 22, "cache_read_input_tokens": 500, "cache_creation_input_tokens": 40, "output_tokens": 14}}
+            artifact = journal.write_artifact("claude-stream-inbound", result, media_type="application/x-ndjson")
+            journal.append("transport_message", status="received", backend_id="claude-session", artifacts=(artifact,), payload={"direction": "inbound", "type": "result", "subtype": "success"})
+            journal.checkpoint("running", {"controller": {"criteria": {}, "tasks": {}, "findings": {}}})
+            detail = build_run_detail(root, "claude-session-run")
+        projected = detail["metrics"]
+        self.assertEqual(len(projected["by_agent"]), 1)
+        row = projected["by_agent"][0]
+        self.assertEqual(row["label"], "claude-session coordinator")
+        self.assertEqual(row["model"], "claude-fable-5")
+        self.assertEqual(row["calls"], 2)
+        self.assertEqual(row["total_tokens"], 576)  # result usage: 22+500+40 in, 14 out
+        self.assertEqual(row["peak_input_tokens"], 412)  # msg_2 context: 12+400+0
+        self.assertEqual(row["cost"]["state"], "available")
+        self.assertEqual(row["cost"]["usd"], 1.25)
+        self.assertEqual(projected["totals"]["peak_input_tokens"], 412)
+        self.assertIn("claude session stream artifacts", projected["provenance"]["collection_method"])
+
     def test_detail_projects_recorded_execution_stages_without_usage(self) -> None:
         metrics = _detail_metrics({
             "events": [{

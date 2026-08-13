@@ -344,9 +344,12 @@ def _detail_metrics(metrics: Mapping[str, Any]) -> dict[str, Any]:
     records: list[dict[str, Any]] = []
     spans: list[tuple[int, int]] = []
     unspanned_records = 0
+    transport_sessions: set[Any] = set()
     for event in metrics.get("events", []):
         if event.get("event_type") != "backend_transport":
             continue
+        if event.get("session_id") is not None:
+            transport_sessions.add(event.get("session_id"))
         end_ns, span_ms = event.get("monotonic_ns"), event.get("duration_ms")
         if type(end_ns) is int and type(span_ms) is int and span_ms >= 0:
             spans.append((end_ns - span_ms * 1_000_000, end_ns))
@@ -387,6 +390,11 @@ def _detail_metrics(metrics: Mapping[str, Any]) -> dict[str, Any]:
         records.extend(_codex_token_usage_records(metrics, stages))
         if records:
             collection_method = "verified cumulative Codex token-usage notifications"
+    session_records, session_spans = _claude_session_records(metrics, stages, transport_sessions)
+    if session_records:
+        collection_method = "verified claude session stream artifacts" if not records else collection_method + "; verified claude session stream artifacts"
+        records.extend(session_records)
+        spans.extend(session_spans)
     totals = _aggregate_metric_rows(records)
     summary = metrics.get("summary") if isinstance(metrics.get("summary"), Mapping) else {}
     summary_usage = summary.get("usage") if isinstance(summary.get("usage"), Mapping) else {}
@@ -523,6 +531,141 @@ def _codex_usage_values(value: Mapping[str, Any]) -> dict[str, int] | None:
         "output_tokens": value.get("outputTokens"),
     }
     return fields if all(type(item) is int and item >= 0 for item in fields.values()) else None
+
+
+def _read_stream_artifact_message(run_dir: Path, artifact: Any) -> Mapping[str, Any] | None:
+    if not isinstance(artifact, Mapping) or not isinstance(artifact.get("path"), str):
+        return None
+    target = run_dir.joinpath(*Path(artifact["path"]).parts)
+    try:
+        resolved = target.resolve(strict=True)
+        if resolved.is_symlink() or run_dir not in resolved.parents or resolved.stat().st_size > 4 * 1024 * 1024:
+            return None
+        text = resolved.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    for line in text.splitlines():
+        try:
+            message = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        return message if isinstance(message, Mapping) else None
+    return None
+
+
+def _claude_stream_usage_values(value: Any) -> dict[str, int] | None:
+    """Normalize per-request claude usage to harness semantics.
+
+    input_tokens covers everything the request carried into context
+    (uncached + cache reads + cache writes); cached_input_tokens is the
+    cache-read subset, matching parse_claude_result_usage.
+    """
+    if not isinstance(value, Mapping):
+        return None
+    uncached = value.get("input_tokens")
+    cache_read = value.get("cache_read_input_tokens")
+    cache_creation = value.get("cache_creation_input_tokens")
+    output = value.get("output_tokens")
+    if not all(type(item) is int and item >= 0 for item in (uncached, cache_read, cache_creation, output)):
+        return None
+    return {
+        "input_tokens": uncached + cache_read + cache_creation,
+        "cached_input_tokens": cache_read,
+        "output_tokens": output,
+    }
+
+
+def _claude_session_records(metrics: Mapping[str, Any], stages: list[Mapping[str, Any]], transport_sessions: set[Any]) -> tuple[list[dict[str, Any]], list[tuple[int, int]]]:
+    """Project journaled claude session streams into coordinator metric rows.
+
+    ClaudeAgentSession coordinators journal their full stream-json transcript
+    as transport_message artifacts but never emit a backend_transport usage
+    record, so without this projection their tokens, cost, and the only
+    derivable per-request context peak are absent from run metrics.  Stream
+    assistant events repeat once per content block with identical usage, so
+    turns are deduplicated by message id before any summation.
+    """
+    supplied = metrics.get("run_dir")
+    if not isinstance(supplied, str):
+        return [], []
+    run_dir = Path(supplied).resolve()
+    sessions: dict[str, dict[str, Any]] = {}
+    for event in metrics.get("events", []):
+        if event.get("event_type") != "transport_message":
+            continue
+        payload = event.get("payload") if isinstance(event.get("payload"), Mapping) else {}
+        if payload.get("direction") != "inbound" or payload.get("type") not in {"system", "assistant", "result"}:
+            continue
+        actor = event.get("actor") if isinstance(event.get("actor"), Mapping) else {}
+        for artifact in event.get("artifacts", []):
+            message = _read_stream_artifact_message(run_dir, artifact)
+            if message is None:
+                continue
+            # Events journaled before backend_session_identified carry no
+            # event-level session id, so the stream message's own session_id
+            # is the only key that keeps one session in one bucket.
+            key = message.get("session_id") or event.get("session_id") or actor.get("id") or "claude-session"
+            if key in transport_sessions:
+                continue
+            session = sessions.setdefault(str(key), {
+                "model": None, "backend": str(actor.get("id") or "claude-session"),
+                "turns": {}, "peak": None, "result": None, "first_ns": None, "last_ns": None,
+            })
+            end_ns = event.get("monotonic_ns")
+            if type(end_ns) is int:
+                session["first_ns"] = end_ns if session["first_ns"] is None else min(session["first_ns"], end_ns)
+                session["last_ns"] = end_ns if session["last_ns"] is None else max(session["last_ns"], end_ns)
+            if message.get("type") == "system" and message.get("subtype") == "init" and isinstance(message.get("model"), str):
+                session["model"] = message["model"]
+            elif message.get("type") == "assistant":
+                body = message.get("message") if isinstance(message.get("message"), Mapping) else {}
+                usage = _claude_stream_usage_values(body.get("usage"))
+                if usage is not None:
+                    turn_id = str(body.get("id") or artifact.get("path"))
+                    session["turns"][turn_id] = usage
+                    peak = session["peak"]
+                    session["peak"] = usage["input_tokens"] if peak is None else max(peak, usage["input_tokens"])
+            elif message.get("type") == "result":
+                session["result"] = message
+    records: list[dict[str, Any]] = []
+    spans: list[tuple[int, int]] = []
+    multiple = len(sessions) > 1
+    for key, session in sessions.items():
+        result = session["result"] if isinstance(session["result"], Mapping) else {}
+        usage = _claude_stream_usage_values(result.get("usage"))
+        if usage is None and session["turns"]:
+            turns = list(session["turns"].values())
+            usage = {field: sum(turn[field] for turn in turns) for field in ("input_tokens", "cached_input_tokens", "output_tokens")}
+        if usage is None:
+            continue
+        model = session["model"] or "unavailable"
+        recorded_cost = _nonnegative_number(result.get("total_cost_usd"))
+        estimated_cost = _estimated_api_cost(model, usage) if recorded_cost is None else None
+        calls = result.get("num_turns") if type(result.get("num_turns")) is int and result.get("num_turns") > 0 else max(len(session["turns"]), 1)
+        if type(session["first_ns"]) is int and type(session["last_ns"]) is int and session["last_ns"] > session["first_ns"]:
+            spans.append((session["first_ns"], session["last_ns"]))
+            duration_ms = (session["last_ns"] - session["first_ns"]) // 1_000_000
+        else:
+            duration_ms = 0
+        records.append({
+            "agent": f"claude-session coordinator ({str(key)[:8]})" if multiple else "claude-session coordinator",
+            "phase": next((str(stage.get("phase")) for stage in stages if stage.get("kind") == "coordinator session"), "other"),
+            "agent_type": "run_coordinator",
+            "model": model,
+            "effort": "unavailable",
+            "backend": session["backend"],
+            "calls": calls,
+            "input_tokens": usage["input_tokens"],
+            "cached_input_tokens": usage["cached_input_tokens"],
+            "output_tokens": usage["output_tokens"],
+            "peak_input_tokens": session["peak"],
+            "duration_ms": duration_ms,
+            "cost_usd": recorded_cost if recorded_cost is not None else estimated_cost["usd"] if estimated_cost else None,
+            "cost_kind": "authoritative" if recorded_cost is not None else "estimated" if estimated_cost else "unavailable",
+            "cost_source": "claude stream result total_cost_usd" if recorded_cost is not None else estimated_cost["source"] if estimated_cost else None,
+            "long_context_priced": estimated_cost["long_context"] if estimated_cost else False,
+        })
+    return records, spans
 
 
 def _execution_stages(metrics: Mapping[str, Any]) -> list[dict[str, Any]]:
