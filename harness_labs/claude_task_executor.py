@@ -31,7 +31,12 @@ from .controller_live import (
     _snapshot_delta_paths,
     _worker_prompt,
 )
-from .controller_results import semantic_payload, validate_semantic_result
+from .controller_results import (
+    DeliverableFloorViolation,
+    enforce_deliverable_floor,
+    semantic_payload,
+    validate_semantic_result,
+)
 from .git_transaction import (
     GitTransactionError,
     normalize_allowed_paths,
@@ -113,6 +118,18 @@ class ClaudeSemanticTaskExecutor:
     def execute(self, attempt: TaskAttempt) -> TaskResult:
         try:
             return self._execute(attempt)
+        except DeliverableFloorViolation as exc:
+            self._audit_deliverable_floor_violation(attempt, exc)
+            return TaskResult(
+                attempt_id=attempt.attempt_id,
+                status="failed",
+                payload={
+                    "error": str(exc),
+                    "error_type": type(exc).__name__,
+                    "field": exc.field,
+                    "reason": exc.reason,
+                },
+            )
         except (
             GitTransactionError,
             LiveExecutionError,
@@ -291,8 +308,7 @@ class ClaudeSemanticTaskExecutor:
             )
 
         deliverable = raw.get("deliverable_markdown")
-        if not isinstance(deliverable, str) or not deliverable.strip():
-            raise LiveExecutionError("Claude deliverable is empty")
+        enforce_deliverable_floor(deliverable, "deliverable_markdown")
         details = json.loads(raw["details_json"])
         if not isinstance(details, Mapping):
             raise LiveExecutionError("Claude details_json must encode an object")
@@ -376,6 +392,27 @@ class ClaudeSemanticTaskExecutor:
         except json.JSONDecodeError:
             return None
         return parsed if isinstance(parsed, Mapping) else None
+
+    def _audit_deliverable_floor_violation(
+        self,
+        attempt: TaskAttempt,
+        exc: DeliverableFloorViolation,
+    ) -> None:
+        if self.audit is None:
+            return
+        self.audit.append(
+            "deliverable_floor_refused",
+            status="failed",
+            payload={"field": exc.field, "reason": exc.reason},
+            actor=AuditActor(
+                attempt.attempt_id,
+                "capability_adapter",
+                parent_id=attempt.parent_attempt_id,
+            ),
+            attempt_id=attempt.attempt_id,
+            parent_attempt_id=attempt.parent_attempt_id,
+            backend_id="subprocess",
+        )
 
     def _run_preflight(
         self,

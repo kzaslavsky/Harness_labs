@@ -15,7 +15,13 @@ from typing import Any, Mapping
 from .attempts import TaskAttempt, TaskResult
 from .audit import AuditActor, AuditJournal
 from .controller_evidence import EvidenceCatalog, EvidenceError
-from .controller_results import semantic_payload, validate_semantic_result
+from .controller_results import (
+    DeliverableFloorViolation,
+    MIN_DELIVERABLE_LENGTH,
+    enforce_deliverable_floor,
+    semantic_payload,
+    validate_semantic_result,
+)
 from .git_transaction import (
     GitTransactionError,
     normalize_allowed_paths,
@@ -50,8 +56,11 @@ _RAW_OUTPUT_SCHEMA: dict[str, Any] = {
         "satisfied_criteria",
     ],
     "properties": {
-        "summary": {"type": "string", "minLength": 1},
-        "deliverable_markdown": {"type": "string", "minLength": 1},
+        "summary": {"type": "string", "minLength": MIN_DELIVERABLE_LENGTH},
+        "deliverable_markdown": {
+            "type": "string",
+            "minLength": MIN_DELIVERABLE_LENGTH,
+        },
         "details_json": {"type": "string", "minLength": 2},
         "claims": {
             "type": "array",
@@ -208,6 +217,18 @@ class CodexSemanticTaskExecutor:
     def execute(self, attempt: TaskAttempt) -> TaskResult:
         try:
             return self._execute(attempt)
+        except DeliverableFloorViolation as exc:
+            self._audit_deliverable_floor_violation(attempt, exc)
+            return TaskResult(
+                attempt_id=attempt.attempt_id,
+                status="failed",
+                payload={
+                    "error": str(exc),
+                    "error_type": type(exc).__name__,
+                    "field": exc.field,
+                    "reason": exc.reason,
+                },
+            )
         except (
             GitTransactionError,
             LiveExecutionError,
@@ -385,8 +406,7 @@ class CodexSemanticTaskExecutor:
             )
 
         deliverable = raw.get("deliverable_markdown")
-        if not isinstance(deliverable, str) or not deliverable.strip():
-            raise LiveExecutionError("Codex deliverable is empty")
+        enforce_deliverable_floor(deliverable, "deliverable_markdown")
         details = json.loads(raw["details_json"])
         if not isinstance(details, Mapping):
             raise LiveExecutionError("Codex details_json must encode an object")
@@ -461,6 +481,27 @@ class CodexSemanticTaskExecutor:
             expected_details_schema=str(self.task["details_schema"]),
         )
         return result
+
+    def _audit_deliverable_floor_violation(
+        self,
+        attempt: TaskAttempt,
+        exc: DeliverableFloorViolation,
+    ) -> None:
+        if self.audit is None:
+            return
+        self.audit.append(
+            "deliverable_floor_refused",
+            status="failed",
+            payload={"field": exc.field, "reason": exc.reason},
+            actor=AuditActor(
+                attempt.attempt_id,
+                "capability_adapter",
+                parent_id=attempt.parent_attempt_id,
+            ),
+            attempt_id=attempt.attempt_id,
+            parent_attempt_id=attempt.parent_attempt_id,
+            backend_id="subprocess",
+        )
 
     def _run_preflight(
         self,
