@@ -409,6 +409,15 @@ implementation summary, under a heading "Red-phase evidence", the gate
 verdict's red.tail excerpt and each FAILED test node id exactly as the gate
 JSON reports them. Reviewers are contractually required to reject summaries
 without this section; producing it costs one gate run you must do anyway.
+PATH-GRANT OBLIGATION: the writable-path grant is enforced mechanically — a
+final diff touching ANY file outside your allowed paths fails the task and
+leaves a dirty tree that deadlocks the whole node (no actor can clean it).
+Existing tests outside your grant (for example
+tests/test_plan_graph_observability.py) must be kept passing by making your
+event and API changes additive; you may NOT edit those files, and any coverage
+you want there goes into your granted test files instead. Before finishing,
+run `git status --porcelain` and `git diff --name-only` and confirm every
+changed file is inside the grant; revert any stray edit before you stop.
 """
     return (
         RoleProfile(
