@@ -165,6 +165,7 @@ class RunCatalogTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory); run = self._run(root, "claude-session-run")
             journal = AuditJournal.open_existing(run, actor=AuditActor("claude-session", "backend"))
+            journal.append("backend_process_started", status="started", backend_id="claude-session", payload={"model": "claude-fable-5", "effort": "medium", "pid": 123})
             init = journal.write_artifact("claude-stream-inbound", {"type": "system", "subtype": "init", "model": "claude-fable-5", "session_id": "sess-1"}, media_type="application/x-ndjson")
             journal.append("transport_message", status="received", backend_id="claude-session", artifacts=(init,), payload={"direction": "inbound", "type": "system", "subtype": "init"})
             turn_one = {"type": "assistant", "session_id": "sess-1", "message": {"id": "msg_1", "model": "claude-fable-5", "usage": {"input_tokens": 10, "cache_read_input_tokens": 100, "cache_creation_input_tokens": 40, "output_tokens": 5}}}
@@ -184,6 +185,8 @@ class RunCatalogTests(unittest.TestCase):
         row = projected["by_agent"][0]
         self.assertEqual(row["label"], "claude-session coordinator")
         self.assertEqual(row["model"], "claude-fable-5")
+        self.assertEqual(row["phase"], "coordinate")  # not the overseen controller phase
+        self.assertEqual(row["effort"], "medium")
         self.assertEqual(row["calls"], 2)
         self.assertEqual(row["total_tokens"], 576)  # result usage: 22+500+40 in, 14 out
         self.assertEqual(row["peak_input_tokens"], 412)  # msg_2 context: 12+400+0

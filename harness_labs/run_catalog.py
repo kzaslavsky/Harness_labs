@@ -390,7 +390,7 @@ def _detail_metrics(metrics: Mapping[str, Any]) -> dict[str, Any]:
         records.extend(_codex_token_usage_records(metrics, stages))
         if records:
             collection_method = "verified cumulative Codex token-usage notifications"
-    session_records, session_spans = _claude_session_records(metrics, stages, transport_sessions)
+    session_records, session_spans = _claude_session_records(metrics, transport_sessions)
     if session_records:
         collection_method = "verified claude session stream artifacts" if not records else collection_method + "; verified claude session stream artifacts"
         records.extend(session_records)
@@ -575,7 +575,7 @@ def _claude_stream_usage_values(value: Any) -> dict[str, int] | None:
     }
 
 
-def _claude_session_records(metrics: Mapping[str, Any], stages: list[Mapping[str, Any]], transport_sessions: set[Any]) -> tuple[list[dict[str, Any]], list[tuple[int, int]]]:
+def _claude_session_records(metrics: Mapping[str, Any], transport_sessions: set[Any]) -> tuple[list[dict[str, Any]], list[tuple[int, int]]]:
     """Project journaled claude session streams into coordinator metric rows.
 
     ClaudeAgentSession coordinators journal their full stream-json transcript
@@ -590,7 +590,13 @@ def _claude_session_records(metrics: Mapping[str, Any], stages: list[Mapping[str
         return [], []
     run_dir = Path(supplied).resolve()
     sessions: dict[str, dict[str, Any]] = {}
+    process_efforts: dict[str, str] = {}
     for event in metrics.get("events", []):
+        if event.get("event_type") == "backend_process_started":
+            payload = event.get("payload") if isinstance(event.get("payload"), Mapping) else {}
+            effort = payload.get("effort") or payload.get("reasoning")
+            if isinstance(event.get("backend_id"), str) and isinstance(effort, str):
+                process_efforts[event["backend_id"]] = effort
         if event.get("event_type") != "transport_message":
             continue
         payload = event.get("payload") if isinstance(event.get("payload"), Mapping) else {}
@@ -649,10 +655,13 @@ def _claude_session_records(metrics: Mapping[str, Any], stages: list[Mapping[str
             duration_ms = 0
         records.append({
             "agent": f"claude-session coordinator ({str(key)[:8]})" if multiple else "claude-session coordinator",
-            "phase": next((str(stage.get("phase")) for stage in stages if stage.get("kind") == "coordinator session"), "other"),
+            # Coordinator-session stages carry the controller phase they were
+            # overseeing (e.g. "implement"), which would mislabel the
+            # coordinator as an implementer; its own phase is coordination.
+            "phase": "coordinate",
             "agent_type": "run_coordinator",
             "model": model,
-            "effort": "unavailable",
+            "effort": process_efforts.get(session["backend"], "unavailable"),
             "backend": session["backend"],
             "calls": calls,
             "input_tokens": usage["input_tokens"],
