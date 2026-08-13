@@ -795,17 +795,18 @@ def resume_graph(
     predecessor: str,
     frontier: list[str],
     blocker: str,
+    logical_id: str,
 ) -> int:
     admission = PlanApprovalAdmission(repository=REPO, receipt_path=receipt_path)
     admission.validate()
     registration = load_registration(
         ROOT / "logs" / "registration" / "contract-burden-relaxation.json"
     )
-    # NOTE: the cb-exp-1 attempt predates run_graph passing logical_graph_id,
-    # so its descriptor recorded the attempt id as its logical id; the
-    # directive must match what the predecessor durably recorded.
+    # The logical id is the stable graph slot across attempts; the cb-exp-1
+    # root attempt recorded its own attempt id as its logical id (it predates
+    # run_graph passing logical_graph_id), and every successor inherits it.
     directive = RepairResumeDirective(
-        logical_graph_id=predecessor,
+        logical_graph_id=logical_id,
         predecessor_attempt_id=predecessor,
         retry_frontier=tuple(frontier),
         blocker_evidence_ref=blocker,
@@ -852,6 +853,10 @@ def main() -> int:
     parser.add_argument("--predecessor", help="prior graph attempt id to resume from")
     parser.add_argument("--frontier", nargs="+", help="node ids to retry")
     parser.add_argument("--blocker", help="artifact:sha256:… blocker evidence ref")
+    parser.add_argument(
+        "--logical-id", default="cb-graph-cb-exp-1",
+        help="stable logical graph id recorded by the root attempt",
+    )
     arguments = parser.parse_args()
     # PlanGraph IDs must match ^[a-z0-9][a-z0-9-]{0,127}$ — lowercase, no T/Z.
     run_id = arguments.run_id or datetime.now(timezone.utc).strftime(
@@ -874,7 +879,7 @@ def main() -> int:
             parser.error("resume requires --predecessor, --frontier, and --blocker")
         return resume_graph(
             run_id, receipt, arguments.predecessor, arguments.frontier,
-            arguments.blocker,
+            arguments.blocker, arguments.logical_id,
         )
     return run_graph(run_id, receipt)
 
