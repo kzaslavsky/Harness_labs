@@ -113,6 +113,40 @@ class DashboardApiTests(unittest.TestCase):
         self.assertEqual(detail_status, 200)
         self.assertEqual(json.loads(detail_body)["run_id"], "graph-attempt-2")
 
+    def test_descriptorless_child_with_matching_run_id_is_id_matched_and_inspectable(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            plan = root / "plan.md"
+            plan.write_text("approved plan\n", encoding="utf-8")
+            PlanGraphAudit(
+                repository=root, run_root=root, graph_run_id="graph-1", plan=str(plan),
+                plan_sha256=hashlib.sha256(plan.read_bytes()).hexdigest(),
+                base_commit="a" * 40, registration_binding=_registration_binding("graph-1"),
+                objective="id-matched correlation",
+                nodes={"CB-01": {"status": "running", "feature_run_id": "graph-1-CB-01", "depends_on": []}},
+                functionality_tests=(),
+            )
+            self._run(root, "graph-1-CB-01")
+            (root / "graph-1-CB-01" / "descriptor.json").unlink()
+            app = DashboardApplication(root, refresh_seconds=60)
+            status, catalog_body, _ = self._request(app, "GET", "/api/catalog")
+            detail_status, detail_body, _ = self._request(app, "GET", "/api/feature-runs/graph-1-CB-01")
+
+        self.assertEqual(status, 200)
+        catalog = json.loads(catalog_body)
+        node = catalog["plan_graphs"][0]["nodes"][0]
+        self.assertEqual(node["feature_run_id"], "graph-1-CB-01")
+        self.assertEqual(node["evidence"]["state"], "partial")
+        self.assertEqual(node["evidence"]["reason"], "correlated by exact run id; descriptor attestation absent")
+        run = catalog["feature_runs"][0]
+        self.assertEqual(run["kind"], "legacy_feature_run")
+        self.assertEqual(run["correlation"]["state"], "id_matched")
+        self.assertEqual(run["correlation"]["plan_graph_id"], "graph-1")
+        self.assertEqual(run["correlation"]["plan_node_id"], "CB-01")
+        self.assertEqual(catalog["ungrouped_feature_runs"], [])
+        self.assertEqual(detail_status, 200)
+        self.assertIn("metrics", json.loads(detail_body))
+
     def test_catalog_etag_is_stable_across_refreshes_without_a_new_revision(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

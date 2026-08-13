@@ -10,7 +10,7 @@ from pathlib import Path
 
 from harness_labs.audit import AuditActor, AuditJournal
 from harness_labs.plan_graph_audit import PlanGraphAudit
-from harness_labs.run_catalog import _detail_metrics, _graph_execution, _snapshot, build_run_catalog, build_run_detail
+from harness_labs.run_catalog import _ID_MATCH_REASON, _detail_metrics, _graph_execution, _snapshot, build_run_catalog, build_run_detail, merge_run_catalogs
 
 
 def _registration_binding(graph_run_id: str) -> dict[str, str]:
@@ -172,7 +172,78 @@ class RunCatalogTests(unittest.TestCase):
         snapshot = _snapshot(Path("/runs"), now, [], records)
         self.assertEqual([record["run_id"] for record in snapshot["ungrouped_feature_runs"]], ["child"])
 
+    def test_id_matched_legacy_child_correlates_without_descriptor(self) -> None:
+        now = datetime(2026, 8, 9, tzinfo=timezone.utc)
+        records = [
+            {"run_id": "graph", "status": "running", "liveness": {"state": "liveness_unavailable", "reason": "no lease"}, "evidence": {"state": "available", "reason": None}, "nodes": [
+                {"node_id": "matched", "status": "succeeded", "feature_run_id": "graph-matched", "liveness": {"state": "not_applicable", "reason": None}, "evidence": {"state": "available", "reason": None}},
+                {"node_id": "attested", "status": "running", "feature_run_id": "attested-child", "liveness": {"state": "not_applicable", "reason": None}, "evidence": {"state": "available", "reason": None}},
+                {"node_id": "missing", "status": "queued", "feature_run_id": "graph-missing", "liveness": {"state": "not_applicable", "reason": None}, "evidence": {"state": "available", "reason": None}},
+            ]},
+            {"run_id": "graph-matched", "kind": "legacy_feature_run", "status": "succeeded", "liveness": {"state": "terminal", "reason": None}, "evidence": {"state": "partial", "reason": "descriptor was absent for the legacy run"}, "correlation": None},
+            {"run_id": "attested-child", "kind": "feature_run", "status": "running", "liveness": {"state": "liveness_unavailable", "reason": "no lease"}, "evidence": {"state": "available", "reason": None}, "correlation": {"plan_graph_id": "graph", "plan_node_id": "attested", "parent_run_id": "graph"}},
+        ]
+
+        snapshot = _snapshot(Path("/runs"), now, [], records)
+
+        nodes = {node["node_id"]: node for node in snapshot["plan_graphs"][0]["nodes"]}
+        self.assertEqual(nodes["matched"]["evidence"], {"state": "partial", "reason": _ID_MATCH_REASON})
+        self.assertEqual(nodes["matched"]["liveness"], {"state": "terminal", "reason": None})
+        self.assertEqual(nodes["attested"]["evidence"], {"state": "available", "reason": None})
+        self.assertEqual(nodes["missing"]["evidence"], {"state": "partial", "reason": "child correlation is not verified"})
+        runs = {record["run_id"]: record for record in snapshot["feature_runs"]}
+        self.assertEqual(runs["graph-matched"]["correlation"], {
+            "plan_graph_id": "graph", "plan_node_id": "matched", "parent_run_id": "graph",
+            "state": "id_matched", "reason": _ID_MATCH_REASON,
+        })
+        self.assertEqual(runs["attested-child"]["correlation"], {"plan_graph_id": "graph", "plan_node_id": "attested", "parent_run_id": "graph"})
+        self.assertEqual(snapshot["ungrouped_feature_runs"], [])
+
+    def test_id_matching_is_reserved_for_descriptor_less_legacy_runs(self) -> None:
+        now = datetime(2026, 8, 9, tzinfo=timezone.utc)
+        records = [
+            {"run_id": "graph", "status": "running", "liveness": {"state": "liveness_unavailable", "reason": "no lease"}, "evidence": {"state": "available", "reason": None}, "nodes": [
+                {"node_id": "standalone", "status": "running", "feature_run_id": "standalone-child", "liveness": {"state": "not_applicable", "reason": None}, "evidence": {"state": "available", "reason": None}},
+                {"node_id": "broken", "status": "failed", "feature_run_id": "corrupt-child", "liveness": {"state": "not_applicable", "reason": None}, "evidence": {"state": "available", "reason": None}},
+            ]},
+            {"run_id": "standalone-child", "kind": "feature_run", "status": "running", "liveness": {"state": "liveness_unavailable", "reason": "no lease"}, "evidence": {"state": "available", "reason": None}, "correlation": None},
+            {"run_id": "corrupt-child", "kind": "legacy_feature_run", "status": "corrupt", "liveness": {"state": "liveness_unavailable", "reason": "run is corrupt"}, "evidence": {"state": "unavailable", "reason": "corrupt"}, "correlation": None},
+        ]
+
+        snapshot = _snapshot(Path("/runs"), now, [], records)
+
+        for node in snapshot["plan_graphs"][0]["nodes"]:
+            self.assertEqual(node["evidence"], {"state": "partial", "reason": "child correlation is not verified"})
+        for record in snapshot["feature_runs"]:
+            self.assertIsNone(record["correlation"])
+        self.assertEqual([record["run_id"] for record in snapshot["ungrouped_feature_runs"]], ["standalone-child", "corrupt-child"])
+
+    def test_merged_roots_id_match_without_upgrading_to_attested_evidence(self) -> None:
+        graph_catalog = {
+            "availability": {"state": "available", "reason": None}, "generated_at": "2026-08-09T00:00:00Z", "diagnostics": [],
+            "plan_graphs": [{"run_id": "graph", "status": "running", "liveness": {"state": "liveness_unavailable", "reason": "no lease"}, "evidence": {"state": "available", "reason": None}, "nodes": [
+                {"node_id": "node", "status": "succeeded", "feature_run_id": "graph-node", "liveness": {"state": "not_applicable", "reason": None}, "evidence": {"state": "partial", "reason": "child correlation is not verified"}},
+            ]}],
+            "feature_runs": [], "ungrouped_feature_runs": [],
+        }
+        child = {"run_id": "graph-node", "kind": "legacy_feature_run", "status": "succeeded", "liveness": {"state": "terminal", "reason": None}, "evidence": {"state": "partial", "reason": "descriptor was absent for the legacy run"}, "correlation": None}
+        child_catalog = {
+            "availability": {"state": "available", "reason": None}, "generated_at": "2026-08-09T00:00:01Z", "diagnostics": [],
+            "plan_graphs": [], "feature_runs": [child], "ungrouped_feature_runs": [child],
+        }
+
+        merged = merge_run_catalogs([(Path("/roots/a"), graph_catalog), (Path("/roots/b"), child_catalog)])
+
+        node = merged["plan_graphs"][0]["nodes"][0]
+        self.assertEqual(node["evidence"], {"state": "partial", "reason": _ID_MATCH_REASON})
+        self.assertEqual(node["liveness"], {"state": "terminal", "reason": None})
+        merged_child = merged["feature_runs"][0]
+        self.assertEqual(merged_child["correlation"]["state"], "id_matched")
+        self.assertEqual(merged_child["correlation"]["plan_node_id"], "node")
+        self.assertEqual(merged["ungrouped_feature_runs"], [])
+
     def test_legacy_graph_node_recovers_unique_child_by_audited_merge_commit(self) -> None:
+
         now = datetime(2026, 8, 9, tzinfo=timezone.utc)
         records = [
             {"run_id": "graph", "status": "succeeded", "liveness": {"state": "terminal", "reason": None}, "evidence": {"state": "available", "reason": None}, "nodes": [{"node_id": "node", "status": "succeeded", "feature_run_id": "legacy-reservation", "liveness": {"state": "not_applicable", "reason": None}, "evidence": {"state": "available", "reason": None}, "_candidate_commit": "b" * 40}]},

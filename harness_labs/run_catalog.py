@@ -158,11 +158,18 @@ def merge_run_catalogs(
                 (feature for feature in features if _node_matches_child(graph, node, feature)),
                 None,
             )
-            node["evidence"] = (
-                availability("available")
-                if child is not None
-                else availability("partial", "child correlation is not verified")
-            )
+            if child is None:
+                # A graph and a descriptor-less legacy child may also live in
+                # different roots; exact run-id equality still binds them.
+                child = _id_match_child(graph, node, features)
+            if child is None:
+                node["evidence"] = availability("partial", "child correlation is not verified")
+            elif _correlation_is_id_matched(child):
+                # Never let a merged view upgrade an id-matched correlation to
+                # the fully-available evidence reserved for attested children.
+                node["evidence"] = availability("partial", _ID_MATCH_REASON)
+            else:
+                node["evidence"] = availability("available")
             if child is not None:
                 node["liveness"] = dict(child["liveness"])
 
@@ -273,6 +280,11 @@ def _snapshot(root: Path, now: datetime, diagnostics: list[dict[str, str | None]
                 # replace it with the separate, less-specific correlation
                 # warning merely because a child catalog record is absent.
                 if node.get("evidence", {}).get("state") != "available":
+                    continue
+                id_matched = _id_match_child(graph, node, features)
+                if id_matched is not None:
+                    node["liveness"] = dict(id_matched["liveness"])
+                    node["evidence"] = availability("partial", _ID_MATCH_REASON)
                     continue
                 legacy_matches = [
                     record for record in features
@@ -844,6 +856,48 @@ def _graph_status(metrics: Mapping[str, Any], fallback: str) -> str:
     state = metrics["checkpoint"].get("state", {})
     value = state.get("terminal_graph_status") if isinstance(state, Mapping) else None
     return value if value in TERMINAL_STATUSES or value in {"queued", "running"} else fallback
+
+_ID_MATCH_REASON = "correlated by exact run id; descriptor attestation absent"
+
+
+def _id_match_child(graph: Mapping[str, Any], node: Mapping[str, Any], features: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Bind a descriptor-less legacy run to a node by exact run-id equality.
+
+    This correlation is deliberately weaker than descriptor attestation: the
+    injected correlation is labeled state "id_matched" and callers must keep
+    the node evidence partial so it can never read as descriptor-attested.
+    Runs that carry a descriptor (even one with a null parent_correlation)
+    are excluded because their attestation already speaks for itself.
+    """
+    run_id = node.get("feature_run_id")
+    if not isinstance(run_id, str) or not run_id:
+        return None
+    child = next(
+        (
+            record for record in features
+            if record.get("run_id") == run_id
+            and record.get("kind") == "legacy_feature_run"
+            and record.get("status") != "corrupt"
+            and not record.get("correlation")
+        ),
+        None,
+    )
+    if child is None:
+        return None
+    child["correlation"] = {
+        "plan_graph_id": graph["run_id"],
+        "plan_node_id": node["node_id"],
+        "parent_run_id": graph["run_id"],
+        "state": "id_matched",
+        "reason": _ID_MATCH_REASON,
+    }
+    return child
+
+
+def _correlation_is_id_matched(child: Mapping[str, Any] | None) -> bool:
+    correlation = child.get("correlation") if child else None
+    return isinstance(correlation, Mapping) and correlation.get("state") == "id_matched"
+
 
 def _correlation(descriptor: Mapping[str, Any] | None) -> dict[str, str] | None:
     value = descriptor.get("parent_correlation") if descriptor else None
