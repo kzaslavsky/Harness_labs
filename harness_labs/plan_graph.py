@@ -2129,15 +2129,16 @@ class PlanGraph:
     def _validate_completed_dependencies(
         ordered_runs: Sequence[PlanRun], completed: Mapping[str, str]
     ) -> None:
-        seen_incomplete = False
+        # Completion is a DAG property, not a topological prefix: under
+        # parallel dispatch a node legitimately completes while an
+        # earlier-ordered sibling is still open, so the only checkpoint
+        # invariant is that no node is marked complete before its own
+        # dependencies.  Commit-level custody is enforced separately by
+        # integration barriers and digest-verified reuse receipts.
         for run in ordered_runs:
-            if run.id not in completed:
-                seen_incomplete = True
-            elif seen_incomplete:
-                raise PlanGraphError(
-                    f"PlanGraph state marks {run.id!r} complete outside sequential candidate lineage"
-                )
-            elif any(dependency not in completed for dependency in run.depends_on):
+            if run.id in completed and any(
+                dependency not in completed for dependency in run.depends_on
+            ):
                 raise PlanGraphError(
                     f"PlanGraph state marks {run.id!r} complete before its dependency"
                 )

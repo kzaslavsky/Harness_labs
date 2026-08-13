@@ -153,5 +153,81 @@ class ReuseChainTests(unittest.TestCase):
         self.assertIn("b", result.completed)
 
 
+class ParallelSiblingResumeTests(ReuseChainTests):
+    """Resume must accept checkpoints where a parallel sibling sealed.
+
+    Diamond a → (b ∥ c): b fails while c seals on its own branch, so the
+    completed set {a, c} is not a topological prefix.  The successor must
+    still admit the checkpoint, reuse a and c, and re-run only b.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.registration = register_plan_graph(
+            repository=self.repository,
+            logical_graph_id="parallel-resume",
+            decomposition={
+                "plan": "docs/approved-plan.md",
+                "base_commit": self.base_commit,
+                "runs": [
+                    {"id": "a", "objective": "Build A", "plan_sections": ["1"],
+                     "criteria": ["AC-1"], "depends_on": [],
+                     "verification_argv": ["true"]},
+                    {"id": "b", "objective": "Build B", "plan_sections": ["2"],
+                     "criteria": ["AC-2"], "depends_on": ["a"],
+                     "verification_argv": ["true"]},
+                    {"id": "c", "objective": "Build C", "plan_sections": ["3"],
+                     "criteria": ["AC-3"], "depends_on": ["a"],
+                     "verification_argv": ["true"]},
+                ],
+                "plan_sections": {
+                    "1": "Build A. AC-1: A works.",
+                    "2": "Build B. AC-2: B works.",
+                    "3": "Build C. AC-3: C works.",
+                },
+                "acceptance_criteria": {"AC-1": "A works.", "AC-2": "B works.", "AC-3": "C works."},
+                "functionality_tests": [],
+            },
+        )
+
+    def resume(self, predecessor: str, fail_b: bool) -> PlanGraph:
+        return PlanGraph.resume(
+            self.repository,
+            self.registration,
+            self.launcher(fail_b),
+            run_root=self.run_root,
+            directive=RepairResumeDirective(
+                logical_graph_id="root-attempt",
+                predecessor_attempt_id=predecessor,
+                retry_frontier=("b",),
+                blocker_evidence_ref=self.blocker_ref(predecessor),
+            ),
+        )
+
+    def test_reuse_survives_two_successor_hops(self) -> None:  # noqa: D102
+        self.skipTest("inherited serial scenario; covered by ReuseChainTests")
+
+    def test_resume_reuses_parallel_sibling_sealed_past_failed_frontier(self) -> None:
+        root = PlanGraph(
+            self.repository, self.registration, self.launcher(fail_b=True),
+            run_root=self.run_root, graph_run_id="root-attempt",
+            max_parallelism=2,
+        )
+        result = root.run()
+        self.assertEqual(result.status, "failed")
+        self.assertIn("a", result.completed)
+        self.assertIn("c", result.completed, "sibling c must seal despite b failing")
+
+        self.launched.clear()
+        successor = self.resume("root-attempt", fail_b=False)
+        repaired = successor.run()
+        self.assertEqual(repaired.status, "succeeded")
+        self.assertEqual(
+            self.launched, ["b"],
+            "successor must reuse a and the sealed parallel sibling c, re-running only b",
+        )
+        self.assertEqual(set(repaired.completed), {"a", "b", "c"})
+
+
 if __name__ == "__main__":
     unittest.main()
