@@ -43,6 +43,11 @@ def build_run_catalog(source_root: Path, *, clock: Clock | None = None, process_
     for entry in sorted(root.iterdir(), key=lambda path: path.name):
         if entry.is_symlink() or not entry.is_dir():
             continue
+        if entry.name.startswith("."):
+            # Ledger and lock bookkeeping (.plan-graph-budgets,
+            # .plan-graph-locks) live beside run directories; they are
+            # infrastructure, not runs, and must not poison catalog IDs.
+            continue
         if entry.name in exclusions:
             reason = exclusions[entry.name]
             diagnostics.append(_diagnostic("bounded_run_rejected", reason, entry.name))
