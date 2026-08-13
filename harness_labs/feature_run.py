@@ -592,6 +592,20 @@ def run_feature_worktree(
         evidence_classification=evidence_classification,
     )
     evidence = EvidenceCatalog(audit=audit)
+    if verification_repair_executor_factory is not None:
+        verification_repair_executor_factory = _grant_aware_repair_factory(
+            verification_repair_executor_factory,
+            evidence=evidence,
+            worktree_path=transaction.worktree_path,
+            audit=audit,
+        )
+    if review_fix_executor_factory is not None:
+        review_fix_executor_factory = _grant_aware_review_fix_factory(
+            review_fix_executor_factory,
+            evidence=evidence,
+            worktree_path=transaction.worktree_path,
+            audit=audit,
+        )
     recovery = _RecoveryState(recovery_limit)
     handoff_records = []
     for handoff in initial_evidence:
@@ -1351,6 +1365,144 @@ def _resume_kernel_after_recovery(
     )
     if not receipt.accepted:
         raise ValueError(f"recovery could not resume run: {receipt.message}")
+
+
+def _dirty_baseline_receipt_ref(
+    evidence: EvidenceCatalog,
+    dirty_paths: list[str],
+) -> str | None:
+    """Return a workspace-change receipt whose changed_paths covers every dirty path.
+
+    Any receipt truthfully attests an adoptable baseline as long as its
+    recorded change set is a superset of what is currently dirty; the
+    tightest-covering receipt is preferred (fewest paths beyond what's dirty),
+    ties broken by evidence ref for determinism, so a stale receipt from
+    before further edits is passed over once a newer one covers everything.
+    """
+
+    dirty = set(dirty_paths)
+    if not dirty:
+        return None
+    best_ref: str | None = None
+    best_extra: int | None = None
+    for record in evidence.list():
+        if record.kind != "workspace-change-receipt":
+            continue
+        try:
+            receipt = json.loads(evidence.open(record.ref))
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(receipt, Mapping):
+            continue
+        receipted = set(receipt.get("changed_paths", ()))
+        if not dirty <= receipted:
+            continue
+        extra = len(receipted - dirty)
+        if best_extra is None or extra < best_extra:
+            best_ref = record.ref
+            best_extra = extra
+    return best_ref
+
+
+def _attach_dirty_baseline_grant(
+    executor: Executor,
+    *,
+    evidence: EvidenceCatalog,
+    worktree_path: Path,
+    audit: AuditJournal,
+    attempt: TaskAttempt,
+    actor: AuditActor,
+) -> None:
+    """Supply a repair/fix executor an audited grant for the current dirty baseline.
+
+    Only executors that expose a settable ``dirty_baseline_grant`` attribute
+    (the two live semantic executors) participate; anything else is left
+    untouched. A grant is only ever attached when an existing
+    ``workspace-change-receipt`` in this run's evidence catalog truthfully
+    covers every path currently dirty, and that decision is recorded in the
+    audit journal so the adoption is provable, not merely asserted.
+    """
+
+    if not hasattr(executor, "dirty_baseline_grant"):
+        return
+    dirty_paths = list(workspace_snapshot(worktree_path)["changed_paths"])
+    if not dirty_paths:
+        return
+    receipt_ref = _dirty_baseline_receipt_ref(evidence, dirty_paths)
+    if receipt_ref is None:
+        return
+    grant = {"receipt_ref": receipt_ref}
+    executor.dirty_baseline_grant = grant
+    audit.append(
+        "dirty_baseline_adoption_grant_supplied",
+        status="granted",
+        payload={
+            "receipt_ref": receipt_ref,
+            "dirty_paths": sorted(dirty_paths),
+        },
+        actor=actor,
+        attempt_id=attempt.attempt_id,
+    )
+
+
+def _grant_aware_repair_factory(
+    factory: VerificationRepairExecutorFactory,
+    *,
+    evidence: EvidenceCatalog,
+    worktree_path: Path,
+    audit: AuditJournal,
+) -> VerificationRepairExecutorFactory:
+    """Wrap a repair executor factory to auto-supply the adoption grant.
+
+    Converts the constructor-frozen ``allow_dirty_baseline`` escape hatch into
+    a per-dispatch runtime grant: the factory owned outside this module still
+    decides everything else about the repair executor, but every dispatch it
+    produces is offered whatever receipted baseline this run's evidence
+    catalog can prove covers the current dirty workspace.
+    """
+
+    def wrapped(attempt: TaskAttempt) -> Executor:
+        executor = factory(attempt)
+        _attach_dirty_baseline_grant(
+            executor,
+            evidence=evidence,
+            worktree_path=worktree_path,
+            audit=audit,
+            attempt=attempt,
+            actor=AuditActor("verification-owner", "verification_owner"),
+        )
+        return executor
+
+    return wrapped
+
+
+def _grant_aware_review_fix_factory(
+    factory: ReviewFixExecutorFactory,
+    *,
+    evidence: EvidenceCatalog,
+    worktree_path: Path,
+    audit: AuditJournal,
+) -> ReviewFixExecutorFactory:
+    """Wrap a review-fix executor factory to auto-supply the adoption grant.
+
+    Only the writable ``"fix"`` stage can face a dirty baseline; ``"review"``
+    and ``"verify"`` stay read-only and are passed through unchanged.
+    """
+
+    def wrapped(stage: str, attempt: TaskAttempt) -> Executor:
+        executor = factory(stage, attempt)
+        if stage == "fix":
+            _attach_dirty_baseline_grant(
+                executor,
+                evidence=evidence,
+                worktree_path=worktree_path,
+                audit=audit,
+                attempt=attempt,
+                actor=AuditActor("review-fix-controller", "controller"),
+            )
+        return executor
+
+    return wrapped
 
 
 def _verify_with_recovery(

@@ -318,7 +318,6 @@ class CodexSemanticTaskExecutorTests(unittest.TestCase):
             "Verify only.",
             sandbox="workspace-write",
             writable_paths=("tests",),
-            allow_dirty_baseline=True,
             forbid_repository_change=True,
         )
         snapshots = (
@@ -418,6 +417,16 @@ class CodexSemanticTaskExecutorTests(unittest.TestCase):
                 return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
 
             evidence = EvidenceCatalog()
+            prior_receipt = evidence.add(
+                kind="workspace-change-receipt",
+                content={
+                    "protocol": "workspace-change-receipt/2",
+                    "changed_paths": ["feature.txt", "other.txt"],
+                    "files": before["files"],
+                },
+                media_type="application/json",
+                producer_task_id="prior-attempt",
+            )
             executor = CodexSemanticTaskExecutor(
                 task,
                 repository,
@@ -426,7 +435,7 @@ class CodexSemanticTaskExecutorTests(unittest.TestCase):
                 sandbox="workspace-write",
                 require_repository_change=True,
                 writable_paths=("feature.txt",),
-                allow_dirty_baseline=True,
+                dirty_baseline_grant={"receipt_ref": prior_receipt.ref},
             )
             with (
                 patch(
@@ -463,6 +472,168 @@ class CodexSemanticTaskExecutorTests(unittest.TestCase):
                 content["baseline_changed_paths"],
                 ["feature.txt", "other.txt"],
             )
+
+    def test_grant_refused_when_dirty_content_does_not_match_the_receipt(self):
+        task = {
+            "id": "fix",
+            "objective": "Fix",
+            "context": "{}",
+            "details_schema": "review-fix-fix/1",
+            "acceptance_criteria": [],
+            "required_capabilities": ["repo.write"],
+        }
+        evidence = EvidenceCatalog()
+        prior_receipt = evidence.add(
+            kind="workspace-change-receipt",
+            content={
+                "protocol": "workspace-change-receipt/2",
+                "changed_paths": ["feature.txt"],
+                "files": {
+                    "feature.txt": {"kind": "file", "sha256": "receipted-content"}
+                },
+            },
+            media_type="application/json",
+            producer_task_id="prior-attempt",
+        )
+        executor = CodexSemanticTaskExecutor(
+            task,
+            Path("."),
+            evidence,
+            "Fix only.",
+            sandbox="workspace-write",
+            writable_paths=("feature.txt",),
+            dirty_baseline_grant={"receipt_ref": prior_receipt.ref},
+        )
+        snapshots = (
+            {
+                "head": "abc",
+                "branch": "feature",
+                "changed_paths": ["feature.txt"],
+                "files": {
+                    "feature.txt": {"kind": "file", "sha256": "different-content"}
+                },
+            },
+            {
+                "head": "abc",
+                "branch": "feature",
+                "changed_paths": ["feature.txt"],
+                "files": {
+                    "feature.txt": {"kind": "file", "sha256": "different-content"}
+                },
+            },
+        )
+
+        def run(argv, **kwargs):
+            output = Path(argv[argv.index("-o") + 1])
+            output.write_text(
+                json.dumps(
+                    {
+                        "summary": "Verified.",
+                        "deliverable_markdown": "Verified.",
+                        "details_json": "{}",
+                        "claims": [],
+                        "findings": [],
+                        "recommendations": [],
+                        "unresolved_questions": [],
+                        "satisfied_criteria": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+        with (
+            patch("harness_labs.controller_live.shutil.which", return_value="codex"),
+            patch("harness_labs.controller_live.subprocess.run", side_effect=run),
+            patch(
+                "harness_labs.controller_live.workspace_snapshot",
+                side_effect=snapshots,
+            ),
+            patch.object(Path, "exists", return_value=True),
+        ):
+            result = executor.execute(
+                TaskAttempt(
+                    "fix/attempt-1",
+                    "task:fix",
+                    "context:fix",
+                    "profile:fixer",
+                )
+            )
+        self.assertEqual(
+            result.status,
+            "failed",
+            "a dirty path whose current content diverges from what the "
+            "receipt attests must still be refused, even though its name "
+            "matches a receipted path",
+        )
+        self.assertIn(
+            "clean repository baseline", str(result.payload.get("error", ""))
+        )
+
+    def test_worker_cannot_mint_its_own_deliverable_as_a_workspace_change_receipt(
+        self,
+    ) -> None:
+        task = {
+            "id": "inspect",
+            "objective": "Inspect",
+            "context": json.dumps({"artifact_kind": "workspace-change-receipt"}),
+            "details_schema": "inspection/1",
+            "acceptance_criteria": [],
+            "required_capabilities": ["repo.read"],
+        }
+        evidence = EvidenceCatalog()
+        executor = CodexSemanticTaskExecutor(
+            task,
+            Path("."),
+            evidence,
+            "Inspect only.",
+        )
+        raw = {
+            "summary": "Inspected.",
+            "deliverable_markdown": json.dumps(
+                {"changed_paths": ["anything.txt"]}
+            ),
+            "details_json": "{}",
+            "claims": [],
+            "findings": [],
+            "recommendations": [],
+            "unresolved_questions": [],
+            "satisfied_criteria": [],
+        }
+
+        def run(argv, **kwargs):
+            output = Path(argv[argv.index("-o") + 1])
+            output.write_text(json.dumps(raw), encoding="utf-8")
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+        with (
+            patch("harness_labs.controller_live.shutil.which", return_value="codex"),
+            patch("harness_labs.controller_live.subprocess.run", side_effect=run),
+            patch(
+                "harness_labs.controller_live.workspace_snapshot",
+                side_effect=(
+                    {"head": "abc", "branch": "feature", "changed_paths": [], "files": {}},
+                    {"head": "abc", "branch": "feature", "changed_paths": [], "files": {}},
+                ),
+            ),
+            patch.object(Path, "exists", return_value=True),
+        ):
+            result = executor.execute(
+                TaskAttempt(
+                    "inspect/attempt-1",
+                    "task:inspect",
+                    "context:inspect",
+                    "profile:inspector",
+                )
+            )
+        self.assertEqual(result.status, "succeeded", result.payload)
+        semantic = validate_semantic_result(
+            result,
+            expected_details_schema="inspection/1",
+        )
+        kinds = {item["kind"] for item in semantic.artifacts}
+        self.assertNotIn("workspace-change-receipt", kinds)
+        self.assertIn("inspection/1-report", kinds)
 
 
 if __name__ == "__main__":
