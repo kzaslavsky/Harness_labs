@@ -172,6 +172,9 @@ def merge_run_catalogs(
                 node["evidence"] = availability("available")
             if child is not None:
                 node["liveness"] = dict(child["liveness"])
+    # A reused node's origin attempt may live in any configured root, so the
+    # reuse chain is re-resolved over the merged graph and feature records.
+    _resolve_reused_nodes(graphs, features)
 
     ungrouped = [
         feature for feature in features
@@ -281,6 +284,10 @@ def _snapshot(root: Path, now: datetime, diagnostics: list[dict[str, str | None]
                 # warning merely because a child catalog record is absent.
                 if node.get("evidence", {}).get("state") != "available":
                     continue
+                if node.get("reused_from_attempt"):
+                    # A recorded reuse governs; _resolve_reused_nodes follows
+                    # the chain instead of guessing by id or merge commit.
+                    continue
                 id_matched = _id_match_child(graph, node, features)
                 if id_matched is not None:
                     node["liveness"] = dict(id_matched["liveness"])
@@ -298,6 +305,7 @@ def _snapshot(root: Path, now: datetime, diagnostics: list[dict[str, str | None]
                     )
                 else:
                     node["evidence"] = availability("partial", "child correlation is not verified")
+    _resolve_reused_nodes(graphs, features)
     ungrouped = [
         record for record in features
         if not any(_node_matches_child(graph, node, record) for graph in graphs for node in graph["nodes"])
@@ -326,9 +334,16 @@ def _detail(metrics: Mapping[str, Any], descriptor: Mapping[str, Any] | None) ->
 def _detail_metrics(metrics: Mapping[str, Any]) -> dict[str, Any]:
     """Project verified transport records into reconciled operator metrics."""
     records: list[dict[str, Any]] = []
+    spans: list[tuple[int, int]] = []
+    unspanned_records = 0
     for event in metrics.get("events", []):
         if event.get("event_type") != "backend_transport":
             continue
+        end_ns, span_ms = event.get("monotonic_ns"), event.get("duration_ms")
+        if type(end_ns) is int and type(span_ms) is int and span_ms >= 0:
+            spans.append((end_ns - span_ms * 1_000_000, end_ns))
+        else:
+            unspanned_records += 1
         payload = event.get("payload") if isinstance(event.get("payload"), Mapping) else {}
         usage = payload.get("usage") if isinstance(payload.get("usage"), Mapping) else {}
         actor = event.get("actor") if isinstance(event.get("actor"), Mapping) else {}
@@ -371,6 +386,13 @@ def _detail_metrics(metrics: Mapping[str, Any]) -> dict[str, Any]:
         totals["wall_clock_ms"] = summary_usage["wall_clock_ms"]
     else:
         totals["wall_clock_ms"] = None
+    # duration_ms sums per-record backend durations, which overlap whenever a
+    # coordinator blocks on dispatched workers or workers run in parallel, so
+    # its sum may legitimately exceed wall time.  busy_ms is the union of the
+    # verified activity intervals — honest non-overlapping busy time — and is
+    # reported as unavailable rather than invented when any transport record
+    # lacks monotonic timing or when only cumulative session usage exists.
+    totals["busy_ms"] = _interval_union_ms(spans) if spans and not unspanned_records else None
     state = metrics.get("checkpoint", {}).get("state", {})
     state = state if isinstance(state, Mapping) else {}
     controller = state.get("controller") if isinstance(state.get("controller"), Mapping) else {}
@@ -407,6 +429,13 @@ def _detail_metrics(metrics: Mapping[str, Any]) -> dict[str, Any]:
                 "maximum observed input_tokens in one backend invocation; "
                 "unavailable when every record reports only cumulative "
                 "session usage (claude-print results)"
+            ),
+            "busy_time_definition": (
+                "union of verified backend_transport activity intervals "
+                "(non-overlapping busy time); duration_ms sums per-record "
+                "durations and may exceed wall time when a coordinator "
+                "blocks on dispatched workers; unavailable when any record "
+                "lacks monotonic timing or usage is cumulative-only"
             ),
         },
     }
@@ -651,6 +680,23 @@ def _aggregate_metric_rows(rows: list[Mapping[str, Any]]) -> dict[str, Any]:
     return result
 
 
+def _interval_union_ms(spans: list[tuple[int, int]]) -> int:
+    """Total covered length of monotonic activity intervals, overlap-free."""
+    total = 0
+    cursor: int | None = None
+    end_cursor = 0
+    for start, end in sorted(spans):
+        if cursor is None or start > end_cursor:
+            if cursor is not None:
+                total += end_cursor - cursor
+            cursor, end_cursor = start, end
+        else:
+            end_cursor = max(end_cursor, end)
+    if cursor is not None:
+        total += end_cursor - cursor
+    return total // 1_000_000
+
+
 def _breakdown(records: list[dict[str, Any]], key: str) -> list[dict[str, Any]]:
     groups: dict[str, list[dict[str, Any]]] = {}
     for record in records:
@@ -691,7 +737,9 @@ def _nodes(metrics: Mapping[str, Any]) -> list[dict[str, Any]]:
         evidence = data.get("evidence")
         evidence = evidence if isinstance(evidence, Mapping) else {}
         reason = evidence.get("reason")
-        result.append({"node_id": node_id, "status": status, "feature_run_id": data.get("feature_run_id") if isinstance(data.get("feature_run_id"), str) else None, "depends_on": [value for value in dependencies if isinstance(value, str)], "liveness": liveness, "evidence": availability("partial", reason) if isinstance(reason, str) and reason else availability("available"), "_candidate_commit": data.get("candidate_commit") if isinstance(data.get("candidate_commit"), str) else None})
+        candidate_commit = data.get("candidate_commit") if isinstance(data.get("candidate_commit"), str) else None
+        reused_from = data.get("reused_from_attempt")
+        result.append({"node_id": node_id, "status": status, "feature_run_id": data.get("feature_run_id") if isinstance(data.get("feature_run_id"), str) else None, "depends_on": [value for value in dependencies if isinstance(value, str)], "liveness": liveness, "evidence": availability("partial", reason) if isinstance(reason, str) and reason else availability("available"), "reused_from_attempt": reused_from if isinstance(reused_from, str) and reused_from else None, "candidate_commit": candidate_commit, "_candidate_commit": candidate_commit})
     return result
 
 
@@ -858,6 +906,93 @@ def _graph_status(metrics: Mapping[str, Any], fallback: str) -> str:
     return value if value in TERMINAL_STATUSES or value in {"queued", "running"} else fallback
 
 _ID_MATCH_REASON = "correlated by exact run id; descriptor attestation absent"
+_REUSE_UNRESOLVED_REASON = "reused node's origin run could not be resolved from the recorded reuse chain"
+
+
+def _resolve_reused_nodes(graphs: list[dict[str, Any]], features: list[dict[str, Any]]) -> None:
+    """Correlate reused nodes to the attempt where the node actually executed.
+
+    A successor attempt reuses a sealed node instead of re-running it, so the
+    node's planned feature_run_id names a run directory that never existed.
+    The checkpoint records ``reused_from_attempt`` per node; following that
+    recorded chain (verifying the sealed candidate commit at every hop) leads
+    to the origin attempt whose feature run holds the real evidence.  The
+    resulting correlation is explicitly state "reused" and the node evidence
+    stays partial: this is recorded-chain resolution, never attestation.
+    """
+    graphs_by_id = {graph["run_id"]: graph for graph in graphs if isinstance(graph.get("run_id"), str)}
+    features_by_id = {feature["run_id"]: feature for feature in features if isinstance(feature.get("run_id"), str)}
+    for graph in graphs:
+        for node in graph.get("nodes", []):
+            if not isinstance(node, dict):
+                continue
+            reused_from = node.get("reused_from_attempt")
+            if not isinstance(reused_from, str) or not reused_from:
+                continue
+            if node.get("feature_run_id") in features_by_id:
+                # The planned run actually exists; direct correlation governs.
+                continue
+            origin = _reuse_origin(node, reused_from, graphs_by_id, features_by_id)
+            if origin is None:
+                node["correlation"] = None
+                node["evidence"] = availability("partial", _REUSE_UNRESOLVED_REASON)
+                continue
+            origin_attempt_id, origin_run = origin
+            reason = (
+                f"node was reused from attempt {origin_attempt_id}; "
+                f"metrics come from origin run {origin_run['run_id']}"
+            )
+            node["correlation"] = {
+                "state": "reused",
+                "origin_attempt_id": origin_attempt_id,
+                "origin_feature_run_id": origin_run["run_id"],
+                "reused_from_attempt": reused_from,
+                "reason": reason,
+            }
+            node["evidence"] = availability("partial", reason)
+            node["liveness"] = dict(origin_run["liveness"])
+
+
+def _reuse_origin(
+    node: Mapping[str, Any],
+    reused_from: str,
+    graphs_by_id: Mapping[str, Mapping[str, Any]],
+    features_by_id: Mapping[str, Mapping[str, Any]],
+) -> tuple[str, Mapping[str, Any]] | None:
+    """Walk the recorded reuse chain to the attempt that executed the node."""
+    sealed_commit = node.get("candidate_commit")
+    if not isinstance(sealed_commit, str) or not sealed_commit:
+        return None
+    seen: set[str] = set()
+    predecessor_id: str | None = reused_from
+    while isinstance(predecessor_id, str) and predecessor_id:
+        if predecessor_id in seen:
+            return None
+        seen.add(predecessor_id)
+        predecessor = graphs_by_id.get(predecessor_id)
+        if predecessor is None:
+            return None
+        candidate = next(
+            (
+                item for item in predecessor.get("nodes", [])
+                if isinstance(item, Mapping) and item.get("node_id") == node.get("node_id")
+            ),
+            None,
+        )
+        # The reused seal must reference the same sealed candidate commit at
+        # every hop; a mismatch means the chain does not describe this seal.
+        if candidate is None or candidate.get("candidate_commit") != sealed_commit:
+            return None
+        next_predecessor = candidate.get("reused_from_attempt")
+        if isinstance(next_predecessor, str) and next_predecessor:
+            predecessor_id = next_predecessor
+            continue
+        run_id = candidate.get("feature_run_id")
+        origin_run = features_by_id.get(run_id) if isinstance(run_id, str) else None
+        if origin_run is None or origin_run.get("status") == "corrupt":
+            return None
+        return predecessor_id, origin_run
+    return None
 
 
 def _id_match_child(graph: Mapping[str, Any], node: Mapping[str, Any], features: list[dict[str, Any]]) -> dict[str, Any] | None:

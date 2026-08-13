@@ -10,7 +10,7 @@ from pathlib import Path
 
 from harness_labs.audit import AuditActor, AuditJournal
 from harness_labs.plan_graph_audit import PlanGraphAudit
-from harness_labs.run_catalog import _ID_MATCH_REASON, _detail_metrics, _graph_execution, _snapshot, build_run_catalog, build_run_detail, merge_run_catalogs
+from harness_labs.run_catalog import _ID_MATCH_REASON, _REUSE_UNRESOLVED_REASON, _detail_metrics, _graph_execution, _snapshot, build_run_catalog, build_run_detail, merge_run_catalogs
 
 
 def _registration_binding(graph_run_id: str) -> dict[str, str]:
@@ -462,6 +462,130 @@ class RunCatalogTests(unittest.TestCase):
         ]
         snapshot = _snapshot(Path("/runs"), now, [], records)
         self.assertEqual(snapshot["plan_graphs"][0]["nodes"][0]["liveness"]["state"], "stale")
+
+    @staticmethod
+    def _reuse_graph(run_id: str, *, reused_from: str | None, commit: str | None = "c" * 40, node_id: str = "N") -> dict:
+        return {
+            "run_id": run_id, "status": "running",
+            "liveness": {"state": "liveness_unavailable", "reason": "no lease"},
+            "evidence": {"state": "available", "reason": None},
+            "nodes": [{
+                "node_id": node_id, "status": "succeeded", "feature_run_id": f"{run_id}-{node_id}",
+                "depends_on": [], "liveness": {"state": "not_applicable", "reason": None},
+                "evidence": {"state": "available", "reason": None},
+                "reused_from_attempt": reused_from, "candidate_commit": commit,
+            }],
+        }
+
+    @staticmethod
+    def _legacy_run(run_id: str, status: str = "succeeded") -> dict:
+        liveness = {"state": "terminal", "reason": None} if status != "corrupt" else {"state": "liveness_unavailable", "reason": "run is corrupt"}
+        evidence = {"state": "partial", "reason": "descriptor was absent for the legacy run"} if status != "corrupt" else {"state": "unavailable", "reason": "corrupt"}
+        return {"run_id": run_id, "kind": "legacy_feature_run", "status": status, "liveness": liveness, "evidence": evidence, "correlation": None}
+
+    def test_reused_nodes_resolve_origin_across_two_hop_chain(self) -> None:
+        now = datetime(2026, 8, 9, tzinfo=timezone.utc)
+        records = [
+            self._reuse_graph("root", reused_from=None),
+            self._reuse_graph("attempt-1", reused_from="root"),
+            self._reuse_graph("attempt-2", reused_from="attempt-1"),
+            self._legacy_run("root-N"),
+        ]
+
+        snapshot = _snapshot(Path("/runs"), now, [], records)
+
+        graphs = {graph["run_id"]: graph for graph in snapshot["plan_graphs"]}
+        two_hop = graphs["attempt-2"]["nodes"][0]
+        self.assertEqual(two_hop["correlation"]["state"], "reused")
+        self.assertEqual(two_hop["correlation"]["origin_attempt_id"], "root")
+        self.assertEqual(two_hop["correlation"]["origin_feature_run_id"], "root-N")
+        self.assertEqual(two_hop["correlation"]["reused_from_attempt"], "attempt-1")
+        self.assertEqual(two_hop["evidence"]["state"], "partial")
+        self.assertIn("root-N", two_hop["evidence"]["reason"])
+        self.assertEqual(two_hop["liveness"], {"state": "terminal", "reason": None})
+        one_hop = graphs["attempt-1"]["nodes"][0]
+        self.assertEqual(one_hop["correlation"]["origin_attempt_id"], "root")
+        # The origin node keeps its own (stronger) direct correlation path.
+        self.assertNotIn("correlation", graphs["root"]["nodes"][0])
+        self.assertEqual(graphs["root"]["nodes"][0]["evidence"]["reason"], _ID_MATCH_REASON)
+
+    def test_reuse_resolution_refuses_broken_chains_without_fabricating_origins(self) -> None:
+        now = datetime(2026, 8, 9, tzinfo=timezone.utc)
+        missing_chain = self._reuse_graph("gone-attempt", reused_from="never-recorded")
+        mismatched_origin = self._reuse_graph("swapped-attempt", reused_from="swapped-root", commit="d" * 40)
+        swapped_root = self._reuse_graph("swapped-root", reused_from=None, commit="e" * 40)
+        corrupt_attempt = self._reuse_graph("corrupt-attempt", reused_from="corrupt-root")
+        corrupt_root = self._reuse_graph("corrupt-root", reused_from=None)
+        records = [
+            missing_chain, mismatched_origin, swapped_root, corrupt_attempt, corrupt_root,
+            self._legacy_run("swapped-root-N"),
+            self._legacy_run("corrupt-root-N", status="corrupt"),
+        ]
+
+        snapshot = _snapshot(Path("/runs"), now, [], records)
+
+        graphs = {graph["run_id"]: graph for graph in snapshot["plan_graphs"]}
+        for run_id in ("gone-attempt", "swapped-attempt", "corrupt-attempt"):
+            node = graphs[run_id]["nodes"][0]
+            self.assertIsNone(node["correlation"], run_id)
+            self.assertEqual(node["evidence"], {"state": "partial", "reason": _REUSE_UNRESOLVED_REASON}, run_id)
+
+    def test_merged_roots_resolve_reuse_chain_across_audit_roots(self) -> None:
+        def catalog(graphs: list[dict], features: list[dict]) -> dict:
+            return {
+                "availability": {"state": "available", "reason": None}, "generated_at": "2026-08-09T00:00:00Z",
+                "diagnostics": [], "plan_graphs": graphs, "feature_runs": features,
+                "ungrouped_feature_runs": list(features),
+            }
+
+        successor_catalog = catalog([self._reuse_graph("attempt-2", reused_from="attempt-1")], [])
+        origin_catalog = catalog(
+            [self._reuse_graph("attempt-1", reused_from="root"), self._reuse_graph("root", reused_from=None)],
+            [self._legacy_run("root-N")],
+        )
+
+        merged = merge_run_catalogs([(Path("/roots/a"), successor_catalog), (Path("/roots/b"), origin_catalog)])
+
+        graphs = {graph["run_id"]: graph for graph in merged["plan_graphs"]}
+        node = graphs["attempt-2"]["nodes"][0]
+        self.assertEqual(node["correlation"]["state"], "reused")
+        self.assertEqual(node["correlation"]["origin_attempt_id"], "root")
+        self.assertEqual(node["correlation"]["origin_feature_run_id"], "root-N")
+        self.assertEqual(node["liveness"], {"state": "terminal", "reason": None})
+
+    def test_detail_busy_time_is_interval_union_not_summed_duration(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); run = self._run(root, "busy")
+            journal = AuditJournal.open_existing(run, actor=AuditActor("controller", "controller"))
+            usage = {"input_tokens": 10, "cached_input_tokens": 0, "output_tokens": 5}
+            for attempt in ("implement-busy/attempt-1", "implement-busy/attempt-1/verify"):
+                journal.append(
+                    "backend_transport", status="succeeded", attempt_id=attempt,
+                    actor=AuditActor(attempt, "semantic_worker"), backend_id="codex-exec", duration_ms=1_000,
+                    payload={"model": "gpt-test", "usage": usage},
+                )
+            journal.checkpoint("running", journal.checkpoint_state())
+            totals = build_run_detail(root, "busy")["metrics"]["totals"]
+        # The two 1000 ms activity intervals were recorded back-to-back and
+        # overlap in monotonic time, so the honest busy union is strictly
+        # smaller than the summed backend durations.
+        self.assertEqual(totals["duration_ms"], 2_000)
+        self.assertIsInstance(totals["busy_ms"], int)
+        self.assertGreaterEqual(totals["busy_ms"], 1_000)
+        self.assertLess(totals["busy_ms"], 2_000)
+
+    def test_detail_busy_time_is_unavailable_when_a_record_lacks_timing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); run = self._run(root, "untimed")
+            journal = AuditJournal.open_existing(run, actor=AuditActor("controller", "controller"))
+            journal.append(
+                "backend_transport", status="succeeded", attempt_id="implement-untimed/attempt-1",
+                actor=AuditActor("implement-untimed/attempt-1", "semantic_worker"), backend_id="codex-exec",
+                payload={"model": "gpt-test", "usage": {"input_tokens": 10, "cached_input_tokens": 0, "output_tokens": 5}},
+            )
+            journal.checkpoint("running", journal.checkpoint_state())
+            totals = build_run_detail(root, "untimed")["metrics"]["totals"]
+        self.assertIsNone(totals["busy_ms"])
 
 
 if __name__ == "__main__":

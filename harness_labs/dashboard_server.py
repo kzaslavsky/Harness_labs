@@ -405,9 +405,22 @@ def _merge_metric_totals(rows: list[Mapping[str, Any]]) -> dict[str, Any]:
         if isinstance(row.get("peak_input_tokens"), int)
     ]
     result["peak_input_tokens"] = max(known_peaks) if known_peaks else None
+    # Wall and busy time are only meaningful cumulatively when every try
+    # reports them.  Summing a subset (e.g. omitting a still-running try
+    # whose summary does not exist yet) understates wall time while the
+    # summed backend durations keep growing, which falsely displays agent
+    # time exceeding wall time.  Tries execute sequentially, so summing
+    # per-try values never double-counts overlapping intervals.
     wall = [row.get("wall_clock_ms") for row in rows]
-    if any(value is not None for value in wall):
-        result["wall_clock_ms"] = sum(int(value) for value in wall if type(value) is int)
+    if rows and all(type(value) is int for value in wall):
+        result["wall_clock_ms"] = sum(wall)
+    else:
+        result["wall_clock_ms"] = None
+    busy = [row.get("busy_ms") for row in rows]
+    if rows and all(type(value) is int for value in busy):
+        result["busy_ms"] = sum(busy)
+    else:
+        result["busy_ms"] = None
     costs = [row.get("cost") for row in rows if isinstance(row.get("cost"), Mapping)]
     unavailable = [cost for cost in costs if cost.get("state") == "unavailable"]
     estimated = [cost for cost in costs if cost.get("state") == "estimated"]
