@@ -516,5 +516,261 @@ class ClaudeSemanticTaskExecutorTests(unittest.TestCase):
         self.assertEqual(result.status, "succeeded", result.payload)
 
 
+class ClaudeSemanticTaskExecutorDirtyBaselineTests(unittest.TestCase):
+    """AC-CB05-1 / AC-CB05-2: the Claude executor's own writable preflight."""
+
+    def _run(self, executor: ClaudeSemanticTaskExecutor, snapshots):
+        def run(argv, **kwargs):
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                stdout=json.dumps(_envelope(_raw_result())),
+                stderr="",
+            )
+
+        with (
+            patch(
+                "harness_labs.claude_task_executor.shutil.which",
+                return_value="claude",
+            ),
+            patch(
+                "harness_labs.claude_task_executor.subprocess.run",
+                side_effect=run,
+            ),
+            patch(
+                "harness_labs.claude_task_executor.workspace_snapshot",
+                side_effect=snapshots,
+            ),
+            patch.object(Path, "exists", return_value=True),
+        ):
+            return executor.execute(
+                TaskAttempt(
+                    "fix/attempt-1",
+                    "task:fix",
+                    "context:fix",
+                    "profile:fixer",
+                )
+            )
+
+    def _task(self) -> dict:
+        return {
+            "id": "fix",
+            "objective": "Fix",
+            "context": "{}",
+            "details_schema": "review-fix-fix/1",
+            "acceptance_criteria": [],
+            "required_capabilities": ["repo.write"],
+        }
+
+    def test_dirty_path_covered_by_named_receipt_is_accepted(self) -> None:
+        evidence = EvidenceCatalog()
+        receipt = evidence.add(
+            kind="workspace-change-receipt",
+            content={
+                "changed_paths": ["feature.txt"],
+                "files": {"feature.txt": {"kind": "file", "sha256": "same"}},
+            },
+            media_type="application/json",
+            producer_task_id="prior-attempt",
+        )
+        executor = ClaudeSemanticTaskExecutor(
+            self._task(),
+            Path("."),
+            evidence,
+            "Fix only.",
+            sandbox="workspace-write",
+            writable_paths=("feature.txt",),
+            dirty_baseline_grant={"receipt_ref": receipt.ref},
+        )
+        files = {"feature.txt": {"kind": "file", "sha256": "same"}}
+        snapshots = (
+            _snapshot(changed_paths=["feature.txt"], files=files),
+            _snapshot(changed_paths=["feature.txt"], files=files),
+        )
+        result = self._run(executor, snapshots)
+        self.assertEqual(result.status, "succeeded", result.payload)
+
+    def test_dirty_path_outside_receipted_change_set_is_refused_even_inside_writable_paths(
+        self,
+    ) -> None:
+        evidence = EvidenceCatalog()
+        receipt = evidence.add(
+            kind="workspace-change-receipt",
+            content={"changed_paths": ["covered.txt"]},
+            media_type="application/json",
+            producer_task_id="prior-attempt",
+        )
+        executor = ClaudeSemanticTaskExecutor(
+            self._task(),
+            Path("."),
+            evidence,
+            "Fix only.",
+            sandbox="workspace-write",
+            writable_paths=("uncovered.txt",),
+            dirty_baseline_grant={"receipt_ref": receipt.ref},
+        )
+        snapshots = (
+            _snapshot(changed_paths=["uncovered.txt"]),
+            _snapshot(changed_paths=["uncovered.txt"]),
+        )
+        result = self._run(executor, snapshots)
+        self.assertEqual(
+            result.status,
+            "failed",
+            "a dirty path outside the receipted change set must still be "
+            "refused, even though it is one of the worker's own writable_paths",
+        )
+        self.assertIn(
+            "clean repository baseline", str(result.payload.get("error", ""))
+        )
+
+    def test_dirty_content_mismatch_is_refused_even_when_the_path_matches(
+        self,
+    ) -> None:
+        evidence = EvidenceCatalog()
+        receipt = evidence.add(
+            kind="workspace-change-receipt",
+            content={
+                "changed_paths": ["feature.txt"],
+                "files": {
+                    "feature.txt": {"kind": "file", "sha256": "receipted-content"}
+                },
+            },
+            media_type="application/json",
+            producer_task_id="prior-attempt",
+        )
+        executor = ClaudeSemanticTaskExecutor(
+            self._task(),
+            Path("."),
+            evidence,
+            "Fix only.",
+            sandbox="workspace-write",
+            writable_paths=("feature.txt",),
+            dirty_baseline_grant={"receipt_ref": receipt.ref},
+        )
+        files = {"feature.txt": {"kind": "file", "sha256": "different-content"}}
+        snapshots = (
+            _snapshot(changed_paths=["feature.txt"], files=files),
+            _snapshot(changed_paths=["feature.txt"], files=files),
+        )
+        result = self._run(executor, snapshots)
+        self.assertEqual(
+            result.status,
+            "failed",
+            "a dirty path whose current content diverges from what the "
+            "receipt attests must still be refused",
+        )
+        self.assertIn(
+            "clean repository baseline", str(result.payload.get("error", ""))
+        )
+
+    def test_dirty_baseline_without_any_grant_is_refused(self) -> None:
+        evidence = EvidenceCatalog()
+        executor = ClaudeSemanticTaskExecutor(
+            self._task(),
+            Path("."),
+            evidence,
+            "Fix only.",
+            sandbox="workspace-write",
+            writable_paths=("feature.txt",),
+        )
+        snapshots = (
+            _snapshot(changed_paths=["feature.txt"]),
+            _snapshot(changed_paths=["feature.txt"]),
+        )
+        result = self._run(executor, snapshots)
+        self.assertEqual(result.status, "failed")
+        self.assertIn(
+            "clean repository baseline", str(result.payload.get("error", ""))
+        )
+
+    def test_legacy_allow_dirty_baseline_flag_no_longer_bypasses_the_preflight(
+        self,
+    ) -> None:
+        # Restored only so callers built against the prior constructor keep
+        # working; it must never itself grant access to a dirty baseline.
+        evidence = EvidenceCatalog()
+        executor = ClaudeSemanticTaskExecutor(
+            self._task(),
+            Path("."),
+            evidence,
+            "Fix only.",
+            sandbox="workspace-write",
+            writable_paths=("feature.txt",),
+            allow_dirty_baseline=True,
+        )
+        snapshots = (
+            _snapshot(changed_paths=["feature.txt"]),
+            _snapshot(changed_paths=["feature.txt"]),
+        )
+        result = self._run(executor, snapshots)
+        self.assertEqual(result.status, "failed")
+        self.assertIn(
+            "clean repository baseline", str(result.payload.get("error", ""))
+        )
+
+    def test_worker_cannot_mint_its_own_deliverable_as_a_workspace_change_receipt(
+        self,
+    ) -> None:
+        evidence = EvidenceCatalog()
+        task = {
+            "id": "inspect",
+            "objective": "Inspect",
+            "context": json.dumps({"artifact_kind": "workspace-change-receipt"}),
+            "details_schema": "inspection/1",
+            "acceptance_criteria": [],
+            "required_capabilities": ["repo.read"],
+        }
+        executor = ClaudeSemanticTaskExecutor(
+            task,
+            Path("."),
+            evidence,
+            "Inspect only.",
+        )
+        raw = _raw_result(
+            deliverable_markdown=json.dumps({"changed_paths": ["anything.txt"]})
+        )
+
+        def run(argv, **kwargs):
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                stdout=json.dumps(_envelope(raw)),
+                stderr="",
+            )
+
+        with (
+            patch(
+                "harness_labs.claude_task_executor.shutil.which",
+                return_value="claude",
+            ),
+            patch(
+                "harness_labs.claude_task_executor.subprocess.run",
+                side_effect=run,
+            ),
+            patch(
+                "harness_labs.claude_task_executor.workspace_snapshot",
+                side_effect=(_snapshot(), _snapshot()),
+            ),
+            patch.object(Path, "exists", return_value=True),
+        ):
+            result = executor.execute(
+                TaskAttempt(
+                    "inspect/attempt-1",
+                    "task:inspect",
+                    "context:inspect",
+                    "profile:inspector",
+                )
+            )
+        self.assertEqual(result.status, "succeeded", result.payload)
+        semantic = validate_semantic_result(
+            result,
+            expected_details_schema="inspection/1",
+        )
+        kinds = {item["kind"] for item in semantic.artifacts}
+        self.assertNotIn("workspace-change-receipt", kinds)
+        self.assertIn("inspection/1-report", kinds)
+
+
 if __name__ == "__main__":
     unittest.main()

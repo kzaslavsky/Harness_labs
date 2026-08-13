@@ -14,7 +14,7 @@ from typing import Any, Mapping
 
 from .attempts import TaskAttempt, TaskResult
 from .audit import AuditActor, AuditJournal
-from .controller_evidence import EvidenceCatalog
+from .controller_evidence import EvidenceCatalog, EvidenceError
 from .controller_results import semantic_payload, validate_semantic_result
 from .git_transaction import (
     GitTransactionError,
@@ -27,6 +27,13 @@ from .usage import ModelPrice, parse_codex_jsonl_usage, usage_payload
 
 class LiveExecutionError(RuntimeError):
     """Raised when a live model task cannot produce a valid result."""
+
+
+# Reserved for the controller-authored workspace-change receipt only; a task's
+# coordinator-supplied ``artifact_kind`` may never claim this kind for its own
+# deliverable, or a worker could mint a catalog entry that the dirty-baseline
+# grant resolver would trust as a genuine prior-attempt receipt.
+_WORKSPACE_CHANGE_RECEIPT_KIND = "workspace-change-receipt"
 
 
 _RAW_OUTPUT_SCHEMA: dict[str, Any] = {
@@ -152,7 +159,13 @@ class CodexSemanticTaskExecutor:
     require_repository_change: bool = False
     forbid_repository_change: bool = False
     writable_paths: tuple[str, ...] = ()
+    # Deprecated: superseded by ``dirty_baseline_grant``, which binds a
+    # per-dispatch adoption to a specific receipted change set instead of
+    # blanket-accepting any dirty baseline. Accepted only so callers built
+    # against the prior constructor keep working; it has no effect on the
+    # writable preflight.
     allow_dirty_baseline: bool = False
+    dirty_baseline_grant: Mapping[str, Any] | None = None
     audit: AuditJournal | None = field(default=None, repr=False)
     pricing: ModelPrice | None = None
 
@@ -174,9 +187,21 @@ class CodexSemanticTaskExecutor:
         elif self.writable_paths:
             raise ValueError("writable_paths require the workspace-write sandbox")
         if self.allow_dirty_baseline and self.sandbox != "workspace-write":
-            raise ValueError(
-                "allow_dirty_baseline requires the workspace-write sandbox"
+            raise ValueError("allow_dirty_baseline requires the workspace-write sandbox")
+        if self.dirty_baseline_grant is not None:
+            if self.sandbox != "workspace-write":
+                raise ValueError(
+                    "dirty_baseline_grant requires the workspace-write sandbox"
+                )
+            receipt_ref = (
+                self.dirty_baseline_grant.get("receipt_ref")
+                if isinstance(self.dirty_baseline_grant, Mapping)
+                else None
             )
+            if not isinstance(receipt_ref, str) or not receipt_ref.strip():
+                raise ValueError(
+                    "dirty_baseline_grant must name a receipt_ref"
+                )
         if self.require_preflight_success and not self.preflight_argv:
             raise ValueError("require_preflight_success requires a preflight command")
 
@@ -215,16 +240,15 @@ class CodexSemanticTaskExecutor:
             if self.sandbox == "workspace-write"
             else None
         )
-        if (
-            initial_workspace is not None
-            and initial_workspace["changed_paths"]
-            and not self.allow_dirty_baseline
-        ):
-            raise LiveExecutionError(
-                "writable worker requires a clean repository baseline"
-            )
+        adoption_grant = None
+        if initial_workspace is not None and initial_workspace["changed_paths"]:
+            adoption_grant = self._resolve_dirty_baseline_grant(initial_workspace)
         artifact_kind = context.pop("artifact_kind", None)
-        if not isinstance(artifact_kind, str) or not artifact_kind.strip():
+        if (
+            not isinstance(artifact_kind, str)
+            or not artifact_kind.strip()
+            or artifact_kind == _WORKSPACE_CHANGE_RECEIPT_KIND
+        ):
             artifact_kind = f"{self.task['details_schema']}-report"
         preflight_artifact = None
         if self.preflight_argv:
@@ -304,6 +328,7 @@ class CodexSemanticTaskExecutor:
                 prompt,
                 completed,
                 (monotonic_ns() - started_ns) // 1_000_000,
+                adoption_grant,
             )
             if completed.returncode != 0:
                 detail = (completed.stderr.strip() or completed.stdout.strip())[-2000:]
@@ -341,13 +366,13 @@ class CodexSemanticTaskExecutor:
                     + ", ".join(worker_changed_paths)
                 )
             workspace_artifact = self.evidence.add(
-                kind="workspace-change-receipt",
+                kind=_WORKSPACE_CHANGE_RECEIPT_KIND,
                 content={
                     "protocol": "workspace-change-receipt/2",
                     "repository": str(repository),
                     "baseline_head": initial_workspace["head"],
                     "branch": initial_workspace["branch"],
-                    "dirty_baseline_allowed": self.allow_dirty_baseline,
+                    "dirty_baseline_grant": adoption_grant,
                     "baseline_changed_paths": initial_workspace["changed_paths"],
                     "allowed_paths": list(normalize_allowed_paths(self.writable_paths)),
                     "changed_paths": final_workspace["changed_paths"],
@@ -488,6 +513,52 @@ class CodexSemanticTaskExecutor:
             )
         return receipt
 
+    def _resolve_dirty_baseline_grant(
+        self, initial_workspace: Mapping[str, Any]
+    ) -> Mapping[str, Any]:
+        """Accept a dirty baseline only for a grant whose receipt covers it exactly.
+
+        The grant must name an existing ``workspace-change-receipt`` evidence
+        entry left by a prior attempt in this run whose recorded
+        ``changed_paths`` covers every currently dirty path *and* whose
+        recorded ``files`` content state matches what is on disk right now;
+        a missing, unresolvable, path-incomplete, or content-mismatched grant
+        refuses with the same clean-baseline message as no grant at all, so
+        neither a shared path name nor a forged path list can substitute for
+        the receipted change set's actual attested content.
+        """
+
+        dirty_paths: list[str] = initial_workspace["changed_paths"]
+        dirty_files: Mapping[str, Any] = initial_workspace["files"]
+        grant = self.dirty_baseline_grant
+        receipt_ref = grant.get("receipt_ref") if isinstance(grant, Mapping) else None
+        receipted_paths: set[str] = set()
+        receipted_files: Mapping[str, Any] = {}
+        if isinstance(receipt_ref, str) and receipt_ref.strip():
+            try:
+                record = self.evidence.metadata(receipt_ref)
+                if record.kind == _WORKSPACE_CHANGE_RECEIPT_KIND:
+                    receipt = json.loads(self.evidence.open(receipt_ref))
+                    if isinstance(receipt, Mapping):
+                        receipted_paths = set(receipt.get("changed_paths", ()))
+                        raw_files = receipt.get("files")
+                        if isinstance(raw_files, Mapping):
+                            receipted_files = raw_files
+            except (EvidenceError, json.JSONDecodeError):
+                receipted_paths = set()
+                receipted_files = {}
+        covered = bool(receipted_paths) and set(dirty_paths) <= receipted_paths
+        if covered:
+            covered = all(
+                dirty_files.get(path) == receipted_files.get(path)
+                for path in dirty_paths
+            )
+        if not covered:
+            raise LiveExecutionError(
+                "writable worker requires a clean repository baseline"
+            )
+        return {"receipt_ref": receipt_ref, "receipted_paths": sorted(receipted_paths)}
+
     def _audit_transport(
         self,
         attempt: TaskAttempt,
@@ -495,6 +566,7 @@ class CodexSemanticTaskExecutor:
         prompt: str,
         completed: subprocess.CompletedProcess[str],
         duration_ms: int,
+        adoption_grant: Mapping[str, Any] | None,
     ) -> None:
         if self.audit is None:
             return
@@ -526,7 +598,7 @@ class CodexSemanticTaskExecutor:
                 "sandbox": self.sandbox,
                 "writable_paths": list(self.writable_paths),
                 "forbid_repository_change": self.forbid_repository_change,
-                "allow_dirty_baseline": self.allow_dirty_baseline,
+                "dirty_baseline_grant": adoption_grant,
                 "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
                 "usage": (
                     usage_payload(
