@@ -95,7 +95,7 @@ In pg99 the run view shows **all four acceptance criteria `satisfied`** and `run
 - **Where:** operator launcher: "left is browser evidence, uniquely owned downstream by FR-20", "PlanGraph transfer it to the nearest unique downstream owner (FR-20)", plus a one-path grant "This one-path grant repairs the frozen ownership defect".
 - **Evidence:** when a finding's only fix lives outside the discovering node's `allowed_paths`, the harness has no transfer mechanism; the operator routes obligations between nodes by editing prompt text, and patches path-ownership defects with hand-written single-path grants.
 - **Action:** first-class obligation transfer: a blocked finding names a target node; the graph attaches it to that node's inherited findings with provenance. Related to item 3 (narrowing) — both are "the coordinator can see the right move but the contract has no verb for it."
-- **Status:** open.
+- **Status:** landed in this harness before the CB program (`db003d5`, "transfer coupled review findings"): `_transfer_targets_for` resolves downstream path grants to their nearest unique owner, review-fix emits `transferred_findings`, `_advance_finding_obligations` validates unique ownership and attaches obligations to the target's inherited findings, and the target's review panel receives them with `inherited_ledger_frozen` guarding the budget. Covered by tests (`test_review_fix.py`, `test_plan_graph.py`, `test_feature_run.py`). The FR-20 evidence above came from Retinology's older harness fork, which lacks it. Caveat: not yet exercised live — no CB-run finding required cross-node transfer — so it has test coverage but no battle validation.
 
 ### 10. Build segment cannot dispatch verification-only work — dead-end when only verification remains
 
