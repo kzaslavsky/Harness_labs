@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import subprocess
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -401,15 +402,64 @@ _VERIFICATION_FAILURE_CLASSES = frozenset({
 })
 
 
+_DRIVER_CRASH_MARKERS = (
+    "walk driver",
+    "driver crashed",
+    "browser crashed",
+    "webdriver crashed",
+    "browser has disconnected",
+    "target closed",
+)
+_PYTEST_PASSED_RE = re.compile(r"\d+ passed\b")
+_PYTEST_FAILING_RE = re.compile(r"\b(?!0\b)\d+ (?:failed|errors?)\b")
+_PYTEST_FAILED_NODE_RE = re.compile(r"^failed ", re.MULTILINE)
+
+
+def _is_driver_crash_with_green_pytest(lowered_full_text: str) -> bool:
+    """True when a browser/driver crash marker sits next to a clean pytest run.
+
+    Distinguishes a live-browser walk-driver crash (environment fault) from a
+    genuine assertion failure inside the same pytest invocation: pytest's own
+    summary line is the ground truth for whether the product code failed.
+    """
+    if not any(marker in lowered_full_text for marker in _DRIVER_CRASH_MARKERS):
+        return False
+    if not _PYTEST_PASSED_RE.search(lowered_full_text):
+        return False
+    if _PYTEST_FAILING_RE.search(lowered_full_text):
+        return False
+    if _PYTEST_FAILED_NODE_RE.search(lowered_full_text):
+        return False
+    return True
+
+
 def classify_verification_failure(command: Mapping[str, object]) -> dict[str, str]:
     """Classify only evidence present in one deterministic command result.
 
-    The conservative default deliberately treats timeouts and selector/browser
-    failures as indeterminate: neither proves a product defect nor transient
-    infrastructure.
+    Structured fields are checked before any output-text heuristic: a timeout
+    (the `timed_out` flag or exit code 124) or a signal termination (a
+    negative exit code) is an environment fault by construction, so it must
+    not depend on what the command happened to print. The conservative
+    default still treats unrecognized output as indeterminate: neither proves
+    a product defect nor transient infrastructure.
     """
-    excerpt = "\n".join(str(command.get(key, "")) for key in ("stderr", "stdout"))[:500]
+    full_text = "\n".join(str(command.get(key, "")) for key in ("stderr", "stdout"))
+    excerpt = full_text[:500]
     lowered = excerpt.lower()
+    if command.get("timed_out") is True:
+        return {"classification": "infrastructure_transient", "rule_id": "timeout-flag", "evidence_excerpt": excerpt}
+    exit_code = command.get("exit_code")
+    if isinstance(exit_code, int):
+        if exit_code == 124:
+            return {"classification": "infrastructure_transient", "rule_id": "timeout-exit-124", "evidence_excerpt": excerpt}
+        if exit_code < 0:
+            return {
+                "classification": "infrastructure_transient",
+                "rule_id": f"signal-terminated-{-exit_code}",
+                "evidence_excerpt": excerpt,
+            }
+    if _is_driver_crash_with_green_pytest(full_text.lower()):
+        return {"classification": "infrastructure_transient", "rule_id": "driver-crash-pytest-green", "evidence_excerpt": excerpt}
     if any(marker in lowered for marker in ("connection reset", "temporary failure", "dns", "network is unreachable")):
         return {"classification": "infrastructure_transient", "rule_id": "transient-network", "evidence_excerpt": excerpt}
     if any(marker in lowered for marker in ("permission denied", "outside_allowed_paths", "outside allowed paths")):
