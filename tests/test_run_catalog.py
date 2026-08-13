@@ -134,6 +134,27 @@ class RunCatalogTests(unittest.TestCase):
         self.assertEqual(cost["long_context_records"], 1)
         self.assertIn("gpt-5.6-terra", cost["sources"][0])
 
+    def test_detail_infers_claude_cost_without_long_context_premium(self) -> None:
+        # Claude 4.6+ bills the full context window at standard rates, and
+        # claude-print usage is cumulative across turns, so a large input sum
+        # must never trigger the GPT long-context multipliers.
+        metrics = _detail_metrics({
+            "events": [{
+                "event_type": "backend_transport", "attempt_id": "implement-cost/attempt-1",
+                "actor": {"id": "worker", "role": "semantic_worker"}, "backend_id": "claude-print", "duration_ms": 1,
+                "payload": {"model": "claude-sonnet-5", "reasoning": "medium", "usage": {
+                    "input_tokens": 3_000_000, "cached_input_tokens": 2_000_000, "output_tokens": 50_000, "cost_usd": None,
+                }},
+            }],
+            "checkpoint": {"state": {}}, "summary": None,
+        })
+        cost = metrics["totals"]["cost"]
+        self.assertEqual(cost["state"], "estimated")
+        # 1M uncached * $2 + 2M cache-read * $0.20 + 50k output * $10, per MTok
+        self.assertEqual(cost["usd"], 2.9)
+        self.assertEqual(cost["long_context_records"], 0)
+        self.assertIn("platform.claude.com", cost["sources"][0])
+
     def test_detail_projects_recorded_execution_stages_without_usage(self) -> None:
         metrics = _detail_metrics({
             "events": [{

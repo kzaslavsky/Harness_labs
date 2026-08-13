@@ -21,9 +21,17 @@ _DESCRIPTOR_FIELDS = frozenset({"protocol", "run_kind", "run_id", "created_at", 
 _PLAN_GRAPH_LINEAGE_FIELDS = frozenset({"logical_graph_id", "graph_attempt_id", "predecessor_attempt_id"})
 _LEASE_FIELDS = frozenset({"protocol", "run_id", "controller_instance_id", "hostname", "pid", "process_start_token", "heartbeat_sequence", "heartbeat_at", "controller_kind"})
 _ESTIMATED_MODEL_PRICES = {
-    "gpt-5.6-sol": {"input": Decimal("5.00"), "cached_input": Decimal("0.50"), "output": Decimal("30.00"), "source": "https://developers.openai.com/api/docs/models/gpt-5.6-sol"},
-    "gpt-5.6-terra": {"input": Decimal("2.50"), "cached_input": Decimal("0.25"), "output": Decimal("15.00"), "source": "https://developers.openai.com/api/docs/models/gpt-5.6-terra"},
-    "gpt-5.6-luna": {"input": Decimal("1.00"), "cached_input": Decimal("0.10"), "output": Decimal("6.00"), "source": "https://developers.openai.com/api/docs/models/gpt-5.6-luna"},
+    "gpt-5.6-sol": {"input": Decimal("5.00"), "cached_input": Decimal("0.50"), "output": Decimal("30.00"), "long_context_premium": True, "source": "https://developers.openai.com/api/docs/models/gpt-5.6-sol"},
+    "gpt-5.6-terra": {"input": Decimal("2.50"), "cached_input": Decimal("0.25"), "output": Decimal("15.00"), "long_context_premium": True, "source": "https://developers.openai.com/api/docs/models/gpt-5.6-terra"},
+    "gpt-5.6-luna": {"input": Decimal("1.00"), "cached_input": Decimal("0.10"), "output": Decimal("6.00"), "long_context_premium": True, "source": "https://developers.openai.com/api/docs/models/gpt-5.6-luna"},
+    # Claude 4.6+ bills the full context window at standard per-token rates
+    # (no long-context premium).  cached_input is the cache-read rate (0.1x
+    # input); cache-write premiums are not derivable from the recorded usage
+    # and stay excluded, as the provenance reason states.
+    "claude-fable-5": {"input": Decimal("10.00"), "cached_input": Decimal("1.00"), "output": Decimal("50.00"), "long_context_premium": False, "source": "https://platform.claude.com/docs/en/about-claude/pricing"},
+    "claude-opus-5": {"input": Decimal("5.00"), "cached_input": Decimal("0.50"), "output": Decimal("25.00"), "long_context_premium": False, "source": "https://platform.claude.com/docs/en/about-claude/pricing"},
+    "claude-sonnet-5": {"input": Decimal("2.00"), "cached_input": Decimal("0.20"), "output": Decimal("10.00"), "long_context_premium": False, "source": "https://platform.claude.com/docs/en/about-claude/pricing"},
+    "claude-haiku-4-5": {"input": Decimal("1.00"), "cached_input": Decimal("0.10"), "output": Decimal("5.00"), "long_context_premium": False, "source": "https://platform.claude.com/docs/en/about-claude/pricing"},
 }
 _LONG_CONTEXT_THRESHOLD = 272_000
 
@@ -625,7 +633,7 @@ def _estimated_api_cost(model: str, usage: Mapping[str, Any]) -> dict[str, Any] 
     cached_tokens = min(input_tokens, _nonnegative_int(usage.get("cached_input_tokens")))
     output_tokens = _nonnegative_int(usage.get("output_tokens"))
     uncached_tokens = input_tokens - cached_tokens
-    long_context = input_tokens > _LONG_CONTEXT_THRESHOLD
+    long_context = price["long_context_premium"] and input_tokens > _LONG_CONTEXT_THRESHOLD
     input_multiplier = Decimal("2") if long_context else Decimal("1")
     output_multiplier = Decimal("1.5") if long_context else Decimal("1")
     million = Decimal("1000000")
