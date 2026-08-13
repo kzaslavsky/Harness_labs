@@ -107,10 +107,15 @@ the named workers.
 # Dependency edges exist only where nodes share owned files or consume another
 # node's mechanism. harness_labs/plan_graph.py and harness_labs/feature_run.py
 # are each owned by several nodes and are serialized through the dependency
-# spine; the file-disjoint roots CB2-01, CB2-02, and CB2-04 are
-# parallel-eligible under max_parallelism=2. Per program rule 2 every
-# red/green gate runs with a 1400s per-phase wall clock until CB2-03 seals
-# load-aware budgets.
+# Roots CB2-01, CB2-02, CB2-03 are file-disjoint and parallel-eligible
+# (max_parallelism=2, at most two admitted). Shared-file spine:
+# plan_graph.py / plan_graph_audit.py / feature_run.py are serialized
+# CB2-03 -> CB2-05 -> CB2-06. CB2-04 and CB2-07 were deleted at lens
+# adjudication (see docs/development/plan-review-cb2/adjudication.md).
+# The sink CB2-08 depends on every surviving node and runs the dual-phase
+# retirement check plus the full suite so the final join is verified inside
+# a repairable node. Per program rule 2 every red/green gate runs with a
+# 1400s per-phase wall clock (hang detector; measured gate cycle is ~2.2s).
 NODES: tuple[dict[str, Any], ...] = (
     {
         "id": "CB2-01",
@@ -119,6 +124,8 @@ NODES: tuple[dict[str, Any], ...] = (
         "allowed_paths": [
             "harness_labs/controller_live.py",
             "harness_labs/claude_task_executor.py",
+            "tests/test_controller_live.py",
+            "tests/test_claude_task_executor.py",
             "tests/test_relax_claims.py",
         ],
         "creates": ["tests/test_relax_claims.py"],
@@ -130,7 +137,6 @@ NODES: tuple[dict[str, Any], ...] = (
         "regression": ["tests/"],
         "allowed_paths": [
             "scripts/dev/red_green_check.py",
-            "harness_labs/feature_run.py",
             "tests/test_relax_gate_timeout_classification.py",
         ],
         "creates": ["tests/test_relax_gate_timeout_classification.py"],
@@ -142,22 +148,14 @@ NODES: tuple[dict[str, Any], ...] = (
         "regression": ["tests/"],
         "allowed_paths": [
             "harness_labs/plan_graph.py",
-            "experiments/run_burden_plan_graph.py",
+            "harness_labs/plan_graph_audit.py",
+            "harness_labs/feature_run.py",
+            "tests/test_plan_graph.py",
+            "tests/test_plan_graph_parallel_run.py",
+            "tests/test_feature_run.py",
             "tests/test_relax_gate_concurrency.py",
         ],
         "creates": ["tests/test_relax_gate_concurrency.py"],
-        "depends_on": ["CB2-02"],
-    },
-    {
-        "id": "CB2-04",
-        "finding_tests": ["tests/test_relax_review_convergence.py"],
-        "regression": ["tests/"],
-        "allowed_paths": [
-            "harness_labs/review_fix.py",
-            "harness_labs/development_policy.py",
-            "tests/test_relax_review_convergence.py",
-        ],
-        "creates": ["tests/test_relax_review_convergence.py"],
         "depends_on": [],
     },
     {
@@ -167,6 +165,9 @@ NODES: tuple[dict[str, Any], ...] = (
         "allowed_paths": [
             "harness_labs/plan_graph.py",
             "harness_labs/plan_graph_audit.py",
+            "tests/test_plan_graph.py",
+            "tests/test_plan_graph_recover.py",
+            "tests/test_plan_graph_reuse_chain.py",
             "tests/test_relax_resume_operability.py",
         ],
         "creates": ["tests/test_relax_resume_operability.py"],
@@ -180,22 +181,15 @@ NODES: tuple[dict[str, Any], ...] = (
             "harness_labs/plan_graph.py",
             "harness_labs/feature_run.py",
             "harness_labs/plan_graph_budget.py",
+            "harness_labs/plan_graph_contract.py",
+            "harness_labs/plan_approval.py",
+            "tests/test_plan_graph.py",
+            "tests/test_feature_run.py",
+            "tests/test_plan_graph_budget.py",
             "tests/test_relax_gate_decomposition.py",
         ],
         "creates": ["tests/test_relax_gate_decomposition.py"],
-        "depends_on": ["CB2-02", "CB2-05"],
-    },
-    {
-        "id": "CB2-07",
-        "finding_tests": ["tests/test_relax_direct_gate_criteria.py"],
-        "regression": ["tests/"],
-        "allowed_paths": [
-            "harness_labs/feature_run.py",
-            "harness_labs/controller_kernel.py",
-            "tests/test_relax_direct_gate_criteria.py",
-        ],
-        "creates": ["tests/test_relax_direct_gate_criteria.py"],
-        "depends_on": ["CB2-06"],
+        "depends_on": ["CB2-05"],
     },
     {
         "id": "CB2-08",
@@ -207,9 +201,10 @@ NODES: tuple[dict[str, Any], ...] = (
             "scripts/dev/check_workaround_retirement.py",
         ],
         "creates": [],
-        "depends_on": ["CB2-01", "CB2-04", "CB2-07"],
+        "depends_on": ["CB2-01", "CB2-02", "CB2-06"],
         "verification_argv": [
             "python3", "scripts/dev/check_workaround_retirement.py",
+            "--dual-phase", "--base", RED_BASE, "--regression", "tests/",
         ],
         "verification_required_paths": [
             {"path": "scripts/dev/check_workaround_retirement.py",
@@ -242,7 +237,12 @@ def parse_plan_document() -> tuple[dict[str, str], dict[str, str], dict[str, str
     objectives: dict[str, str] = {}
     criteria: dict[str, str] = {}
     node_criteria: dict[str, list[str]] = {}
+    program_nodes = {spec["id"] for spec in NODES}
     for node_id, body in sections.items():
+        if node_id not in program_nodes:
+            # Tombstoned sections (CB2-04, CB2-07 — deleted at lens
+            # adjudication) stay in the plan for history but are not runs.
+            continue
         objective = re.search(r"^Objective: (.+)$", body, re.M)
         if objective is None:
             raise RuntimeError(f"{node_id}: no objective line in plan document")
