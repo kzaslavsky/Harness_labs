@@ -254,22 +254,50 @@ class PlanGraphAudit:
         barriers = state.get("integration_barriers")
         if not isinstance(barriers, list) or not all(isinstance(item, dict) for item in barriers):
             raise AuditError("predecessor integration custody evidence is invalid")
+        inherited = self._reuse_receipt_custody()
         for node_id, node in nodes.items():
             if node_id in invalidated or node.get("status") != "succeeded":
                 continue
             candidate, dependencies = node.get("candidate_commit"), node.get("depends_on")
             # A successful node is reusable only when the predecessor's
             # controller-owned integration barrier binds that exact candidate
-            # to its recorded input.  Child status alone is never sufficient.
+            # to its recorded input, or the predecessor itself reused the
+            # node under a digest-verified reuse receipt (custody inherited
+            # along the successor chain). Child status alone is never
+            # sufficient.
             custody_matches = any(
                 barrier.get("node_id") == node_id
                 and barrier.get("integrated_commit") == candidate
                 and _is_git_commit(barrier.get("input_commit"))
                 for barrier in barriers
-            )
+            ) or inherited.get(node_id) == candidate
             if _is_git_commit(candidate) and custody_matches and isinstance(dependencies, list) and all(dependency in reusable for dependency in dependencies):
                 reusable[node_id] = candidate
         return {"retry_frontier": frontier, "invalidated_node_ids": tuple(node_id for node_id in nodes if node_id in invalidated), "reused_completed": reusable, "predecessor_checkpoint": json.loads(self.journal.checkpoint_path.read_text(encoding="utf-8"))}
+
+    def _reuse_receipt_custody(self) -> dict[str, str]:
+        """Return candidates this attempt reused under digest-verified receipts."""
+        custody: dict[str, str] = {}
+        try:
+            for line in self.journal.events_path.read_text(encoding="utf-8").splitlines():
+                event = json.loads(line)
+                if event.get("event_type") != "plan_graph_node_reused":
+                    continue
+                for artifact in event.get("artifacts", []):
+                    if not isinstance(artifact, dict):
+                        continue
+                    path = self.run_dir / str(artifact.get("path", ""))
+                    raw = path.read_bytes()
+                    if hashlib.sha256(raw).hexdigest() != artifact.get("sha256"):
+                        raise AuditError("reuse receipt does not match its recorded digest")
+                    receipt = json.loads(raw)
+                    node_id = receipt.get("node_id")
+                    candidate = receipt.get("candidate_commit")
+                    if isinstance(node_id, str) and _is_git_commit(candidate):
+                        custody[node_id] = candidate
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            raise AuditError("predecessor reuse custody is invalid") from exc
+        return custody
 
     def _has_recorded_artifact(self, reference: str) -> bool:
         digest = reference.removeprefix("artifact:sha256:")
@@ -1226,11 +1254,26 @@ class PlanGraphAudit:
             logical_artifact = journal.write_artifact("plan-graph-logical-attempt", logical_attempt)
             authority_artifact = journal.write_artifact("plan-graph-resume-authority", resume_authority)
             journal.append("plan_graph_repair_successor_allocated", status="running", payload={**resume, "logical_attempt_ref": f"artifact:sha256:{logical_artifact.sha256}", "resume_authority_ref": f"artifact:sha256:{authority_artifact.sha256}"}, actor=_ACTOR, artifacts=(checkpoint_artifact, logical_artifact, authority_artifact))
+            predecessor_barriers = [
+                barrier
+                for barrier in (checkpoint.get("state", {}).get("integration_barriers") or [])
+                if isinstance(barrier, dict)
+            ]
             for node_id, node in self._initial_state["nodes"].items():
                 if node.get("reused_from_attempt") is None:
                     continue
                 receipt = journal.write_artifact("plan-graph-node-reuse-receipt", {"logical_graph_id": self.logical_graph_id, "predecessor_attempt_id": self.predecessor_attempt_id, "node_id": node_id, "candidate_commit": node["candidate_commit"], "blocker_evidence_ref": resume["blocker_evidence_ref"]})
                 journal.append("plan_graph_node_reused", status="succeeded", payload={"plan_node_id": node_id, "reuse_receipt_ref": f"artifact:sha256:{receipt.sha256}"}, actor=_ACTOR, artifacts=(receipt,))
+                # Custody must survive successor chains: carry the
+                # predecessor's integration barrier for every reused node so
+                # a later repair_selection can still prove this candidate.
+                for barrier in predecessor_barriers:
+                    if (
+                        barrier.get("node_id") == node_id
+                        and barrier.get("integrated_commit") == node["candidate_commit"]
+                    ):
+                        self._initial_state["integration_barriers"].append(dict(barrier))
+                        break
             journal.checkpoint("running", self._initial_state)
         return journal
 
