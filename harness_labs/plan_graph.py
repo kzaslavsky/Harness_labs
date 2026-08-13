@@ -12,6 +12,7 @@ import os
 from pathlib import Path, PurePosixPath
 import subprocess
 import tempfile
+import threading
 from typing import Callable, Mapping, Sequence
 from uuid import uuid4
 
@@ -346,6 +347,105 @@ class PlanGraphRegistration:
     plan_version_transition: Mapping[str, object] | None = None
 
 
+class GateSlot:
+    """Graph-owned mutual-exclusion slot for verification-command execution.
+
+    One instance is shared by every :class:`FeatureRunRequest` issued for a
+    single ready-set run (``max_parallelism`` > 1), so concurrently admitted
+    siblings' deterministic verification commands run one at a time instead
+    of silently splitting the gate's wall-clock budget across them (item 14,
+    the CB-06 failure mode). Node work outside the verification stage —
+    dispatch, review, fix — is untouched and keeps running in parallel; only
+    whichever caller wraps its verification-command execution in the
+    :class:`GateSlotHold` returned by :meth:`hold` is serialized. That wrap
+    spans the whole verification stage as the caller defines it, including
+    any recovery retries and recovery-agent invocations attempted before the
+    stage is considered done — see ``run_feature_worktree``'s gate-slot
+    ``with`` block for the concrete critical section.
+
+    Acquisition and release are safe to call from any thread: they only
+    journal through :class:`~harness_labs.plan_graph_audit.PlanGraphAudit`,
+    whose underlying journal append is internally mutex-protected.
+    """
+
+    def __init__(self, audit: PlanGraphAudit) -> None:
+        self._semaphore = threading.Semaphore(1)
+        self._audit = audit
+        self._lock = threading.Lock()
+        self._contending = 0
+
+    def hold(self, node_id: str) -> "GateSlotHold":
+        """Return one node's single-use hold on this exclusive slot.
+
+        The hold exposes only bound acquire/release closures and an
+        ``entered`` flag — never the slot or its audit — so a launcher that
+        receives the hold cannot reach the controller's audit journal
+        through it.
+        """
+        entered = threading.Event()
+
+        def acquire() -> None:
+            with self._lock:
+                self._contending += 1
+            self._semaphore.acquire()
+            try:
+                with self._lock:
+                    concurrency = self._contending
+                self._audit.gate_slot_acquired(node_id, concurrency)
+            except BaseException:
+                with self._lock:
+                    self._contending -= 1
+                self._semaphore.release()
+                raise
+            entered.set()
+
+        def release() -> None:
+            with self._lock:
+                concurrency = self._contending
+                self._contending -= 1
+            try:
+                self._audit.gate_slot_released(node_id, concurrency)
+            finally:
+                self._semaphore.release()
+
+        return GateSlotHold(acquire, release, entered)
+
+
+class GateSlotHold:
+    """One node's context-managed hold on a :class:`GateSlot`.
+
+    Threaded through :attr:`FeatureRunRequest.verification_gate_slot` so the
+    launcher (or, for an in-process ready-set run, ``run_feature_worktree``
+    itself) can wrap exactly its verification-command execution and nothing
+    else. Single use: acquire on ``__enter__``, release on ``__exit__``.
+    Built from acquire/release closures rather than a direct reference to
+    the owning :class:`GateSlot`, so nothing reachable from this object's
+    attributes leads back to the graph's audit journal.
+    """
+
+    def __init__(
+        self,
+        acquire: Callable[[], None],
+        release: Callable[[], None],
+        entered: threading.Event,
+    ) -> None:
+        self._acquire = acquire
+        self._release = release
+        self._entered = entered
+
+    def __enter__(self) -> "GateSlotHold":
+        self._acquire()
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self._release()
+
+    @property
+    def entered(self) -> bool:
+        """Whether this hold's exclusive slot was ever actually acquired."""
+        return self._entered.is_set()
+
+
 @dataclass(frozen=True)
 class FeatureRunRequest:
     protocol: str
@@ -361,6 +461,7 @@ class FeatureRunRequest:
     finding_obligations: tuple[Mapping[str, object], ...] = ()
     finding_transfer_targets: Mapping[str, str] | None = None
     inherited_ledger_frozen: bool = False
+    verification_gate_slot: "GateSlotHold | None" = None
 
     def __post_init__(self) -> None:
         if self.protocol != FEATURE_RUN_REQUEST_PROTOCOL:
@@ -1361,17 +1462,30 @@ class PlanGraph:
     ) -> PlanGraphResult:
         """Execute the graph through ReadySetScheduler admission.
 
-        Launcher calls run on worker threads; every audit, ledger, and Git
-        mutation stays on this coordinating thread. Sibling candidates branch
-        from their dependencies' candidates and are joined with
-        controller-owned merge commits; the final graph candidate joins the
-        sink nodes' candidates.
+        Launcher calls run on worker threads; every node-content checkpoint
+        mutation, ledger update, and Git mutation stays on this coordinating
+        thread. The sole exception is the shared ``gate_slot``: its
+        acquire/release journal entries and the checkpoint re-stamp that
+        follows each of them change no per-node field, only re-binding the
+        checkpoint to the journal head those entries just advanced, so it is
+        safe to write from the worker thread holding the slot around its own
+        verification-command execution — the journal's internal mutex
+        serializes it against this thread's own checkpoint writes. Sibling
+        candidates branch from their dependencies' candidates and are joined
+        with controller-owned merge commits; the final graph candidate joins
+        the sink nodes' candidates.
         """
         scheduler = ReadySetScheduler(
             ordered_runs, max_parallelism=self.max_parallelism
         )
         by_id = {run.id: run for run in ordered_runs}
         self._revalidate_approval()
+        # max_parallelism > 1 is exactly this method's precondition, so one
+        # exclusive gate slot is always created here and shared by every
+        # request this run issues; the legacy sequential path never builds
+        # one, so max_parallelism=1 stays byte-identical (no slot, no
+        # verification_gate_slot value, no gate slot journal events).
+        gate_slot = GateSlot(audit)
         in_flight: dict[str, tuple[Future, FeatureRunRequest, str]] = {}
         terminal: _SealDecision | None = None
         deferred_error: PlanGraphError | None = None
@@ -1400,7 +1514,8 @@ class PlanGraph:
                             )
                             break
                         request = self._request_for_run(
-                            run, base, tuple(finding_obligations.get(run.id, ()))
+                            run, base, tuple(finding_obligations.get(run.id, ())),
+                            verification_gate_slot=gate_slot.hold(run.id),
                         )
                         try:
                             reservation = self.budget.reserve(
@@ -1452,6 +1567,23 @@ class PlanGraph:
                             "failed",
                             evidence={"error": str(exc), "error_type": type(exc).__name__},
                         )
+                    # A successful outcome for a node with verification_argv
+                    # only happens once its verification command has actually
+                    # run (see run_feature_worktree). If this node's slot was
+                    # never entered, the launcher could not have serialized
+                    # that run against its concurrently admitted siblings —
+                    # e.g. an out-of-process launcher, which has no way to
+                    # carry the in-process hold across the subprocess
+                    # boundary — so record that the mutual-exclusion
+                    # guarantee did not apply, instead of leaving the journal
+                    # indistinguishable from a run that never needed it.
+                    if (
+                        outcome.status == "succeeded"
+                        and run.verification_argv
+                        and request.verification_gate_slot is not None
+                        and not request.verification_gate_slot.entered
+                    ):
+                        audit.gate_slot_bypassed(run.id)
                     try:
                         decision = self._seal_outcome(
                             audit, run, request, reservation, outcome,
@@ -1686,6 +1818,8 @@ class PlanGraph:
         run: PlanRun,
         candidate_commit: str,
         finding_obligations: tuple[Mapping[str, object], ...] = (),
+        *,
+        verification_gate_slot: "GateSlotHold | None" = None,
     ) -> FeatureRunRequest:
         if self._audit is None:
             raise PlanGraphError("FeatureRun request requires an initialized PlanGraph audit")
@@ -1704,6 +1838,7 @@ class PlanGraph:
             finding_obligations=finding_obligations,
             finding_transfer_targets=self._transfer_targets_for(run),
             inherited_ledger_frozen=bool(finding_obligations),
+            verification_gate_slot=verification_gate_slot,
         )
 
     @staticmethod
@@ -2491,6 +2626,8 @@ __all__ = [
     "FeatureRunOutcome",
     "FeatureRunRequest",
     "FunctionalityCommand",
+    "GateSlot",
+    "GateSlotHold",
     "PathIntent",
     "PlanGraph",
     "RequiredPath",

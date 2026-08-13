@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import AbstractContextManager, nullcontext
 import hashlib
 import json
 import re
@@ -539,6 +540,7 @@ def run_feature_worktree(
     ) = None,
     verification_repair_limit: int = 1,
     verification_timeout_seconds: float | None = 1200,
+    verification_gate_slot: AbstractContextManager[None] | None = None,
     recovery_agent: RecoveryAgent | None = None,
     recovery_limit: int = 3,
     evidence_classification: str = "production_lifecycle",
@@ -749,34 +751,16 @@ def run_feature_worktree(
     if status == "succeeded" and project_run_view(kernel)["status"] == "succeeded":
         if verification_argv:
             assert verification_repair_executor_factory is not None
-            verification_result = _verify_with_recovery(
-                run_id=contract.run_id,
-                objective=contract.objective,
-                acceptance_criteria=contract.criteria,
-                worktree_path=transaction.worktree_path,
-                allowed_paths=allowed_paths,
-                argv=verification_argv,
-                repair_executor_factory=verification_repair_executor_factory,
-                repair_limit=verification_repair_limit,
-                timeout_seconds=verification_timeout_seconds,
-                evidence=evidence,
-                audit=audit,
-            )
-            status = verification_result.status
-            while status in {"blocked", "failed", "interrupted"}:
-                if not _recover_abnormal(
-                    agent=recovery_agent,
-                    recovery=recovery,
-                    audit=audit,
-                    contract=contract,
-                    worktree_path=transaction.worktree_path,
-                    allowed_paths=allowed_paths,
-                    stage="verification",
-                    condition=status,
-                    reason=verification_result.reason,
-                ):
-                    break
-                retried_verification = _verify_with_recovery(
+            # A graph-owned exclusive gate slot, when supplied by a PlanGraph
+            # ready-set run, serializes this whole verification stage —
+            # including its recovery retries and their recovery-agent
+            # invocations below, which run for an unbounded duration —
+            # across concurrently admitted siblings; dispatch above and
+            # review/fix below stay parallel. Solo FeatureRuns and
+            # max_parallelism=1 pass no slot, so `nullcontext()` makes this a
+            # no-op identical to before.
+            with (verification_gate_slot or nullcontext()):
+                verification_result = _verify_with_recovery(
                     run_id=contract.run_id,
                     objective=contract.objective,
                     acceptance_criteria=contract.criteria,
@@ -788,13 +772,40 @@ def run_feature_worktree(
                     timeout_seconds=verification_timeout_seconds,
                     evidence=evidence,
                     audit=audit,
-                    stage="recovery",
                 )
-                verification_result = _combine_verification_results(
-                    verification_result,
-                    retried_verification,
-                )
-                status = retried_verification.status
+                status = verification_result.status
+                while status in {"blocked", "failed", "interrupted"}:
+                    if not _recover_abnormal(
+                        agent=recovery_agent,
+                        recovery=recovery,
+                        audit=audit,
+                        contract=contract,
+                        worktree_path=transaction.worktree_path,
+                        allowed_paths=allowed_paths,
+                        stage="verification",
+                        condition=status,
+                        reason=verification_result.reason,
+                    ):
+                        break
+                    retried_verification = _verify_with_recovery(
+                        run_id=contract.run_id,
+                        objective=contract.objective,
+                        acceptance_criteria=contract.criteria,
+                        worktree_path=transaction.worktree_path,
+                        allowed_paths=allowed_paths,
+                        argv=verification_argv,
+                        repair_executor_factory=verification_repair_executor_factory,
+                        repair_limit=verification_repair_limit,
+                        timeout_seconds=verification_timeout_seconds,
+                        evidence=evidence,
+                        audit=audit,
+                        stage="recovery",
+                    )
+                    verification_result = _combine_verification_results(
+                        verification_result,
+                        retried_verification,
+                    )
+                    status = retried_verification.status
     if status == "succeeded" and project_run_view(kernel)["status"] == "succeeded":
         if review_fix_policy.enabled:
             assert review_fix_executor_factory is not None

@@ -6,10 +6,12 @@ object store, and a barrier proves genuine concurrency.
 """
 from __future__ import annotations
 
+import json
 import subprocess
 import tempfile
 import threading
 import unittest
+from contextlib import nullcontext
 from dataclasses import replace
 from pathlib import Path
 
@@ -132,6 +134,14 @@ class ParallelPlanGraphTests(unittest.TestCase):
             line.split("\t", 1)[1]
             for line in git(self.repository, "ls-tree", "-r", commit).splitlines()
         }
+
+    def journal_events(self, graph: PlanGraph) -> list[dict[str, object]]:
+        events_path = graph.run_root / graph.graph_run_id / "events.jsonl"
+        return [
+            json.loads(line)
+            for line in events_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
 
     def test_independent_roots_run_concurrently(self) -> None:
         barrier = threading.Barrier(2, timeout=20)
@@ -262,6 +272,69 @@ class ParallelPlanGraphTests(unittest.TestCase):
     def test_max_parallelism_validation(self) -> None:
         with self.assertRaises(Exception):
             self.graph({"a": []}, lambda request: None, max_parallelism=0)
+
+    def test_launcher_that_ignores_the_gate_slot_is_journaled_as_bypassed(self) -> None:
+        """An out-of-process-style launcher that never enters its hold.
+
+        SubprocessFeatureRunLauncher cannot carry the in-process hold across
+        a subprocess boundary, so a node it launches can complete
+        successfully without ever acquiring the exclusive slot. That must
+        not look, in the journal, like a run in which no node needed the
+        slot at all.
+        """
+
+        def launcher(request):
+            # Never touches request.verification_gate_slot.
+            candidate = self.commit_file(
+                request.base_commit, f"{request.plan_node_id}.txt",
+                request.plan_node_id,
+            )
+            return FeatureRunOutcome("succeeded", candidate_commit=candidate)
+
+        graph = self.graph({"a": [], "b": []}, launcher, max_parallelism=2)
+        result = graph.run()
+        self.assertEqual(result.status, "succeeded")
+
+        events = self.journal_events(graph)
+        bypassed = {
+            event["payload"]["plan_node_id"] for event in events
+            if event.get("event_type") == "plan_graph_gate_slot_bypassed"
+        }
+        self.assertEqual(bypassed, {"a", "b"})
+        acquired = [
+            event for event in events
+            if event.get("event_type") == "plan_graph_gate_slot_acquired"
+        ]
+        self.assertEqual(acquired, [])
+
+    def test_launcher_that_uses_the_gate_slot_is_not_journaled_as_bypassed(self) -> None:
+        barrier = threading.Barrier(2, timeout=20)
+
+        def launcher(request):
+            barrier.wait()
+            with (request.verification_gate_slot or nullcontext()):
+                pass
+            candidate = self.commit_file(
+                request.base_commit, f"{request.plan_node_id}.txt",
+                request.plan_node_id,
+            )
+            return FeatureRunOutcome("succeeded", candidate_commit=candidate)
+
+        graph = self.graph({"a": [], "b": []}, launcher, max_parallelism=2)
+        result = graph.run()
+        self.assertEqual(result.status, "succeeded")
+
+        events = self.journal_events(graph)
+        bypassed = [
+            event for event in events
+            if event.get("event_type") == "plan_graph_gate_slot_bypassed"
+        ]
+        self.assertEqual(bypassed, [])
+        acquired = {
+            event["payload"]["plan_node_id"] for event in events
+            if event.get("event_type") == "plan_graph_gate_slot_acquired"
+        }
+        self.assertEqual(acquired, {"a", "b"})
 
 
 if __name__ == "__main__":

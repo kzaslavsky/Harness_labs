@@ -336,6 +336,77 @@ class PlanGraphAudit:
             },
         )
 
+    def gate_slot_acquired(self, node_id: str, admitted_concurrency: int) -> None:
+        """Journal one node's acquisition of the graph-owned gate slot.
+
+        Not a node-content checkpoint transition: the ready-set scheduler's
+        launchers run on worker threads and hold this slot only around
+        their own verification-command execution, concurrently with other
+        in-flight nodes' dispatch/review/fix work, so this must be safe to
+        call off the coordinating thread. It journals the event, then
+        re-stamps the checkpoint against that event with an empty update so
+        the durable checkpoint never lags the journal head for the
+        potentially long verification window this event opens.
+        ``AuditJournal.append``/``merge_checkpoint`` are internally
+        mutex-protected, so concurrent callers serialize safely without any
+        of them mutating per-node state.
+        """
+        self._gate_slot_event(node_id, "acquired", admitted_concurrency)
+
+    def gate_slot_released(self, node_id: str, admitted_concurrency: int) -> None:
+        """Journal one node's release of the graph-owned gate slot."""
+        self._gate_slot_event(node_id, "released", admitted_concurrency)
+
+    def gate_slot_bypassed(self, node_id: str) -> None:
+        """Journal that an admitted node completed verification unslotted.
+
+        Emitted from the coordinating thread when a node with
+        ``verification_argv`` succeeds without ever entering its minted
+        :class:`~harness_labs.plan_graph.GateSlotHold` — e.g. an
+        out-of-process launcher, which has no way to carry the in-process
+        hold across the subprocess boundary. Without this record the journal
+        would be indistinguishable from a run in which no node needed the
+        slot, silently losing the CB-06 mutual-exclusion guarantee.
+        """
+        if not isinstance(node_id, str) or not node_id:
+            raise AuditError("gate slot event requires a non-empty node id")
+        self.journal.append(
+            "plan_graph_gate_slot_bypassed",
+            status="failed",
+            payload={"plan_node_id": node_id},
+            actor=_ACTOR,
+        )
+
+    def _gate_slot_event(
+        self, node_id: str, action: str, admitted_concurrency: int
+    ) -> None:
+        if not isinstance(node_id, str) or not node_id:
+            raise AuditError("gate slot event requires a non-empty node id")
+        if (
+            not isinstance(admitted_concurrency, int)
+            or isinstance(admitted_concurrency, bool)
+            or admitted_concurrency < 1
+        ):
+            raise AuditError(
+                "gate slot admitted_concurrency must be a positive integer"
+            )
+        self.journal.append(
+            f"plan_graph_gate_slot_{action}",
+            status="running" if action == "acquired" else "succeeded",
+            payload={
+                "plan_node_id": node_id,
+                "admitted_concurrency": admitted_concurrency,
+            },
+            actor=_ACTOR,
+        )
+        # A plain append leaves the durable checkpoint's head_hash lagging
+        # the journal head until the coordinating thread's next per-node
+        # transition — during a slow verification stage that window can
+        # persist for the run's whole gate-holding duration. An empty-update
+        # merge changes no state field; it only re-checkpoints against the
+        # journal head this event just advanced, closing that window.
+        self.journal.merge_checkpoint(status="running", updates={})
+
     def node_completed(
         self,
         node_id: str,

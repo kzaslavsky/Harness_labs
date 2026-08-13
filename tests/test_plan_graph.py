@@ -9,14 +9,18 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
+from harness_labs.audit import AuditError
 from harness_labs.plan_graph import (
     FEATURE_RUN_REQUEST_PROTOCOL,
     FeatureRunOutcome,
     FeatureRunRequest,
+    GateSlot,
     PlanGraph,
     PlanGraphError,
     PlanGraphRegistration,
@@ -474,6 +478,52 @@ class PlanGraphTests(unittest.TestCase):
         with self.assertRaisesRegex(PlanGraphError, "initialized PlanGraph audit"):
             graph._request_for_run(graph.plan.runs[0], self.base_commit)
 
+    def test_gate_slot_event_guards_reject_invalid_arguments(self) -> None:
+        graph = self.graph(lambda request: FeatureRunOutcome("failed"))
+        audit = graph._audit_for_run()
+        with self.assertRaisesRegex(AuditError, "non-empty node id"):
+            audit.gate_slot_acquired("", 1)
+        with self.assertRaisesRegex(AuditError, "positive integer"):
+            audit.gate_slot_acquired("a", 0)
+        with self.assertRaisesRegex(AuditError, "positive integer"):
+            audit.gate_slot_acquired("a", -1)
+        with self.assertRaisesRegex(AuditError, "positive integer"):
+            audit.gate_slot_acquired("a", True)
+        with self.assertRaisesRegex(AuditError, "non-empty node id"):
+            audit.gate_slot_released("", 1)
+        with self.assertRaisesRegex(AuditError, "non-empty node id"):
+            audit.gate_slot_bypassed("")
+
+    def test_gate_slot_event_leaves_checkpoint_bound_to_journal_head(self) -> None:
+        """A gate slot append must not leave the checkpoint lagging the journal.
+
+        Guards against the checkpoint going stale for the whole duration of a
+        slow verification window, which made ``AuditJournal.verify`` see an
+        unbound checkpoint until the next per-node transition.
+        """
+        graph = self.graph(lambda request: FeatureRunOutcome("failed"))
+        audit = graph._audit_for_run()
+        audit.gate_slot_acquired("a", 1)
+        events = [
+            json.loads(line)
+            for line in audit.journal.events_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        checkpoint = json.loads(
+            audit.journal.checkpoint_path.read_text(encoding="utf-8")
+        )
+        self.assertEqual(checkpoint["head_hash"], events[-1]["event_hash"])
+        audit.gate_slot_released("a", 1)
+        events = [
+            json.loads(line)
+            for line in audit.journal.events_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        checkpoint = json.loads(
+            audit.journal.checkpoint_path.read_text(encoding="utf-8")
+        )
+        self.assertEqual(checkpoint["head_hash"], events[-1]["event_hash"])
+
     def test_failure_stops_dependents_and_identity_mismatch_fails(self) -> None:
         calls = []
         result = self.graph(
@@ -497,6 +547,152 @@ class PlanGraphTests(unittest.TestCase):
         )
         self.assertEqual(completed.returncode, 2)
         self.assertIn("incompatible", completed.stderr)
+
+
+class _RecordingGateAudit:
+    """Minimal stand-in for PlanGraphAudit's gate-slot journaling surface."""
+
+    def __init__(self, *, fail_acquire: bool = False, fail_release: bool = False) -> None:
+        self.acquired: list[tuple[str, int]] = []
+        self.released: list[tuple[str, int]] = []
+        self.fail_acquire = fail_acquire
+        self.fail_release = fail_release
+
+    def gate_slot_acquired(self, node_id: str, admitted_concurrency: int) -> None:
+        if self.fail_acquire:
+            raise AuditError("simulated acquire journal failure")
+        self.acquired.append((node_id, admitted_concurrency))
+
+    def gate_slot_released(self, node_id: str, admitted_concurrency: int) -> None:
+        if self.fail_release:
+            raise AuditError("simulated release journal failure")
+        self.released.append((node_id, admitted_concurrency))
+
+
+class GateSlotTests(unittest.TestCase):
+    """Direct unit coverage for GateSlot/GateSlotHold, independent of a graph."""
+
+    def test_holds_serialize_across_threads(self) -> None:
+        slot = GateSlot(_RecordingGateAudit())
+        active = 0
+        max_active = 0
+        lock = threading.Lock()
+
+        def worker(node_id: str) -> None:
+            nonlocal active, max_active
+            with slot.hold(node_id):
+                with lock:
+                    active += 1
+                    max_active = max(max_active, active)
+                time.sleep(0.05)
+                with lock:
+                    active -= 1
+
+        threads = [
+            threading.Thread(target=worker, args=(f"n{i}",)) for i in range(3)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=5)
+        self.assertEqual(max_active, 1)
+
+    def test_hold_exposes_no_slot_or_audit_attribute(self) -> None:
+        slot = GateSlot(_RecordingGateAudit())
+        hold = slot.hold("a")
+        self.assertEqual(set(vars(hold)), {"_acquire", "_release", "_entered"})
+        for name in ("slot", "_slot", "audit", "_audit", "node_id", "_node_id"):
+            self.assertFalse(hasattr(hold, name), f"hold must not expose {name!r}")
+
+    def test_entered_flag_tracks_actual_acquisition(self) -> None:
+        slot = GateSlot(_RecordingGateAudit())
+        hold = slot.hold("a")
+        self.assertFalse(hold.entered)
+        with hold:
+            self.assertTrue(hold.entered)
+        self.assertTrue(hold.entered)
+
+    def test_acquire_rolls_back_semaphore_on_audit_error(self) -> None:
+        audit = _RecordingGateAudit(fail_acquire=True)
+        slot = GateSlot(audit)
+        hold = slot.hold("a")
+        with self.assertRaises(AuditError):
+            hold.__enter__()
+        self.assertFalse(hold.entered)
+
+        # A failed acquire must not leave the exclusive slot permanently
+        # held: a fresh hold has to be able to acquire it promptly.
+        audit.fail_acquire = False
+        acquired = threading.Event()
+        second = slot.hold("b")
+
+        def worker() -> None:
+            with second:
+                acquired.set()
+
+        thread = threading.Thread(target=worker)
+        thread.start()
+        thread.join(timeout=5)
+        self.assertTrue(acquired.is_set())
+
+    def test_release_frees_semaphore_even_if_audit_fails(self) -> None:
+        audit = _RecordingGateAudit(fail_release=True)
+        slot = GateSlot(audit)
+        hold = slot.hold("a")
+        hold.__enter__()
+        with self.assertRaises(AuditError):
+            hold.__exit__(None, None, None)
+
+        # The journal-then-release ordering is preserved, but a failed
+        # release journal must not leave a sibling blocked forever.
+        audit.fail_release = False
+        acquired = threading.Event()
+        second = slot.hold("b")
+
+        def worker() -> None:
+            with second:
+                acquired.set()
+
+        thread = threading.Thread(target=worker)
+        thread.start()
+        thread.join(timeout=5)
+        self.assertTrue(acquired.is_set())
+
+    def test_release_reports_concurrency_of_contending_sibling(self) -> None:
+        """Acquire/release concurrency is sampled live, not fixed at admission.
+
+        Guards against the stale value that repeated whatever was computed
+        once at admission time for both a node's acquire and release event,
+        regardless of how contention actually evolved in between.
+        """
+        audit = _RecordingGateAudit()
+        slot = GateSlot(audit)
+        a_holding = threading.Event()
+        b_joined = threading.Event()
+
+        def run_a() -> None:
+            with slot.hold("a"):
+                a_holding.set()
+                b_joined.wait(timeout=5)
+                time.sleep(0.05)
+
+        def run_b() -> None:
+            a_holding.wait(timeout=5)
+            b_joined.set()
+            with slot.hold("b"):
+                pass
+
+        thread_a = threading.Thread(target=run_a)
+        thread_b = threading.Thread(target=run_b)
+        thread_a.start()
+        thread_b.start()
+        thread_a.join(timeout=5)
+        thread_b.join(timeout=5)
+
+        self.assertEqual(audit.acquired, [("a", 1), ("b", 1)])
+        # "a" released while "b" was already contending for the slot, so its
+        # release event must report 2, not the 1 it was admitted with.
+        self.assertEqual(audit.released, [("a", 2), ("b", 1)])
 
 
 if __name__ == "__main__":
