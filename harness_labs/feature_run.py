@@ -32,6 +32,7 @@ from .git_transaction import (
     paths_outside_scope,
     workspace_snapshot,
 )
+from .plan_graph_budget import failing_identifiers
 from .review_fix import (
     ReviewFixExecutorFactory,
     ReviewFixLoop,
@@ -383,7 +384,7 @@ class DeterministicVerificationResult:
     command_attempts: tuple[Mapping[str, object], ...]
     repair_attempts: int
     repair_invocation_ids: tuple[str, ...] = ()
-    repair_invocations: tuple[Mapping[str, str], ...] = ()
+    repair_invocations: tuple[Mapping[str, object], ...] = ()
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -1369,9 +1370,20 @@ def _verify_with_recovery(
 ) -> DeterministicVerificationResult:
     command_attempts: list[Mapping[str, object]] = []
     repair_attempts = 0
+    # Repair allowance actually charged: distinct from repair_attempts (the
+    # dispatch count) so a renewal can give an allowance unit back without
+    # making repair_attempts contradict repair_invocation_ids.
+    repair_budget_consumed = 0
     repair_invocation_ids: list[str] = []
-    repair_invocations: list[Mapping[str, str]] = []
+    repair_invocations: list[Mapping[str, object]] = []
     env_retries = 0
+    # The failing-identifier set that motivated the most recently dispatched
+    # repair; compared against each rerun's set to decide renewal. ``None``
+    # can mean either "no repair dispatched yet" or "the dispatching rerun's
+    # output was unparseable", so a separate flag disambiguates those cases
+    # for the audit-emission guard below.
+    previous_failing_ids: frozenset[str] | None = None
+    awaiting_repair_delta = False
     runner = AttemptRunner()
     actor = AuditActor("verification-owner", "verification_owner")
 
@@ -1423,7 +1435,43 @@ def _verify_with_recovery(
             # repair allowance; their invocation evidence remains explicit.
             env_retries += 1
             continue
-        if repair_attempts >= repair_limit:
+        current_failing_ids = failing_identifiers(command)
+        if awaiting_repair_delta:
+            # A strict subset (not merely a smaller count) proves every
+            # currently-failing test was already failing and at least one
+            # previously-failing test is now gone; an unparseable baseline or
+            # rerun, an equal/larger set, or a set with a new member are all
+            # non-improving and must not renew the allowance.
+            renewed = (
+                current_failing_ids is not None
+                and previous_failing_ids is not None
+                and bool(current_failing_ids)
+                and current_failing_ids < previous_failing_ids
+            )
+            audit.append(
+                "deterministic_verification_repair_budget_delta",
+                status="renewed" if renewed else "consumed",
+                payload={
+                    "repair_attempt": ordinal,
+                    "previous_failing_ids": (
+                        sorted(previous_failing_ids)
+                        if previous_failing_ids is not None
+                        else None
+                    ),
+                    "current_failing_ids": (
+                        sorted(current_failing_ids)
+                        if current_failing_ids is not None
+                        else None
+                    ),
+                    "renewed": renewed,
+                },
+                actor=actor,
+            )
+            if renewed:
+                # A repair that strictly shrank the observed failing set does
+                # not spend the declared repair limit; give the unit back.
+                repair_budget_consumed -= 1
+        if repair_budget_consumed >= repair_limit:
             return DeterministicVerificationResult(
                 "blocked",
                 "declared verification command still fails after repair budget",
@@ -1456,11 +1504,19 @@ def _verify_with_recovery(
         repair_invocation_id = f"{run_id}:verification-repair:{stage}:{ordinal}"
         # Record the dispatch before execution so an interrupted worker is still
         # visible to the parent ledger and can be idempotently reconciled.
+        previous_failing_ids = current_failing_ids
+        awaiting_repair_delta = True
         repair_attempts += 1
+        repair_budget_consumed += 1
         repair_invocation_ids.append(repair_invocation_id)
         repair_invocations.append({
             "invocation_id": repair_invocation_id,
             "classification": classification,
+            # Carried on the structured evidence so the parent ledger's
+            # import_child_evidence sees the same failure_keys substrate
+            # reserve() uses, instead of the loop being the only place that
+            # knows which tests motivated this dispatch.
+            "failure_keys": sorted(current_failing_ids) if current_failing_ids else [],
         })
         try:
             repair = runner.run(attempt, repair_executor_factory(attempt))
@@ -1568,10 +1624,12 @@ def _verify_with_recovery(
                     f"{run_id}:verification-repair:{stage}:{ordinal}:recovery-1"
                 )
                 repair_attempts += 1
+                repair_budget_consumed += 1
                 repair_invocation_ids.append(recovery_invocation_id)
                 repair_invocations.append({
                     "invocation_id": recovery_invocation_id,
                     "classification": classification,
+                    "failure_keys": sorted(current_failing_ids) if current_failing_ids else [],
                 })
                 recovery = runner.run(
                     recovery_attempt,
@@ -1622,7 +1680,21 @@ def _verify_with_recovery(
                 tuple(repair_invocations),
             )
 
-    raise AssertionError("verification loop did not terminate")
+    # A renewed allowance can let the loop dispatch more repairs than the
+    # non-delta-scoped design assumed, so the fixed iteration bound above can
+    # now be reached while still mid-repair rather than only through the
+    # defensive branch it was originally written for. That is a legitimate
+    # exhaustion of the loop's own hard bound (AC-CB04-2), not a programming
+    # error, so it must resolve to the same terminal `blocked` outcome every
+    # other bound in this loop returns rather than escape as an exception.
+    return DeterministicVerificationResult(
+        "blocked",
+        "verification did not converge within the loop's bounded iteration limit",
+        tuple(command_attempts),
+        repair_attempts,
+        tuple(repair_invocation_ids),
+        tuple(repair_invocations),
+    )
 
 
 def _run_verification_command(

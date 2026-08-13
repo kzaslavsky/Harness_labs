@@ -1206,6 +1206,7 @@ class FeatureRunTests(unittest.TestCase):
                         "post_implementation:1"
                     ),
                     "classification": "product",
+                    "failure_keys": [],
                 },),
             )
             AuditJournal.verify(root / "run")
