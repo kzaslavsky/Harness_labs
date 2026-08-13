@@ -319,6 +319,154 @@ class ControllerKernelTests(unittest.TestCase):
         self.assertTrue(completion.accepted)
         self.assertEqual(self.kernel.snapshot()["status"], "succeeded")
 
+    # AC-CB06-1: a run-contract criterion may declare deterministic-verification
+    # adjudication, and it can only become satisfied from the verification
+    # owner's own passing command evidence (record_gate_verification), never
+    # from a coordinator claim.
+    def test_gate_backed_criterion_satisfied_only_by_verification_owner(self) -> None:
+        contract = RunContract(
+            run_id="gate-kernel-run",
+            objective="Ship a change whose correctness is gated by a command.",
+            phases=("active",),
+            criteria=(
+                {
+                    "id": "gate",
+                    "statement": "The declared verification command passes.",
+                    "source": "operator",
+                    "adjudication": "deterministic_verification",
+                },
+            ),
+        )
+        kernel = ControllerKernel(contract, evidence=self.evidence)
+        self.assertEqual(
+            kernel.snapshot()["criteria"]["gate"]["adjudication"],
+            "deterministic_verification",
+        )
+        self.assertEqual(
+            self.kernel.snapshot()["criteria"]["grounded"]["adjudication"],
+            "claimed",
+        )
+
+        completion = kernel.handle(
+            CommandEnvelope(
+                command_id="complete-with-gate-pending",
+                run_id="gate-kernel-run",
+                type="run.complete_request",
+                actor=self.actor,
+                expected_revision=kernel.revision,
+                idempotency_key="complete-with-gate-pending",
+                payload={},
+            )
+        )
+        self.assertTrue(completion.accepted, completion.message)
+        self.assertEqual(kernel.snapshot()["criteria"]["gate"]["status"], "pending")
+
+        verification_artifact = self.evidence.add(
+            kind="deterministic-verification-output",
+            content={"exit_code": 0, "argv": ["python3", "-m", "unittest"]},
+            media_type="application/json",
+            producer_task_id="verification-owner",
+        )
+        events = kernel.record_gate_verification(
+            criterion_ids=("gate",),
+            evidence_ref=verification_artifact.ref,
+        )
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].event_type, "criterion.gate_verified")
+        gate = kernel.snapshot()["criteria"]["gate"]
+        self.assertEqual(gate["status"], "satisfied")
+        self.assertIn("verification-owner", gate["satisfied_by"])
+        self.assertIn(verification_artifact.ref, gate["evidence_refs"])
+
+    def test_record_gate_verification_rejects_non_gate_criterion_and_unknown_evidence(
+        self,
+    ) -> None:
+        verification_artifact = self.evidence.add(
+            kind="deterministic-verification-output",
+            content={"exit_code": 0},
+            media_type="application/json",
+            producer_task_id="verification-owner",
+        )
+        with self.assertRaisesRegex(KernelError, "not gate-backed"):
+            self.kernel.record_gate_verification(
+                criterion_ids=("grounded",),
+                evidence_ref=verification_artifact.ref,
+            )
+        with self.assertRaisesRegex(KernelError, "unknown evidence"):
+            self.kernel.record_gate_verification(
+                criterion_ids=("grounded",),
+                evidence_ref="artifact:sha256:" + "0" * 64,
+            )
+
+    # AC-CB06-1: kind and producer_task_id alone only prove a record came
+    # from the verification stage, not which attempt of a (possibly several)
+    # verification run it is. record_gate_verification must additionally
+    # bind the receipt to a passing (exit_code == 0) attempt, and
+    # record_gate_verification_failure to a failing one, or a failing
+    # attempt's own evidence could satisfy a criterion it never passed for.
+    def test_record_gate_verification_rejects_evidence_from_a_failing_attempt(
+        self,
+    ) -> None:
+        contract = RunContract(
+            run_id="gate-receipt-run",
+            objective="Ship a change whose correctness is gated by a command.",
+            phases=("active",),
+            criteria=(
+                {
+                    "id": "gate",
+                    "statement": "The declared verification command passes.",
+                    "source": "operator",
+                    "adjudication": "deterministic_verification",
+                },
+            ),
+        )
+        kernel = ControllerKernel(contract, evidence=self.evidence)
+        failing_attempt = self.evidence.add(
+            kind="deterministic-verification-output",
+            content={"exit_code": 1, "argv": ["python3", "-m", "unittest"]},
+            media_type="application/json",
+            producer_task_id="verification-owner",
+        )
+        with self.assertRaisesRegex(KernelError, "not a passing command result"):
+            kernel.record_gate_verification(
+                criterion_ids=("gate",),
+                evidence_ref=failing_attempt.ref,
+            )
+        self.assertEqual(kernel.snapshot()["criteria"]["gate"]["status"], "pending")
+
+        passing_attempt = self.evidence.add(
+            kind="deterministic-verification-output",
+            content={"exit_code": 0, "argv": ["python3", "-m", "unittest"]},
+            media_type="application/json",
+            producer_task_id="verification-owner",
+        )
+        with self.assertRaisesRegex(KernelError, "not a failing command result"):
+            kernel.record_gate_verification_failure(
+                criterion_ids=("gate",),
+                evidence_ref=passing_attempt.ref,
+            )
+
+    # AC-CB06-1: a coordinator can never mint its own gate -- only a
+    # run-contract criterion (constructed at kernel initialization) may
+    # declare deterministic-verification adjudication.
+    def test_criterion_propose_rejects_deterministic_verification_adjudication(
+        self,
+    ) -> None:
+        receipt = self.kernel.handle(
+            self.command(
+                "criterion.propose",
+                {
+                    "id": "coordinator-gate",
+                    "statement": "The coordinator declares its own gate.",
+                    "source": "coordinator",
+                    "adjudication": "deterministic_verification",
+                },
+                command_id="propose-gate",
+            )
+        )
+        self.assertFalse(receipt.accepted)
+        self.assertIn("deterministic-verification adjudication", receipt.message)
+
     def test_completion_rejects_open_review_finding(self) -> None:
         review = self.evidence.add(
             kind="review",

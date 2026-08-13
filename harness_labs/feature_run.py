@@ -585,6 +585,19 @@ def run_feature_worktree(
     creation = transaction.creation_receipt()
     contract = contract_factory(transaction.worktree_path, creation)
     _validate_repository_binding(contract, creation)
+    gate_criterion_ids = tuple(
+        sorted(
+            str(item.get("id"))
+            for item in contract.criteria
+            if item.get("adjudication") == "deterministic_verification"
+        )
+    )
+    if gate_criterion_ids and not verification_argv:
+        raise ValueError(
+            "run-contract criteria declare deterministic-verification "
+            "adjudication but no verification_argv was supplied: "
+            + ", ".join(gate_criterion_ids)
+        )
     audit = AuditJournal(
         run_dir,
         contract.run_id,
@@ -874,6 +887,13 @@ def run_feature_worktree(
             )
             post_review = retried_post_review
             status = post_review.status
+    if (
+        status == "succeeded"
+        and project_run_view(kernel)["status"] == "succeeded"
+        and verification_result is not None
+        and verification_result.status == "succeeded"
+    ):
+        _promote_gate_criteria(kernel, verification_result)
     if status == "succeeded" and project_run_view(kernel)["status"] == "succeeded":
         while True:
             try:
@@ -927,6 +947,13 @@ def run_feature_worktree(
                 break
 
     view = project_run_view(kernel)
+    if (
+        view["status"] == "succeeded"
+        and status != "succeeded"
+        and verification_result is not None
+    ):
+        _record_gate_verification_failure(kernel, verification_result)
+        view = project_run_view(kernel)
     terminal_status = (
         "succeeded"
         if status == "succeeded" and view["status"] == "succeeded"
@@ -1907,6 +1934,75 @@ def _combine_verification_results(
         repair_attempts=first.repair_attempts + second.repair_attempts,
         repair_invocation_ids=first.repair_invocation_ids + second.repair_invocation_ids,
         repair_invocations=first.repair_invocations + second.repair_invocations,
+    )
+
+
+def _promote_gate_criteria(
+    kernel: ControllerKernel,
+    verification_result: DeterministicVerificationResult,
+) -> None:
+    """Satisfy any pending gate-backed criteria from the controller-owned
+    verification command's own passing evidence.
+
+    Called only after the declared verification command has actually
+    succeeded, so a criterion the coordinator left pending at
+    run.complete_request (because it could not truthfully claim it) is
+    satisfied from real command evidence rather than from any claim.
+    """
+
+    criteria = kernel.snapshot()["criteria"]
+    pending_gate_ids = tuple(
+        criterion_id
+        for criterion_id, criterion in criteria.items()
+        if criterion.get("adjudication") == "deterministic_verification"
+        and criterion["status"] != "satisfied"
+    )
+    if not pending_gate_ids:
+        return
+    passing_ref = None
+    for attempt in reversed(verification_result.command_attempts):
+        if attempt.get("exit_code") == 0:
+            passing_ref = attempt.get("evidence_ref")
+            break
+    if not isinstance(passing_ref, str):
+        raise ValueError(
+            "successful verification result has no passing command evidence"
+        )
+    kernel.record_gate_verification(
+        criterion_ids=pending_gate_ids,
+        evidence_ref=passing_ref,
+    )
+
+
+def _record_gate_verification_failure(
+    kernel: ControllerKernel,
+    verification_result: DeterministicVerificationResult,
+) -> None:
+    """Walk a run a coordinator completion request marked "succeeded" back
+    off that status once the declared verification command has actually
+    failed, so a gate-backed criterion left pending never persists inside a
+    kernel snapshot that still claims the run "succeeded".
+    """
+
+    criteria = kernel.snapshot()["criteria"]
+    pending_gate_ids = tuple(
+        criterion_id
+        for criterion_id, criterion in criteria.items()
+        if criterion.get("adjudication") == "deterministic_verification"
+        and criterion["status"] != "satisfied"
+    )
+    if not pending_gate_ids:
+        return
+    failing_ref = None
+    for attempt in reversed(verification_result.command_attempts):
+        if attempt.get("exit_code") != 0:
+            failing_ref = attempt.get("evidence_ref")
+            break
+    if not isinstance(failing_ref, str):
+        return
+    kernel.record_gate_verification_failure(
+        criterion_ids=pending_gate_ids,
+        evidence_ref=failing_ref,
     )
 
 

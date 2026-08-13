@@ -932,6 +932,148 @@ class FeatureRunTests(unittest.TestCase):
             )
             AuditJournal.verify(root / "run")
 
+    # AC-CB06-2/AC-CB06-1: on the build-only segment used by the plan-graph
+    # bound dispatch path, the coordinator completes with a gate-backed
+    # criterion still pending, and the criterion is satisfied only once the
+    # controller-owned deterministic verification command actually passes.
+    def test_gate_backed_criterion_is_satisfied_by_verification_not_claim(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            base = root / "base"
+            base.mkdir()
+            git(base, "init", "-b", "main")
+            git(base, "config", "user.name", "Harness Tests")
+            git(base, "config", "user.email", "harness@example.invalid")
+            (base / "README.md").write_text("base\n", encoding="utf-8")
+            git(base, "add", "README.md")
+            git(base, "commit", "--no-gpg-sign", "-m", "Base")
+            schema = CoordinatorDispatchSchema(
+                "feature-gate-test/1",
+                (
+                    CoordinatorSegment(
+                        id="active",
+                        phases=("active",),
+                        instructions=(
+                            "Implement the change. Do not dispatch a "
+                            "verification-only task; the parent FeatureRun "
+                            "owns and runs the declared verification gate."
+                        ),
+                        required_artifact_kinds=("engineering-plan",),
+                        context_artifact_kinds=("engineering-plan",),
+                    ),
+                ),
+            )
+
+            def contract_factory(worktree, receipt):
+                return RunContract(
+                    run_id="feature-run-gate",
+                    objective="Build a file behind a deterministic gate.",
+                    phases=("active",),
+                    criteria=(
+                        {
+                            "id": "built",
+                            "statement": "The file is built.",
+                            "source": "operator",
+                        },
+                        {
+                            "id": "verified",
+                            "statement": (
+                                "The declared verification command passes."
+                            ),
+                            "source": "operator",
+                            "adjudication": "deterministic_verification",
+                        },
+                    ),
+                    terminal_artifact_kinds=("implementation-summary",),
+                    repository={
+                        "path": str(worktree),
+                        "branch": receipt["feature_branch"],
+                        "base_branch": receipt["base_branch"],
+                        "base_commit": receipt["base_commit"],
+                    },
+                )
+
+            def session_factory(worktree, launch, evidence):
+                # The coordinator can only truthfully claim "built"; nothing
+                # in its tool surface can claim "verified" (AC-CB06-3 makes a
+                # direct claim on it a kernel rejection), so it completes
+                # with "verified" still pending.
+                return ScriptedCoordinatorSession(
+                    [
+                        (
+                            "task_dispatch",
+                            {
+                                "tasks": [
+                                    {
+                                        "id": "build",
+                                        "role": "builder",
+                                        "objective": "Build feature.txt",
+                                        "details_schema": "build/1",
+                                        "required_capabilities": ["repo.write"],
+                                        "acceptance_criteria": ["built"],
+                                        "dependencies": [],
+                                    }
+                                ],
+                                "max_parallelism": 1,
+                            },
+                        ),
+                        ("run_complete_request", {}),
+                    ],
+                    final="Complete.",
+                )
+
+            result = run_feature_worktree(
+                base_repository=base,
+                base_branch="main",
+                feature_branch="feature/gate-test",
+                worktree_path=root / "feature",
+                run_dir=root / "run",
+                contract_factory=contract_factory,
+                schema=schema,
+                session_factory=session_factory,
+                profile_builder=lambda worktree, evidence: (
+                    RoleProfile(
+                        "builder",
+                        "builder",
+                        frozenset({"repo.write"}),
+                        lambda task: _BuildExecutor(task, worktree, evidence),
+                    ),
+                ),
+                allowed_paths=("feature.txt",),
+                commit_message="Build feature behind a gate",
+                merge=False,
+                verification_argv=(
+                    "python3",
+                    "-c",
+                    "from pathlib import Path; assert Path('feature.txt').read_text() == 'built\\n'",
+                ),
+                verification_repair_executor_factory=lambda attempt: self.fail(
+                    "repair must not run when deterministic verification passes"
+                ),
+                evidence_classification="component",
+                initial_evidence=(
+                    FeatureRunHandoffArtifact(
+                        "engineering-plan",
+                        {"objective": "Build a file behind a deterministic gate."},
+                    ),
+                ),
+            )
+
+            self.assertEqual(
+                result.status,
+                "succeeded",
+                result.dispatch.result.payload,
+            )
+            self.assertEqual(result.verification.status, "succeeded")
+            criteria = {item["id"]: item for item in result.run_view["criteria"]}
+            self.assertEqual(criteria["built"]["status"], "satisfied")
+            self.assertEqual(criteria["verified"]["status"], "satisfied")
+            self.assertIn("verification-owner", criteria["verified"]["satisfied_by"])
+            self.assertNotIn("build", criteria["verified"]["satisfied_by"])
+            AuditJournal.verify(root / "run")
+
     def test_failed_verification_repairs_same_candidate_and_reruns(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
