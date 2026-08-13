@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import subprocess
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
@@ -32,6 +33,7 @@ from .git_transaction import (
     paths_outside_scope,
     workspace_snapshot,
 )
+from .plan_graph_budget import failing_identifiers
 from .review_fix import (
     ReviewFixExecutorFactory,
     ReviewFixLoop,
@@ -383,7 +385,7 @@ class DeterministicVerificationResult:
     command_attempts: tuple[Mapping[str, object], ...]
     repair_attempts: int
     repair_invocation_ids: tuple[str, ...] = ()
-    repair_invocations: tuple[Mapping[str, str], ...] = ()
+    repair_invocations: tuple[Mapping[str, object], ...] = ()
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -402,15 +404,64 @@ _VERIFICATION_FAILURE_CLASSES = frozenset({
 })
 
 
+_DRIVER_CRASH_MARKERS = (
+    "walk driver",
+    "driver crashed",
+    "browser crashed",
+    "webdriver crashed",
+    "browser has disconnected",
+    "target closed",
+)
+_PYTEST_PASSED_RE = re.compile(r"\d+ passed\b")
+_PYTEST_FAILING_RE = re.compile(r"\b(?!0\b)\d+ (?:failed|errors?)\b")
+_PYTEST_FAILED_NODE_RE = re.compile(r"^failed ", re.MULTILINE)
+
+
+def _is_driver_crash_with_green_pytest(lowered_full_text: str) -> bool:
+    """True when a browser/driver crash marker sits next to a clean pytest run.
+
+    Distinguishes a live-browser walk-driver crash (environment fault) from a
+    genuine assertion failure inside the same pytest invocation: pytest's own
+    summary line is the ground truth for whether the product code failed.
+    """
+    if not any(marker in lowered_full_text for marker in _DRIVER_CRASH_MARKERS):
+        return False
+    if not _PYTEST_PASSED_RE.search(lowered_full_text):
+        return False
+    if _PYTEST_FAILING_RE.search(lowered_full_text):
+        return False
+    if _PYTEST_FAILED_NODE_RE.search(lowered_full_text):
+        return False
+    return True
+
+
 def classify_verification_failure(command: Mapping[str, object]) -> dict[str, str]:
     """Classify only evidence present in one deterministic command result.
 
-    The conservative default deliberately treats timeouts and selector/browser
-    failures as indeterminate: neither proves a product defect nor transient
-    infrastructure.
+    Structured fields are checked before any output-text heuristic: a timeout
+    (the `timed_out` flag or exit code 124) or a signal termination (a
+    negative exit code) is an environment fault by construction, so it must
+    not depend on what the command happened to print. The conservative
+    default still treats unrecognized output as indeterminate: neither proves
+    a product defect nor transient infrastructure.
     """
-    excerpt = "\n".join(str(command.get(key, "")) for key in ("stderr", "stdout"))[:500]
+    full_text = "\n".join(str(command.get(key, "")) for key in ("stderr", "stdout"))
+    excerpt = full_text[:500]
     lowered = excerpt.lower()
+    if command.get("timed_out") is True:
+        return {"classification": "infrastructure_transient", "rule_id": "timeout-flag", "evidence_excerpt": excerpt}
+    exit_code = command.get("exit_code")
+    if isinstance(exit_code, int):
+        if exit_code == 124:
+            return {"classification": "infrastructure_transient", "rule_id": "timeout-exit-124", "evidence_excerpt": excerpt}
+        if exit_code < 0:
+            return {
+                "classification": "infrastructure_transient",
+                "rule_id": f"signal-terminated-{-exit_code}",
+                "evidence_excerpt": excerpt,
+            }
+    if _is_driver_crash_with_green_pytest(full_text.lower()):
+        return {"classification": "infrastructure_transient", "rule_id": "driver-crash-pytest-green", "evidence_excerpt": excerpt}
     if any(marker in lowered for marker in ("connection reset", "temporary failure", "dns", "network is unreachable")):
         return {"classification": "infrastructure_transient", "rule_id": "transient-network", "evidence_excerpt": excerpt}
     if any(marker in lowered for marker in ("permission denied", "outside_allowed_paths", "outside allowed paths")):
@@ -537,6 +588,19 @@ def run_feature_worktree(
     creation = transaction.creation_receipt()
     contract = contract_factory(transaction.worktree_path, creation)
     _validate_repository_binding(contract, creation)
+    gate_criterion_ids = tuple(
+        sorted(
+            str(item.get("id"))
+            for item in contract.criteria
+            if item.get("adjudication") == "deterministic_verification"
+        )
+    )
+    if gate_criterion_ids and not verification_argv:
+        raise ValueError(
+            "run-contract criteria declare deterministic-verification "
+            "adjudication but no verification_argv was supplied: "
+            + ", ".join(gate_criterion_ids)
+        )
     audit = AuditJournal(
         run_dir,
         contract.run_id,
@@ -577,6 +641,20 @@ def run_feature_worktree(
         payload={"descriptor_sha256": hashlib.sha256(descriptor_raw).hexdigest()},
     )
     evidence = EvidenceCatalog(audit=audit)
+    if verification_repair_executor_factory is not None:
+        verification_repair_executor_factory = _grant_aware_repair_factory(
+            verification_repair_executor_factory,
+            evidence=evidence,
+            worktree_path=transaction.worktree_path,
+            audit=audit,
+        )
+    if review_fix_executor_factory is not None:
+        review_fix_executor_factory = _grant_aware_review_fix_factory(
+            review_fix_executor_factory,
+            evidence=evidence,
+            worktree_path=transaction.worktree_path,
+            audit=audit,
+        )
     recovery = _RecoveryState(recovery_limit)
     handoff_records = []
     for handoff in initial_evidence:
@@ -845,6 +923,13 @@ def run_feature_worktree(
             )
             post_review = retried_post_review
             status = post_review.status
+    if (
+        status == "succeeded"
+        and project_run_view(kernel)["status"] == "succeeded"
+        and verification_result is not None
+        and verification_result.status == "succeeded"
+    ):
+        _promote_gate_criteria(kernel, verification_result)
     if status == "succeeded" and project_run_view(kernel)["status"] == "succeeded":
         while True:
             try:
@@ -898,6 +983,13 @@ def run_feature_worktree(
                 break
 
     view = project_run_view(kernel)
+    if (
+        view["status"] == "succeeded"
+        and status != "succeeded"
+        and verification_result is not None
+    ):
+        _record_gate_verification_failure(kernel, verification_result)
+        view = project_run_view(kernel)
     terminal_status = (
         "succeeded"
         if status == "succeeded" and view["status"] == "succeeded"
@@ -1348,6 +1440,144 @@ def _resume_kernel_after_recovery(
         raise ValueError(f"recovery could not resume run: {receipt.message}")
 
 
+def _dirty_baseline_receipt_ref(
+    evidence: EvidenceCatalog,
+    dirty_paths: list[str],
+) -> str | None:
+    """Return a workspace-change receipt whose changed_paths covers every dirty path.
+
+    Any receipt truthfully attests an adoptable baseline as long as its
+    recorded change set is a superset of what is currently dirty; the
+    tightest-covering receipt is preferred (fewest paths beyond what's dirty),
+    ties broken by evidence ref for determinism, so a stale receipt from
+    before further edits is passed over once a newer one covers everything.
+    """
+
+    dirty = set(dirty_paths)
+    if not dirty:
+        return None
+    best_ref: str | None = None
+    best_extra: int | None = None
+    for record in evidence.list():
+        if record.kind != "workspace-change-receipt":
+            continue
+        try:
+            receipt = json.loads(evidence.open(record.ref))
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(receipt, Mapping):
+            continue
+        receipted = set(receipt.get("changed_paths", ()))
+        if not dirty <= receipted:
+            continue
+        extra = len(receipted - dirty)
+        if best_extra is None or extra < best_extra:
+            best_ref = record.ref
+            best_extra = extra
+    return best_ref
+
+
+def _attach_dirty_baseline_grant(
+    executor: Executor,
+    *,
+    evidence: EvidenceCatalog,
+    worktree_path: Path,
+    audit: AuditJournal,
+    attempt: TaskAttempt,
+    actor: AuditActor,
+) -> None:
+    """Supply a repair/fix executor an audited grant for the current dirty baseline.
+
+    Only executors that expose a settable ``dirty_baseline_grant`` attribute
+    (the two live semantic executors) participate; anything else is left
+    untouched. A grant is only ever attached when an existing
+    ``workspace-change-receipt`` in this run's evidence catalog truthfully
+    covers every path currently dirty, and that decision is recorded in the
+    audit journal so the adoption is provable, not merely asserted.
+    """
+
+    if not hasattr(executor, "dirty_baseline_grant"):
+        return
+    dirty_paths = list(workspace_snapshot(worktree_path)["changed_paths"])
+    if not dirty_paths:
+        return
+    receipt_ref = _dirty_baseline_receipt_ref(evidence, dirty_paths)
+    if receipt_ref is None:
+        return
+    grant = {"receipt_ref": receipt_ref}
+    executor.dirty_baseline_grant = grant
+    audit.append(
+        "dirty_baseline_adoption_grant_supplied",
+        status="granted",
+        payload={
+            "receipt_ref": receipt_ref,
+            "dirty_paths": sorted(dirty_paths),
+        },
+        actor=actor,
+        attempt_id=attempt.attempt_id,
+    )
+
+
+def _grant_aware_repair_factory(
+    factory: VerificationRepairExecutorFactory,
+    *,
+    evidence: EvidenceCatalog,
+    worktree_path: Path,
+    audit: AuditJournal,
+) -> VerificationRepairExecutorFactory:
+    """Wrap a repair executor factory to auto-supply the adoption grant.
+
+    Converts the constructor-frozen ``allow_dirty_baseline`` escape hatch into
+    a per-dispatch runtime grant: the factory owned outside this module still
+    decides everything else about the repair executor, but every dispatch it
+    produces is offered whatever receipted baseline this run's evidence
+    catalog can prove covers the current dirty workspace.
+    """
+
+    def wrapped(attempt: TaskAttempt) -> Executor:
+        executor = factory(attempt)
+        _attach_dirty_baseline_grant(
+            executor,
+            evidence=evidence,
+            worktree_path=worktree_path,
+            audit=audit,
+            attempt=attempt,
+            actor=AuditActor("verification-owner", "verification_owner"),
+        )
+        return executor
+
+    return wrapped
+
+
+def _grant_aware_review_fix_factory(
+    factory: ReviewFixExecutorFactory,
+    *,
+    evidence: EvidenceCatalog,
+    worktree_path: Path,
+    audit: AuditJournal,
+) -> ReviewFixExecutorFactory:
+    """Wrap a review-fix executor factory to auto-supply the adoption grant.
+
+    Only the writable ``"fix"`` stage can face a dirty baseline; ``"review"``
+    and ``"verify"`` stay read-only and are passed through unchanged.
+    """
+
+    def wrapped(stage: str, attempt: TaskAttempt) -> Executor:
+        executor = factory(stage, attempt)
+        if stage == "fix":
+            _attach_dirty_baseline_grant(
+                executor,
+                evidence=evidence,
+                worktree_path=worktree_path,
+                audit=audit,
+                attempt=attempt,
+                actor=AuditActor("review-fix-controller", "controller"),
+            )
+        return executor
+
+    return wrapped
+
+
 def _verify_with_recovery(
     *,
     run_id: str,
@@ -1365,9 +1595,20 @@ def _verify_with_recovery(
 ) -> DeterministicVerificationResult:
     command_attempts: list[Mapping[str, object]] = []
     repair_attempts = 0
+    # Repair allowance actually charged: distinct from repair_attempts (the
+    # dispatch count) so a renewal can give an allowance unit back without
+    # making repair_attempts contradict repair_invocation_ids.
+    repair_budget_consumed = 0
     repair_invocation_ids: list[str] = []
-    repair_invocations: list[Mapping[str, str]] = []
+    repair_invocations: list[Mapping[str, object]] = []
     env_retries = 0
+    # The failing-identifier set that motivated the most recently dispatched
+    # repair; compared against each rerun's set to decide renewal. ``None``
+    # can mean either "no repair dispatched yet" or "the dispatching rerun's
+    # output was unparseable", so a separate flag disambiguates those cases
+    # for the audit-emission guard below.
+    previous_failing_ids: frozenset[str] | None = None
+    awaiting_repair_delta = False
     runner = AttemptRunner()
     actor = AuditActor("verification-owner", "verification_owner")
 
@@ -1419,7 +1660,43 @@ def _verify_with_recovery(
             # repair allowance; their invocation evidence remains explicit.
             env_retries += 1
             continue
-        if repair_attempts >= repair_limit:
+        current_failing_ids = failing_identifiers(command)
+        if awaiting_repair_delta:
+            # A strict subset (not merely a smaller count) proves every
+            # currently-failing test was already failing and at least one
+            # previously-failing test is now gone; an unparseable baseline or
+            # rerun, an equal/larger set, or a set with a new member are all
+            # non-improving and must not renew the allowance.
+            renewed = (
+                current_failing_ids is not None
+                and previous_failing_ids is not None
+                and bool(current_failing_ids)
+                and current_failing_ids < previous_failing_ids
+            )
+            audit.append(
+                "deterministic_verification_repair_budget_delta",
+                status="renewed" if renewed else "consumed",
+                payload={
+                    "repair_attempt": ordinal,
+                    "previous_failing_ids": (
+                        sorted(previous_failing_ids)
+                        if previous_failing_ids is not None
+                        else None
+                    ),
+                    "current_failing_ids": (
+                        sorted(current_failing_ids)
+                        if current_failing_ids is not None
+                        else None
+                    ),
+                    "renewed": renewed,
+                },
+                actor=actor,
+            )
+            if renewed:
+                # A repair that strictly shrank the observed failing set does
+                # not spend the declared repair limit; give the unit back.
+                repair_budget_consumed -= 1
+        if repair_budget_consumed >= repair_limit:
             return DeterministicVerificationResult(
                 "blocked",
                 "declared verification command still fails after repair budget",
@@ -1452,11 +1729,19 @@ def _verify_with_recovery(
         repair_invocation_id = f"{run_id}:verification-repair:{stage}:{ordinal}"
         # Record the dispatch before execution so an interrupted worker is still
         # visible to the parent ledger and can be idempotently reconciled.
+        previous_failing_ids = current_failing_ids
+        awaiting_repair_delta = True
         repair_attempts += 1
+        repair_budget_consumed += 1
         repair_invocation_ids.append(repair_invocation_id)
         repair_invocations.append({
             "invocation_id": repair_invocation_id,
             "classification": classification,
+            # Carried on the structured evidence so the parent ledger's
+            # import_child_evidence sees the same failure_keys substrate
+            # reserve() uses, instead of the loop being the only place that
+            # knows which tests motivated this dispatch.
+            "failure_keys": sorted(current_failing_ids) if current_failing_ids else [],
         })
         try:
             repair = runner.run(attempt, repair_executor_factory(attempt))
@@ -1564,10 +1849,12 @@ def _verify_with_recovery(
                     f"{run_id}:verification-repair:{stage}:{ordinal}:recovery-1"
                 )
                 repair_attempts += 1
+                repair_budget_consumed += 1
                 repair_invocation_ids.append(recovery_invocation_id)
                 repair_invocations.append({
                     "invocation_id": recovery_invocation_id,
                     "classification": classification,
+                    "failure_keys": sorted(current_failing_ids) if current_failing_ids else [],
                 })
                 recovery = runner.run(
                     recovery_attempt,
@@ -1618,7 +1905,21 @@ def _verify_with_recovery(
                 tuple(repair_invocations),
             )
 
-    raise AssertionError("verification loop did not terminate")
+    # A renewed allowance can let the loop dispatch more repairs than the
+    # non-delta-scoped design assumed, so the fixed iteration bound above can
+    # now be reached while still mid-repair rather than only through the
+    # defensive branch it was originally written for. That is a legitimate
+    # exhaustion of the loop's own hard bound (AC-CB04-2), not a programming
+    # error, so it must resolve to the same terminal `blocked` outcome every
+    # other bound in this loop returns rather than escape as an exception.
+    return DeterministicVerificationResult(
+        "blocked",
+        "verification did not converge within the loop's bounded iteration limit",
+        tuple(command_attempts),
+        repair_attempts,
+        tuple(repair_invocation_ids),
+        tuple(repair_invocations),
+    )
 
 
 def _run_verification_command(
@@ -1679,6 +1980,75 @@ def _combine_verification_results(
         repair_attempts=first.repair_attempts + second.repair_attempts,
         repair_invocation_ids=first.repair_invocation_ids + second.repair_invocation_ids,
         repair_invocations=first.repair_invocations + second.repair_invocations,
+    )
+
+
+def _promote_gate_criteria(
+    kernel: ControllerKernel,
+    verification_result: DeterministicVerificationResult,
+) -> None:
+    """Satisfy any pending gate-backed criteria from the controller-owned
+    verification command's own passing evidence.
+
+    Called only after the declared verification command has actually
+    succeeded, so a criterion the coordinator left pending at
+    run.complete_request (because it could not truthfully claim it) is
+    satisfied from real command evidence rather than from any claim.
+    """
+
+    criteria = kernel.snapshot()["criteria"]
+    pending_gate_ids = tuple(
+        criterion_id
+        for criterion_id, criterion in criteria.items()
+        if criterion.get("adjudication") == "deterministic_verification"
+        and criterion["status"] != "satisfied"
+    )
+    if not pending_gate_ids:
+        return
+    passing_ref = None
+    for attempt in reversed(verification_result.command_attempts):
+        if attempt.get("exit_code") == 0:
+            passing_ref = attempt.get("evidence_ref")
+            break
+    if not isinstance(passing_ref, str):
+        raise ValueError(
+            "successful verification result has no passing command evidence"
+        )
+    kernel.record_gate_verification(
+        criterion_ids=pending_gate_ids,
+        evidence_ref=passing_ref,
+    )
+
+
+def _record_gate_verification_failure(
+    kernel: ControllerKernel,
+    verification_result: DeterministicVerificationResult,
+) -> None:
+    """Walk a run a coordinator completion request marked "succeeded" back
+    off that status once the declared verification command has actually
+    failed, so a gate-backed criterion left pending never persists inside a
+    kernel snapshot that still claims the run "succeeded".
+    """
+
+    criteria = kernel.snapshot()["criteria"]
+    pending_gate_ids = tuple(
+        criterion_id
+        for criterion_id, criterion in criteria.items()
+        if criterion.get("adjudication") == "deterministic_verification"
+        and criterion["status"] != "satisfied"
+    )
+    if not pending_gate_ids:
+        return
+    failing_ref = None
+    for attempt in reversed(verification_result.command_attempts):
+        if attempt.get("exit_code") != 0:
+            failing_ref = attempt.get("evidence_ref")
+            break
+    if not isinstance(failing_ref, str):
+        return
+    kernel.record_gate_verification_failure(
+        criterion_ids=pending_gate_ids,
+        evidence_ref=failing_ref,
     )
 
 

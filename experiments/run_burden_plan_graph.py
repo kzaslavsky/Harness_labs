@@ -94,12 +94,7 @@ You are one phase coordinator in an audited FeatureRun. You cannot read files
 or run commands. Use only typed controller tools. Follow the segment
 instructions, inspect structured worker results, and open material artifacts
 before advancing. Never claim work without evidence. Do not delegate beyond
-the named workers. When dispatching tasks, acceptance_criteria entries must be
-bare criterion ids (for example "AC-CB01-1"), never the full statement text. A
-superseding or repair dispatch must keep the original task's
-required_capabilities and details schema unchanged. These two rules are gates
-in the harness version ORCHESTRATING this run; the run itself is building
-their replacements.
+the named workers.
 """
 
 # ---------------------------------------------------------------------------
@@ -309,26 +304,15 @@ def assemble_decomposition() -> dict[str, Any]:
                 "verification_required_paths": required,
             }
         )
-    # Registration (currently) requires each run's objective, criterion ids,
-    # and statements verbatim in its cited sections; CB-02 removes that gate,
-    # but this decomposition must pass the harness that registers it.
-    plan_sections = dict(sections)
-    for run in runs:
-        cited = "\n".join(plan_sections[key] for key in run["plan_sections"])
-        additions = []
-        if run["objective"] not in cited:
-            additions.append(f"Objective: {run['objective']}")
-        for criterion in run["criteria"]:
-            statement = criteria[criterion]
-            if criterion not in cited or statement not in cited:
-                additions.append(f"{criterion}: {statement}")
-        if additions:
-            key = run["plan_sections"][0]
-            plan_sections[key] = plan_sections[key] + "\n" + "\n".join(additions)
+    # CB-02 removed the verbatim-substring plan gate: validate_plan_graph_plan
+    # now checks referential integrity only (sections/criteria exist, every
+    # criterion assigned, dependency order), so the cited sections are used
+    # exactly as authored — no mechanical objective/criterion-statement
+    # normalization is needed to pass registration.
     decomposition = {
         "protocol": "plan-graph-plan/1",
         "plan": PLAN_PATH,
-        "plan_sections": plan_sections,
+        "plan_sections": dict(sections),
         "acceptance_criteria": criteria,
         "runs": runs,
         "functionality_tests": [
@@ -610,7 +594,7 @@ def _launch_node(
         {
             "id": criterion,
             "statement": acceptance_criteria[criterion],
-            "source": "operator",
+            "source": "plan",
         }
         for criterion in run.criteria
     )

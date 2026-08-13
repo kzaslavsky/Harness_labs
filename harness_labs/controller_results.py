@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import string
 from dataclasses import dataclass
 from typing import Any, Mapping
 
@@ -13,9 +14,79 @@ CLAIM_KINDS = frozenset({"observed", "inferred"})
 FINDING_SEVERITIES = frozenset({"critical", "major", "minor", "info"})
 COVERAGE_STATUSES = frozenset({"satisfied", "not_satisfied", "not_applicable"})
 
+# Deterministic deliverable-content floor. Closed rule set, no model judgment:
+# a field is refused if it is shorter than this, exactly matches a known
+# placeholder token (case-insensitive, whitespace-normalized), or consists of
+# a single token repeated across the whole field. Chosen low enough that real
+# short sentences ("Built.", "Verified.") clear it on length alone.
+MIN_DELIVERABLE_LENGTH = 4
+_PLACEHOLDER_TOKENS = frozenset(
+    {
+        "test",
+        "todo",
+        "tbd",
+        "n/a",
+        "na",
+        "placeholder",
+        "wip",
+        "fixme",
+        "xxx",
+        "lorem ipsum",
+    }
+)
+
 
 class SemanticResultError(ValueError):
     """Raised when a TaskResult does not satisfy its declared semantic contract."""
+
+
+class DeliverableFloorViolation(SemanticResultError):
+    """Raised when a summary or deliverable field fails the content floor.
+
+    Carries a machine-classified ``reason`` (``not_a_string``,
+    ``sub_minimal_length``, ``placeholder_token``, or ``repeated_token``) so
+    the refusal is auditable as more than a generic validation failure.
+    """
+
+    def __init__(self, field: str, reason: str) -> None:
+        self.field = field
+        self.reason = reason
+        super().__init__(
+            f"semantic result {field} failed the deliverable-content floor "
+            f"({reason})"
+        )
+
+
+def deliverable_floor_reason(text: str) -> str | None:
+    """Classify placeholder content, or return ``None`` if it clears the floor."""
+
+    stripped = text.strip()
+    if len(stripped) < MIN_DELIVERABLE_LENGTH:
+        return "sub_minimal_length"
+    normalized = " ".join(stripped.lower().split()).strip(string.punctuation + " ")
+    if normalized in _PLACEHOLDER_TOKENS:
+        return "placeholder_token"
+    tokens = [tok.strip(string.punctuation) for tok in stripped.split()]
+    tokens = [tok.lower() for tok in tokens if tok]
+    if len(tokens) > 1 and len(set(tokens)) == 1:
+        return "repeated_token"
+    return None
+
+
+def enforce_deliverable_floor(text: Any, field: str) -> str:
+    """Refuse placeholder content at the shared semantic result boundary.
+
+    A closed, deterministic check — the same function both semantic executors
+    and :func:`validate_semantic_result` call, so a placeholder result is
+    refused mechanically rather than relying on coordinator judgment.
+    """
+
+    if not isinstance(text, str):
+        raise DeliverableFloorViolation(field, "not_a_string")
+    reason = deliverable_floor_reason(text)
+    if reason is not None:
+        raise DeliverableFloorViolation(field, reason)
+    return text
 
 
 @dataclass(frozen=True)
@@ -47,6 +118,7 @@ def validate_semantic_result(
     if payload.get("protocol") != SEMANTIC_RESULT_PROTOCOL:
         raise SemanticResultError("semantic result protocol is invalid")
     summary = _text(payload, "summary")
+    enforce_deliverable_floor(summary, "summary")
     details_schema = _text(payload, "details_schema")
     if details_schema != expected_details_schema:
         raise SemanticResultError(
