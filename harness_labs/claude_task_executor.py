@@ -27,6 +27,7 @@ from .controller_live import (
     _RAW_OUTPUT_SCHEMA,
     _WORKSPACE_CHANGE_RECEIPT_KIND,
     LiveExecutionError,
+    _filter_satisfied_criteria,
     _parse_context,
     _snapshot_delta_paths,
     _worker_prompt,
@@ -327,15 +328,13 @@ class ClaudeSemanticTaskExecutor:
         if workspace_artifact is not None:
             evidence_refs.append(workspace_artifact.ref)
             artifacts.append(workspace_artifact.as_dict())
-        accepted_criteria = set(self.task.get("acceptance_criteria", ()))
-        satisfied = raw.get("satisfied_criteria", [])
-        if not isinstance(satisfied, list):
-            raise LiveExecutionError("satisfied_criteria must be a list")
-        unknown = set(satisfied) - accepted_criteria
-        if unknown:
-            raise LiveExecutionError(
-                f"worker claimed unassigned criteria: {sorted(unknown)}"
-            )
+        satisfied = _filter_satisfied_criteria(
+            raw.get("satisfied_criteria", []),
+            accepted_criteria=set(self.task.get("acceptance_criteria", ())),
+            audit=self.audit,
+            attempt=attempt,
+            backend_id="claude-print",
+        )
         payload = semantic_payload(
             summary=str(raw["summary"]),
             details_schema=str(self.task["details_schema"]),

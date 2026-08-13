@@ -426,15 +426,13 @@ class CodexSemanticTaskExecutor:
         if workspace_artifact is not None:
             evidence_refs.append(workspace_artifact.ref)
             artifacts.append(workspace_artifact.as_dict())
-        accepted_criteria = set(self.task.get("acceptance_criteria", ()))
-        satisfied = raw.get("satisfied_criteria", [])
-        if not isinstance(satisfied, list):
-            raise LiveExecutionError("satisfied_criteria must be a list")
-        unknown = set(satisfied) - accepted_criteria
-        if unknown:
-            raise LiveExecutionError(
-                f"worker claimed unassigned criteria: {sorted(unknown)}"
-            )
+        satisfied = _filter_satisfied_criteria(
+            raw.get("satisfied_criteria", []),
+            accepted_criteria=set(self.task.get("acceptance_criteria", ())),
+            audit=self.audit,
+            attempt=attempt,
+            backend_id="codex-exec",
+        )
         payload = semantic_payload(
             summary=str(raw["summary"]),
             details_schema=str(self.task["details_schema"]),
@@ -665,6 +663,52 @@ class CodexSemanticTaskExecutor:
             duration_ms=duration_ms,
             artifacts=(prompt_artifact, stdout_artifact, stderr_artifact),
         )
+
+
+_UNASSIGNED_CRITERIA_ANNOTATED_EVENT = "unassigned_criteria_annotated"
+
+
+def _filter_satisfied_criteria(
+    satisfied: Any,
+    *,
+    accepted_criteria: set[str],
+    audit: AuditJournal | None,
+    attempt: TaskAttempt,
+    backend_id: str,
+) -> list[str]:
+    """Drop out-of-assignment ids from a worker's ``satisfied_criteria`` claim.
+
+    A worker's claim vocabulary is untrusted input under the harness's own
+    rules, so an id naming a criterion outside the task's assignment is noise,
+    not a violation: it is journaled here and dropped instead of failing the
+    caller's node.
+    """
+
+    if not isinstance(satisfied, list):
+        raise LiveExecutionError("satisfied_criteria must be a list")
+    in_assignment = list(
+        dict.fromkeys(
+            criterion_id for criterion_id in satisfied if criterion_id in accepted_criteria
+        )
+    )
+    dropped = sorted(
+        {criterion_id for criterion_id in satisfied if criterion_id not in accepted_criteria}
+    )
+    if dropped and audit is not None:
+        audit.append(
+            _UNASSIGNED_CRITERIA_ANNOTATED_EVENT,
+            status="succeeded",
+            payload={"dropped_criteria": dropped},
+            actor=AuditActor(
+                attempt.attempt_id,
+                "capability_adapter",
+                parent_id=attempt.parent_attempt_id,
+            ),
+            attempt_id=attempt.attempt_id,
+            parent_attempt_id=attempt.parent_attempt_id,
+            backend_id=backend_id,
+        )
+    return in_assignment
 
 
 def _snapshot_delta_paths(
