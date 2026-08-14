@@ -404,32 +404,6 @@ and finish or replace it rather than starting blind. Your structured result is
 part of the deliverable: summary and deliverable_markdown must substantively
 describe what you changed and how the red/green gate proves it — placeholder
 text fails the run.
-RED-PHASE EVIDENCE OBLIGATION: after your gate run passes, paste into the
-implementation summary, under a heading "Red-phase evidence", the gate
-verdict's red.tail excerpt and each FAILED test node id exactly as the gate
-JSON reports them. Reviewers are contractually required to reject summaries
-without this section; producing it costs one gate run you must do anyway.
-PATH-GRANT OBLIGATION: the writable-path grant is enforced mechanically — a
-final diff touching ANY file outside your allowed paths fails the task and
-leaves a dirty tree that deadlocks the whole node (no actor can clean it).
-Existing tests outside your grant must be kept passing by making your event
-and API changes additive; you may NOT edit those files, and any coverage
-you want there goes into your granted test files instead. Before finishing,
-run `git status --porcelain` and `git diff --name-only` and confirm every
-changed file is inside the grant; revert any stray edit before you stop.
-SUMMARY FLOOR: the summary and deliverable_markdown fields are validated by a
-deterministic placeholder detector — a summary that is (or normalizes to) a
-stub token like "WIP", "TODO", "placeholder", or a single repeated word is
-mechanically refused, the task fails, and the failed attempt's uncommitted
-edits deadlock the node. Write the real multi-sentence summary of what you
-changed BEFORE you finish; never emit a stub intending to revise it.
-STRUCTURED-RESULT DISCIPLINE: emit your final structured result IMMEDIATELY
-once the gate passes and your diff is grant-clean — do not keep exploring,
-re-running suites, or polishing afterward. Long sessions exhaust the
-structured-output retry budget at the very end, which fails the task with
-unreceipted residue and deadlocks the node. Keep the structured fields plain
-(markdown strings, no exotic nesting); if an emission is rejected, simplify
-the content rather than adding to it.
 """
     return (
         RoleProfile(
@@ -512,14 +486,6 @@ for behavioral reasons rather than ImportError? (3) is the relaxation minimal
 — no new authority, no scope growth? Every finding needs file, stable subject,
 score, fix_cost, and the exact acceptance clause in protects. Empty findings
 means the candidate clears.
-EVIDENCE-OBLIGATION FINDINGS: the red-phase evidence obligation is satisfied
-by a "Red-phase evidence" section in the implementation summary whose FAILED
-node ids match the gate verdict, or by the controller-owned gate receipt in
-the journal — accept either. Anchor every finding's file and required_paths
-INSIDE this node's writable paths ({', '.join(writable)}); a finding anchored
-to any other file (including plan or program documents) is unfixable by
-contract, will deadlock the node, and must instead be recorded in your
-report narrative, not as a finding.
 """,
             "fix": f"""\
 Inspect the supplied ledger and fix_finding_keys. Modify only
