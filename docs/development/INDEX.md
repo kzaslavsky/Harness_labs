@@ -45,6 +45,12 @@ Status: active
   [`plan-projection-design.md`](plan-projection-design.md)
 - Repository-bound PlanGraph approval design:
   [`plan-approval-design.md`](plan-approval-design.md)
+- Dashboard observability metrics plan (graph rollup, naming, snapshot
+  contract, server API, live and completed-viewer UI, historical
+  reconstruction):
+  [`DASHBOARD_OBSERVABILITY_METRICS_PLAN.md`](DASHBOARD_OBSERVABILITY_METRICS_PLAN.md)
+- Completed-PlanGraph viewer backfill and viewing runbook:
+  [`../observability/completed-plangraph-viewer.md`](../observability/completed-plangraph-viewer.md)
 
 ## Seed implementation records
 

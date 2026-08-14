@@ -109,7 +109,7 @@ def build_snapshot(
     outcome["narrative"] = narrative
 
     data_quality = _data_quality(own_summary, metrics, criteria_text_unavailable, criteria_reason, reconstructed)
-    timing = _timing(metrics, own_summary, own_metrics.get("manifest"))
+    timing = _timing(metrics, own_summary, own_metrics.get("manifest"), own_metrics.get("events") or [])
     generated_at = _timestamp(now or datetime.now(timezone.utc))
 
     return {
@@ -456,13 +456,45 @@ def _narrative(display_name: str, status: Any, outcome: Mapping[str, Any], metri
 # Timing and data-quality
 # ---------------------------------------------------------------------------
 
-def _timing(metrics: Mapping[str, Any], own_summary: Mapping[str, Any] | None, manifest: Mapping[str, Any] | None) -> dict[str, Any]:
+def _timing(metrics: Mapping[str, Any], own_summary: Mapping[str, Any] | None, manifest: Mapping[str, Any] | None, events: list[Any]) -> dict[str, Any]:
     finished_at = None
     if isinstance(own_summary, Mapping) and isinstance(own_summary.get("finished_at"), str):
         finished_at = own_summary["finished_at"]
     elif isinstance(manifest, Mapping) and isinstance(manifest.get("finished_at"), str):
         finished_at = manifest["finished_at"]
-    return {"started_at": metrics["timing"]["started_at"], "finished_at": finished_at, "wall_clock_ms": metrics["timing"]["wall_clock_ms"]}
+    wall_clock_ms = metrics["timing"]["wall_clock_ms"]
+    if wall_clock_ms["state"] != "available":
+        derived_ms = _derive_wall_clock_ms(events)
+        if derived_ms is not None:
+            wall_clock_ms = {
+                "state": "partial",
+                "value": derived_ms,
+                "reason": "derived from first/last verified journal event timestamps (graph summary.json is unavailable)",
+            }
+    return {"started_at": metrics["timing"]["started_at"], "finished_at": finished_at, "wall_clock_ms": wall_clock_ms}
+
+
+def _derive_wall_clock_ms(events: list[Any]) -> int | None:
+    """Fallback wall-clock estimate for the pre-2026-08-05 corpus shape whose
+    graphs have no ``summary.json``: the span between the first and last
+    verified journal event timestamps.  Only used for the snapshot's own
+    ``timing`` block -- the shared ``graph_metrics`` rollup never estimates a
+    wall clock this way (its wall-time contract is ``summary.json`` only)."""
+    timestamps = [parsed for parsed in (_parse_event_timestamp(event) for event in events) if parsed is not None]
+    if len(timestamps) < 2:
+        return None
+    span_ms = (max(timestamps) - min(timestamps)).total_seconds() * 1000
+    return max(0, round(span_ms))
+
+
+def _parse_event_timestamp(event: Any) -> datetime | None:
+    value = event.get("timestamp") if isinstance(event, Mapping) else None
+    if not isinstance(value, str):
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
 
 
 def _data_quality(own_summary: Mapping[str, Any] | None, metrics: Mapping[str, Any], criteria_text_unavailable: bool, criteria_reason: str | None, reconstructed: bool) -> dict[str, Any]:
