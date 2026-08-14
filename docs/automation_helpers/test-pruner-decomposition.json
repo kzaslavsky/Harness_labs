@@ -2,59 +2,43 @@
   "protocol": "plan-graph-plan/1",
   "plan": "docs/automation_helpers/test-pruner-plangraph-plan.md",
   "plan_sections": {
-    "OVERVIEW": "Build the useless-test pruner as a PlanGraph-developed, FeatureRun-hosted maintenance routine. Evidence tools select deletion candidates; a Codex-exec model seat performs only the bounded deletion.",
-    "BACKENDS": "Every build-time and runtime model seat runs on the Codex exec backend via the agent-mixture provider map; the human-side operator loop is the only exception.",
-    "TP-01": "Mutation engine core: deterministic stdlib-ast mutant enumeration with stable mutant IDs and a fixed classical operator set. Pure enumeration, no execution.",
-    "TP-02": "Mutant execution and scoring: temp-tree materialization, scoped unittest subprocess runs with hard budgets, killed/survived/timeout/error/budget-exhausted classification, and the test-pruner-report/1 schema.",
-    "TP-03": "Static vacuity detector: flags assert-free, tautological, and mock-neutralized tests; must produce zero unreviewed flags on the repository's current suite.",
-    "TP-04": "Candidate selector and routine policy: merge mutation and static evidence into at most five ranked deletion candidates with full evidence chains; author the static-plane policy document.",
-    "TP-05": "All-codex runtime wiring: FeatureRun dispatch of the bounded deletion with codex-exec coordinator, implementer, reviewer, and repair seats; candidate-only integration; PlanGraph launcher variant.",
-    "TP-06": "Pilot and audit evidence: planted fixture corpus, end-to-end selection accuracy assertion, post-deletion green suite, and a recorded pilot report artifact."
+    "OVERVIEW": "Build the useless-test pruner as a PlanGraph-developed, FeatureRun-hosted maintenance routine with a quarantine-first output. Deterministic evidence tools select candidates; Codex-exec model seats only execute the bounded quarantine edit. Dogfooding GraphRun on itself with an all-codex fleet is an explicit second goal.",
+    "METHODOLOGY": "Hardened measurement core: per-test line-level sys.settrace attribution, structural out-of-scope exclusion for subprocess-driven tests, killable-mutant denominators with equivalent-mutant screening, full-selection no-failfast kill semantics, green-baseline preflight, reproduce-twice zero-kill verdicts, named module allowlist with exhaustiveness proof, operator set matched to this codebase, and a report schema whose every count carries its denominator.",
+    "BACKENDS": "Every model seat on Codex exec via four module-level spec constants; mixture layer for worker seats, hand-wired factories from the same constants for reviewer and repair seats; evidence tools run controller-side via preflight; path confinement is post-hoc git-delta detection with candidate-only integration and human review as the real boundary.",
+    "PREWORK": "Human-owned before approval: the committed tp_gate.py suite gate, the committed one-argument build-graph launcher with persisted registration and recovery authority, and a green all-codex smoke FeatureRun.",
+    "TP-01": "Mutation measurement engine: deterministic enumeration (mutation_check.py), traced budgeted execution and scoring (mutation_score.py), and the test-pruner-report/1 schema, all owned by one node.",
+    "TP-02": "Advisory static vacuity detector with implicit-no-raise-oracle and skip-override classification, a committed baseline snapshot, and gate-adjudicated zero-drift verification against that snapshot.",
+    "TP-03": "Quarantine-candidate selector with machine-checked hard disqualifiers and versioned exclusion roots, the routine policy document with budgets and metrics, and the per-run metric record.",
+    "TP-04": "All-codex runtime FeatureRun wiring with verification gates and candidate-only integration, a fully deterministic fixture pilot with mechanical candidate application, the runtime config assertion test, and the operator calibration harness."
   },
   "acceptance_criteria": {
-    "AC-ENG-1": "Mutant enumeration is deterministic, stdlib-only, refuses out-of-root targets, and produces stable mutant IDs across repeated invocations.",
-    "AC-ENG-2": "Mutant execution runs each mutant in an isolated subprocess against a scoped test selection under hard per-mutant and total budgets; exhaustion is reported as budget-exhausted, never silently truncated.",
-    "AC-RPT-1": "Every pruner report validates against schemas/test-pruner-report.schema.json and records per-test attribution method, mutant counts, statuses, budgets, environment fingerprint, and target commit.",
-    "AC-DET-1": "The static detector flags planted assert-free, tautological, and mock-neutralized tests in its own fixtures and raises zero unreviewed flags against the repository's current suite.",
-    "AC-SEL-1": "The selector emits at most five deletion candidates per run, each backed by an evidence chain free of timeout, error, budget-exhausted, or fallback-attribution contamination, and the routine policy document exists.",
-    "AC-RUN-1": "Runtime wiring resolves every model seat to the codex-exec provider, confines the deletion lane's writable paths to tests/**, and forces candidate-only integration.",
-    "AC-PIL-1": "On the planted fixture corpus the pruner selects exactly the planted vacuous tests, genuine tests survive, the fixture suite passes after deletion, and the pilot report is recorded as a reviewable artifact."
+    "AC-ENG-1": "Mutant enumeration is deterministic, stdlib-only, refuses out-of-root targets, produces stable mutant IDs across repeated invocations, and implements the plan's operator set including call-statement deletion, exception-type swap, return-to-None, and same-module string-literal substitution.",
+    "AC-ENG-2": "Mutant execution materializes mutants only in temporary trees, runs the full scoped selection without failfast in isolated subprocesses under hard budgets, records per-test line-level traced attribution from fresh processes, classifies import/collection/setUp breakage as error excluded from every denominator, computes per-mutant killable flags, requires a passing pre-flight baseline, reproduces every zero-kill verdict across two independent runs with PYTHONHASHSEED pinned, and reports budget exhaustion as budget-exhausted, never silent truncation.",
+    "AC-RPT-1": "Every pruner report validates against schemas/test-pruner-report.schema.json, which declares draft-2020-12 $schema, a unique $id, and type object, and records per test: attribution method and confidence, exercised-line overlap, eligible, killable, sampled, run, and killed mutant counts, per-operator-class kills, sampling metadata, module-level suite mutation score, baseline status, budgets, an allowlisted environment fingerprint free of absolute paths and usernames, and the target commit SHA.",
+    "AC-DET-1": "The static detector flags planted assert-free, tautological, and mock-neutralized tests in its fixtures, classifies bare-invocation must-not-raise tests and skipTest overrides as non-vacuous categories pinned by tests against this repository's four known real cases, and its node verification runs the detector over tests/ and diffs the output against the committed baseline snapshot tests/fixtures/vacuous_baseline.json so drift fails the gate.",
+    "AC-SEL-1": "The selector emits at most five quarantine candidates per run; static flags alone never qualify a candidate; hard machine-checked disqualifiers reject any test with out-of-scope or fallback attribution, zero attributed mutants run, killable-in-traced-region below the recorded floor, non-passing baseline status, unreproduced zero-kill verdicts, or timeout, error, or budget-exhausted contamination; the pruner's own tests and tests/fixtures are a versioned exclusion root enforced in code and pinned by a test; and the policy document exists with a Status line, quarantine-then-delete lifecycle, run-frequency and open-candidate budgets, reviewer-of-record, and denominator-bearing metrics.",
+    "AC-RUN-1": "Runtime wiring drives every model seat from four module-level codex-exec spec constants verified via parse_backend_spec and RoleProfile.backend_id without invoking any executor factory; the quarantine lane's writable paths use prefix form confined under tests; candidate_only is always true; allow_dirty_baseline is false; verification chains the tp_gate suite and contract check via verification_gates; a verification-repair factory is present; the plan-graph variant passes controller-owned keys only through PlanGraphFeatureRunBinding; and each run emits the policy's metric record.",
+    "AC-PIL-1": "The fixture pilot is fully deterministic with no model invocation under tests/: on the planted corpus the pipeline selects exactly the planted vacuous tests, genuine tests survive, mechanical application of the candidate list leaves the fixture suite green, and the calibration harness computes precision-at-5 from operator labels over the module allowlist."
   },
   "runs": [
     {
       "id": "TP-01",
-      "objective": "Create the deterministic stdlib-only mutant enumeration engine in scripts/dev/mutation_check.py with unit tests.",
-      "plan_sections": ["TP-01"],
-      "criteria": ["AC-ENG-1"],
+      "objective": "Create the mutation measurement engine: deterministic enumeration in scripts/dev/mutation_check.py, traced budgeted execution and scoring in scripts/dev/mutation_score.py, the test-pruner-report/1 schema, and their tests.",
+      "plan_sections": ["TP-01", "METHODOLOGY"],
+      "criteria": ["AC-ENG-1", "AC-ENG-2", "AC-RPT-1"],
       "depends_on": [],
       "allowed_paths": [
         "scripts/dev/mutation_check.py",
-        "tests/test_mutation_check.py"
-      ],
-      "path_intents": [
-        {"path": "scripts/dev/mutation_check.py", "action": "create"},
-        {"path": "tests/test_mutation_check.py", "action": "create"}
-      ],
-      "verification_argv": ["python3", "-m", "unittest", "tests.test_mutation_check", "-v"],
-      "verification_timeout_seconds": 900,
-      "verification_required_paths": [
-        {"path": "tests/__init__.py", "availability": "base"}
-      ]
-    },
-    {
-      "id": "TP-02",
-      "objective": "Create the isolated mutant execution and budgeted scoring engine on top of the TP-01 enumeration API, plus the test-pruner-report/1 schema.",
-      "plan_sections": ["TP-02"],
-      "criteria": ["AC-ENG-2", "AC-RPT-1"],
-      "depends_on": ["TP-01"],
-      "allowed_paths": [
         "scripts/dev/mutation_score.py",
         "schemas/test-pruner-report.schema.json",
+        "tests/test_mutation_check.py",
         "tests/test_mutation_scoring.py"
       ],
       "path_intents": [
+        {"path": "scripts/dev/mutation_check.py", "action": "create"},
         {"path": "scripts/dev/mutation_score.py", "action": "create"},
         {"path": "schemas/test-pruner-report.schema.json", "action": "create"},
+        {"path": "tests/test_mutation_check.py", "action": "create"},
         {"path": "tests/test_mutation_scoring.py", "action": "create"}
       ],
       "verification_argv": ["python3", "-m", "unittest", "tests.test_mutation_check", "tests.test_mutation_scoring", "-v"],
@@ -64,17 +48,19 @@
       ]
     },
     {
-      "id": "TP-03",
-      "objective": "Create the static vacuity detector for assert-free, tautological, and mock-neutralized tests, verified against fixtures and the current suite.",
-      "plan_sections": ["TP-03"],
+      "id": "TP-02",
+      "objective": "Create the advisory static vacuity detector, its committed baseline snapshot, and tests pinning the must-not-raise and skip-override classifications against this repository's known real cases.",
+      "plan_sections": ["TP-02", "METHODOLOGY"],
       "criteria": ["AC-DET-1"],
       "depends_on": [],
       "allowed_paths": [
         "scripts/dev/vacuous_test_check.py",
+        "tests/fixtures/vacuous_baseline.json",
         "tests/test_vacuous_test_check.py"
       ],
       "path_intents": [
         {"path": "scripts/dev/vacuous_test_check.py", "action": "create"},
+        {"path": "tests/fixtures/vacuous_baseline.json", "action": "create"},
         {"path": "tests/test_vacuous_test_check.py", "action": "create"}
       ],
       "verification_argv": ["python3", "-m", "unittest", "tests.test_vacuous_test_check", "-v"],
@@ -84,11 +70,11 @@
       ]
     },
     {
-      "id": "TP-04",
-      "objective": "Create the evidence-merging candidate selector with a five-candidate cap and author the routine's static-plane policy document.",
-      "plan_sections": ["TP-04"],
+      "id": "TP-03",
+      "objective": "Create the quarantine-candidate selector with hard disqualifiers and exclusion roots, the routine policy document, and the per-run metric record.",
+      "plan_sections": ["TP-03", "METHODOLOGY"],
       "criteria": ["AC-SEL-1"],
-      "depends_on": ["TP-02", "TP-03"],
+      "depends_on": ["TP-01", "TP-02"],
       "allowed_paths": [
         "scripts/dev/test_pruner_select.py",
         "docs/automation_helpers/test-pruner-policy.md",
@@ -102,59 +88,46 @@
       "verification_argv": ["python3", "-m", "unittest", "tests.test_pruner_select", "-v"],
       "verification_timeout_seconds": 900,
       "verification_required_paths": [
-        {"path": "tests/__init__.py", "availability": "base"}
+        {"path": "tests/__init__.py", "availability": "base"},
+        {"path": "scripts/dev/mutation_check.py", "availability": "created_by", "producer_run_id": "TP-01"},
+        {"path": "scripts/dev/mutation_score.py", "availability": "created_by", "producer_run_id": "TP-01"},
+        {"path": "scripts/dev/vacuous_test_check.py", "availability": "created_by", "producer_run_id": "TP-02"}
       ]
     },
     {
-      "id": "TP-05",
-      "objective": "Create the all-codex FeatureRun wiring and PlanGraph launcher that turn a selector report into a bounded deletion-only candidate branch.",
-      "plan_sections": ["TP-05", "BACKENDS"],
-      "criteria": ["AC-RUN-1"],
-      "depends_on": ["TP-04"],
+      "id": "TP-04",
+      "objective": "Create the all-codex runtime FeatureRun wiring, the runtime config assertion test, the deterministic fixture pilot with mechanical candidate application, and the operator calibration harness.",
+      "plan_sections": ["TP-04", "BACKENDS"],
+      "criteria": ["AC-RUN-1", "AC-PIL-1"],
+      "depends_on": ["TP-03"],
       "allowed_paths": [
         "experiments/run_test_pruner_feature.py",
-        "experiments/run_test_pruner_plan_graph.py",
-        "tests/test_pruner_runtime_config.py"
+        "scripts/dev/tp_calibration.py",
+        "tests/test_pruner_runtime_config.py",
+        "tests/fixtures/test_pruner_pilot",
+        "tests/test_pruner_pilot.py"
       ],
       "path_intents": [
         {"path": "experiments/run_test_pruner_feature.py", "action": "create"},
-        {"path": "experiments/run_test_pruner_plan_graph.py", "action": "create"},
-        {"path": "tests/test_pruner_runtime_config.py", "action": "create"}
-      ],
-      "verification_argv": ["python3", "-m", "unittest", "tests.test_pruner_runtime_config", "-v"],
-      "verification_timeout_seconds": 900,
-      "verification_required_paths": [
-        {"path": "tests/__init__.py", "availability": "base"}
-      ]
-    },
-    {
-      "id": "TP-06",
-      "objective": "Create the planted fixture corpus and end-to-end pilot proving selection accuracy and post-deletion suite health, recording the pilot report artifact.",
-      "plan_sections": ["TP-06"],
-      "criteria": ["AC-PIL-1"],
-      "depends_on": ["TP-05"],
-      "allowed_paths": [
-        "tests/fixtures/test_pruner_pilot",
-        "tests/test_pruner_pilot.py",
-        "docs/automation_helpers/pilot-report.json"
-      ],
-      "path_intents": [
+        {"path": "scripts/dev/tp_calibration.py", "action": "create"},
+        {"path": "tests/test_pruner_runtime_config.py", "action": "create"},
         {"path": "tests/fixtures/test_pruner_pilot", "action": "create"},
-        {"path": "tests/test_pruner_pilot.py", "action": "create"},
-        {"path": "docs/automation_helpers/pilot-report.json", "action": "create"}
+        {"path": "tests/test_pruner_pilot.py", "action": "create"}
       ],
-      "verification_argv": ["python3", "-m", "unittest", "tests.test_pruner_pilot", "-v"],
+      "verification_argv": ["python3", "-m", "unittest", "tests.test_pruner_runtime_config", "tests.test_pruner_pilot", "-v"],
       "verification_timeout_seconds": 1800,
       "verification_required_paths": [
-        {"path": "tests/__init__.py", "availability": "base"}
+        {"path": "tests/__init__.py", "availability": "base"},
+        {"path": "scripts/dev/test_pruner_select.py", "availability": "created_by", "producer_run_id": "TP-03"}
       ]
     }
   ],
   "functionality_tests": [
     {
-      "argv": ["python3", "-m", "unittest", "discover", "-s", "tests"],
+      "argv": ["python3", "scripts/dev/tp_gate.py"],
       "timeout_seconds": 3600,
       "required_paths": [
+        {"path": "scripts/dev/tp_gate.py", "availability": "base"},
         {"path": "tests/__init__.py", "availability": "base"}
       ]
     },
@@ -169,6 +142,8 @@
   "referenced_artifacts": [
     "docs/automation_helpers/automation-routines-analysis.md",
     "docs/automation_helpers/boris-cherny-automation-routines.md",
+    "docs/automation_helpers/test-pruner-review-round-1.md",
+    "scripts/dev/tp_gate.py",
     "AGENTS.md"
   ]
 }
