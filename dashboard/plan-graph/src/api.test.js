@@ -48,9 +48,17 @@ test('attempts are grouped by logical graph identity and newest live attempt is 
   assert.equal(defaultGraphAttempt(groups[0]).run_id, 'attempt-live');
 });
 
-test('graphs with the same plan digest remain distinct when their logical graph IDs differ', () => {
-  const first = graph('attempt-1', '2026-08-09T00:00:00Z');
-  const second = { ...graph('attempt-2', '2026-08-09T00:01:00Z'), logical_graph_id: 'logical-graph-2' };
+test('singleton self-identities are combined as retries by plan, base, and topology', () => {
+  const first = { ...graph('attempt-1', '2026-08-09T00:00:00Z'), logical_graph_id: 'attempt-1', graph_attempt_id: 'attempt-1' };
+  const second = { ...graph('attempt-2', '2026-08-09T00:01:00Z'), logical_graph_id: 'attempt-2', graph_attempt_id: 'attempt-2' };
+  const groups = planGraphGroups({ plan_graphs: [first, second] });
+  assert.equal(groups.length, 1);
+  assert.deepEqual(groups[0].attempts.map((item) => item.run_id), ['attempt-2', 'attempt-1']);
+});
+
+test('same-plan graphs with different verified topology remain distinct', () => {
+  const first = { ...graph('attempt-1', '2026-08-09T00:00:00Z'), logical_graph_id: 'attempt-1', graph_attempt_id: 'attempt-1' };
+  const second = { ...graph('attempt-2', '2026-08-09T00:01:00Z', 'running', [node('other')]), logical_graph_id: 'attempt-2', graph_attempt_id: 'attempt-2' };
   assert.equal(planGraphGroups({ plan_graphs: [first, second] }).length, 2);
 });
 

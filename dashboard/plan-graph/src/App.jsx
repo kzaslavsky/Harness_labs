@@ -128,7 +128,7 @@ function Dashboard() {
   const [selectedNodeKey, setSelectedNodeKey] = useState(null);
   const [selectedPlanKey, setSelectedPlanKey] = useState(null); const [selectedGraphId, setSelectedGraphId] = useState(null);
   const refresh = useCallback(async (signal) => { try { const result = await fetchCatalog({ etag: etag.current, signal }); if (result.catalog) { etag.current = result.etag; setCatalog(result.catalog); } setError(undefined); } catch (reason) { if (reason.name !== 'AbortError') setError(reason.message); } }, []);
-  useEffect(() => { const controller = new AbortController(); const refreshWhileVisible = () => { if (document.visibilityState === 'visible') refresh(controller.signal); }; refreshWhileVisible(); const timer = window.setInterval(refreshWhileVisible, POLL_MILLISECONDS); document.addEventListener('visibilitychange', refreshWhileVisible); return () => { controller.abort(); window.clearInterval(timer); document.removeEventListener('visibilitychange', refreshWhileVisible); }; }, [refresh]);
+  useEffect(() => { const controller = new AbortController(); let active = true; let timer; const poll = async () => { if (document.visibilityState === 'visible') await refresh(controller.signal); if (active) timer = window.setTimeout(poll, POLL_MILLISECONDS); }; poll(); return () => { active = false; controller.abort(); window.clearTimeout(timer); }; }, [refresh]);
   const selectedRun = useMemo(() => selectedRunFor(catalog, selectedRunId), [catalog, selectedRunId]);
   const visibleDetail = detailRunId === selectedRunId ? detail : null;
   useEffect(() => {
@@ -136,21 +136,22 @@ function Dashboard() {
     if (!selectedRun) { detailRef.current = null; detailRunIdRef.current = null; setDetail(null); setDetailRunId(null); setDetailError('The selected FeatureRun is no longer present in the refreshed catalog.'); return undefined; }
     let active = true;
     let requestController;
-    const refreshDetail = () => {
-      if (document.visibilityState !== 'visible') return;
-      requestController?.abort();
-      requestController = new AbortController();
-      setDetailError(undefined);
-      fetchRunDetail(selectedRunId, requestController.signal).then((result) => {
-        if (active) { detailRef.current = result; detailRunIdRef.current = selectedRunId; setDetail(result); setDetailRunId(selectedRunId); }
-      }).catch((reason) => {
-        if (active && reason.name !== 'AbortError' && (detailRunIdRef.current !== selectedRunId || !detailRef.current)) setDetailError(reason.message);
-      });
+    let timer;
+    const refreshDetail = async () => {
+      if (document.visibilityState === 'visible') {
+        requestController = new AbortController();
+        setDetailError(undefined);
+        try {
+          const result = await fetchRunDetail(selectedRunId, requestController.signal);
+          if (active) { detailRef.current = result; detailRunIdRef.current = selectedRunId; setDetail(result); setDetailRunId(selectedRunId); }
+        } catch (reason) {
+          if (active && reason.name !== 'AbortError' && (detailRunIdRef.current !== selectedRunId || !detailRef.current)) setDetailError(reason.message);
+        }
+      }
+      if (active) timer = window.setTimeout(refreshDetail, POLL_MILLISECONDS);
     };
     refreshDetail();
-    const timer = window.setInterval(refreshDetail, POLL_MILLISECONDS);
-    document.addEventListener('visibilitychange', refreshDetail);
-    return () => { active = false; requestController?.abort(); window.clearInterval(timer); document.removeEventListener('visibilitychange', refreshDetail); };
+    return () => { active = false; requestController?.abort(); window.clearTimeout(timer); };
   }, [selectedRunId, selectedRun]);
   const graphGroups = useMemo(() => catalog ? planGraphGroups(catalog) : [], [catalog]);
   const selectedGroup = graphGroups.find((group) => group.key === selectedPlanKey) || graphGroups[0] || null;

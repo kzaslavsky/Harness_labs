@@ -15,6 +15,7 @@ from harness_labs.dashboard_server import (
     DashboardError,
     _DashboardHandler,
     _apply_cumulative_node_metrics,
+    build_run_detail,
     load_audit_root_registry,
 )
 from harness_labs.plan_graph_audit import PlanGraphAudit
@@ -130,6 +131,17 @@ class DashboardApiTests(unittest.TestCase):
             transport = type("Transport", (), {"headers": {"If-None-Match": first_etag}, "wfile": io.BytesIO(), "send_response": lambda self, value: setattr(self, "status", value), "send_header": lambda self, key, value: setattr(self, key.lower().replace("-", "_"), value), "end_headers": lambda self: None})()
             _DashboardHandler._send(transport, 200, refreshed_catalog, etag=refreshed_options["etag"])
             self.assertEqual(transport.status, 304)
+
+    def test_catalog_does_not_eagerly_project_feature_run_details(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._run(root)
+            app = DashboardApplication(root, refresh_seconds=60)
+            with patch("harness_labs.dashboard_server.build_run_detail", wraps=build_run_detail) as projector:
+                self.assertEqual(self._request(app, "GET", "/api/catalog")[0], 200)
+                projector.assert_not_called()
+                self.assertEqual(self._request(app, "GET", "/api/feature-runs/run-1")[0], 200)
+                self.assertEqual(projector.call_count, 1)
 
     def test_only_get_is_supported_and_paths_cannot_escape(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

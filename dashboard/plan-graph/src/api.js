@@ -125,15 +125,27 @@ export function stateLabel(record) {
 }
 
 export function planGraphGroups(catalog) {
+  const logicalIdCounts = new Map();
+  for (const graph of catalog.plan_graphs) {
+    if (graph.logical_graph_id) logicalIdCounts.set(graph.logical_graph_id, (logicalIdCounts.get(graph.logical_graph_id) || 0) + 1);
+  }
   const groups = new Map();
   for (const graph of catalog.plan_graphs) {
-    const key = graph.logical_graph_id || graph.plan_digest;
+    const declaredIdentityIsShared = graph.logical_graph_id && logicalIdCounts.get(graph.logical_graph_id) > 1;
+    const topology = [...graph.nodes]
+      .sort((left, right) => left.node_id.localeCompare(right.node_id))
+      .map((node) => [node.node_id, [...node.depends_on].sort()]);
+    const baseCommit = graph.execution?.logical_graph?.base_commit || 'base-unavailable';
+    const key = declaredIdentityIsShared
+      ? `logical:${graph.logical_graph_id}`
+      : `retry:${graph.plan_digest}:${baseCommit}:${JSON.stringify(topology)}`;
     const group = groups.get(key) || { key, planPath: graph.plan_path, planDigest: graph.plan_digest, attempts: [] };
     group.attempts.push(graph);
     groups.set(key, group);
   }
   for (const group of groups.values()) {
     group.attempts.sort((left, right) => right.created_at.localeCompare(left.created_at) || right.run_id.localeCompare(left.run_id));
+    group.planPath = group.attempts[0].plan_path;
   }
   return [...groups.values()].sort((left, right) => right.attempts[0].created_at.localeCompare(left.attempts[0].created_at));
 }

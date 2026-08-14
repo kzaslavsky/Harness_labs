@@ -93,9 +93,22 @@ Metrics for a FeatureRun correlated from a PlanGraph node are cumulative across
 all verified tries of that node under the same approved-plan digest. The detail
 view keeps the per-try totals so retries and checkpoint resumes remain
 individually auditable and are not double-counted within a try.
+Catalog refreshes project only graph and run summaries. Verified FeatureRun
+detail and cumulative node history are projected on demand for the selected run
+and cached only for that immutable catalog snapshot, so a growing audit root
+does not block the initial dashboard render on every run's detail.
+After the first verified snapshot, catalog reads use stale-while-revalidate:
+one background refresh computes the next snapshot while readers continue to
+receive the last verified snapshot. Catalog and detail polling schedule the next
+request only after the prior request completes, preventing slow projections
+from being repeatedly abandoned or multiplied.
 ReactFlow cards retain the concise PlanGraph node ID as their visible title
 through every lifecycle state. Full FeatureRun and PlanGraph run IDs remain in
 the inspector and metric breakdowns rather than expanding the graph card.
+PlanGraph records with a recurring declared logical graph ID are grouped by
+that identity. When legacy retry launchers instead assign a fresh self-identity
+to every attempt, the dashboard combines attempts only when approved-plan
+digest, base commit, and normalized node/dependency topology all match.
 
 Malformed run directories are isolated: valid peers stay visible and the
 catalog shows a bounded diagnostic. A corrupt summary does not make the raw

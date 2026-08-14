@@ -60,13 +60,18 @@ class DashboardApplication:
         self.assets_root = _contained_assets(assets_root) if assets_root is not None else None
         self.refresh_seconds = refresh_seconds
         self._lock = threading.Lock()
+        self._detail_lock = threading.Lock()
+        self._refresh_guard = threading.Lock()
+        self._refresh_thread: threading.Thread | None = None
         self._snapshot: _Snapshot | None = None
         self._last_error: str | None = None
 
     def snapshot(self) -> _Snapshot:
         current = self._snapshot
-        if current is None or time.monotonic() - current.created_at >= self.refresh_seconds:
+        if current is None:
             self.refresh()
+        elif time.monotonic() - current.created_at >= self.refresh_seconds:
+            self._schedule_refresh()
         current = self._snapshot
         if current is None:
             raise DashboardError(self._last_error or "catalog is unavailable")
@@ -84,6 +89,21 @@ class DashboardApplication:
                 return
             self._snapshot = candidate
             self._last_error = None
+
+    def _schedule_refresh(self) -> None:
+        with self._refresh_guard:
+            if self._refresh_thread is not None and self._refresh_thread.is_alive():
+                return
+            self._refresh_thread = threading.Thread(target=self._background_refresh, name="dashboard-catalog-refresh", daemon=True)
+            self._refresh_thread.start()
+
+    def _background_refresh(self) -> None:
+        try:
+            self.refresh()
+        finally:
+            with self._refresh_guard:
+                if self._refresh_thread is threading.current_thread():
+                    self._refresh_thread = None
 
     def health(self) -> bytes:
         try:
@@ -110,6 +130,39 @@ class DashboardApplication:
         media = "text/html; charset=utf-8" if resolved.suffix == ".html" else "application/javascript; charset=utf-8" if resolved.suffix == ".js" else "text/css; charset=utf-8" if resolved.suffix == ".css" else "application/octet-stream"
         return resolved.read_bytes(), media
 
+    def feature_run_detail(self, snapshot: _Snapshot, run_id: str) -> bytes | None:
+        cached = snapshot.run_details.get(run_id)
+        if cached is not None:
+            return cached
+        with self._detail_lock:
+            cached = snapshot.run_details.get(run_id)
+            if cached is not None:
+                return cached
+            runs = {run["run_id"]: run for run in snapshot.catalog_value["feature_runs"]}
+            target = runs.get(run_id)
+            if target is None or target.get("status") == "corrupt":
+                return None
+            details: dict[str, dict[str, Any]] = {}
+            for history_id in _node_history_run_ids(snapshot.catalog_value, run_id):
+                run = runs.get(history_id)
+                if run is None or run.get("status") == "corrupt":
+                    continue
+                try:
+                    details[history_id] = build_run_detail(Path(run["source_root"]), history_id)
+                except (AuditError, DashboardError, OSError, ValueError, json.JSONDecodeError):
+                    continue
+            _apply_cumulative_node_metrics(snapshot.catalog_value, details)
+            detail = details.get(run_id)
+            if detail is None:
+                return None
+            try:
+                body = _json_bytes(detail)
+            except DashboardError:
+                return None
+            if isinstance(snapshot.run_details, dict):
+                snapshot.run_details[run_id] = body
+            return body
+
     def _build_snapshot(self) -> _Snapshot:
         source_catalogs = []
         for root in self.audit_roots:
@@ -119,28 +172,10 @@ class DashboardApplication:
         catalog_value = _cap_diagnostics(catalog_value)
         _ensure_unique_ids(catalog_value)
         graph_details: dict[str, bytes] = {}
-        run_detail_values: dict[str, dict[str, Any]] = {}
         for graph in catalog_value["plan_graphs"]:
             graph_details[graph["run_id"]] = _json_bytes(graph)
-        for run in catalog_value["feature_runs"]:
-            run_id = run["run_id"]
-            if run.get("status") == "corrupt":
-                continue
-            try:
-                run_detail_values[run_id] = build_run_detail(Path(run["source_root"]), run_id)
-            except (AuditError, DashboardError, OSError, ValueError, json.JSONDecodeError):
-                # A catalog summary may safely describe a corrupt detail; it must not
-                # make an arbitrary journal available through the detail endpoint.
-                continue
-        _apply_cumulative_node_metrics(catalog_value, run_detail_values)
-        run_details: dict[str, bytes] = {}
-        for run_id, detail in run_detail_values.items():
-            try:
-                run_details[run_id] = _json_bytes(detail)
-            except DashboardError:
-                continue
         catalog = _json_bytes(catalog_value)
-        return _Snapshot(catalog, catalog_value, graph_details, run_details, str(catalog_value["revision"]), time.monotonic())
+        return _Snapshot(catalog, catalog_value, graph_details, {}, str(catalog_value["revision"]), time.monotonic())
 
 
 def create_dashboard_server(application: DashboardApplication, host: str = "127.0.0.1", port: int = 8000) -> ThreadingHTTPServer:
@@ -187,7 +222,7 @@ class _DashboardHandler(BaseHTTPRequestHandler):
             body = snapshot.graph_details.get(_path_id(path, "/api/plan-graphs/"))
             etag = True
         elif path.startswith("/api/feature-runs/"):
-            body = snapshot.run_details.get(_path_id(path, "/api/feature-runs/"))
+            body = self.app.feature_run_detail(snapshot, _path_id(path, "/api/feature-runs/"))
             etag = True
         else:
             body = None
@@ -347,6 +382,29 @@ def _apply_cumulative_node_metrics(catalog: Mapping[str, Any], details: dict[str
             metrics = [base_metrics.get(item) for item in history]
             if all(isinstance(item, Mapping) for item in metrics):
                 details[run_id]["metrics"] = _merge_detail_metrics(metrics, history)
+
+
+def _node_history_run_ids(catalog: Mapping[str, Any], target_run_id: str) -> list[str]:
+    """Return the ordered tries for the target's logical node through this try."""
+    histories: dict[tuple[str, str], list[str]] = {}
+    graphs = sorted(catalog.get("plan_graphs", []), key=lambda graph: (str(graph.get("created_at", "")), str(graph.get("run_id", ""))))
+    for graph in graphs:
+        plan_digest = graph.get("plan_digest")
+        if not isinstance(plan_digest, str):
+            continue
+        for node in graph.get("nodes", []):
+            if not isinstance(node, Mapping):
+                continue
+            node_id = node.get("node_id")
+            run_id = node.get("feature_run_id")
+            if not isinstance(node_id, str) or not isinstance(run_id, str):
+                continue
+            history = histories.setdefault((plan_digest, node_id), [])
+            if run_id not in history:
+                history.append(run_id)
+            if run_id == target_run_id:
+                return list(history)
+    return [target_run_id]
 
 
 def _merge_detail_metrics(metrics: list[Mapping[str, Any]], run_ids: list[str]) -> dict[str, Any]:
