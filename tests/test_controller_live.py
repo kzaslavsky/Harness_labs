@@ -281,6 +281,12 @@ class CodexSemanticTaskExecutorTests(unittest.TestCase):
         }
 
         def run(argv, **kwargs):
+            if argv[0] == "git":
+                # CB3-04 restoration probes/reverts with real git subprocess
+                # calls after the attempt fails; treat every one as a no-op
+                # success here so this test stays focused on the grant-escape
+                # refusal itself rather than restoration's own mechanics.
+                return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
             output = Path(argv[argv.index("-o") + 1])
             output.write_text(json.dumps(raw), encoding="utf-8")
             return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
@@ -346,6 +352,12 @@ class CodexSemanticTaskExecutorTests(unittest.TestCase):
         }
 
         def run(argv, **kwargs):
+            if argv[0] == "git":
+                # CB3-04 restoration probes/reverts with real git subprocess
+                # calls after the attempt fails; treat every one as a no-op
+                # success here so this test stays focused on the
+                # forbid-repository-change refusal itself.
+                return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
             output = Path(argv[argv.index("-o") + 1])
             output.write_text(json.dumps(raw), encoding="utf-8")
             return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")

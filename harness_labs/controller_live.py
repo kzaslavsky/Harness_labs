@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import hashlib
+import itertools
 import json
 import shutil
 import subprocess
 import tempfile
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from time import monotonic_ns
@@ -205,6 +207,120 @@ def select_dirty_baseline_receipt(
     )
 
 
+# One event type, ``status`` distinguishes "restored" from "declined" --
+# matching the ``dirty_baseline_adoption_grant_supplied`` convention already
+# used for the sibling grant decision.
+ATTEMPT_START_BASELINE_RESTORATION_EVENT = "attempt_start_baseline_restoration"
+
+
+def _git_probe(repository: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    """Run one git command scoped to ``repository``; never raises on its own."""
+
+    return subprocess.run(
+        ["git", *args],
+        cwd=repository,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+
+def _tracked_at_commit(repository: Path, commit: str, path: str) -> bool:
+    """True when ``path`` exists in ``commit`` -- a tracked change to revert.
+
+    False (including any probe anomaly) means ``path`` is treated as the
+    attempt's own untracked residue to remove outright; restoration resolves
+    every dirty path to exactly one of its two concrete actions, never a
+    silent no-op for an individual path.
+    """
+
+    return _git_probe(repository, "cat-file", "-e", f"{commit}:{path}").returncode == 0
+
+
+def restore_attempt_start_baseline(
+    repository: Path,
+    baseline_commit: str,
+    dirty_paths: list[str],
+) -> dict[str, str]:
+    """Restore ``repository`` to ``baseline_commit`` across exactly ``dirty_paths``.
+
+    Every path is classified read-only (tracked at the baseline commit, or
+    not) before any mutation, so a scoped ``git checkout`` failure for the
+    tracked set leaves the tree in its unchanged dirty state rather than a
+    partially reverted one -- never a partial revert. Paths absent from the
+    baseline commit are the attempt's own untracked residue (restoration
+    only ever runs when the attempt started from a clean baseline, so any
+    currently dirty path not present at the baseline commit was created by
+    this attempt) and are removed directly from the working tree. No path
+    outside ``dirty_paths`` -- no journal, no evidence artifact, nothing
+    else in the repository -- is ever touched.
+    """
+
+    tracked = sorted(
+        path
+        for path in dirty_paths
+        if _tracked_at_commit(repository, baseline_commit, path)
+    )
+    untracked = sorted(path for path in dirty_paths if path not in tracked)
+    actions: dict[str, str] = {}
+    if tracked:
+        checkout = _git_probe(repository, "checkout", baseline_commit, "--", *tracked)
+        if checkout.returncode != 0:
+            for path in tracked:
+                actions[path] = "revert_failed"
+            for path in untracked:
+                actions[path] = "skipped"
+            return actions
+        for path in tracked:
+            actions[path] = "reverted"
+    for path in untracked:
+        target = repository / path
+        try:
+            if target.is_symlink() or target.is_file():
+                target.unlink()
+            elif target.is_dir():
+                shutil.rmtree(target)
+            actions[path] = "removed"
+        except OSError:
+            actions[path] = "removal_failed"
+    return actions
+
+
+# Controller-local (in-process, not catalog-ordered) bookkeeping of which
+# writable attempt most recently started against a given repository path --
+# the "no newer attempt has started" restoration trigger condition. Shared
+# across both the Codex and Claude executors so a sibling writable attempt
+# from either backend against the same repository is honored.
+_ATTEMPT_SEQUENCE_LOCK = threading.Lock()
+_ATTEMPT_SEQUENCE_COUNTER = itertools.count(1)
+_LATEST_WRITABLE_ATTEMPT_SEQUENCE: dict[str, int] = {}
+
+
+def _record_writable_attempt_started(repository: Path) -> int:
+    """Record that a writable attempt has started against ``repository``.
+
+    Returns this attempt's sequence token. If, by the time restoration is
+    evaluated, the latest token recorded for the same repository no longer
+    matches this one, a newer writable attempt has since started against
+    the same workspace and restoration must decline rather than delete
+    that attempt's in-flight files.
+    """
+
+    key = str(repository)
+    with _ATTEMPT_SEQUENCE_LOCK:
+        token = next(_ATTEMPT_SEQUENCE_COUNTER)
+        _LATEST_WRITABLE_ATTEMPT_SEQUENCE[key] = token
+        return token
+
+
+def _is_latest_writable_attempt(repository: Path, token: int) -> bool:
+    """True when ``token`` is still the latest recorded start for ``repository``."""
+
+    key = str(repository)
+    with _ATTEMPT_SEQUENCE_LOCK:
+        return _LATEST_WRITABLE_ATTEMPT_SEQUENCE.get(key) == token
+
+
 _RAW_OUTPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
@@ -340,6 +456,19 @@ class CodexSemanticTaskExecutor:
     dirty_baseline_grant: Mapping[str, Any] | None = None
     audit: AuditJournal | None = field(default=None, repr=False)
     pricing: ModelPrice | None = None
+    # Per-execute() bookkeeping for CB3-04 restoration -- not a constructor
+    # input; set from the attempt-start and post-worker workspace snapshots
+    # already taken during ``_execute`` and consumed once by
+    # ``_maybe_restore_attempt_start_baseline``.
+    _attempt_start_baseline: Mapping[str, Any] | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
+    _attempt_end_workspace: Mapping[str, Any] | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
+    _attempt_sequence_token: int | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
 
     def __post_init__(self) -> None:
         if self.sandbox not in {"read-only", "workspace-write"}:
@@ -378,11 +507,16 @@ class CodexSemanticTaskExecutor:
             raise ValueError("require_preflight_success requires a preflight command")
 
     def execute(self, attempt: TaskAttempt) -> TaskResult:
+        self._attempt_start_baseline = None
+        self._attempt_end_workspace = None
+        self._attempt_sequence_token = None
+        result: TaskResult | None = None
         try:
-            return self._execute(attempt)
+            result = self._execute(attempt)
+            return result
         except DeliverableFloorViolation as exc:
             self._audit_deliverable_floor_violation(attempt, exc)
-            return TaskResult(
+            result = TaskResult(
                 attempt_id=attempt.attempt_id,
                 status="failed",
                 payload={
@@ -392,6 +526,7 @@ class CodexSemanticTaskExecutor:
                     "reason": exc.reason,
                 },
             )
+            return result
         except (
             GitTransactionError,
             LiveExecutionError,
@@ -399,11 +534,20 @@ class CodexSemanticTaskExecutor:
             ValueError,
             json.JSONDecodeError,
         ) as exc:
-            return TaskResult(
+            result = TaskResult(
                 attempt_id=attempt.attempt_id,
                 status="failed",
                 payload={"error": str(exc), "error_type": type(exc).__name__},
             )
+            return result
+        finally:
+            # A ``finally`` (not a plain trailer after the ``except``
+            # clauses) so restoration also runs for exception types outside
+            # the caught tuple above -- the attempt still terminated without
+            # succeeding, and any residue it left is still this attempt's
+            # own to restore or decline.
+            if result is None or result.status != "succeeded":
+                self._maybe_restore_attempt_start_baseline(attempt)
 
     def _execute(self, attempt: TaskAttempt) -> TaskResult:
         repository = self.repository.resolve(strict=True)
@@ -424,6 +568,11 @@ class CodexSemanticTaskExecutor:
             if self.sandbox == "workspace-write"
             else None
         )
+        self._attempt_start_baseline = initial_workspace
+        if initial_workspace is not None:
+            self._attempt_sequence_token = _record_writable_attempt_started(
+                repository
+            )
         adoption_grant = None
         if initial_workspace is not None and initial_workspace["changed_paths"]:
             adoption_grant = self._resolve_dirty_baseline_grant(initial_workspace)
@@ -526,6 +675,7 @@ class CodexSemanticTaskExecutor:
         workspace_artifact = None
         if initial_workspace is not None:
             final_workspace = workspace_snapshot(repository)
+            self._attempt_end_workspace = final_workspace
             if final_workspace["head"] != initial_workspace["head"]:
                 raise LiveExecutionError("writable worker changed repository HEAD")
             if final_workspace["branch"] != initial_workspace["branch"]:
@@ -750,6 +900,135 @@ class CodexSemanticTaskExecutor:
             "receipted_paths": list(verification.receipted_paths),
         }
 
+    def _maybe_restore_attempt_start_baseline(self, attempt: TaskAttempt) -> None:
+        """Restore a failed writable attempt's own residue when nothing can adopt it.
+
+        Triggers only when the attempt started from a clean baseline (this
+        workspace's dirty state, if any, is entirely the attempt's own
+        making) and no workspace-change receipt covers the current dirty
+        state (a covering receipt means CB3-03's dispatch-chokepoint
+        adoption can recover the work instead, so this never fires there --
+        AC-CB304-1). A best-effort safety net: any anomaly while inspecting
+        or mutating the workspace here is swallowed rather than raised,
+        since restoration must never mask the attempt's own failure result
+        or crash the caller.
+
+        ``final`` -- the post-worker workspace snapshot -- may never have
+        been taken if the attempt failed before reaching it (a timeout, a
+        nonzero worker exit, a missing or unparsable result); in that case
+        it is taken here on demand so restoration is still reachable.
+        """
+
+        baseline = self._attempt_start_baseline
+        final = self._attempt_end_workspace
+        token = self._attempt_sequence_token
+        self._attempt_start_baseline = None
+        self._attempt_end_workspace = None
+        self._attempt_sequence_token = None
+        if self.sandbox != "workspace-write" or baseline is None:
+            return
+        try:
+            if final is None:
+                final = workspace_snapshot(self.repository.resolve(strict=True))
+            dirty_paths = list(final.get("changed_paths", ()))
+            if not dirty_paths:
+                return
+            self._evaluate_and_apply_baseline_restoration(
+                attempt, baseline, final, dirty_paths, token
+            )
+        except Exception:
+            return
+
+    def _evaluate_and_apply_baseline_restoration(
+        self,
+        attempt: TaskAttempt,
+        baseline: Mapping[str, Any],
+        final: Mapping[str, Any],
+        dirty_paths: list[str],
+        sequence_token: int | None,
+    ) -> None:
+        started_clean = not baseline.get("changed_paths")
+        head_unchanged = final.get("head") == baseline.get("head")
+        branch_unchanged = final.get("branch") == baseline.get("branch")
+        repository = self.repository.resolve(strict=True)
+        no_newer_attempt_started = sequence_token is not None and (
+            _is_latest_writable_attempt(repository, sequence_token)
+        )
+        receipt_ref: str | None = None
+        if started_clean:
+            receipt_ref, _ = select_dirty_baseline_receipt(
+                evidence=self.evidence,
+                dirty_paths=dirty_paths,
+                dirty_files=final.get("files", {}),
+            )
+        conditions = {
+            "attempt_terminated_failed": True,
+            "attempt_started_clean": started_clean,
+            "head_unchanged": head_unchanged,
+            "branch_unchanged": branch_unchanged,
+            "no_newer_attempt_started": no_newer_attempt_started,
+            "no_covering_receipt": receipt_ref is None,
+        }
+        baseline_commit = str(baseline["head"])
+        if all(conditions.values()):
+            actions = restore_attempt_start_baseline(
+                repository, baseline_commit, dirty_paths
+            )
+            self._journal_baseline_restoration(
+                attempt,
+                status="restored",
+                baseline_commit=baseline_commit,
+                dirty_paths=dirty_paths,
+                conditions=conditions,
+                receipt_ref=receipt_ref,
+                actions=actions,
+            )
+        else:
+            self._journal_baseline_restoration(
+                attempt,
+                status="declined",
+                baseline_commit=baseline_commit,
+                dirty_paths=dirty_paths,
+                conditions=conditions,
+                receipt_ref=receipt_ref,
+                actions=None,
+            )
+
+    def _journal_baseline_restoration(
+        self,
+        attempt: TaskAttempt,
+        *,
+        status: str,
+        baseline_commit: str,
+        dirty_paths: list[str],
+        conditions: Mapping[str, bool],
+        receipt_ref: str | None,
+        actions: Mapping[str, str] | None,
+    ) -> None:
+        if self.audit is None:
+            return
+        payload: dict[str, Any] = {
+            "baseline_commit": baseline_commit,
+            "dirty_paths": dirty_paths,
+            "conditions": dict(conditions),
+            "receipt_ref": receipt_ref,
+        }
+        if actions is not None:
+            payload["actions"] = dict(actions)
+        self.audit.append(
+            ATTEMPT_START_BASELINE_RESTORATION_EVENT,
+            status=status,
+            payload=payload,
+            actor=AuditActor(
+                attempt.attempt_id,
+                "capability_adapter",
+                parent_id=attempt.parent_attempt_id,
+            ),
+            attempt_id=attempt.attempt_id,
+            parent_attempt_id=attempt.parent_attempt_id,
+            backend_id="subprocess",
+        )
+
     def _audit_transport(
         self,
         attempt: TaskAttempt,
@@ -931,10 +1210,12 @@ def _worker_prompt(
 
 
 __all__ = [
+    "ATTEMPT_START_BASELINE_RESTORATION_EVENT",
     "CodexSemanticTaskExecutor",
     "DirtyBaselineGrantVerification",
     "LiveExecutionError",
     "dirty_baseline_grant_refusal_detail",
+    "restore_attempt_start_baseline",
     "select_dirty_baseline_receipt",
     "verify_dirty_baseline_grant",
 ]
