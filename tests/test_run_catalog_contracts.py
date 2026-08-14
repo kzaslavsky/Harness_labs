@@ -254,6 +254,46 @@ class RunCatalogContractTests(unittest.TestCase):
         with self.assertRaises(SchemaValidationError):
             self._validator("run-catalog-snapshot.schema.json").validate(snapshot)
 
+    def test_naming_and_block_escalation_projections_validate_against_catalog_schema(self) -> None:
+        """DM-02: display_name/objective/block_escalation are optional additions.
+
+        Existing committed fixtures (validated unchanged above) never carry
+        these fields; this asserts the new, always-emitted values validate
+        too, so the schema addition is genuinely additive both ways.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            plan = root / "naming-schema-plan.md"
+            plan.write_text("approved plan\n", encoding="utf-8")
+            audit = PlanGraphAudit(
+                repository=root,
+                run_root=root,
+                graph_run_id="graph-attempt",
+                plan=str(plan),
+                plan_sha256=hashlib.sha256(plan.read_bytes()).hexdigest(),
+                base_commit="a" * 40,
+                registration_binding=_registration_binding("graph-attempt"),
+                objective="schema naming projection",
+                nodes={"lane": {"status": "queued", "feature_run_id": "child", "depends_on": [], "objective": "Land the naming schema."}},
+                functionality_tests=(),
+            )
+            audit.journal.append(
+                "plan_graph_block_escalated", status="blocked",
+                payload={"blocker_evidence_ref": f"artifact:sha256:{'a' * 64}", "stable_path": "escalation.json"},
+            )
+            audit.journal.checkpoint("running", audit.state)
+            snapshot = build_run_catalog(root)
+        self._validator("run-catalog-snapshot.schema.json").validate(snapshot)
+        graph = snapshot["plan_graphs"][0]
+        self.assertEqual(graph["display_name"], "Naming Schema Plan")
+        self.assertEqual(graph["nodes"][0]["objective"], "Land the naming schema.")
+        self.assertEqual(graph["execution"]["block_escalation"]["escalated"], True)
+        # additionalProperties: false still rejects anything unexpected on
+        # these new optional shapes.
+        graph["execution"]["block_escalation"]["unexpected"] = True
+        with self.assertRaises(SchemaValidationError):
+            self._validator("run-catalog-snapshot.schema.json").validate(snapshot)
+
 
 if __name__ == "__main__":
     unittest.main()
