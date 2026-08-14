@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { defaultGraphAttempt, displayState, graphProjection, planGraphGroups, selectedRunFor, stateLabel, validateCatalog, validateRunDetail } from './api.js';
+import { defaultGraphAttempt, displayState, elapsedMs, graphProjection, liveGraphs, planGraphGroups, selectedRunFor, stateLabel, validateCatalog, validateGraphMetrics, validateRunDetail } from './api.js';
+import { distributionSummary, metricValue, money } from './format.js';
 
 const availability = { state: 'available', reason: null };
 const liveness = (state) => ({ state, reason: null });
@@ -128,6 +129,77 @@ test('FeatureRun detail validation accepts the production availability projectio
   assert.deepEqual(validateRunDetail(detail), detail);
   delete detail.availability.usage;
   assert.throws(() => validateRunDetail(detail));
+});
+
+test('liveGraphs lists only non-terminal graphs, newest first', () => {
+  const catalog = { plan_graphs: [graph('done', '2026-08-09T00:00:00Z', 'succeeded'), graph('run-a', '2026-08-09T00:01:00Z', 'running'), graph('run-b', '2026-08-09T00:02:00Z', 'queued')] };
+  assert.deepEqual(liveGraphs(catalog).map((item) => item.run_id), ['run-b', 'run-a']);
+  assert.deepEqual(liveGraphs(null), []);
+});
+
+test('elapsedMs derives elapsed time from started_at against the current clock', () => {
+  assert.equal(elapsedMs('2026-08-09T00:00:00Z', Date.parse('2026-08-09T00:00:05Z')), 5000);
+  assert.equal(elapsedMs(null), null);
+  assert.equal(elapsedMs('not-a-date'), null);
+});
+
+test('tri-state metric formatting renders available, partial, and unavailable values distinctly', () => {
+  assert.equal(metricValue({ state: 'available', value: 42 }), '42');
+  assert.equal(metricValue({ state: 'partial', value: 42 }), '≥42');
+  assert.equal(metricValue({ state: 'unavailable', value: null }), 'Unavailable');
+  assert.equal(metricValue(null), 'Unavailable');
+});
+
+test('distribution summaries mark only the max as a verified lower bound when partial', () => {
+  const partial = { state: 'partial', mean: 10, median: 10, max: 20, reason: 'lower bound' };
+  assert.equal(distributionSummary(partial), 'mean 10 · median 10 · max ≥20');
+  const available = { state: 'available', mean: 10, median: 10, max: 20 };
+  assert.equal(distributionSummary(available), 'mean 10 · median 10 · max 20');
+  assert.equal(distributionSummary({ state: 'unavailable' }), 'Unavailable');
+});
+
+test('cost formatting distinguishes recorded dollars from estimates', () => {
+  assert.equal(money({ state: 'available', usd: 1.5 }), '$1.5000');
+  assert.equal(money({ state: 'estimated', usd: 1.5 }), '≈$1.5000');
+  assert.equal(money({ state: 'unavailable', usd: null }), 'Unavailable');
+});
+
+const genericMetric = (state, value, reason = null) => ({ state, value, reason });
+const tokenBlock = (state, overrides = {}) => ({ state, reason: null, input_tokens: null, cached_input_tokens: null, output_tokens: null, total_tokens: null, ...overrides });
+const costBlock = (state, usd = null, reason = null) => ({ state, usd, reason });
+const ledgerBlock = (state, overrides = {}) => ({ state, reason: null, graph_launches: null, gate_invocations: null, repair_dispatches: null, structural_decisions: null, ...overrides });
+const distribution = (state, overrides = {}) => ({ state, reason: null, mean: null, median: null, max: null, sample_size: 0, population: 0, ...overrides });
+const graphMetricsDoc = (overrides = {}) => ({
+  protocol: 'harness-plan-graph-metrics/1', run_id: 'graph-1', status: 'running',
+  timing: { started_at: '2026-08-09T00:00:00Z', wall_clock_ms: genericMetric('available', 1000) },
+  totals: {
+    tokens: tokenBlock('partial', { input_tokens: 10, cached_input_tokens: 0, output_tokens: 5, total_tokens: 15, reason: 'lower bound: 1 of 2 FeatureRun(s) report verified token usage' }),
+    cost: costBlock('estimated', 0.05, 'one or more FeatureRun cost records are estimated'),
+    calls: genericMetric('available', 3), agent_busy_ms: genericMetric('available', 900),
+    parallelism: genericMetric('available', 1.2), peak_input_tokens: genericMetric('available', 10),
+  },
+  retries: { budget_ledger: ledgerBlock('available', { graph_launches: 1, gate_invocations: 0, repair_dispatches: 0, structural_decisions: 0 }), node_retries: 0, graph_attempts: 1 },
+  recovery: { dispositions: [], attempt_lineage_count: 1, invalidations_count: 0 },
+  blockers: { count: 0, nodes: [] },
+  counts: { logical_nodes: 2, feature_run_tries: 2 },
+  per_feature_run: { wall_ms: distribution('available', { mean: 900, median: 900, max: 900, sample_size: 2, population: 2 }), tokens: distribution('partial', { mean: 15, median: 15, max: 15, sample_size: 1, population: 2, reason: 'lower bound: 1 of 2 FeatureRun(s) report this metric' }), cost_usd: distribution('unavailable') },
+  nodes: [],
+  scheduling: { critical_path_ms: genericMetric('available', 900) },
+  cache: { savings_usd: genericMetric('unavailable', null) },
+  lineage_totals: { tokens: tokenBlock('unavailable'), cost: costBlock('unavailable'), calls: genericMetric('unavailable', null), agent_busy_ms: genericMetric('unavailable', null), peak_input_tokens: genericMetric('unavailable', null), reason: 'no cross-attempt lineage' },
+  ...overrides,
+});
+
+test('PlanGraph metrics validation accepts a full tri-state document and rejects an incomplete one', () => {
+  const doc = graphMetricsDoc();
+  assert.equal(validateGraphMetrics(doc), doc);
+  assert.equal(doc.totals.tokens.state, 'partial');
+  assert.equal(doc.totals.cost.state, 'estimated');
+  const errorDoc = { protocol: 'harness-plan-graph-metrics/1', run_id: 'graph-2', status: 'blocked', error: { state: 'unavailable', reason: 'catalog write in progress' } };
+  assert.equal(validateGraphMetrics(errorDoc), errorDoc);
+  const broken = graphMetricsDoc();
+  delete broken.counts;
+  assert.throws(() => validateGraphMetrics(broken));
 });
 
 test('FeatureRun detail validation normalizes keyed controller families', () => {

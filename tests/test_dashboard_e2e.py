@@ -18,7 +18,7 @@ from unittest.mock import patch
 
 from harness_labs.observability.dashboard_server import DashboardApplication, _DashboardHandler, create_dashboard_server
 from harness_labs.observability.run_catalog import RunCatalog
-from scripts.dashboard_fixture_run import advance_live_fixture, create_fixture
+from scripts.dashboard_fixture_run import _feature, _graph, _lease, advance_live_fixture, create_fixture
 
 
 def _get(app: DashboardApplication, path: str) -> bytes:
@@ -226,6 +226,72 @@ class DashboardEndToEndTests(unittest.TestCase):
                 # The two-second UI polling interval must retain the selection and
                 # show the terminal state after the catalog refresh.
                 page.wait_for("document.querySelector('aside[aria-label=\\\"live-child FeatureRun details\\\"]') && document.querySelector('.inspector').innerText.includes('Succeeded')", timeout=6)
+
+    def test_in_flight_strip_and_graph_totals_are_certified(self) -> None:
+        """AC-DM05-1, AC-DM05-2: the in-flight strip lists every live PlanGraph
+        and switches selection without a reload, and the GraphTotals panel
+        renders DM-01 headline metrics with explicit tri-state labelling."""
+        chrome = _chrome_binary()
+        if chrome is None:
+            self.skipTest("set DASHBOARD_E2E_CHROME to a Chrome binary to run UI certification")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            create_fixture(root)
+            # A second, independent live PlanGraph (distinct topology from
+            # "active-graph") so the strip has more than one entry to switch
+            # between -- this is what AC-DM05-1 actually certifies.
+            second_parent = {"plan_graph_id": "second-active-graph", "plan_node_id": "solo", "parent_run_id": "second-active-graph"}
+            second_live = _feature(root, "second-live-child", parent=second_parent)
+            _lease(second_live, "second-live-child", stale=False)
+            _graph(root, "second-active-graph", root / "approved-plan.md", {"solo": {"status": "running", "feature_run_id": "second-live-child"}}, terminal=False)
+            assets = Path("dashboard/plan-graph/dist").resolve()
+            with patch("harness_labs.observability.dashboard_server.RunCatalog", side_effect=lambda source, **options: RunCatalog(source, process_probe=lambda pid: "fixture-process-token", **options)):
+                app = DashboardApplication(root, assets_root=assets, refresh_seconds=0.001)
+                server = create_dashboard_server(app, port=0)
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+                page = _ChromePage(chrome)
+                host, port = server.server_address[:2]
+                self.addCleanup(server.server_close)
+                self.addCleanup(lambda: thread.join(timeout=5))
+                self.addCleanup(server.shutdown)
+                self.addCleanup(page.close)
+                page.command("Page.navigate", url=f"http://{host}:{port}/")
+                page.wait_for("document.querySelectorAll('.in-flight-list button').length === 2")
+                names = page.evaluate("[...document.querySelectorAll('.in-flight-list button strong')].map((node) => node.innerText)")
+                self.assertEqual(len(set(names)), 2, "in-flight display names must be unique")
+                # Every strip entry reports a non-empty elapsed label derived
+                # client-side from started_at, never a raw zero/blank.
+                elapsed_labels = page.evaluate("[...document.querySelectorAll('.in-flight-list button span')].map((node) => node.innerText)")
+                self.assertTrue(all(label for label in elapsed_labels))
+                # The GraphTotals panel renders for the initially selected
+                # live graph with explicit tri-state labelling (this fixture
+                # records no backend usage, so tokens must say so, not "0").
+                page.wait_for("document.querySelector('.graph-totals') !== null")
+                page.wait_for("document.querySelector('.graph-totals').innerText.includes('Total tokens')")
+                self.assertIn("Unavailable", page.evaluate("document.querySelector('.graph-totals').innerText"))
+                # active-graph (3 nodes) and second-active-graph (1 node) have
+                # different topologies, so the node count is a reliable,
+                # order-independent signal that a strip click actually
+                # switched the canvas's selection in place -- no navigation,
+                # no full reload.
+                initial_count = page.evaluate("document.querySelectorAll('.react-flow__node').length")
+                self.assertIn(initial_count, (1, 3))
+                active_index = page.evaluate("[...document.querySelectorAll('.in-flight-list button')].findIndex((button) => button.classList.contains('active'))")
+                other_index = 1 - active_index
+                other_name = names[other_index]
+                page.evaluate(f"document.querySelectorAll('.in-flight-list button')[{other_index}].click()")
+                page.wait_for(f"document.querySelectorAll('.react-flow__node').length === {4 - initial_count}")
+                active_name = page.evaluate("document.querySelector('.in-flight-list button.active strong').innerText")
+                self.assertEqual(active_name, other_name)
+                page.wait_for("document.querySelector('.graph-totals').innerText.includes('Logical nodes')")
+                # A single-try node inspector reports non-cumulative retry
+                # labelling ("Retries", not "Cumulative retries") -- the
+                # cumulative merge itself is certified by test_graph_metrics.py
+                # and test_dashboard_api.py; this pins only the UI wiring.
+                page.evaluate("[...document.querySelectorAll('.react-flow__node')].find((node) => !node.innerText.includes('correlation unavailable')).click()")
+                page.wait_for("document.querySelector('.inspector').innerText.includes('Retries')")
+                self.assertNotIn("Cumulative retries", page.evaluate("document.querySelector('.inspector').innerText"))
 
     def test_operator_legacy_graph_import_is_explicitly_retired(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

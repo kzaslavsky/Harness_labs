@@ -1,20 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Background, Controls, Handle, Position, ReactFlow, ReactFlowProvider } from '@xyflow/react';
-import { defaultGraphAttempt, displayState, fetchCatalog, fetchRunDetail, graphProjection, planGraphGroups, selectedRunFor, stateLabel } from './api.js';
+import { defaultGraphAttempt, displayState, elapsedMs, fetchCatalog, fetchPlanGraphMetrics, fetchRunDetail, graphProjection, liveGraphs, planGraphGroups, selectedRunFor, stateLabel } from './api.js';
+import { compactId, duration, money, title, tokens } from './format.js';
+import GraphTotals from './components/GraphTotals.jsx';
+import InFlightStrip from './components/InFlightStrip.jsx';
+import NodeMetricsTable from './components/NodeMetricsTable.jsx';
 
 const POLL_MILLISECONDS = 2_000;
-const number = new Intl.NumberFormat('en-US');
-const title = (value) => String(value || 'Unavailable').replace(/[_-]+/g, ' ').replace(/\b\w/g, (letter) => letter.toUpperCase());
-const tokens = (value) => value === null || value === undefined ? 'Unavailable' : number.format(value);
-const duration = (milliseconds) => {
-  if (milliseconds === null || milliseconds === undefined) return 'Unavailable';
-  if (milliseconds < 1_000) return `${milliseconds} ms`;
-  if (milliseconds < 60_000) return `${(milliseconds / 1_000).toFixed(1)} s`;
-  const hours = Math.floor(milliseconds / 3_600_000); const minutes = Math.floor((milliseconds % 3_600_000) / 60_000); const seconds = Math.floor((milliseconds % 60_000) / 1_000);
-  return hours ? `${hours}h ${minutes}m` : `${minutes}m ${seconds}s`;
-};
-const money = (cost) => cost?.state === 'available' ? `$${Number(cost.usd).toFixed(4)}` : cost?.state === 'estimated' ? `≈$${Number(cost.usd).toFixed(4)}` : 'Unavailable';
-const compactId = (value) => { const parts = String(value || '').split('/'); return parts.length > 1 ? parts.slice(-3).join(' / ') : value; };
+const TICK_MILLISECONDS = 1_000;
 function Status({ record }) { const state = displayState(record); return <span className={`status status--${state}`}><i />{stateLabel(record)}</span>; }
 function Availability({ value, label }) { return <p className={value?.state === 'available' ? 'availability' : 'availability availability--missing'}><strong>{label}</strong> {value?.state || 'unavailable'}{value?.reason ? ` — ${value.reason}` : ''}</p>; }
 function Liveness({ value }) { if (!value || value.state === 'terminal' || value.state === 'not_applicable') return null; const verified = value.state === 'live'; return <p className={verified ? 'availability' : 'availability availability--missing'}><strong>Liveness:</strong> {verified ? 'verified' : 'unverified'}{value.reason ? ` — ${value.reason}` : ''}</p>; }
@@ -98,20 +91,23 @@ function Activity({ events, availability }) {
 }
 
 function MetricCards({ metrics }) {
-  const total = metrics.totals; const quality = metrics.quality;
+  const total = metrics.totals; const quality = metrics.quality; const cumulative = metrics.cumulative_quality;
+  const attemptCount = metrics.provenance.attempt_count;
+  const retryCounters = cumulative || quality;
   return <div className="metric-cards">
-    <div><span>{metrics.provenance.attempt_count > 1 ? 'Cumulative tokens' : 'Total tokens'}</span><strong>{tokens(total.total_tokens)}</strong><small>{metrics.provenance.attempt_count > 1 ? `${number.format(metrics.provenance.attempt_count)} node tries · ` : ''}{tokens(total.input_tokens)} in · {tokens(total.output_tokens)} out</small></div>
+    <div><span>{attemptCount > 1 ? 'Cumulative tokens' : 'Total tokens'}</span><strong>{tokens(total.total_tokens)}</strong><small>{attemptCount > 1 ? `${tokens(attemptCount)} node tries · ` : ''}{tokens(total.input_tokens)} in · {tokens(total.output_tokens)} out</small></div>
     <div><span>Peak observed input</span><strong>{tokens(total.peak_input_tokens)}</strong><small>single agent invocation</small></div>
     <div><span>Agent busy time</span><strong>{duration(total.busy_ms)}</strong><small>non-overlapping backend activity</small></div>
-    <div><span>Backend time (summed)</span><strong>{duration(total.duration_ms)}</strong><small>{number.format(total.calls)} backend call{total.calls === 1 ? '' : 's'} · overlaps under parallel dispatch</small></div>
-    <div><span>Wall time</span><strong>{duration(total.wall_clock_ms)}</strong><small>run elapsed time{total.wall_clock_ms === null && metrics.provenance.attempt_count > 1 ? ' · a try has not recorded its summary yet' : ''}</small></div>
+    <div><span>Backend time (summed)</span><strong>{duration(total.duration_ms)}</strong><small>{tokens(total.calls)} backend call{total.calls === 1 ? '' : 's'} · overlaps under parallel dispatch</small></div>
+    <div><span>Wall time</span><strong>{duration(total.wall_clock_ms)}</strong><small>run elapsed time{total.wall_clock_ms === null && attemptCount > 1 ? ' · a try has not recorded its summary yet' : ''}</small></div>
     <div><span>{total.cost.state === 'available' ? 'Recorded API cost' : 'Estimated API cost'}</span><strong>{money(total.cost)}</strong><small>{total.cost.reason || 'audited usage pricing'}</small></div>
-    <div><span>Quality</span><strong>{quality.criteria_satisfied}/{quality.criteria_total} criteria</strong><small>{quality.open_findings} open findings · {quality.review_cycles} review cycles · {quality.verification_repairs} repairs</small></div>
+    <div><span>Quality</span><strong>{quality.criteria_satisfied}/{quality.criteria_total} criteria</strong><small>{quality.open_findings} open findings</small></div>
+    <div><span>{attemptCount > 1 ? 'Cumulative retries' : 'Retries'}</span><strong>{retryCounters.review_cycles} review cycle{retryCounters.review_cycles === 1 ? '' : 's'} · {retryCounters.verification_repairs} repair{retryCounters.verification_repairs === 1 ? '' : 's'}</strong><small>{retryCounters.findings_total} total findings{attemptCount > 1 && cumulative ? ` · ${cumulative.reason}` : ''}</small></div>
   </div>;
 }
 
 function MetricsTable({ heading, rows, agents = false }) {
-  return <section className="metric-section"><h3>{heading}</h3>{rows.length ? <div className="table-wrap"><table><thead><tr><th>{agents ? 'Agent' : heading.replace('By ', '')}</th>{agents && <><th>Phase</th><th>Model / effort</th><th>Backend</th></>}<th>Calls</th><th>Total tokens</th><th>Peak input</th><th>Backend time (summed)</th><th>Cost</th></tr></thead><tbody>{rows.map((row) => <tr key={row.label}><td title={row.label}>{agents ? compactId(row.label) : title(row.label)}</td>{agents && <><td>{title(row.phase)}</td><td>{row.model}<small>{row.effort}</small></td><td>{row.backend}</td></>}<td>{number.format(row.calls)}</td><td>{tokens(row.total_tokens)}<small>{tokens(row.input_tokens)} in · {tokens(row.output_tokens)} out</small></td><td>{tokens(row.peak_input_tokens)}</td><td>{duration(row.duration_ms)}</td><td title={row.cost.reason || ''}>{money(row.cost)}</td></tr>)}</tbody></table></div> : <p className="muted">No audited backend usage records were found.</p>}</section>;
+  return <section className="metric-section"><h3>{heading}</h3>{rows.length ? <div className="table-wrap"><table><thead><tr><th>{agents ? 'Agent' : heading.replace('By ', '')}</th>{agents && <><th>Phase</th><th>Model / effort</th><th>Backend</th></>}<th>Calls</th><th>Total tokens</th><th>Peak input</th><th>Backend time (summed)</th><th>Cost</th></tr></thead><tbody>{rows.map((row) => <tr key={row.label}><td title={row.label}>{agents ? compactId(row.label) : title(row.label)}</td>{agents && <><td>{title(row.phase)}</td><td>{row.model}<small>{row.effort}</small></td><td>{row.backend}</td></>}<td>{tokens(row.calls)}</td><td>{tokens(row.total_tokens)}<small>{tokens(row.input_tokens)} in · {tokens(row.output_tokens)} out</small></td><td>{tokens(row.peak_input_tokens)}</td><td>{duration(row.duration_ms)}</td><td title={row.cost.reason || ''}>{money(row.cost)}</td></tr>)}</tbody></table></div> : <p className="muted">No audited backend usage records were found.</p>}</section>;
 }
 
 function Metrics({ metrics }) {
@@ -130,8 +126,14 @@ function Dashboard() {
   const [detailTab, setDetailTab] = useState('overview');
   const [selectedNodeKey, setSelectedNodeKey] = useState(null);
   const [selectedPlanKey, setSelectedPlanKey] = useState(null); const [selectedGraphId, setSelectedGraphId] = useState(null);
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  const [graphMetrics, setGraphMetrics] = useState(null); const [graphMetricsRunId, setGraphMetricsRunId] = useState(null);
   const refresh = useCallback(async (signal) => { try { const result = await fetchCatalog({ etag: etag.current, signal }); if (result.catalog) { etag.current = result.etag; setCatalog(result.catalog); } setError(undefined); } catch (reason) { if (reason.name !== 'AbortError') setError(reason.message); } }, []);
   useEffect(() => { const controller = new AbortController(); let active = true; let timer; const poll = async () => { if (document.visibilityState === 'visible') await refresh(controller.signal); if (active) timer = window.setTimeout(poll, POLL_MILLISECONDS); }; poll(); return () => { active = false; controller.abort(); window.clearTimeout(timer); }; }, [refresh]);
+  // Elapsed time for live PlanGraphs is derived client-side from `started_at`
+  // (the metrics endpoint deliberately never serves it), so this clock ticks
+  // independently of the catalog/metrics polling cadence.
+  useEffect(() => { const timer = window.setInterval(() => setNowMs(Date.now()), TICK_MILLISECONDS); return () => window.clearInterval(timer); }, []);
   const selectedRun = useMemo(() => selectedRunFor(catalog, selectedRunId), [catalog, selectedRunId]);
   const visibleDetail = detailRunId === selectedRunId ? detail : null;
   useEffect(() => {
@@ -159,6 +161,36 @@ function Dashboard() {
   const graphGroups = useMemo(() => catalog ? planGraphGroups(catalog) : [], [catalog]);
   const selectedGroup = graphGroups.find((group) => group.key === selectedPlanKey) || graphGroups[0] || null;
   const selectedGraph = selectedGroup?.attempts.find((graph) => graph.run_id === selectedGraphId) || defaultGraphAttempt(selectedGroup);
+  const selectGraph = useCallback((graph) => {
+    const group = graphGroups.find((candidate) => candidate.attempts.some((attempt) => attempt.run_id === graph.run_id));
+    setSelectedPlanKey(group?.key || null);
+    setSelectedGraphId(graph.run_id);
+  }, [graphGroups]);
+  useEffect(() => {
+    const runId = selectedGraph?.run_id;
+    if (!runId) { setGraphMetrics(null); setGraphMetricsRunId(null); return undefined; }
+    let active = true;
+    let requestController;
+    let timer;
+    const refreshGraphMetrics = async () => {
+      if (document.visibilityState === 'visible') {
+        requestController = new AbortController();
+        try {
+          const result = await fetchPlanGraphMetrics(runId, requestController.signal);
+          if (active) { setGraphMetrics(result); setGraphMetricsRunId(runId); }
+        } catch (reason) {
+          if (active && reason.name !== 'AbortError') { setGraphMetrics(null); setGraphMetricsRunId(runId); }
+        }
+      }
+      if (active) timer = window.setTimeout(refreshGraphMetrics, POLL_MILLISECONDS);
+    };
+    refreshGraphMetrics();
+    return () => { active = false; requestController?.abort(); window.clearTimeout(timer); };
+  }, [selectedGraph?.run_id]);
+  const visibleGraphMetrics = graphMetricsRunId === selectedGraph?.run_id ? graphMetrics : null;
+  const nodeObjectives = useMemo(() => Object.fromEntries((selectedGraph?.nodes || []).filter((node) => node.objective).map((node) => [node.node_id, node.objective])), [selectedGraph]);
+  const inFlightGraphs = useMemo(() => catalog ? liveGraphs(catalog) : [], [catalog]);
+  const selectedGraphElapsedMs = selectedGraph ? elapsedMs(selectedGraph.created_at, nowMs) : null;
   const projection = useMemo(() => catalog ? graphProjection(catalog, selectedGraph) : { nodes: [], edges: [] }, [catalog, selectedGraph]);
   const { nodes, edges } = projection;
   const selectedNode = nodes.find((node) => node.id === selectedNodeKey)?.data || null;
@@ -172,12 +204,17 @@ function Dashboard() {
   const rootCount = catalog?.source_roots?.length || (catalog?.source_root ? 1 : 0);
   return <div className="app"><main><header className="top"><div><span className="eyebrow">READ-ONLY OPERATIONS DASHBOARD</span><h1>PlanGraphs</h1><p>{graphCount} logical PlanGraph{graphCount === 1 ? '' : 's'} · {attemptCount} execution attempt{attemptCount === 1 ? '' : 's'} across {rootCount} audit root{rootCount === 1 ? '' : 's'} · polling every 2 seconds</p></div><div><span className="readonly">Read-only</span><button onClick={() => refresh()} className="refresh">Refresh</button></div></header>
     {error && <p className="error" role="alert">{error}</p>}{!catalog && !error && <p className="loading">Loading catalog…</p>}
-    {catalog && <><Availability label="Catalog:" value={catalog.availability} /><section className="graph"><div className="graph-heading"><div><h2>Execution map</h2><p>{selectedGraph ? `${selectedGraph.plan_path} · audited dependencies · ${selectedGroup.attempts.length} attempt${selectedGroup.attempts.length === 1 ? '' : 's'}` : 'Select a discovered PlanGraph.'}</p></div><div className="graph-selectors">
-        {graphGroups.length > 1 && <label>Plan<select value={selectedGroup?.key || ''} onChange={(event) => { const group = graphGroups.find((item) => item.key === event.target.value); setSelectedPlanKey(event.target.value); setSelectedGraphId(defaultGraphAttempt(group)?.run_id || null); }}><option value="" disabled>Select plan</option>{graphGroups.map((group) => <option key={group.key} value={group.key}>{group.planPath}</option>)}</select></label>}
-        {selectedGroup?.attempts.length > 1 && <label>Attempt<select value={selectedGraph?.run_id || ''} onChange={(event) => setSelectedGraphId(event.target.value)}>{selectedGroup.attempts.map((graph) => <option key={graph.run_id} value={graph.run_id}>{graph.created_at} · {graph.status}</option>)}</select></label>}
+    {catalog && <><Availability label="Catalog:" value={catalog.availability} />
+      <InFlightStrip graphs={inFlightGraphs} selectedRunId={selectedGraph?.run_id} onSelect={selectGraph} nowMs={nowMs} />
+      <section className="graph"><div className="graph-heading"><div><h2>Execution map</h2><p>{selectedGraph ? `${selectedGraph.display_name || selectedGraph.plan_path} · audited dependencies · ${selectedGroup.attempts.length} attempt${selectedGroup.attempts.length === 1 ? '' : 's'}` : 'Select a discovered PlanGraph.'}</p></div><div className="graph-selectors">
+        {graphGroups.length > 1 && <label>Plan<select value={selectedGroup?.key || ''} onChange={(event) => { const group = graphGroups.find((item) => item.key === event.target.value); setSelectedPlanKey(event.target.value); setSelectedGraphId(defaultGraphAttempt(group)?.run_id || null); }}><option value="" disabled>Select plan</option>{graphGroups.map((group) => <option key={group.key} value={group.key}>{group.displayName}</option>)}</select></label>}
+        {selectedGroup?.attempts.length > 1 && <label>Attempt<select value={selectedGraph?.run_id || ''} onChange={(event) => setSelectedGraphId(event.target.value)}>{selectedGroup.attempts.map((graph) => <option key={graph.run_id} value={graph.run_id}>{graph.display_name || graph.run_id} · {graph.created_at} · {graph.status}</option>)}</select></label>}
       </div><div className="legend">{['running', 'queued', 'blocked', 'stale', 'succeeded', 'unavailable'].map((state) => <span key={state} className={`status status--${state}`}><i />{state}</span>)}</div></div>
-      {nodes.length ? <ReactFlow nodes={nodes} edges={edges} nodeTypes={nodeTypes} onNodeClick={onNodeClick} fitView nodesDraggable={false} nodesConnectable={false} deleteKeyCode={null} proOptions={{ hideAttribution: true }}><Background /><Controls showInteractive={false} /></ReactFlow> : <div className="empty-canvas"><h2>No PlanGraphs discovered</h2><p>The configured audit roots have no verified PlanGraph records.</p></div>}</section><GraphExecutionSummary graph={selectedGraph} />
-      <section className="runs"><h2>FeatureRuns</h2>{catalog.feature_runs.length ? catalog.feature_runs.map((run) => <button key={run.run_id} onClick={() => { setDetailTab('overview'); setSelectedNodeKey(null); setSelectedRunId(run.run_id); }}><code>{run.run_id}</code><Status record={run} /><span>{run.correlation ? `${run.correlation.plan_graph_id} / ${run.correlation.plan_node_id}${run.correlation.state === 'id_matched' ? ' · id match (unattested)' : ''}` : 'Ungrouped or legacy'}</span></button>) : <p className="muted">No FeatureRuns discovered.</p>}</section>
+      {nodes.length ? <ReactFlow nodes={nodes} edges={edges} nodeTypes={nodeTypes} onNodeClick={onNodeClick} fitView nodesDraggable={false} nodesConnectable={false} deleteKeyCode={null} proOptions={{ hideAttribution: true }}><Background /><Controls showInteractive={false} /></ReactFlow> : <div className="empty-canvas"><h2>No PlanGraphs discovered</h2><p>The configured audit roots have no verified PlanGraph records.</p></div>}</section>
+      {selectedGraph && <GraphTotals metrics={visibleGraphMetrics} elapsedMs={selectedGraphElapsedMs} />}
+      {selectedGraph && <NodeMetricsTable nodes={visibleGraphMetrics?.nodes} nodeObjectives={nodeObjectives} />}
+      <GraphExecutionSummary graph={selectedGraph} />
+      <section className="runs"><h2>FeatureRuns</h2>{catalog.feature_runs.length ? catalog.feature_runs.map((run) => <button key={run.run_id} onClick={() => { setDetailTab('overview'); setSelectedNodeKey(null); setSelectedRunId(run.run_id); }}><div><strong>{run.display_name || run.run_id}</strong><code>{run.run_id}</code></div><Status record={run} /><span>{run.correlation ? `${run.correlation.plan_graph_id} / ${run.correlation.plan_node_id}${run.correlation.state === 'id_matched' ? ' · id match (unattested)' : ''}` : 'Ungrouped or legacy'}</span></button>) : <p className="muted">No FeatureRuns discovered.</p>}</section>
     </>}</main><Detail run={selectedRun} node={selectedNode} detail={visibleDetail} error={detailError} onClose={() => { setSelectedNodeKey(null); setSelectedRunId(null); }} tab={detailTab} onTabChange={setDetailTab} /></div>;
 }
 export default function App() { return <ReactFlowProvider><Dashboard /></ReactFlowProvider>; }
