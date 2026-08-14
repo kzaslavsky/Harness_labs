@@ -58,6 +58,13 @@ DISPATCHER_COMMANDS = frozenset(
 CRITERION_ADJUDICATIONS = frozenset({"claimed", "deterministic_verification"})
 GATE_VERIFICATION_EVIDENCE_KIND = "deterministic-verification-output"
 GATE_VERIFICATION_OWNER = "verification-owner"
+PROVENANCE_REF_SHAPES = (
+    "artifact:sha256:<hex>",
+    "command:<id>",
+    "task:<id>",
+    "system-result:<id>:<n>",
+    "decision:<id>",
+)
 
 
 class KernelError(RuntimeError):
@@ -556,8 +563,32 @@ class ControllerKernel:
                 continue
             if ref in self._state["rejected_task_dispatch_refs"]:
                 continue
-            return "unknown_evidence", f"unknown provenance reference: {ref}"
+            if self._resolves_kernel_entity_ref(ref):
+                continue
+            return "unknown_evidence", (
+                f"unknown provenance reference: {ref} "
+                "(accepted ref shapes: " + ", ".join(PROVENANCE_REF_SHAPES) + ")"
+            )
         return None
+
+    def _resolves_kernel_entity_ref(self, ref: str) -> bool:
+        """Resolve a ref naming an entity already present in kernel state.
+
+        Strictly read-only: consults existing tasks/decisions/events and
+        mints no new records.
+        """
+
+        if ref.startswith("task:"):
+            return ref[len("task:") :] in self._state["tasks"]
+        if ref.startswith("decision:"):
+            return ref[len("decision:") :] in self._state["decisions"]
+        if ref.startswith("system-result:"):
+            return any(
+                event.command_id == ref
+                for event in self._events
+                if event.event_type == "task.result_recorded"
+            )
+        return False
 
     def _evaluate(
         self,
