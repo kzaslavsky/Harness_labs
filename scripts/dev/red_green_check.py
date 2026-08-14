@@ -106,8 +106,9 @@ def main() -> int:
         verdict["red"] = red
         if red["timed_out"]:
             verdict["verdict"] = "red-phase-timeout"
+            verdict["timed_out"] = True
             print(json.dumps(verdict, indent=2))
-            return 1
+            return 124
         if red["exit_code"] == 0:
             verdict["verdict"] = "red-phase-passed-on-base"
             print(json.dumps(verdict, indent=2))
@@ -125,6 +126,9 @@ def main() -> int:
     verdict["green"] = green
     if green["timed_out"]:
         verdict["verdict"] = "green-phase-timeout"
+        verdict["timed_out"] = True
+        print(json.dumps(verdict, indent=2))
+        return 124
     elif green["exit_code"] == 0:
         verdict["verdict"] = "red-green-proven"
     else:
