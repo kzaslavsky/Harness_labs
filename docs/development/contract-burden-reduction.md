@@ -161,6 +161,76 @@ The relaxation program itself (`cb-graph-cb-exp-1`, 8 nodes, claude backend, fir
 
 The live CB-2 program runner, `experiments/run_burden2_plan_graph.py` (commit `838c162`), keeps its own `claims_rule` pin verbatim for the entire CB-2 program by design (`CONTRACT_BURDEN_RELAXATION_2_PLAN.md` Program rule 5): the running harness is frozen at RED_BASE and no candidate may affect it mid-program, so CB2-08 retires the pin only from the inert CB-1 launcher, `experiments/run_burden_plan_graph.py` — not from the live runner. Once the CB-2 program's final candidate is adopted, retiring the CB-2 runner's own `claims_rule` pin is an explicit **operator step**, not a harness/node action: after adoption, an operator applies the same removal CB2-08 made to the CB-1 launcher (delete the `claims_rule` block and its three f-string injections into the review/fix/verify stage instructions in `experiments/run_burden2_plan_graph.py`) and re-runs that runner's own regression coverage. Tracked here so the pin is not silently forgotten once every item in this document is closed.
 
+## CB-2 relaxation PlanGraph live run (2026-08-13/14)
+
+Operating the CB-2 program itself (`contract-burden-relaxation-2`, attempts 1–4,
+final candidate `75c99c109a48a5b603b87036332de56540f30812`) surfaced four new
+burden specimens. Three node blocks occurred across the program — each with a
+different trigger, each recovered by an instruction pin plus resume-with-reuse
+(no sealed node was ever re-executed). Recorded at adoption per program rule:
+no mid-program edits to this document outside CB2-08's grant.
+
+### 17. Coordinator-dispatched writable follow-ups carry no adoption grant (item 5 residual)
+
+- **Specimen:** CB2-02 root attempt — the implementer task succeeded, but the
+  coordinator's writable follow-up dispatches were refused with "writable
+  worker requires a clean repository baseline"; `supersede` was rejected
+  ("superseded task is not failed") and `retry` was rejected ("unknown
+  provenance reference"), leaving resume as the only exit.
+- **Diagnosis:** item 5's dirty-baseline adoption grant is wired to the
+  stage-machine dispatch path only; coordinator-initiated writable dispatches
+  never receive one, so any legitimately dirty tree (a successful implementer's
+  uncommitted work) is unreachable for follow-up work.
+- **Status:** open. CB-3 candidate.
+
+### 18. Review obligations lack a journal-receipt discharge verb; out-of-grant anchors deadlock
+
+- **Specimen:** CB2-02 attempt-1 — a review finding anchored to the plan
+  document (outside the node's writable paths) recurred every cycle because no
+  fix task may touch its anchor; the cycle ceiling then blocked a gate-passing
+  candidate. Undischargeable by construction.
+- **Diagnosis:** the review contract's only discharge verb is "fixed in the
+  working tree." An obligation that is already satisfied by journaled evidence
+  (a gate receipt, a controller-owned artifact) cannot be discharged by citing
+  it, and a finding anchored outside the grant is unfixable by contract.
+- **Mitigation in place:** runner instruction pin (commit `0065164`) forbids
+  reviewers from anchoring findings outside the node's writable paths.
+- **Status:** open (contract fix: a "discharged by journal receipt" verb plus
+  mechanical rejection of findings anchored outside the writable grant).
+  CB-3 candidate.
+
+### 19. Dirty-baseline dead-end after any failed writable task — the dominant amplifier
+
+- **Specimens:** three distinct triggers funneled into the identical terminal
+  state: an out-of-grant edit (CB2-05, attempt-2), a placeholder summary
+  refused by the deliverable floor (CB2-08, attempt-3), and item 17's
+  grant-less follow-up dispatch (CB2-02, root). In each case the failed
+  attempt's uncommitted edits made every subsequent writable dispatch fail
+  preflight; the coordinator (no shell access) escalated via
+  `operator_input.requested`, which dead-ends in a headless run; the node
+  blocked and the whole attempt went terminal.
+- **Diagnosis:** the failure trigger varies; the unrecoverable part is always
+  the dirty tree. No in-system actor is authorized to restore a clean
+  baseline, so a recoverable single-task failure is amplified into a
+  node-level block costing a full resume cycle.
+- **Fix direction:** harness-owned tree restoration on failed writable
+  attempts (grant-scoped `git checkout -- <grant>` / clean of the failed
+  task's residue, journaled as a reconciliation event), plus an explicit
+  headless policy for `operator_input.requested` (fail fast with a typed
+  blocker instead of dying on session error). Highest-leverage CB-3 item.
+- **Status:** open. CB-3 candidate (primary).
+
+### 20. Adoption grant supplied and granted, yet executor preflight still refuses
+
+- **Specimen:** CB2-03 attempt-1 — the journal records
+  `dirty_baseline_adoption_grant_supplied | granted`, immediately followed by
+  the executor preflight refusing the writable worker on the same
+  dirty-baseline precondition the grant exists to waive.
+- **Diagnosis:** a defect inside the adopted CB-05 grant path itself: the
+  grant is issued at one layer and not honored at the executor preflight
+  layer. Distinct from item 17 (where no grant is issued at all).
+- **Status:** open. CB-3 candidate.
+
 ## Explicit keep-list (earned their cost this run)
 
 - **Approval receipt / digest binding at admission** — the actual trust boundary; revalidated at graph start and cost nothing.
@@ -188,3 +258,4 @@ The originating defect of the blocked run was an **absence** of contract: the se
 - **2026-08-13 (later)** — CB relaxation PlanGraph completed (`cb-graph-cb-exp-1` attempt-4, candidate `8afa0190`): items 11–16 added from live operation (claims-vocabulary rejection, reuse custody decay [fixed], parallel-shape resume rejection [fixed], load-blind gate timeout, review cycle ceiling vs. gate evidence, recovery API usability). First live validation of resume-with-reuse recovery and parallel node dispatch; zero whole-graph relaunches.
 - **2026-08-13 (adoption)** — candidate `8afa0190` merged into `contract-burden-relaxation`, keeping the branch-side fixes the candidate predates (item 12 reuse custody `0ecc5ce`, item 13 parallel-shape resume `60cc13f`, the `claims_rule` pin, resume launcher operability) alongside the CB-01–08 relaxations. Adversarial verification (2026-08-13) confirmed items 8b, 10-general, 11, 14, 15, 16 genuinely open in both trees — scoped as the CB-2 program (`CONTRACT_BURDEN_RELAXATION_2_PLAN.md`); verification also found CB-03's timeout classification unreachable for red/green gates (the script converts timeouts to exit 1 and the `"failed"` text rule mislabels them `product`), folded into item 14.
 - **2026-08-13 (CB2-08)** — the CB-2 relaxation PlanGraph program (CB2-01 … CB2-08) closes items 8 (decomposition half, CB2-06, commit `377a728dd0fc739fed1c37e9bfd99b8cde70b2b2`), 10 (general half, CB2-08, already landed by construction at RED_BASE commit `e605fffc90d880fc7e5bb3d779b82b29f74f8e20`), 11 (CB2-01, commit `402c0ebf6dee8da41e294f55d5c97c4aa74cd0e3`), 14 (CB2-02 + CB2-03, commits `9921fc5e2735be7edc6d5c081312fa14ca8c1f5f` / `f2a7164508fb9cf8a03064c7a07d9d4f6b11f7a7`), and 16 (CB2-05, commit `644659c09bef04e1a9fe78e113074592bb50bc75`), each recorded above with its own status entry (prior status struck through, not deleted). Item 15 was withdrawn during CB-2 adjudication, not closed by a node (see its own entry). CB2-08 also retires the `claims_rule` pin from the inert CB-1 launcher, `experiments/run_burden_plan_graph.py`, now that CB2-01 makes it unnecessary; the live CB-2 program runner keeps its own pin for the program's duration by design, with post-program retirement recorded as an explicit operator step above.
+- **2026-08-14 (CB-2 adoption)** — final candidate `75c99c109a48a5b603b87036332de56540f30812` merged into `contract-burden-relaxation` (merge `76eafa6`); full suite green post-merge (445 passed). Items 17–20 added from live CB-2 program operation: coordinator follow-up dispatches lack the adoption grant (17), review obligations lack a journal-receipt discharge verb and out-of-grant anchors deadlock (18), the dirty-baseline dead-end as the dominant failure amplifier across three distinct triggers (19), and a grant-honored-then-refused defect inside the adopted item-5 path (20). Program operational record: 4 attempts, 3 node blocks, every recovery via instruction pin + resume-with-reuse, zero re-executed sealed nodes. Post-adoption operator steps executed alongside this entry: `claims_rule` pin and interim instruction pins (`0065164`, `d5029c3`, `20f726d`) retired from the CB-2 runner.
