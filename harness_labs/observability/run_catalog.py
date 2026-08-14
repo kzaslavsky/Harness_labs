@@ -1,4 +1,13 @@
-"""Read-only verified catalog for FeatureRun and PlanGraph audit directories."""
+"""Read-only verified catalog for FeatureRun and PlanGraph audit directories.
+
+Layer note: this module imports core only, but it deliberately *parses* the
+journal event shapes of the featurerun and plangraph layers
+(``plan_node_id``, ``plan_graph_*`` recovery events, feature-run lifecycle
+events). That data-coupling is invisible to the import-boundary checker and
+is accepted: the catalog's job is reading every harness's journals. Event
+names consumed here change only with their producing layer's journal
+contract.
+"""
 from __future__ import annotations
 
 import hashlib

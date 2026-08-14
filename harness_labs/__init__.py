@@ -23,7 +23,7 @@ from harness_labs.core.agent_sessions import (
     Usage,
 )
 from harness_labs.core.backends import ClaudePrintBackend, CodexExecBackend, OmlxBackend, PoemBackend
-from harness_labs.agent_mixture import (
+from harness_labs.graphrun.agent_mixture import (
     BackendSpec,
     WorkerRole,
     build_coordinator_session,

@@ -40,7 +40,7 @@ ROOT = Path(__file__).resolve().parents[1]
 HARNESS_SOURCE = Path(os.environ.get("HARNESS_LABS_SOURCE", str(ROOT)))
 sys.path.insert(0, str(HARNESS_SOURCE))
 
-from harness_labs.agent_mixture import build_coordinator_session  # noqa: E402
+from harness_labs.graphrun.agent_mixture import build_coordinator_session  # noqa: E402
 from harness_labs.core.agent_sessions import AgentSession  # noqa: E402
 from harness_labs.core.claude_task_executor import (  # noqa: E402
     ClaudeSemanticTaskExecutor,
@@ -107,7 +107,7 @@ the named workers.
 # ---------------------------------------------------------------------------
 # Dependency edges exist only where nodes share owned files or consume another
 # node's mechanism. harness_labs/core/controller_live.py and
-# harness_labs/agent_mixture.py are each owned by several nodes and are
+# harness_labs/graphrun/agent_mixture.py are each owned by several nodes and are
 # serialized through the dependency spine CB3-02 -> CB3-03 -> CB3-04; CB3-06
 # consumes CB3-02's shared verifier semantics but is path-disjoint from
 # CB3-03. Roots CB3-01, CB3-02 are file-disjoint and parallel-eligible
@@ -137,7 +137,7 @@ NODES: tuple[dict[str, Any], ...] = (
         "finding_tests": ["tests/test_relax_grant_verification.py"],
         "regression": ["tests/"],
         "allowed_paths": [
-            "harness_labs/agent_mixture.py",
+            "harness_labs/graphrun/agent_mixture.py",
             "harness_labs/core/claude_task_executor.py",
             "harness_labs/core/controller_live.py",
             "harness_labs/featurerun/feature_run.py",
@@ -158,7 +158,7 @@ NODES: tuple[dict[str, Any], ...] = (
         "allowed_paths": [
             "harness_labs/core/controller_scheduler.py",
             "harness_labs/core/controller_live.py",
-            "harness_labs/agent_mixture.py",
+            "harness_labs/graphrun/agent_mixture.py",
             "tests/test_controller_scheduler.py",
             "tests/test_controller_live.py",
             "tests/test_agent_mixture.py",

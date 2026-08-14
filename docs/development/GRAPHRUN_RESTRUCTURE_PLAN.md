@@ -158,3 +158,18 @@ with `adjudication: "deterministic_verification"`.
   restructure lands as one merge, scheduled in one sitting.
 - **Old branches** (`featurerun`, `plangraph` on GitHub): historical
   snapshots, untouched by design.
+
+## Change log
+
+- **2026-08-14 (executed)** — GR-01..GR-05 landed on `graphrun-restructure`
+  (supervised, per the execution-mode recommendation): checker + closure reds
+  (`67a3ad3`), boundary fixes with both reds green (`61f9566`, including
+  deletion of the dead `implement_v13_*` aliases), core move (`6c67e77`),
+  featurerun/plangraph/observability moves (`59ea54e`), graphrun surface +
+  closure (this commit). Every step gated by checker (0 errors), smoke-import
+  loop over all modules, and the full suite (480 passed + 1 skipped).
+  Execution surfaced two string forms v2 had not enumerated — indented
+  in-function relative imports and bare-filename source-scan paths
+  (`tests/test_controller_scenarios.py`) — both folded into the step recipe.
+  Deferred as planned: `runner_support` (rule of three); per-module shims
+  (none needed — zero external flat-path consumers).

@@ -223,7 +223,7 @@ class DirtyBaselineGrantTests(unittest.TestCase):
         self,
     ) -> None:
         with patch(
-            "harness_labs.agent_mixture.workspace_snapshot"
+            "harness_labs.graphrun.agent_mixture.workspace_snapshot"
         ) as snapshot:
             profiles = build_role_profiles(
                 mixture={"*": "claude:claude-opus-5@high"},
@@ -246,7 +246,7 @@ class DirtyBaselineGrantTests(unittest.TestCase):
 
     def test_eligible_role_with_a_clean_workspace_gets_no_grant(self) -> None:
         with patch(
-            "harness_labs.agent_mixture.workspace_snapshot",
+            "harness_labs.graphrun.agent_mixture.workspace_snapshot",
             return_value={"changed_paths": [], "files": {}},
         ):
             profiles = build_role_profiles(
@@ -278,7 +278,7 @@ class DirtyBaselineGrantTests(unittest.TestCase):
             producer_task_id="prior-attempt",
         )
         with patch(
-            "harness_labs.agent_mixture.workspace_snapshot",
+            "harness_labs.graphrun.agent_mixture.workspace_snapshot",
             return_value={"changed_paths": ["index.html"], "files": {}},
         ):
             profiles = build_role_profiles(
@@ -333,7 +333,7 @@ class DirtyBaselineGrantTests(unittest.TestCase):
             producer_task_id="prior-attempt",
         )
         with patch(
-            "harness_labs.agent_mixture.workspace_snapshot",
+            "harness_labs.graphrun.agent_mixture.workspace_snapshot",
             return_value={
                 "changed_paths": ["index.html"],
                 "files": {"index.html": {"kind": "file", "sha256": "same"}},
@@ -381,7 +381,7 @@ class DirtyBaselineGrantTests(unittest.TestCase):
             producer_task_id="prior-attempt",
         )
         with patch(
-            "harness_labs.agent_mixture.workspace_snapshot",
+            "harness_labs.graphrun.agent_mixture.workspace_snapshot",
             return_value={
                 "changed_paths": ["index.html"],
                 "files": {"index.html": {"kind": "file", "sha256": "after"}},
@@ -416,7 +416,7 @@ class DirtyBaselineGrantTests(unittest.TestCase):
         evidence = EvidenceCatalog()
         forged_ref = "artifact:sha256:" + "0" * 64
         with patch(
-            "harness_labs.agent_mixture.workspace_snapshot",
+            "harness_labs.graphrun.agent_mixture.workspace_snapshot",
             return_value={"changed_paths": ["index.html"], "files": {}},
         ):
             profiles = build_role_profiles(

@@ -17,6 +17,21 @@ accountable owner, an explicit task tree, isolated Git worktree and branch,
 structured event and decision logs, and a guarded path to commit and merge into
 the recorded base branch.
 
+## Package layout
+
+```
+harness_labs/
+  core/           # substrate any harness reuses (kernel, executors, journals, evidence)
+  featurerun/     # single-feature harness (imports core only; standalone by contract)
+  plangraph/      # graph orchestration (imports core + featurerun)
+  observability/  # metrics, catalog, dashboard (imports core only)
+  graphrun/       # composition + operator surface (nothing imports it)
+```
+
+Boundaries are enforced by `scripts/dev/check_import_boundaries.py` and
+`tests/test_import_boundaries.py`; see
+`docs/development/GRAPHRUN_RESTRUCTURE_PLAN.md`.
+
 ## Motivation
 
 The project aims to make reliable coding harnesses for autonomous

@@ -39,7 +39,7 @@ ROOT = Path(__file__).resolve().parents[1]
 HARNESS_SOURCE = Path(os.environ.get("HARNESS_LABS_SOURCE", str(ROOT)))
 sys.path.insert(0, str(HARNESS_SOURCE))
 
-from harness_labs.agent_mixture import build_coordinator_session  # noqa: E402
+from harness_labs.graphrun.agent_mixture import build_coordinator_session  # noqa: E402
 from harness_labs.core.agent_sessions import AgentSession  # noqa: E402
 from harness_labs.core.claude_task_executor import (  # noqa: E402
     ClaudeSemanticTaskExecutor,
@@ -168,7 +168,7 @@ NODES: tuple[dict[str, Any], ...] = (
             "harness_labs/core/claude_task_executor.py",
             "harness_labs/core/controller_live.py",
             "harness_labs/featurerun/feature_run.py",
-            "harness_labs/agent_mixture.py",
+            "harness_labs/graphrun/agent_mixture.py",
             "tests/test_relax_adoption.py",
             "tests/test_claude_task_executor.py",
             "tests/test_controller_live.py",
