@@ -418,6 +418,12 @@ event and API changes additive; you may NOT edit those files, and any coverage
 you want there goes into your granted test files instead. Before finishing,
 run `git status --porcelain` and `git diff --name-only` and confirm every
 changed file is inside the grant; revert any stray edit before you stop.
+SUMMARY FLOOR: the summary and deliverable_markdown fields are validated by a
+deterministic placeholder detector — a summary that is (or normalizes to) a
+stub token like "WIP", "TODO", "placeholder", or a single repeated word is
+mechanically refused, the task fails, and the failed attempt's uncommitted
+edits deadlock the node. Write the real multi-sentence summary of what you
+changed BEFORE you finish; never emit a stub intending to revise it.
 """
     return (
         RoleProfile(
