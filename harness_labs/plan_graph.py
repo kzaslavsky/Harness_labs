@@ -94,6 +94,21 @@ class ApprovalEvidence:
 
 
 @dataclass(frozen=True)
+class VerificationGate:
+    """One named, independently timed command within a node's gate tuple.
+
+    An ordered tuple of these replaces a single flat ``verification_argv``
+    when a node's deterministic verification is decomposed: each gate runs,
+    is classified, and is repaired independently, while a full re-run after
+    any repair always restarts at the first gate.
+    """
+
+    name: str
+    argv: tuple[str, ...]
+    timeout_seconds: float = 1200.0
+
+
+@dataclass(frozen=True)
 class PlanRun:
     id: str
     objective: str
@@ -105,6 +120,7 @@ class PlanRun:
     path_intents: tuple[PathIntent, ...] = ()
     verification_timeout_seconds: float = 1200.0
     verification_required_paths: tuple[RequiredPath, ...] = ()
+    verification_gates: tuple[VerificationGate, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -579,6 +595,9 @@ class SubprocessFeatureRunLauncher:
                     _required_path_mapping(value)
                     for value in request.run.verification_required_paths
                 ],
+                "verification_gates": [
+                    _gate_mapping(value) for value in request.run.verification_gates
+                ],
             },
             "base_commit": request.base_commit,
             "plan": request.plan,
@@ -667,6 +686,41 @@ def _required_path_mapping(value: RequiredPath) -> dict[str, object]:
     return result
 
 
+def _gate_mapping(value: VerificationGate) -> dict[str, object]:
+    return {
+        "name": value.name,
+        "argv": list(value.argv),
+        "timeout_seconds": value.timeout_seconds,
+    }
+
+
+def _gate_identity_shape(run: PlanRun) -> tuple[Mapping[str, object], ...]:
+    """Return the ordered shape ``gate_digest`` hashes for one run's gates."""
+    return tuple(_gate_mapping(gate) for gate in run.verification_gates)
+
+
+def _contract_verification_argv(run: PlanRun) -> list[object]:
+    """Return the value ``_plan_graph_digest``'s fixed ``verification_argv``
+    projection sees for one run.
+
+    ``_plan_graph_digest`` (plan_graph_audit.py) projects each node onto a
+    fixed ``contract_keys`` tuple that ends at ``verification_argv`` and has
+    no ``verification_gates`` key of its own, so a gate-tuple node's declared
+    verification must be carried inside ``verification_argv`` itself to stay
+    covered by that digest. A flat-argv node (no gates) is unaffected and
+    stays byte-identical to the base contract. Both the registration-time
+    digest input (``PlanGraph._audit_for_run``) and the repair-resume
+    comparison input (``PlanGraph._contract_nodes``) must call this so the
+    two digests of an unchanged node keep matching.
+    """
+    if not run.verification_gates:
+        return list(run.verification_argv)
+    return [
+        json.dumps(gate, sort_keys=True, separators=(",", ":"))
+        for gate in _gate_identity_shape(run)
+    ]
+
+
 def _command_mapping(value: FunctionalityCommand) -> dict[str, object]:
     return {
         "argv": list(value.argv),
@@ -682,7 +736,7 @@ def _functionality_test_payload(value: FunctionalityCommand | str) -> object:
 
 
 def _run_mapping(value: PlanRun) -> dict[str, object]:
-    return {
+    mapping: dict[str, object] = {
         "id": value.id,
         "objective": value.objective,
         "plan_sections": list(value.plan_sections),
@@ -700,6 +754,11 @@ def _run_mapping(value: PlanRun) -> dict[str, object]:
             for item in value.verification_required_paths
         ],
     }
+    if value.verification_gates:
+        mapping["verification_gates"] = [
+            _gate_mapping(gate) for gate in value.verification_gates
+        ]
+    return mapping
 
 
 def _normalize_functionality_command(
@@ -1119,7 +1178,7 @@ class PlanGraph:
         try:
             self.budget.register(
                 plan_sha256=registration.plan_sha256,
-                gates={run.id: gate_digest(run.verification_argv) for run in self.plan.runs},
+                gates={run.id: gate_digest(run.verification_argv, _gate_identity_shape(run)) for run in self.plan.runs},
                 automatic_recovery=registration.automatic_recovery,
                 transition=registration.plan_version_transition,
             )
@@ -1230,7 +1289,7 @@ class PlanGraph:
                 for run in plan.runs:
                     if run.id not in invalidated:
                         continue
-                    budget.verdict(node_id=run.id, gate=gate_digest(run.verification_argv))
+                    budget.verdict(node_id=run.id, gate=gate_digest(run.verification_argv, _gate_identity_shape(run)))
                 attempt_id = f"{logical_graph_id}-attempt-{cls._next_repair_ordinal(run_root, logical_graph_id, process_probe)}"
                 graph = cls(
                     repository, registration, launcher,
@@ -1253,7 +1312,19 @@ class PlanGraph:
 
     @staticmethod
     def _contract_nodes(plan: PlanGraphPlan) -> dict[str, dict[str, object]]:
-        return {run.id: {"objective": run.objective, "plan_sections": list(run.plan_sections), "depends_on": list(run.depends_on), "criteria": list(run.criteria), "verification_argv": list(run.verification_argv)} for run in plan.runs}
+        return {
+            run.id: {
+                "objective": run.objective,
+                "plan_sections": list(run.plan_sections),
+                "depends_on": list(run.depends_on),
+                "criteria": list(run.criteria),
+                "verification_argv": _contract_verification_argv(run),
+                "verification_gates": [
+                    dict(gate) for gate in _gate_identity_shape(run)
+                ],
+            }
+            for run in plan.runs
+        }
 
     @staticmethod
     def _next_repair_ordinal(
@@ -1373,7 +1444,7 @@ class PlanGraph:
             )
             try:
                 reservation = self.budget.reserve(
-                    node_id=run.id, gate=gate_digest(run.verification_argv),
+                    node_id=run.id, gate=gate_digest(run.verification_argv, _gate_identity_shape(run)),
                     failure_keys=self._finding_keys_for_reservation(finding_obligations.get(run.id, ())),
                     failure_reason=self._failure_reason_for_reservation(run.id),
                     graph_attempt_id=self.graph_run_id,
@@ -1589,7 +1660,7 @@ class PlanGraph:
                         )
                         try:
                             reservation = self.budget.reserve(
-                                node_id=run.id, gate=gate_digest(run.verification_argv),
+                                node_id=run.id, gate=gate_digest(run.verification_argv, _gate_identity_shape(run)),
                                 failure_keys=self._finding_keys_for_reservation(
                                     finding_obligations.get(run.id, ())
                                 ),
@@ -1649,7 +1720,7 @@ class PlanGraph:
                     # indistinguishable from a run that never needed it.
                     if (
                         outcome.status == "succeeded"
-                        and run.verification_argv
+                        and (run.verification_argv or run.verification_gates)
                         and request.verification_gate_slot is not None
                         and not request.verification_gate_slot.entered
                     ):
@@ -1818,6 +1889,11 @@ class PlanGraph:
                 run.id: {
                     "status": "succeeded" if run.id in self.reused_completed else "queued",
                     **_run_mapping(run),
+                    # Keep this projection aligned with ``_contract_nodes`` so a
+                    # gate-tuple node's registration-time digest (computed here)
+                    # and its repair-resume comparison digest stay identical for
+                    # an unchanged node — see ``_contract_verification_argv``.
+                    "verification_argv": _contract_verification_argv(run),
                     "feature_run_id": self._feature_run_id(run.id),
                     "run_dir": str((self.run_root / self._feature_run_id(run.id)).resolve()),
                     "started_at": None,
@@ -2387,10 +2463,31 @@ def validate_plan_graph_plan(plan: PlanGraphPlan) -> None:
             raise PlanGraphError(f"run {run.id!r} has incomplete approved context")
         if any(not value for value in run.verification_argv):
             raise PlanGraphError(f"run {run.id!r} verification_argv contains an empty value")
-        if strict and not run.verification_argv:
+        if strict and not run.verification_argv and not run.verification_gates:
             raise PlanGraphError(
                 f"run {run.id!r} requires controller-owned verification"
             )
+        if run.verification_argv and run.verification_gates:
+            raise PlanGraphError(
+                f"run {run.id!r} may declare verification_argv or "
+                "verification_gates, not both"
+            )
+        gate_names = [gate.name for gate in run.verification_gates]
+        if len(gate_names) != len(set(gate_names)):
+            raise PlanGraphError(f"run {run.id!r} verification_gates has duplicate names")
+        for gate in run.verification_gates:
+            if not gate.name.strip():
+                raise PlanGraphError(f"run {run.id!r} verification_gates has an empty name")
+            if not gate.argv or any(not value for value in gate.argv):
+                raise PlanGraphError(
+                    f"run {run.id!r} verification_gates[{gate.name!r}] argv "
+                    "contains an empty value"
+                )
+            if gate.timeout_seconds <= 0:
+                raise PlanGraphError(
+                    f"run {run.id!r} verification_gates[{gate.name!r}] timeout "
+                    "must be positive"
+                )
         if any(not value for value in run.allowed_paths):
             raise PlanGraphError(f"run {run.id!r} allowed_paths contains an empty value")
         if strict and not run.allowed_paths:
@@ -2614,6 +2711,10 @@ def plan_from_mapping(
                     _required_path_from_mapping(value)
                     for value in item.get("verification_required_paths", ())
                 ),
+                verification_gates=tuple(
+                    _gate_from_mapping(value)
+                    for value in item.get("verification_gates", ())
+                ),
             )
             for item in payload["runs"]  # type: ignore[index]
         )
@@ -2652,6 +2753,18 @@ def _run_from_mapping(value: Mapping[str, object]) -> PlanRun:
             _required_path_from_mapping(item)
             for item in value["verification_required_paths"]  # type: ignore[union-attr]
         ),
+        verification_gates=tuple(
+            _gate_from_mapping(item)
+            for item in value.get("verification_gates", ())  # type: ignore[union-attr]
+        ),
+    )
+
+
+def _gate_from_mapping(value: Mapping[str, object]) -> VerificationGate:
+    return VerificationGate(
+        name=str(value["name"]),
+        argv=tuple(str(item) for item in value["argv"]),  # type: ignore[union-attr]
+        timeout_seconds=float(value["timeout_seconds"]),  # type: ignore[arg-type]
     )
 
 
@@ -2709,6 +2822,7 @@ __all__ = [
     "ReadySetDispatch",
     "ReadySetScheduler",
     "SubprocessFeatureRunLauncher",
+    "VerificationGate",
     "canonical_definition",
     "load_registration",
     "persist_registration",
