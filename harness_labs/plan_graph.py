@@ -12,6 +12,7 @@ import os
 from pathlib import Path, PurePosixPath
 import subprocess
 import tempfile
+import threading
 from typing import Callable, Mapping, Sequence
 from uuid import uuid4
 
@@ -93,6 +94,21 @@ class ApprovalEvidence:
 
 
 @dataclass(frozen=True)
+class VerificationGate:
+    """One named, independently timed command within a node's gate tuple.
+
+    An ordered tuple of these replaces a single flat ``verification_argv``
+    when a node's deterministic verification is decomposed: each gate runs,
+    is classified, and is repaired independently, while a full re-run after
+    any repair always restarts at the first gate.
+    """
+
+    name: str
+    argv: tuple[str, ...]
+    timeout_seconds: float = 1200.0
+
+
+@dataclass(frozen=True)
 class PlanRun:
     id: str
     objective: str
@@ -104,6 +120,7 @@ class PlanRun:
     path_intents: tuple[PathIntent, ...] = ()
     verification_timeout_seconds: float = 1200.0
     verification_required_paths: tuple[RequiredPath, ...] = ()
+    verification_gates: tuple[VerificationGate, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -346,6 +363,105 @@ class PlanGraphRegistration:
     plan_version_transition: Mapping[str, object] | None = None
 
 
+class GateSlot:
+    """Graph-owned mutual-exclusion slot for verification-command execution.
+
+    One instance is shared by every :class:`FeatureRunRequest` issued for a
+    single ready-set run (``max_parallelism`` > 1), so concurrently admitted
+    siblings' deterministic verification commands run one at a time instead
+    of silently splitting the gate's wall-clock budget across them (item 14,
+    the CB-06 failure mode). Node work outside the verification stage —
+    dispatch, review, fix — is untouched and keeps running in parallel; only
+    whichever caller wraps its verification-command execution in the
+    :class:`GateSlotHold` returned by :meth:`hold` is serialized. That wrap
+    spans the whole verification stage as the caller defines it, including
+    any recovery retries and recovery-agent invocations attempted before the
+    stage is considered done — see ``run_feature_worktree``'s gate-slot
+    ``with`` block for the concrete critical section.
+
+    Acquisition and release are safe to call from any thread: they only
+    journal through :class:`~harness_labs.plan_graph_audit.PlanGraphAudit`,
+    whose underlying journal append is internally mutex-protected.
+    """
+
+    def __init__(self, audit: PlanGraphAudit) -> None:
+        self._semaphore = threading.Semaphore(1)
+        self._audit = audit
+        self._lock = threading.Lock()
+        self._contending = 0
+
+    def hold(self, node_id: str) -> "GateSlotHold":
+        """Return one node's single-use hold on this exclusive slot.
+
+        The hold exposes only bound acquire/release closures and an
+        ``entered`` flag — never the slot or its audit — so a launcher that
+        receives the hold cannot reach the controller's audit journal
+        through it.
+        """
+        entered = threading.Event()
+
+        def acquire() -> None:
+            with self._lock:
+                self._contending += 1
+            self._semaphore.acquire()
+            try:
+                with self._lock:
+                    concurrency = self._contending
+                self._audit.gate_slot_acquired(node_id, concurrency)
+            except BaseException:
+                with self._lock:
+                    self._contending -= 1
+                self._semaphore.release()
+                raise
+            entered.set()
+
+        def release() -> None:
+            with self._lock:
+                concurrency = self._contending
+                self._contending -= 1
+            try:
+                self._audit.gate_slot_released(node_id, concurrency)
+            finally:
+                self._semaphore.release()
+
+        return GateSlotHold(acquire, release, entered)
+
+
+class GateSlotHold:
+    """One node's context-managed hold on a :class:`GateSlot`.
+
+    Threaded through :attr:`FeatureRunRequest.verification_gate_slot` so the
+    launcher (or, for an in-process ready-set run, ``run_feature_worktree``
+    itself) can wrap exactly its verification-command execution and nothing
+    else. Single use: acquire on ``__enter__``, release on ``__exit__``.
+    Built from acquire/release closures rather than a direct reference to
+    the owning :class:`GateSlot`, so nothing reachable from this object's
+    attributes leads back to the graph's audit journal.
+    """
+
+    def __init__(
+        self,
+        acquire: Callable[[], None],
+        release: Callable[[], None],
+        entered: threading.Event,
+    ) -> None:
+        self._acquire = acquire
+        self._release = release
+        self._entered = entered
+
+    def __enter__(self) -> "GateSlotHold":
+        self._acquire()
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self._release()
+
+    @property
+    def entered(self) -> bool:
+        """Whether this hold's exclusive slot was ever actually acquired."""
+        return self._entered.is_set()
+
+
 @dataclass(frozen=True)
 class FeatureRunRequest:
     protocol: str
@@ -361,6 +477,7 @@ class FeatureRunRequest:
     finding_obligations: tuple[Mapping[str, object], ...] = ()
     finding_transfer_targets: Mapping[str, str] | None = None
     inherited_ledger_frozen: bool = False
+    verification_gate_slot: "GateSlotHold | None" = None
 
     def __post_init__(self) -> None:
         if self.protocol != FEATURE_RUN_REQUEST_PROTOCOL:
@@ -416,12 +533,21 @@ class PlanGraphResult:
 
 @dataclass(frozen=True)
 class RepairResumeDirective:
-    """Controller-authorized retry frontier for an immutable successor attempt."""
+    """Controller-authorized retry frontier for an immutable successor attempt.
 
-    logical_graph_id: str
-    predecessor_attempt_id: str
-    retry_frontier: tuple[str, ...]
-    blocker_evidence_ref: str
+    ``logical_graph_id`` is optional: when omitted, :meth:`PlanGraph.resume`
+    resolves it from the predecessor attempt's persisted registration
+    binding (``registration.logical_graph_id``) instead of requiring an
+    operator-supplied value.  ``predecessor_attempt_id`` and
+    ``blocker_evidence_ref`` carry default values only so this field can
+    precede them without breaking positional construction; both remain
+    effectively required and are validated by :meth:`PlanGraph.resume`.
+    """
+
+    logical_graph_id: str | None = None
+    predecessor_attempt_id: str = ""
+    retry_frontier: tuple[str, ...] = ()
+    blocker_evidence_ref: str = ""
 
 
 FeatureRunLauncher = Callable[[FeatureRunRequest], FeatureRunOutcome]
@@ -468,6 +594,9 @@ class SubprocessFeatureRunLauncher:
                 "verification_required_paths": [
                     _required_path_mapping(value)
                     for value in request.run.verification_required_paths
+                ],
+                "verification_gates": [
+                    _gate_mapping(value) for value in request.run.verification_gates
                 ],
             },
             "base_commit": request.base_commit,
@@ -557,6 +686,41 @@ def _required_path_mapping(value: RequiredPath) -> dict[str, object]:
     return result
 
 
+def _gate_mapping(value: VerificationGate) -> dict[str, object]:
+    return {
+        "name": value.name,
+        "argv": list(value.argv),
+        "timeout_seconds": value.timeout_seconds,
+    }
+
+
+def _gate_identity_shape(run: PlanRun) -> tuple[Mapping[str, object], ...]:
+    """Return the ordered shape ``gate_digest`` hashes for one run's gates."""
+    return tuple(_gate_mapping(gate) for gate in run.verification_gates)
+
+
+def _contract_verification_argv(run: PlanRun) -> list[object]:
+    """Return the value ``_plan_graph_digest``'s fixed ``verification_argv``
+    projection sees for one run.
+
+    ``_plan_graph_digest`` (plan_graph_audit.py) projects each node onto a
+    fixed ``contract_keys`` tuple that ends at ``verification_argv`` and has
+    no ``verification_gates`` key of its own, so a gate-tuple node's declared
+    verification must be carried inside ``verification_argv`` itself to stay
+    covered by that digest. A flat-argv node (no gates) is unaffected and
+    stays byte-identical to the base contract. Both the registration-time
+    digest input (``PlanGraph._audit_for_run``) and the repair-resume
+    comparison input (``PlanGraph._contract_nodes``) must call this so the
+    two digests of an unchanged node keep matching.
+    """
+    if not run.verification_gates:
+        return list(run.verification_argv)
+    return [
+        json.dumps(gate, sort_keys=True, separators=(",", ":"))
+        for gate in _gate_identity_shape(run)
+    ]
+
+
 def _command_mapping(value: FunctionalityCommand) -> dict[str, object]:
     return {
         "argv": list(value.argv),
@@ -572,7 +736,7 @@ def _functionality_test_payload(value: FunctionalityCommand | str) -> object:
 
 
 def _run_mapping(value: PlanRun) -> dict[str, object]:
-    return {
+    mapping: dict[str, object] = {
         "id": value.id,
         "objective": value.objective,
         "plan_sections": list(value.plan_sections),
@@ -590,6 +754,11 @@ def _run_mapping(value: PlanRun) -> dict[str, object]:
             for item in value.verification_required_paths
         ],
     }
+    if value.verification_gates:
+        mapping["verification_gates"] = [
+            _gate_mapping(gate) for gate in value.verification_gates
+        ]
+    return mapping
 
 
 def _normalize_functionality_command(
@@ -1009,7 +1178,7 @@ class PlanGraph:
         try:
             self.budget.register(
                 plan_sha256=registration.plan_sha256,
-                gates={run.id: gate_digest(run.verification_argv) for run in self.plan.runs},
+                gates={run.id: gate_digest(run.verification_argv, _gate_identity_shape(run)) for run in self.plan.runs},
                 automatic_recovery=registration.automatic_recovery,
                 transition=registration.plan_version_transition,
             )
@@ -1027,45 +1196,79 @@ class PlanGraph:
         directive: RepairResumeDirective,
         **kwargs: object,
     ) -> "PlanGraph":
-        """Create a new repair attempt without mutating its predecessor."""
+        """Create a new repair attempt without mutating its predecessor.
+
+        ``resume`` derives ``graph_run_id``, ``logical_graph_id``,
+        ``predecessor_attempt_id``, ``resume_directive``,
+        ``reused_completed``, and ``predecessor_checkpoint`` itself from
+        ``directive`` and the resolved predecessor; a caller supplying any
+        of those as a kwarg is a conflicting request, rejected up front
+        before any lock or directory is touched.
+        """
+        _RESUME_OWNED_KWARGS = (
+            "graph_run_id", "logical_graph_id", "predecessor_attempt_id",
+            "resume_directive", "reused_completed", "predecessor_checkpoint",
+        )
+        conflicting = [name for name in _RESUME_OWNED_KWARGS if name in kwargs]
+        if conflicting:
+            raise PlanGraphError(
+                "PlanGraph.resume derives "
+                + ", ".join(conflicting)
+                + " itself from directive and the resolved predecessor; an "
+                "explicit kwarg of that name conflicts with it"
+            )
         repository = repository.resolve()
         plan = verify_registration(repository, registration)
 
-        for value, label in (
-            (directive.logical_graph_id, "logical_graph_id"),
-            (directive.predecessor_attempt_id, "predecessor_attempt_id"),
+        if not isinstance(directive.predecessor_attempt_id, str) or not directive.predecessor_attempt_id or directive.predecessor_attempt_id in {".", ".."} or "/" in directive.predecessor_attempt_id or "\\" in directive.predecessor_attempt_id:
+            raise PlanGraphError("predecessor_attempt_id must be a non-empty path-safe name")
+        if directive.logical_graph_id is not None and (
+            not isinstance(directive.logical_graph_id, str)
+            or not directive.logical_graph_id
+            or directive.logical_graph_id in {".", ".."}
+            or "/" in directive.logical_graph_id
+            or "\\" in directive.logical_graph_id
         ):
-            if not isinstance(value, str) or not value or value in {".", ".."} or "/" in value or "\\" in value:
-                raise PlanGraphError(f"{label} must be a non-empty path-safe name")
+            raise PlanGraphError("logical_graph_id must be a non-empty path-safe name")
         if not isinstance(directive.blocker_evidence_ref, str) or not directive.blocker_evidence_ref.startswith("artifact:sha256:"):
             raise PlanGraphError("repair resume requires a blocker evidence reference")
         run_root = run_root.resolve()
+        supplied_tests = tuple(
+            _functionality_test_payload(command)
+            for command in plan.functionality_tests
+        )
+        contract_nodes = cls._contract_nodes(plan)
+        try:
+            # Reading a finalized (failed/blocked) predecessor is safe without
+            # the lineage flock: it is immutable from here on.  This also
+            # resolves an omitted logical_graph_id from the predecessor's
+            # persisted registration binding before the lock id (which is
+            # keyed by that same resolved value) is computed.
+            predecessor = PlanGraphAudit.open_repair_predecessor(
+                run_root=run_root,
+                graph_run_id=directive.predecessor_attempt_id,
+                plan=plan.plan,
+                plan_sha256=registration.plan_sha256,
+                base_commit=plan.base_commit,
+                logical_graph_id=directive.logical_graph_id,
+                plan_graph_digest=PlanGraphAudit.repair_contract_digest(
+                    plan=plan.plan, plan_sha256=registration.plan_sha256,
+                    base_commit=plan.base_commit,
+                    nodes=contract_nodes, functionality_tests=supplied_tests,
+                    plan_sections=plan.plan_sections,
+                    acceptance_criteria=plan.acceptance_criteria,
+                ),
+            )
+        except (AuditError, OSError, ValueError) as exc:
+            raise PlanGraphError(f"could not allocate repair successor: {exc}") from exc
+        logical_graph_id = predecessor.logical_graph_id
+        process_probe = kwargs.get("child_liveness_probe") or _local_process_start_token
         lock_dir = run_root / ".plan-graph-locks"
         lock_dir.mkdir(parents=True, exist_ok=True)
-        lock_id = hashlib.sha256(directive.logical_graph_id.encode("utf-8")).hexdigest()
+        lock_id = hashlib.sha256(logical_graph_id.encode("utf-8")).hexdigest()
         with (lock_dir / f"{lock_id}.lock").open("a+") as lock:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
             try:
-                supplied_tests = tuple(
-                    _functionality_test_payload(command)
-                    for command in plan.functionality_tests
-                )
-                contract_nodes = cls._contract_nodes(plan)
-                predecessor = PlanGraphAudit.open_repair_predecessor(
-                    run_root=run_root,
-                    graph_run_id=directive.predecessor_attempt_id,
-                    plan=plan.plan,
-                    plan_sha256=registration.plan_sha256,
-                    base_commit=plan.base_commit,
-                    logical_graph_id=directive.logical_graph_id,
-                    plan_graph_digest=PlanGraphAudit.repair_contract_digest(
-                        plan=plan.plan, plan_sha256=registration.plan_sha256,
-                        base_commit=plan.base_commit,
-                        nodes=contract_nodes, functionality_tests=supplied_tests,
-                        plan_sections=plan.plan_sections,
-                        acceptance_criteria=plan.acceptance_criteria,
-                    ),
-                )
                 selection = predecessor.repair_selection(
                     retry_frontier=directive.retry_frontier,
                     blocker_evidence_ref=directive.blocker_evidence_ref,
@@ -1086,12 +1289,12 @@ class PlanGraph:
                 for run in plan.runs:
                     if run.id not in invalidated:
                         continue
-                    budget.verdict(node_id=run.id, gate=gate_digest(run.verification_argv))
-                attempt_id = f"{directive.logical_graph_id}-attempt-{cls._next_repair_ordinal(run_root, directive.logical_graph_id)}"
+                    budget.verdict(node_id=run.id, gate=gate_digest(run.verification_argv, _gate_identity_shape(run)))
+                attempt_id = f"{logical_graph_id}-attempt-{cls._next_repair_ordinal(run_root, logical_graph_id, process_probe)}"
                 graph = cls(
                     repository, registration, launcher,
                     run_root=run_root, graph_run_id=attempt_id,
-                    logical_graph_id=directive.logical_graph_id,
+                    logical_graph_id=logical_graph_id,
                     predecessor_attempt_id=directive.predecessor_attempt_id,
                     resume_directive=directive,
                     reused_completed=selection["reused_completed"],
@@ -1109,13 +1312,52 @@ class PlanGraph:
 
     @staticmethod
     def _contract_nodes(plan: PlanGraphPlan) -> dict[str, dict[str, object]]:
-        return {run.id: {"objective": run.objective, "plan_sections": list(run.plan_sections), "depends_on": list(run.depends_on), "criteria": list(run.criteria), "verification_argv": list(run.verification_argv)} for run in plan.runs}
+        return {
+            run.id: {
+                "objective": run.objective,
+                "plan_sections": list(run.plan_sections),
+                "depends_on": list(run.depends_on),
+                "criteria": list(run.criteria),
+                "verification_argv": _contract_verification_argv(run),
+                "verification_gates": [
+                    dict(gate) for gate in _gate_identity_shape(run)
+                ],
+            }
+            for run in plan.runs
+        }
 
     @staticmethod
-    def _next_repair_ordinal(run_root: Path, logical_graph_id: str) -> int:
+    def _next_repair_ordinal(
+        run_root: Path,
+        logical_graph_id: str,
+        process_probe: Callable[[int], str | None],
+    ) -> int:
+        """Return the next free repair ordinal, reclaiming a crash-orphaned top one.
+
+        A repair successor directory that carries no successor-allocation
+        event (the controller crashed during admission, before that event
+        was written) is reclaimed in place — renamed aside, never deleted —
+        so its ordinal is re-allocated here instead of being permanently
+        skipped.  Reclaim only fires for the highest existing ordinal, and
+        only when :meth:`PlanGraphAudit.reclaim_orphaned_successor_attempt`
+        confirms the allocation event is absent and the admission process is
+        dead; any other case declines and this simply returns the next one.
+        """
         prefix = f"{logical_graph_id}-attempt-"
-        ordinals = [int(path.name.removeprefix(prefix)) for path in run_root.glob(f"{prefix}*") if path.is_dir() and path.name.removeprefix(prefix).isdigit()]
-        return max(ordinals, default=0) + 1
+        ordinals = sorted(
+            int(path.name.removeprefix(prefix))
+            for path in run_root.glob(f"{prefix}*")
+            if path.is_dir() and path.name.removeprefix(prefix).isdigit()
+        )
+        if not ordinals:
+            return 1
+        highest = ordinals[-1]
+        candidate_dir = run_root / f"{prefix}{highest}"
+        if PlanGraphAudit.reclaim_orphaned_successor_attempt(
+            candidate_dir, process_probe=process_probe
+        ):
+            return highest
+        return highest + 1
 
     def validate(self) -> None:
         validate_plan_graph_plan(self.plan)
@@ -1202,7 +1444,7 @@ class PlanGraph:
             )
             try:
                 reservation = self.budget.reserve(
-                    node_id=run.id, gate=gate_digest(run.verification_argv),
+                    node_id=run.id, gate=gate_digest(run.verification_argv, _gate_identity_shape(run)),
                     failure_keys=self._finding_keys_for_reservation(finding_obligations.get(run.id, ())),
                     failure_reason=self._failure_reason_for_reservation(run.id),
                     graph_attempt_id=self.graph_run_id,
@@ -1361,17 +1603,30 @@ class PlanGraph:
     ) -> PlanGraphResult:
         """Execute the graph through ReadySetScheduler admission.
 
-        Launcher calls run on worker threads; every audit, ledger, and Git
-        mutation stays on this coordinating thread. Sibling candidates branch
-        from their dependencies' candidates and are joined with
-        controller-owned merge commits; the final graph candidate joins the
-        sink nodes' candidates.
+        Launcher calls run on worker threads; every node-content checkpoint
+        mutation, ledger update, and Git mutation stays on this coordinating
+        thread. The sole exception is the shared ``gate_slot``: its
+        acquire/release journal entries and the checkpoint re-stamp that
+        follows each of them change no per-node field, only re-binding the
+        checkpoint to the journal head those entries just advanced, so it is
+        safe to write from the worker thread holding the slot around its own
+        verification-command execution — the journal's internal mutex
+        serializes it against this thread's own checkpoint writes. Sibling
+        candidates branch from their dependencies' candidates and are joined
+        with controller-owned merge commits; the final graph candidate joins
+        the sink nodes' candidates.
         """
         scheduler = ReadySetScheduler(
             ordered_runs, max_parallelism=self.max_parallelism
         )
         by_id = {run.id: run for run in ordered_runs}
         self._revalidate_approval()
+        # max_parallelism > 1 is exactly this method's precondition, so one
+        # exclusive gate slot is always created here and shared by every
+        # request this run issues; the legacy sequential path never builds
+        # one, so max_parallelism=1 stays byte-identical (no slot, no
+        # verification_gate_slot value, no gate slot journal events).
+        gate_slot = GateSlot(audit)
         in_flight: dict[str, tuple[Future, FeatureRunRequest, str]] = {}
         terminal: _SealDecision | None = None
         deferred_error: PlanGraphError | None = None
@@ -1400,11 +1655,12 @@ class PlanGraph:
                             )
                             break
                         request = self._request_for_run(
-                            run, base, tuple(finding_obligations.get(run.id, ()))
+                            run, base, tuple(finding_obligations.get(run.id, ())),
+                            verification_gate_slot=gate_slot.hold(run.id),
                         )
                         try:
                             reservation = self.budget.reserve(
-                                node_id=run.id, gate=gate_digest(run.verification_argv),
+                                node_id=run.id, gate=gate_digest(run.verification_argv, _gate_identity_shape(run)),
                                 failure_keys=self._finding_keys_for_reservation(
                                     finding_obligations.get(run.id, ())
                                 ),
@@ -1452,6 +1708,23 @@ class PlanGraph:
                             "failed",
                             evidence={"error": str(exc), "error_type": type(exc).__name__},
                         )
+                    # A successful outcome for a node with verification_argv
+                    # only happens once its verification command has actually
+                    # run (see run_feature_worktree). If this node's slot was
+                    # never entered, the launcher could not have serialized
+                    # that run against its concurrently admitted siblings —
+                    # e.g. an out-of-process launcher, which has no way to
+                    # carry the in-process hold across the subprocess
+                    # boundary — so record that the mutual-exclusion
+                    # guarantee did not apply, instead of leaving the journal
+                    # indistinguishable from a run that never needed it.
+                    if (
+                        outcome.status == "succeeded"
+                        and (run.verification_argv or run.verification_gates)
+                        and request.verification_gate_slot is not None
+                        and not request.verification_gate_slot.entered
+                    ):
+                        audit.gate_slot_bypassed(run.id)
                     try:
                         decision = self._seal_outcome(
                             audit, run, request, reservation, outcome,
@@ -1616,6 +1889,11 @@ class PlanGraph:
                 run.id: {
                     "status": "succeeded" if run.id in self.reused_completed else "queued",
                     **_run_mapping(run),
+                    # Keep this projection aligned with ``_contract_nodes`` so a
+                    # gate-tuple node's registration-time digest (computed here)
+                    # and its repair-resume comparison digest stay identical for
+                    # an unchanged node — see ``_contract_verification_argv``.
+                    "verification_argv": _contract_verification_argv(run),
                     "feature_run_id": self._feature_run_id(run.id),
                     "run_dir": str((self.run_root / self._feature_run_id(run.id)).resolve()),
                     "started_at": None,
@@ -1686,6 +1964,8 @@ class PlanGraph:
         run: PlanRun,
         candidate_commit: str,
         finding_obligations: tuple[Mapping[str, object], ...] = (),
+        *,
+        verification_gate_slot: "GateSlotHold | None" = None,
     ) -> FeatureRunRequest:
         if self._audit is None:
             raise PlanGraphError("FeatureRun request requires an initialized PlanGraph audit")
@@ -1704,6 +1984,7 @@ class PlanGraph:
             finding_obligations=finding_obligations,
             finding_transfer_targets=self._transfer_targets_for(run),
             inherited_ledger_frozen=bool(finding_obligations),
+            verification_gate_slot=verification_gate_slot,
         )
 
     @staticmethod
@@ -2182,10 +2463,31 @@ def validate_plan_graph_plan(plan: PlanGraphPlan) -> None:
             raise PlanGraphError(f"run {run.id!r} has incomplete approved context")
         if any(not value for value in run.verification_argv):
             raise PlanGraphError(f"run {run.id!r} verification_argv contains an empty value")
-        if strict and not run.verification_argv:
+        if strict and not run.verification_argv and not run.verification_gates:
             raise PlanGraphError(
                 f"run {run.id!r} requires controller-owned verification"
             )
+        if run.verification_argv and run.verification_gates:
+            raise PlanGraphError(
+                f"run {run.id!r} may declare verification_argv or "
+                "verification_gates, not both"
+            )
+        gate_names = [gate.name for gate in run.verification_gates]
+        if len(gate_names) != len(set(gate_names)):
+            raise PlanGraphError(f"run {run.id!r} verification_gates has duplicate names")
+        for gate in run.verification_gates:
+            if not gate.name.strip():
+                raise PlanGraphError(f"run {run.id!r} verification_gates has an empty name")
+            if not gate.argv or any(not value for value in gate.argv):
+                raise PlanGraphError(
+                    f"run {run.id!r} verification_gates[{gate.name!r}] argv "
+                    "contains an empty value"
+                )
+            if gate.timeout_seconds <= 0:
+                raise PlanGraphError(
+                    f"run {run.id!r} verification_gates[{gate.name!r}] timeout "
+                    "must be positive"
+                )
         if any(not value for value in run.allowed_paths):
             raise PlanGraphError(f"run {run.id!r} allowed_paths contains an empty value")
         if strict and not run.allowed_paths:
@@ -2409,6 +2711,10 @@ def plan_from_mapping(
                     _required_path_from_mapping(value)
                     for value in item.get("verification_required_paths", ())
                 ),
+                verification_gates=tuple(
+                    _gate_from_mapping(value)
+                    for value in item.get("verification_gates", ())
+                ),
             )
             for item in payload["runs"]  # type: ignore[index]
         )
@@ -2447,6 +2753,18 @@ def _run_from_mapping(value: Mapping[str, object]) -> PlanRun:
             _required_path_from_mapping(item)
             for item in value["verification_required_paths"]  # type: ignore[union-attr]
         ),
+        verification_gates=tuple(
+            _gate_from_mapping(item)
+            for item in value.get("verification_gates", ())  # type: ignore[union-attr]
+        ),
+    )
+
+
+def _gate_from_mapping(value: Mapping[str, object]) -> VerificationGate:
+    return VerificationGate(
+        name=str(value["name"]),
+        argv=tuple(str(item) for item in value["argv"]),  # type: ignore[union-attr]
+        timeout_seconds=float(value["timeout_seconds"]),  # type: ignore[arg-type]
     )
 
 
@@ -2491,6 +2809,8 @@ __all__ = [
     "FeatureRunOutcome",
     "FeatureRunRequest",
     "FunctionalityCommand",
+    "GateSlot",
+    "GateSlotHold",
     "PathIntent",
     "PlanGraph",
     "RequiredPath",
@@ -2502,6 +2822,7 @@ __all__ = [
     "ReadySetDispatch",
     "ReadySetScheduler",
     "SubprocessFeatureRunLauncher",
+    "VerificationGate",
     "canonical_definition",
     "load_registration",
     "persist_registration",

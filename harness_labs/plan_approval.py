@@ -387,12 +387,26 @@ def _run_static_gates(
         _validate_base_required_paths(
             repository, base_commit, run.verification_required_paths
         )
-        evidence = _executable_evidence(
-            repository, base_commit, run.verification_argv,
-            run.verification_required_paths,
-        )
-        if evidence is not None:
-            host_executables.append({"consumer": run.id, **evidence})
+        if run.verification_argv:
+            evidence = _executable_evidence(
+                repository, base_commit, run.verification_argv,
+                run.verification_required_paths,
+            )
+            if evidence is not None:
+                host_executables.append({"consumer": run.id, **evidence})
+        for gate in run.verification_gates:
+            if gate.timeout_seconds > MAX_TIMEOUT_SECONDS:
+                raise PlanApprovalError(
+                    f"run {run.id!r} gate {gate.name!r} timeout exceeds policy"
+                )
+            gate_evidence = _executable_evidence(
+                repository, base_commit, gate.argv,
+                run.verification_required_paths,
+            )
+            if gate_evidence is not None:
+                host_executables.append(
+                    {"consumer": f"{run.id}:{gate.name}", **gate_evidence}
+                )
     for index, command in enumerate(plan.functionality_tests):
         if command.timeout_seconds > MAX_TIMEOUT_SECONDS:
             raise PlanApprovalError(

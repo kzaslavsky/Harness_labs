@@ -147,7 +147,7 @@ def _canonical_run(value: object, index: int) -> dict[str, Any]:
     field = f"plan.runs[{index}]"
     if not isinstance(value, Mapping):
         raise PlanGraphContractError(f"{field} must be an object")
-    expected = {
+    required = {
         "id",
         "objective",
         "plan_sections",
@@ -159,7 +159,12 @@ def _canonical_run(value: object, index: int) -> dict[str, Any]:
         "verification_timeout_seconds",
         "verification_required_paths",
     }
-    _require_exact_keys(value, expected, field)
+    # ``verification_gates`` is deliberately optional: a run that omits it
+    # canonicalizes with the exact same key set (and therefore byte-for-byte
+    # the same JSON and digest) every existing decomposition already
+    # produces. Only a run that declares the key opts into gate-tuple shape.
+    _require_keys(value, required, {"verification_gates"}, field)
+    has_gate_tuple = "verification_gates" in value
     run_id = _nonempty_string(value.get("id"), f"{field}.id")
     objective = _nonempty_string(value.get("objective"), f"{field}.objective")
     plan_sections = _string_array(value.get("plan_sections"), f"{field}.plan_sections")
@@ -188,7 +193,14 @@ def _canonical_run(value: object, index: int) -> dict[str, Any]:
             raise PlanGraphContractError(
                 f"{field} path intent {intent['path']!r} is outside allowed_paths"
             )
-    argv = _string_array(value.get("verification_argv"), f"{field}.verification_argv")
+    # A run declaring a gate tuple carries its verification shape entirely
+    # in ``verification_gates``; its flat ``verification_argv`` is then
+    # allowed to be empty rather than the ordinarily-required command.
+    argv = _string_array(
+        value.get("verification_argv"),
+        f"{field}.verification_argv",
+        allow_empty=has_gate_tuple,
+    )
     timeout = _positive_number(
         value.get("verification_timeout_seconds"),
         f"{field}.verification_timeout_seconds",
@@ -204,7 +216,7 @@ def _canonical_run(value: object, index: int) -> dict[str, Any]:
         )
         for offset, item in enumerate(required_values)
     ]
-    return {
+    result = {
         "id": run_id,
         "objective": objective,
         "plan_sections": plan_sections,
@@ -215,6 +227,40 @@ def _canonical_run(value: object, index: int) -> dict[str, Any]:
         "verification_argv": argv,
         "verification_timeout_seconds": timeout,
         "verification_required_paths": required_paths,
+    }
+    if has_gate_tuple:
+        if argv:
+            raise PlanGraphContractError(
+                f"{field} may declare verification_argv or verification_gates, not both"
+            )
+        result["verification_gates"] = _canonical_gate_tuple(
+            value["verification_gates"], f"{field}.verification_gates"
+        )
+    return result
+
+
+def _canonical_gate_tuple(value: object, field: str) -> list[dict[str, Any]]:
+    if not isinstance(value, list) or not value:
+        raise PlanGraphContractError(f"{field} must be a non-empty array")
+    gates = [
+        _canonical_gate(item, f"{field}[{index}]") for index, item in enumerate(value)
+    ]
+    names = [gate["name"] for gate in gates]
+    if len(names) != len(set(names)):
+        raise PlanGraphContractError(f"{field} contains duplicate gate names")
+    return gates
+
+
+def _canonical_gate(value: object, field: str) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise PlanGraphContractError(f"{field} must be an object")
+    _require_exact_keys(value, {"name", "argv", "timeout_seconds"}, field)
+    return {
+        "name": _nonempty_string(value.get("name"), f"{field}.name"),
+        "argv": _string_array(value.get("argv"), f"{field}.argv"),
+        "timeout_seconds": _positive_number(
+            value.get("timeout_seconds"), f"{field}.timeout_seconds"
+        ),
     }
 
 
@@ -307,10 +353,16 @@ def _nonempty_string(value: object, field: str) -> str:
 
 
 def _require_exact_keys(value: Mapping[str, object], expected: set[str], field: str) -> None:
+    _require_keys(value, expected, set(), field)
+
+
+def _require_keys(
+    value: Mapping[str, object], required: set[str], optional: set[str], field: str
+) -> None:
     actual = set(value)
-    if actual != expected:
-        missing = sorted(expected - actual)
-        extra = sorted(actual - expected)
+    missing = sorted(required - actual)
+    extra = sorted(actual - required - optional)
+    if missing or extra:
         raise PlanGraphContractError(
             f"{field} has invalid keys (missing={missing}, extra={extra})"
         )
