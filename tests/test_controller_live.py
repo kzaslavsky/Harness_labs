@@ -566,9 +566,9 @@ class CodexSemanticTaskExecutorTests(unittest.TestCase):
             "receipt attests must still be refused, even though its name "
             "matches a receipted path",
         )
-        self.assertIn(
-            "clean repository baseline", str(result.payload.get("error", ""))
-        )
+        error = str(result.payload.get("error", ""))
+        self.assertIn("dirty-baseline grant refused", error)
+        self.assertIn("feature.txt", error)
 
     def test_worker_cannot_mint_its_own_deliverable_as_a_workspace_change_receipt(
         self,

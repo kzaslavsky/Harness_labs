@@ -281,6 +281,53 @@ class DirtyBaselineGrantTests(unittest.TestCase):
             executor.dirty_baseline_grant, {"receipt_ref": receipt.ref}
         )
 
+    def test_eligible_role_declines_a_receipt_whose_content_has_drifted(
+        self,
+    ) -> None:
+        """Path coverage alone must not be enough: content has to match too.
+
+        The receipt covers ``index.html`` by path, but its recorded content
+        state is stale relative to what ``workspace_snapshot`` reports on
+        disk right now, so the shared content check must reject it even
+        though the earlier coverage-only test for the same setup accepts an
+        equivalent receipt.
+        """
+
+        evidence = EvidenceCatalog()
+        evidence.add(
+            kind="workspace-change-receipt",
+            content={
+                "changed_paths": ["index.html"],
+                "files": {"index.html": {"kind": "file", "sha256": "before"}},
+            },
+            media_type="application/json",
+            producer_task_id="prior-attempt",
+        )
+        with patch(
+            "harness_labs.agent_mixture.workspace_snapshot",
+            return_value={
+                "changed_paths": ["index.html"],
+                "files": {"index.html": {"kind": "file", "sha256": "after"}},
+            },
+        ):
+            profiles = build_role_profiles(
+                mixture={"*": "claude:claude-opus-5@high"},
+                roles=(_role(allow_dirty_baseline=True),),
+                repository=Path("."),
+                evidence=evidence,
+            )
+            executor = profiles[0].executor_factory(
+                {
+                    "id": "fix-1",
+                    "objective": "Fix",
+                    "context": "",
+                    "details_schema": "demo-implementation/1",
+                    "acceptance_criteria": [],
+                    "required_capabilities": ["repo.write"],
+                }
+            )
+        self.assertIsNone(executor.dirty_baseline_grant)
+
     def test_coordinator_authored_context_cannot_name_its_own_grant(self) -> None:
         """A coordinator-supplied dirty_baseline_grant in task context is ignored.
 

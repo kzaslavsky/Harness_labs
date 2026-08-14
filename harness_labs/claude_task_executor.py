@@ -22,7 +22,7 @@ from typing import Any, Mapping
 
 from .attempts import TaskAttempt, TaskResult
 from .audit import AuditActor, AuditJournal
-from .controller_evidence import EvidenceCatalog, EvidenceError
+from .controller_evidence import EvidenceCatalog
 from .controller_live import (
     _RAW_OUTPUT_SCHEMA,
     _WORKSPACE_CHANGE_RECEIPT_KIND,
@@ -31,6 +31,8 @@ from .controller_live import (
     _parse_context,
     _snapshot_delta_paths,
     _worker_prompt,
+    dirty_baseline_grant_refusal_detail,
+    verify_dirty_baseline_grant,
 )
 from .controller_results import (
     DeliverableFloorViolation,
@@ -469,46 +471,35 @@ class ClaudeSemanticTaskExecutor:
     ) -> Mapping[str, Any]:
         """Accept a dirty baseline only for a grant whose receipt covers it exactly.
 
-        The grant must name an existing ``workspace-change-receipt`` evidence
-        entry left by a prior attempt in this run whose recorded
-        ``changed_paths`` covers every currently dirty path *and* whose
-        recorded ``files`` content state matches what is on disk right now;
-        a missing, unresolvable, path-incomplete, or content-mismatched grant
-        refuses with the same clean-baseline message as no grant at all, so
-        neither a shared path name nor a forged path list can substitute for
-        the receipted change set's actual attested content.
+        Delegates to the shared :func:`verify_dirty_baseline_grant` -- the
+        same receipt-resolution, changed-path-coverage, and per-file
+        content-state check an issuer runs before journaling a grant as
+        granted, so a supplied grant can never pass at issue time and fail
+        here. No grant supplied refuses with the generic clean-baseline
+        message; a supplied-but-failing grant refuses with a typed message
+        naming the specific uncovered or content-mismatched paths.
         """
 
-        dirty_paths: list[str] = initial_workspace["changed_paths"]
-        dirty_files: Mapping[str, Any] = initial_workspace["files"]
         grant = self.dirty_baseline_grant
-        receipt_ref = grant.get("receipt_ref") if isinstance(grant, Mapping) else None
-        receipted_paths: set[str] = set()
-        receipted_files: Mapping[str, Any] = {}
-        if isinstance(receipt_ref, str) and receipt_ref.strip():
-            try:
-                record = self.evidence.metadata(receipt_ref)
-                if record.kind == _WORKSPACE_CHANGE_RECEIPT_KIND:
-                    receipt = json.loads(self.evidence.open(receipt_ref))
-                    if isinstance(receipt, Mapping):
-                        receipted_paths = set(receipt.get("changed_paths", ()))
-                        raw_files = receipt.get("files")
-                        if isinstance(raw_files, Mapping):
-                            receipted_files = raw_files
-            except (EvidenceError, json.JSONDecodeError):
-                receipted_paths = set()
-                receipted_files = {}
-        covered = bool(receipted_paths) and set(dirty_paths) <= receipted_paths
-        if covered:
-            covered = all(
-                dirty_files.get(path) == receipted_files.get(path)
-                for path in dirty_paths
-            )
-        if not covered:
+        verification = verify_dirty_baseline_grant(
+            evidence=self.evidence,
+            grant=grant,
+            dirty_paths=initial_workspace["changed_paths"],
+            dirty_files=initial_workspace["files"],
+        )
+        if not verification.ok:
+            if grant is None:
+                raise LiveExecutionError(
+                    "writable worker requires a clean repository baseline"
+                )
             raise LiveExecutionError(
-                "writable worker requires a clean repository baseline"
+                "dirty-baseline grant refused: "
+                + dirty_baseline_grant_refusal_detail(verification)
             )
-        return {"receipt_ref": receipt_ref, "receipted_paths": sorted(receipted_paths)}
+        return {
+            "receipt_ref": verification.receipt_ref,
+            "receipted_paths": list(verification.receipted_paths),
+        }
 
     def _audit_transport(
         self,

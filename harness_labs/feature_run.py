@@ -11,7 +11,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from time import monotonic_ns
-from typing import Callable, Literal, Mapping, Protocol
+from typing import Any, Callable, Literal, Mapping, Protocol
 
 from .agent_sessions import AgentSession
 from .attempts import AttemptRunner, Executor, TaskAttempt, TaskResult
@@ -19,6 +19,7 @@ from .audit import AuditActor, AuditJournal
 from .controller_commands import CommandActor, CommandEnvelope
 from .controller_evidence import EvidenceCatalog
 from .controller_kernel import ControllerKernel, RunContract
+from .controller_live import DirtyBaselineGrantVerification, verify_dirty_baseline_grant
 from .controller_projection import project_run_view
 from .controller_scheduler import CapabilityScheduler, RoleProfile
 from .coordinator_dispatcher import (
@@ -1528,38 +1529,68 @@ def _resume_kernel_after_recovery(
 def _dirty_baseline_receipt_ref(
     evidence: EvidenceCatalog,
     dirty_paths: list[str],
-) -> str | None:
-    """Return a workspace-change receipt whose changed_paths covers every dirty path.
+    dirty_files: Mapping[str, Any],
+) -> tuple[str | None, DirtyBaselineGrantVerification | None]:
+    """Return a workspace-change receipt covering every dirty path's path and content.
 
-    Any receipt truthfully attests an adoptable baseline as long as its
-    recorded change set is a superset of what is currently dirty; the
-    tightest-covering receipt is preferred (fewest paths beyond what's dirty),
-    ties broken by evidence ref for determinism, so a stale receipt from
-    before further edits is passed over once a newer one covers everything.
+    A candidate receipt qualifies only when the shared
+    :func:`~harness_labs.controller_live.verify_dirty_baseline_grant` accepts
+    it -- changed-path coverage *and* per-file content-state match against
+    ``dirty_files`` -- the same check the executor runs at preflight, so a
+    grant issued from the selection here can never be journaled as granted
+    against a workspace state that would fail preflight. Among qualifying
+    receipts the tightest-covering one is preferred (fewest paths beyond
+    what's dirty), ties broken by evidence ref for determinism, so a stale
+    receipt from before further edits is passed over once a newer one covers
+    everything.
+
+    When no candidate qualifies, the second element carries the
+    closest-covering candidate's failed verification (fewest uncovered and
+    mismatched paths combined), or a receipt-less verification against every
+    dirty path when the catalog holds no ``workspace-change-receipt`` at all
+    -- so a caller can journal exactly which paths defeated the grant.
     """
 
     dirty = set(dirty_paths)
     if not dirty:
-        return None
+        return None, None
     best_ref: str | None = None
     best_extra: int | None = None
+    best_failure: DirtyBaselineGrantVerification | None = None
+    best_defects: int | None = None
     for record in evidence.list():
         if record.kind != "workspace-change-receipt":
             continue
-        try:
-            receipt = json.loads(evidence.open(record.ref))
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(receipt, Mapping):
-            continue
-        receipted = set(receipt.get("changed_paths", ()))
-        if not dirty <= receipted:
-            continue
-        extra = len(receipted - dirty)
-        if best_extra is None or extra < best_extra:
-            best_ref = record.ref
-            best_extra = extra
-    return best_ref
+        verification = verify_dirty_baseline_grant(
+            evidence=evidence,
+            grant={"receipt_ref": record.ref},
+            dirty_paths=dirty_paths,
+            dirty_files=dirty_files,
+        )
+        if verification.ok:
+            extra = len(verification.receipted_paths) - len(dirty)
+            if best_extra is None or extra < best_extra or (
+                extra == best_extra and (best_ref is None or record.ref < best_ref)
+            ):
+                best_ref = record.ref
+                best_extra = extra
+        elif best_ref is None:
+            defects = len(verification.uncovered_paths) + len(
+                verification.mismatched_paths
+            )
+            if best_defects is None or defects < best_defects:
+                best_failure = verification
+                best_defects = defects
+    if best_ref is not None:
+        return best_ref, None
+    if best_failure is not None:
+        return None, best_failure
+    return None, verify_dirty_baseline_grant(
+        evidence=evidence,
+        grant=None,
+        dirty_paths=dirty_paths,
+        dirty_files=dirty_files,
+    )
 
 
 def _attach_dirty_baseline_grant(
@@ -1577,17 +1608,40 @@ def _attach_dirty_baseline_grant(
     (the two live semantic executors) participate; anything else is left
     untouched. A grant is only ever attached when an existing
     ``workspace-change-receipt`` in this run's evidence catalog truthfully
-    covers every path currently dirty, and that decision is recorded in the
-    audit journal so the adoption is provable, not merely asserted.
+    covers every path currently dirty *and* matches its on-disk content, per
+    the shared ``verify_dirty_baseline_grant`` check -- the same check the
+    executor re-runs at preflight -- so a grant journaled here as granted
+    cannot then be refused there for the same workspace state, and that
+    decision is recorded in the audit journal so the adoption is provable,
+    not merely asserted. When no candidate qualifies, the decline is
+    journaled too (status ``"refused"``, naming the uncovered and
+    content-mismatched paths) so a workspace that drifted between a prior
+    receipt and now is diagnosable from the journal instead of surfacing
+    only as the executor's later generic clean-baseline refusal.
     """
 
     if not hasattr(executor, "dirty_baseline_grant"):
         return
-    dirty_paths = list(workspace_snapshot(worktree_path)["changed_paths"])
+    snapshot = workspace_snapshot(worktree_path)
+    dirty_paths = list(snapshot["changed_paths"])
     if not dirty_paths:
         return
-    receipt_ref = _dirty_baseline_receipt_ref(evidence, dirty_paths)
+    receipt_ref, failure = _dirty_baseline_receipt_ref(
+        evidence, dirty_paths, snapshot["files"]
+    )
     if receipt_ref is None:
+        if failure is not None:
+            audit.append(
+                "dirty_baseline_adoption_grant_supplied",
+                status="refused",
+                payload={
+                    "dirty_paths": sorted(dirty_paths),
+                    "uncovered_paths": list(failure.uncovered_paths),
+                    "mismatched_paths": list(failure.mismatched_paths),
+                },
+                actor=actor,
+                attempt_id=attempt.attempt_id,
+            )
         return
     grant = {"receipt_ref": receipt_ref}
     executor.dirty_baseline_grant = grant
