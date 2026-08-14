@@ -163,6 +163,26 @@ class BuildRoleProfilesTests(unittest.TestCase):
         self.assertEqual(verifier.preflight_argv, ("python3", "verify.py"))
         self.assertTrue(verifier.require_preflight_success)
 
+    def test_propagates_role_allow_dirty_baseline_to_the_profile(self) -> None:
+        roles = (
+            _role(allow_dirty_baseline=True),
+            _role(
+                profile_id="verifier",
+                role="demo_verifier",
+                sandbox="read-only",
+                writable_paths=(),
+                require_repository_change=False,
+            ),
+        )
+        profiles = build_role_profiles(
+            mixture={"*": "claude:claude-opus-5@high"},
+            roles=roles,
+            repository=Path("."),
+            evidence=EvidenceCatalog(),
+        )
+        self.assertTrue(profiles[0].allow_dirty_baseline)
+        self.assertFalse(profiles[1].allow_dirty_baseline)
+
     def test_rejects_unknown_executable_providers_and_empty_roles(self) -> None:
         with self.assertRaisesRegex(ValueError, "at least one worker role"):
             build_role_profiles(
@@ -280,6 +300,63 @@ class DirtyBaselineGrantTests(unittest.TestCase):
         self.assertEqual(
             executor.dirty_baseline_grant, {"receipt_ref": receipt.ref}
         )
+
+    def test_eligible_role_prefers_the_tightest_covering_receipt(self) -> None:
+        """Regression for the CB3-03 refactor onto the shared selector.
+
+        Selection now delegates to
+        ``controller_live.select_dirty_baseline_receipt`` instead of a
+        private in-module loop; this pins the tightest-covering-receipt
+        preference the delegation must preserve.
+        """
+
+        evidence = EvidenceCatalog()
+        wide = evidence.add(
+            kind="workspace-change-receipt",
+            content={
+                "changed_paths": ["index.html", "extra.txt"],
+                "files": {
+                    "index.html": {"kind": "file", "sha256": "same"},
+                    "extra.txt": {"kind": "file", "sha256": "same"},
+                },
+            },
+            media_type="application/json",
+            producer_task_id="prior-attempt",
+        )
+        tight = evidence.add(
+            kind="workspace-change-receipt",
+            content={
+                "changed_paths": ["index.html"],
+                "files": {"index.html": {"kind": "file", "sha256": "same"}},
+            },
+            media_type="application/json",
+            producer_task_id="prior-attempt",
+        )
+        with patch(
+            "harness_labs.agent_mixture.workspace_snapshot",
+            return_value={
+                "changed_paths": ["index.html"],
+                "files": {"index.html": {"kind": "file", "sha256": "same"}},
+            },
+        ):
+            profiles = build_role_profiles(
+                mixture={"*": "claude:claude-opus-5@high"},
+                roles=(_role(allow_dirty_baseline=True),),
+                repository=Path("."),
+                evidence=evidence,
+            )
+            executor = profiles[0].executor_factory(
+                {
+                    "id": "fix-1",
+                    "objective": "Fix",
+                    "context": "",
+                    "details_schema": "demo-implementation/1",
+                    "acceptance_criteria": [],
+                    "required_capabilities": ["repo.write"],
+                }
+            )
+        self.assertEqual(executor.dirty_baseline_grant, {"receipt_ref": tight.ref})
+        self.assertNotEqual(executor.dirty_baseline_grant["receipt_ref"], wide.ref)
 
     def test_eligible_role_declines_a_receipt_whose_content_has_drifted(
         self,

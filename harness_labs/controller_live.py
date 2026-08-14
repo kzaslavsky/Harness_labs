@@ -138,6 +138,73 @@ def dirty_baseline_grant_refusal_detail(
     return "; ".join(parts)
 
 
+def select_dirty_baseline_receipt(
+    *,
+    evidence: EvidenceCatalog,
+    dirty_paths: list[str],
+    dirty_files: Mapping[str, Any],
+) -> tuple[str | None, DirtyBaselineGrantVerification | None]:
+    """Pick the workspace-change receipt that exactly covers a dirty workspace.
+
+    A candidate receipt qualifies only when :func:`verify_dirty_baseline_grant`
+    accepts it -- changed-path coverage *and* per-file content-state match --
+    so a receipt selected here can never be journaled as granted against a
+    workspace state that would fail the same check again at preflight.
+    Qualification is by content coverage alone: among qualifying receipts the
+    tightest-covering one is preferred (fewest paths beyond what is dirty),
+    ties broken by evidence ref, so selection is deterministic and
+    independent of catalog ordering; receipts are never unioned together to
+    synthesize coverage that no single receipt provides.
+
+    When no candidate qualifies, the second element carries the
+    closest-covering candidate's failed verification (fewest uncovered and
+    mismatched paths combined), or a receipt-less verification against every
+    dirty path when the catalog holds no ``workspace-change-receipt`` at all
+    -- so a caller can journal exactly which paths defeated the grant.
+    """
+
+    dirty = set(dirty_paths)
+    if not dirty:
+        return None, None
+    best_ref: str | None = None
+    best_extra: int | None = None
+    best_failure: DirtyBaselineGrantVerification | None = None
+    best_defects: int | None = None
+    for record in evidence.list():
+        if record.kind != _WORKSPACE_CHANGE_RECEIPT_KIND:
+            continue
+        verification = verify_dirty_baseline_grant(
+            evidence=evidence,
+            grant={"receipt_ref": record.ref},
+            dirty_paths=dirty_paths,
+            dirty_files=dirty_files,
+        )
+        if verification.ok:
+            extra = len(verification.receipted_paths) - len(dirty)
+            if best_extra is None or extra < best_extra or (
+                extra == best_extra and (best_ref is None or record.ref < best_ref)
+            ):
+                best_ref = record.ref
+                best_extra = extra
+        elif best_ref is None:
+            defects = len(verification.uncovered_paths) + len(
+                verification.mismatched_paths
+            )
+            if best_defects is None or defects < best_defects:
+                best_failure = verification
+                best_defects = defects
+    if best_ref is not None:
+        return best_ref, None
+    if best_failure is not None:
+        return None, best_failure
+    return None, verify_dirty_baseline_grant(
+        evidence=evidence,
+        grant=None,
+        dirty_paths=dirty_paths,
+        dirty_files=dirty_files,
+    )
+
+
 _RAW_OUTPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
@@ -868,5 +935,6 @@ __all__ = [
     "DirtyBaselineGrantVerification",
     "LiveExecutionError",
     "dirty_baseline_grant_refusal_detail",
+    "select_dirty_baseline_receipt",
     "verify_dirty_baseline_grant",
 ]

@@ -24,8 +24,7 @@ from .codex_agent_session import CodexAppServerSession
 from .controller_evidence import EvidenceCatalog
 from .controller_live import (
     CodexSemanticTaskExecutor,
-    DirtyBaselineGrantVerification,
-    verify_dirty_baseline_grant,
+    select_dirty_baseline_receipt,
 )
 from .controller_scheduler import RoleProfile
 from .git_transaction import workspace_snapshot
@@ -220,6 +219,7 @@ def build_role_profiles(
                 capabilities=role.capabilities,
                 details_schemas=role.details_schemas,
                 backend_id=spec.backend_id,
+                allow_dirty_baseline=role.allow_dirty_baseline,
                 executor_factory=_executor_factory(
                     spec=spec,
                     role=role,
@@ -304,12 +304,14 @@ def _controller_dirty_baseline_grant(
     of time can never itself bypass the executor's clean-baseline preflight,
     and no dispatched task can choose or influence which receipt is offered.
     The candidate is checked with the same shared
-    :func:`~harness_labs.controller_live.verify_dirty_baseline_grant` the
-    executor runs at preflight (path coverage *and* content state), so a
-    grant issued here is never journaled as granted against a workspace
-    state that would fail preflight. When no candidate qualifies, the decline
-    is journaled too (status ``"refused"``, naming the uncovered and
-    content-mismatched paths) so drift is diagnosable from the journal.
+    :func:`~harness_labs.controller_live.select_dirty_baseline_receipt` (which
+    itself runs :func:`~harness_labs.controller_live.verify_dirty_baseline_grant`,
+    the same check the executor runs at preflight: path coverage *and*
+    content state), so a grant issued here is never journaled as granted
+    against a workspace state that would fail preflight. When no candidate
+    qualifies, the decline is journaled too (status ``"refused"``, naming the
+    uncovered and content-mismatched paths) so drift is diagnosable from the
+    journal.
     """
 
     if not role.allow_dirty_baseline:
@@ -318,8 +320,8 @@ def _controller_dirty_baseline_grant(
     dirty_paths = snapshot["changed_paths"]
     if not dirty_paths:
         return None
-    receipt_ref, failure = _best_covering_receipt(
-        evidence, dirty_paths, snapshot["files"]
+    receipt_ref, failure = select_dirty_baseline_receipt(
+        evidence=evidence, dirty_paths=dirty_paths, dirty_files=snapshot["files"]
     )
     if receipt_ref is None:
         if audit is not None and failure is not None:
@@ -335,64 +337,6 @@ def _controller_dirty_baseline_grant(
             )
         return None
     return {"receipt_ref": receipt_ref}
-
-
-def _best_covering_receipt(
-    evidence: EvidenceCatalog,
-    dirty_paths: list[str],
-    dirty_files: Mapping[str, Any],
-) -> tuple[str | None, DirtyBaselineGrantVerification | None]:
-    """Return the tightest-covering, content-matching receipt for dirty_paths.
-
-    A candidate receipt qualifies only when the shared
-    ``verify_dirty_baseline_grant`` accepts it (changed-path coverage *and*
-    per-file content-state match); among qualifying receipts, the
-    tightest-covering one is preferred (fewest paths beyond what's dirty),
-    ties broken by evidence ref for determinism.
-
-    When no candidate qualifies, the second element carries the
-    closest-covering candidate's failed verification (fewest uncovered and
-    mismatched paths combined), or a receipt-less verification against every
-    dirty path when the catalog holds no ``workspace-change-receipt`` at all.
-    """
-
-    best_ref: str | None = None
-    best_extra: int | None = None
-    best_failure: DirtyBaselineGrantVerification | None = None
-    best_defects: int | None = None
-    for record in evidence.list():
-        if record.kind != "workspace-change-receipt":
-            continue
-        verification = verify_dirty_baseline_grant(
-            evidence=evidence,
-            grant={"receipt_ref": record.ref},
-            dirty_paths=dirty_paths,
-            dirty_files=dirty_files,
-        )
-        if verification.ok:
-            extra = len(verification.receipted_paths) - len(dirty_paths)
-            if best_extra is None or extra < best_extra or (
-                extra == best_extra and (best_ref is None or record.ref < best_ref)
-            ):
-                best_ref = record.ref
-                best_extra = extra
-        elif best_ref is None:
-            defects = len(verification.uncovered_paths) + len(
-                verification.mismatched_paths
-            )
-            if best_defects is None or defects < best_defects:
-                best_failure = verification
-                best_defects = defects
-    if best_ref is not None:
-        return best_ref, None
-    if best_failure is not None:
-        return None, best_failure
-    return None, verify_dirty_baseline_grant(
-        evidence=evidence,
-        grant=None,
-        dirty_paths=dirty_paths,
-        dirty_files=dirty_files,
-    )
 
 
 def build_coordinator_session(
