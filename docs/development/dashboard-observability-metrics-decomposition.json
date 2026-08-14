@@ -1,0 +1,209 @@
+{
+  "protocol": "plan-graph-plan/1",
+  "plan": "docs/development/DASHBOARD_OBSERVABILITY_METRICS_PLAN.md",
+  "plan_sections": {
+    "DM-01": "Create harness_labs/observability/graph_metrics.py: a pure rollup that aggregates a PlanGraph catalog record, graph detail, and children's cumulative FeatureRun detail metrics into graph-level totals (tokens with cached share, tri-state cost, calls, wall time with live-elapsed semantics, busy-interval union and utilization, peak context, verification repairs, review cycles, recovery decisions, node retries, graph attempt lineage, blockers with reasons, FeatureRun count, per-FeatureRun derived stats, per-node table, model/backend/phase breakdowns), protocol plan-graph-metrics/1, with unit tests for mixed availability and retry/blocker counting.",
+    "DM-02": "Project human-readable names through the catalog: node objective in run_catalog._nodes, display_name on plan-graph records (plan path stem plus attempt ordinal) and feature-run records (objective-derived with deterministic fallbacks), objective on feature-run records; extend schemas/run-catalog-snapshot.schema.json and catalog contract tests.",
+    "DM-03": "Create the snapshot contract and builder: schemas/plangraph-metrics-snapshot.schema.json (protocol plangraph-metrics-snapshot/1 with identity, display_name, status, timing, graph_metrics, per-feature-run cumulative metrics with per-try rows, outcome attempted-vs-accomplished summary, data_quality flags, provenance), harness_labs/observability/plangraph_snapshot.py read-only builder, scripts/build_plangraph_snapshot.py idempotent atomic CLI writing to <run-root>/.plan-graph-snapshots/, and best-effort snapshot emission in scripts/run_plan_graph.py after terminal finalization that can never alter run status.",
+    "DM-04": "Extend dashboard_server.py with GET /api/plan-graphs/<id>/metrics (DM-01 rollup for live and terminal graphs, recomputed per catalog revision), GET /api/snapshots and GET /api/snapshots/<id> (from --snapshot-root plus auto-discovered .plan-graph-snapshots dirs, with existing bounds and read-only hygiene), add --snapshot-root to scripts/run_dashboard.py, and make _merge_detail_metrics report cumulative review_cycles, verification_repairs, and findings_total across node tries in a labelled block while retaining latest-try quality and per-try rows; extend API tests.",
+    "DM-05": "Frontend live view: GraphTotals panel beneath the canvas polling the graph metrics endpoint, an In-flight strip listing every live graph with display name, state, and elapsed time with click-to-select, display names across selectors and lists, cumulative labels on retry counters; update api.js validators and tests; rebuild dashboard/plan-graph/dist.",
+    "DM-06": "Frontend completed viewer: Live/Completed view toggle, snapshot browser listing all snapshots with display name, status, finished date, and outcome narrative, full-snapshot rendering through the shared metric components, and a comparison table with one sortable row per snapshot across headline metrics; rebuild dashboard/plan-graph/dist.",
+    "DM-07": "Historical reconstruction hardening and runbook: fixture-based backfill tests covering missing summary.json, zero token records, graph-with-child-token split, launcher dirs without events.jsonl, and interrupted checkpoints; write docs/observability/completed-plangraph-viewer.md (post-merge backfill and viewing commands, snapshot layout, data-quality flags) and update docs/observability/logging-and-metrics.md."
+  },
+  "acceptance_criteria": {
+    "AC-DM01-1": "A rollup over synthetic children with full data reports exact totals for tokens, cost, calls, wall, busy, utilization, peak, retries, recoveries, blockers, FeatureRun count, and per-FeatureRun derived stats.",
+    "AC-DM01-2": "Any child with unavailable cost or missing monotonic spans degrades the corresponding aggregate to the documented tri-state instead of zero, with a reason string.",
+    "AC-DM01-3": "Live graphs report elapsed wall time from checkpoint started_at; terminal graphs report summary.json wall clock.",
+    "AC-DM02-1": "Catalog plan-graph records carry a deterministic display_name derived from the plan path and attempt ordinal; feature-run records carry display_name and objective; node projections carry objective.",
+    "AC-DM02-2": "Records lacking source prose fall back deterministically (objective to node_id to run_id) and still validate against the extended run-catalog-snapshot schema.",
+    "AC-DM03-1": "Building a snapshot for a terminal fixture graph produces a document that validates against the new schema and matches the live rollup's numbers for the same fixture.",
+    "AC-DM03-2": "The CLI is idempotent, writes atomically, refuses non-terminal graphs by default, and never writes inside run directories.",
+    "AC-DM03-3": "After a terminal PlanGraph run through the runner script a snapshot exists for the attempt; a snapshot-write failure leaves run status and journals untouched and is reported as a warning.",
+    "AC-DM03-4": "The outcome block reports per-node objective, status, criteria satisfied/total, and non-success evidence reasons, plus graph-level attempted/succeeded/blocked/failed counts and a narrative string.",
+    "AC-DM04-1": "/api/plan-graphs/<id>/metrics serves the DM-01 rollup for both live and terminal graphs and recomputes only when the catalog revision changes.",
+    "AC-DM04-2": "/api/snapshots lists snapshots from configured roots and auto-discovered snapshot dirs with headline metrics; /api/snapshots/<id> returns schema-valid full documents; malformed snapshot files yield diagnostics without failing healthy listings.",
+    "AC-DM04-3": "For a node with multiple tries the FeatureRun detail response reports cumulative retry, review, and findings counters across tries alongside latest-try quality and per-try rows, covered by API tests.",
+    "AC-DM05-1": "With multiple live graphs in the catalog the In-flight strip lists all of them and switches selection without a reload; new in-flight graphs appear within one polling interval.",
+    "AC-DM05-2": "The totals panel renders every DM-01 headline metric with explicit unavailable or estimated states and cumulative labelling, and updates while the graph is running.",
+    "AC-DM05-3": "npm --prefix dashboard/plan-graph run verify passes and the committed dist build reflects the source changes.",
+    "AC-DM06-1": "The completed viewer lists every snapshot the API serves and renders a selected snapshot's graph totals, per-node metrics, and outcome summary as in a live run, from the snapshot document alone.",
+    "AC-DM06-2": "The comparison table shows one row per snapshot with headline metric columns and sorts ascending or descending by any column, placing data-quality-degraded values last.",
+    "AC-DM06-3": "npm --prefix dashboard/plan-graph run verify passes and the committed dist build reflects the source changes.",
+    "AC-DM07-1": "Backfill over a fixture corpus reproducing each historical degradation yields schema-valid snapshots with correct data_quality flags and derived wall times, and skips launcher-style dirs with a diagnostic instead of failing the corpus.",
+    "AC-DM07-2": "The runbook documents the exact post-merge operator commands to reconstruct all prior completed PlanGraphs and view them, and logging-and-metrics.md documents the snapshot artifact and its protocol."
+  },
+  "runs": [
+    {
+      "id": "DM-01",
+      "objective": "Implement the PlanGraph-level metrics rollup module aggregating child FeatureRun metrics into graph totals with tri-state availability.",
+      "plan_sections": ["DM-01"],
+      "criteria": ["AC-DM01-1", "AC-DM01-2", "AC-DM01-3"],
+      "depends_on": [],
+      "allowed_paths": [
+        "harness_labs/observability/graph_metrics.py",
+        "harness_labs/observability/__init__.py",
+        "tests/test_graph_metrics.py"
+      ],
+      "path_intents": [
+        {"path": "harness_labs/observability/graph_metrics.py", "action": "create"},
+        {"path": "harness_labs/observability/__init__.py", "action": "modify"},
+        {"path": "tests/test_graph_metrics.py", "action": "create"}
+      ],
+      "verification_argv": ["python3", "-m", "unittest", "tests.test_graph_metrics", "tests.test_import_boundaries"],
+      "verification_timeout_seconds": 1200,
+      "verification_required_paths": []
+    },
+    {
+      "id": "DM-02",
+      "objective": "Project human-readable display names and objectives into run catalog records and extend the catalog snapshot schema.",
+      "plan_sections": ["DM-02"],
+      "criteria": ["AC-DM02-1", "AC-DM02-2"],
+      "depends_on": [],
+      "allowed_paths": [
+        "harness_labs/observability/run_catalog.py",
+        "schemas/run-catalog-snapshot.schema.json",
+        "tests/test_run_catalog.py",
+        "tests/test_run_catalog_contracts.py"
+      ],
+      "path_intents": [
+        {"path": "harness_labs/observability/run_catalog.py", "action": "modify"},
+        {"path": "schemas/run-catalog-snapshot.schema.json", "action": "modify"},
+        {"path": "tests/test_run_catalog.py", "action": "modify"},
+        {"path": "tests/test_run_catalog_contracts.py", "action": "modify"}
+      ],
+      "verification_argv": ["python3", "-m", "unittest", "tests.test_run_catalog", "tests.test_run_catalog_contracts", "tests.test_run_metrics"],
+      "verification_timeout_seconds": 1200,
+      "verification_required_paths": []
+    },
+    {
+      "id": "DM-03",
+      "objective": "Define the plangraph metrics snapshot contract and implement the read-only builder, offline CLI, and best-effort completion emission.",
+      "plan_sections": ["DM-03"],
+      "criteria": ["AC-DM03-1", "AC-DM03-2", "AC-DM03-3", "AC-DM03-4"],
+      "depends_on": ["DM-01", "DM-02"],
+      "allowed_paths": [
+        "schemas/plangraph-metrics-snapshot.schema.json",
+        "harness_labs/observability/plangraph_snapshot.py",
+        "harness_labs/observability/__init__.py",
+        "scripts/build_plangraph_snapshot.py",
+        "scripts/run_plan_graph.py",
+        "tests/test_plangraph_snapshot.py"
+      ],
+      "path_intents": [
+        {"path": "schemas/plangraph-metrics-snapshot.schema.json", "action": "create"},
+        {"path": "harness_labs/observability/plangraph_snapshot.py", "action": "create"},
+        {"path": "harness_labs/observability/__init__.py", "action": "modify"},
+        {"path": "scripts/build_plangraph_snapshot.py", "action": "create"},
+        {"path": "scripts/run_plan_graph.py", "action": "modify"},
+        {"path": "tests/test_plangraph_snapshot.py", "action": "create"}
+      ],
+      "verification_argv": ["python3", "-m", "unittest", "tests.test_plangraph_snapshot", "tests.test_graph_metrics", "tests.test_import_boundaries"],
+      "verification_timeout_seconds": 1800,
+      "verification_required_paths": [
+        {"path": "harness_labs/observability/graph_metrics.py", "availability": "created_by", "producer_run_id": "DM-01"}
+      ]
+    },
+    {
+      "id": "DM-04",
+      "objective": "Expose graph rollup and snapshot endpoints on the dashboard server and make retry-related quality counters cumulative across node tries.",
+      "plan_sections": ["DM-04"],
+      "criteria": ["AC-DM04-1", "AC-DM04-2", "AC-DM04-3"],
+      "depends_on": ["DM-01", "DM-02", "DM-03"],
+      "allowed_paths": [
+        "harness_labs/observability/dashboard_server.py",
+        "scripts/run_dashboard.py",
+        "tests/test_dashboard_api.py"
+      ],
+      "path_intents": [
+        {"path": "harness_labs/observability/dashboard_server.py", "action": "modify"},
+        {"path": "scripts/run_dashboard.py", "action": "modify"},
+        {"path": "tests/test_dashboard_api.py", "action": "modify"}
+      ],
+      "verification_argv": ["python3", "-m", "unittest", "tests.test_dashboard_api", "tests.test_run_catalog"],
+      "verification_timeout_seconds": 1800,
+      "verification_required_paths": [
+        {"path": "harness_labs/observability/graph_metrics.py", "availability": "created_by", "producer_run_id": "DM-01"},
+        {"path": "harness_labs/observability/plangraph_snapshot.py", "availability": "created_by", "producer_run_id": "DM-03"}
+      ]
+    },
+    {
+      "id": "DM-05",
+      "objective": "Add the live PlanGraph totals panel, in-flight graph strip, human-readable names, and cumulative retry labelling to the dashboard UI.",
+      "plan_sections": ["DM-05"],
+      "criteria": ["AC-DM05-1", "AC-DM05-2", "AC-DM05-3"],
+      "depends_on": ["DM-04"],
+      "allowed_paths": [
+        "dashboard/plan-graph/src",
+        "dashboard/plan-graph/dist",
+        "dashboard/plan-graph/index.html",
+        "dashboard/plan-graph/package.json"
+      ],
+      "path_intents": [
+        {"path": "dashboard/plan-graph/src/App.jsx", "action": "modify"},
+        {"path": "dashboard/plan-graph/src/api.js", "action": "modify"},
+        {"path": "dashboard/plan-graph/src/api.test.js", "action": "modify"},
+        {"path": "dashboard/plan-graph/src/styles.css", "action": "modify"}
+      ],
+      "verification_argv": ["npm", "--prefix", "dashboard/plan-graph", "run", "verify"],
+      "verification_timeout_seconds": 1200,
+      "verification_required_paths": []
+    },
+    {
+      "id": "DM-06",
+      "objective": "Build the completed-PlanGraph viewer with snapshot browsing, snapshot rendering through shared components, and the sortable cross-graph comparison table.",
+      "plan_sections": ["DM-06"],
+      "criteria": ["AC-DM06-1", "AC-DM06-2", "AC-DM06-3"],
+      "depends_on": ["DM-05"],
+      "allowed_paths": [
+        "dashboard/plan-graph/src",
+        "dashboard/plan-graph/dist",
+        "dashboard/plan-graph/index.html"
+      ],
+      "path_intents": [
+        {"path": "dashboard/plan-graph/src/App.jsx", "action": "modify"},
+        {"path": "dashboard/plan-graph/src/api.js", "action": "modify"},
+        {"path": "dashboard/plan-graph/src/api.test.js", "action": "modify"},
+        {"path": "dashboard/plan-graph/src/styles.css", "action": "modify"}
+      ],
+      "verification_argv": ["npm", "--prefix", "dashboard/plan-graph", "run", "verify"],
+      "verification_timeout_seconds": 1200,
+      "verification_required_paths": []
+    },
+    {
+      "id": "DM-07",
+      "objective": "Harden snapshot reconstruction against the historical run corpus and document the backfill and viewing runbook.",
+      "plan_sections": ["DM-07"],
+      "criteria": ["AC-DM07-1", "AC-DM07-2"],
+      "depends_on": ["DM-03", "DM-04"],
+      "allowed_paths": [
+        "harness_labs/observability/plangraph_snapshot.py",
+        "scripts/build_plangraph_snapshot.py",
+        "tests/test_snapshot_backfill.py",
+        "docs/observability/completed-plangraph-viewer.md",
+        "docs/observability/logging-and-metrics.md"
+      ],
+      "path_intents": [
+        {"path": "harness_labs/observability/plangraph_snapshot.py", "action": "modify"},
+        {"path": "scripts/build_plangraph_snapshot.py", "action": "modify"},
+        {"path": "tests/test_snapshot_backfill.py", "action": "create"},
+        {"path": "docs/observability/completed-plangraph-viewer.md", "action": "create"},
+        {"path": "docs/observability/logging-and-metrics.md", "action": "modify"}
+      ],
+      "verification_argv": ["python3", "-m", "unittest", "tests.test_snapshot_backfill", "tests.test_plangraph_snapshot"],
+      "verification_timeout_seconds": 1800,
+      "verification_required_paths": [
+        {"path": "scripts/build_plangraph_snapshot.py", "availability": "created_by", "producer_run_id": "DM-03"}
+      ]
+    }
+  ],
+  "functionality_tests": [
+    {"argv": ["python3", "-m", "unittest", "discover", "-s", "tests"], "timeout_seconds": 3600, "required_paths": []},
+    {"argv": ["npm", "--prefix", "dashboard/plan-graph", "run", "verify"], "timeout_seconds": 1200, "required_paths": []},
+    {"argv": ["python3", "scripts/check_repository_contracts.py"], "timeout_seconds": 600, "required_paths": [{"path": "scripts/check_repository_contracts.py", "availability": "base"}]}
+  ],
+  "referenced_artifacts": [
+    "docs/development/live-plangraph-dashboard-operations.md",
+    "docs/observability/logging-and-metrics.md",
+    "schemas/run-catalog-snapshot.schema.json"
+  ]
+}
