@@ -423,6 +423,13 @@ stub token like "WIP", "TODO", "placeholder", or a single repeated word is
 mechanically refused, the task fails, and the failed attempt's uncommitted
 edits deadlock the node. Write the real multi-sentence summary of what you
 changed BEFORE you finish; never emit a stub intending to revise it.
+STRUCTURED-RESULT DISCIPLINE: emit your final structured result IMMEDIATELY
+once the gate passes and your diff is grant-clean — do not keep exploring,
+re-running suites, or polishing afterward. Long sessions exhaust the
+structured-output retry budget at the very end, which fails the task with
+unreceipted residue and deadlocks the node. Keep the structured fields plain
+(markdown strings, no exotic nesting); if an emission is rejected, simplify
+the content rather than adding to it.
 """
     return (
         RoleProfile(
