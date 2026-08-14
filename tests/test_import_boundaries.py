@@ -1,8 +1,7 @@
 """GraphRun layer-boundary contract (GRAPHRUN_RESTRUCTURE_PLAN.md).
 
-The two closure tests are the restructure program's red phase: marked
-``xfail(strict=True)`` while the violations exist at base (GR-01), and
-unmarked by the boundary-fix step (GR-02). Assertions run on **static AST
+The two closure tests were the restructure program's red phase (xfail at
+GR-01); GR-02's boundary fixes turned them green and the markers came off. Assertions run on **static AST
 import closures** — deferred in-function imports included — never on
 ``sys.modules``: the package ``__init__`` eagerly re-exports the plangraph
 surface, so any runtime probe is red regardless of layering.
@@ -34,7 +33,6 @@ class ImportBoundaryTests(unittest.TestCase):
             f"boundary checker reported errors:\n{completed.stdout}",
         )
 
-    @unittest.expectedFailure
     def test_feature_run_closure_free_of_plangraph(self):
         layers = boundaries.closure_layers("feature_run", PACKAGE_ROOT)
         plangraph_members = sorted(
@@ -46,7 +44,6 @@ class ImportBoundaryTests(unittest.TestCase):
             f"modules: {plangraph_members}",
         )
 
-    @unittest.expectedFailure
     def test_development_policy_closure_free_of_featurerun(self):
         layers = boundaries.closure_layers("development_policy", PACKAGE_ROOT)
         featurerun_members = sorted(

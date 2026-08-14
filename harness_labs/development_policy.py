@@ -101,20 +101,6 @@ class DevelopmentPolicy:
         return tuple(unique[key] for key in sorted(unique))
 
 
-def implement_v13_development_policy() -> DevelopmentPolicy:
-    """Compatibility alias for the neutral standard FeatureRun policy."""
-
-    from .feature_run_policy import standard_feature_run_policy
-
-    return standard_feature_run_policy()
-
-
-def implement_v13_dispatch_schema():
-    """Compatibility alias for the neutral standard FeatureRun schema."""
-
-    from .feature_run_policy import standard_feature_run_dispatch_schema
-
-    return standard_feature_run_dispatch_schema()
 
 
 def _validate_planning(value: Mapping[str, Any]) -> None:
@@ -151,6 +137,4 @@ __all__ = [
     "DEVELOPMENT_POLICY_PROTOCOL",
     "DevelopmentPolicy",
     "ReviewAssignment",
-    "implement_v13_development_policy",
-    "implement_v13_dispatch_schema",
 ]

@@ -35,7 +35,7 @@ from .git_transaction import (
     paths_outside_scope,
     workspace_snapshot,
 )
-from .plan_graph_budget import failing_identifiers
+from .core.test_output import failing_identifiers
 from .review_fix import (
     ReviewFixExecutorFactory,
     ReviewFixLoop,
