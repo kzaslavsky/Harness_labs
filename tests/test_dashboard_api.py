@@ -88,6 +88,54 @@ class DashboardApiTests(unittest.TestCase):
         self.assertEqual([row["label"] for row in cumulative["by_try"]], ["try-1", "try-2"])
         self.assertEqual([row["feature_run_id"] for row in cumulative["stages"]], ["try-1", "try-2"])
         self.assertEqual(details["try-3"]["metrics"]["totals"]["total_tokens"], 150)
+        # DM-01: the merge is now served through graph_metrics; the merged
+        # document also carries a labelled cumulative-quality block.
+        self.assertEqual(cumulative["cumulative_quality"]["try_count"], 2)
+        third = details["try-3"]["metrics"]["cumulative_quality"]
+        self.assertEqual(third["try_count"], 3)
+
+    def test_feature_run_endpoint_serves_cumulative_quality_across_plan_attempts(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            plan = root / "plan.md"
+            plan.write_text("approved plan\n", encoding="utf-8")
+            plan_sha = hashlib.sha256(plan.read_bytes()).hexdigest()
+
+            def run_with_review_fix(run_id: str, cycles: int) -> None:
+                journal = AuditJournal(root / run_id, run_id, actor=AuditActor("test", "test"))
+                descriptor = {"protocol": "harness-run-descriptor/1", "run_kind": "feature_run", "run_id": run_id, "created_at": "2026-08-09T00:00:00Z", "objective": "test", "evidence_classification": "production_lifecycle", "repository": {"path": "/repo", "base_branch": "main", "base_commit": "a" * 40}, "approved_plan": None, "parent_correlation": None}
+                raw = (json.dumps(descriptor, sort_keys=True, separators=(",", ":")) + "\n").encode()
+                (journal.run_dir / "descriptor.json").write_bytes(raw)
+                journal.append("run_descriptor_bound", status="succeeded", payload={"descriptor_sha256": hashlib.sha256(raw).hexdigest()})
+                journal.checkpoint("running", {"controller": {"criteria": {}, "findings": {}}, "review_fix": {"cycles": cycles}})
+
+            run_with_review_fix("try-1", cycles=2)
+            run_with_review_fix("try-2", cycles=1)
+            PlanGraphAudit(
+                repository=root, run_root=root, graph_run_id="graph-1", plan=str(plan), plan_sha256=plan_sha,
+                base_commit="a" * 40, registration_binding=_registration_binding("graph-1"),
+                objective="first attempt",
+                nodes={"FR-1": {"status": "failed", "feature_run_id": "try-1", "depends_on": []}},
+                functionality_tests=(),
+            )
+            PlanGraphAudit(
+                repository=root, run_root=root, graph_run_id="graph-2", plan=str(plan), plan_sha256=plan_sha,
+                base_commit="a" * 40, registration_binding=_registration_binding("graph-2"),
+                objective="second attempt retries the node",
+                nodes={"FR-1": {"status": "running", "feature_run_id": "try-2", "depends_on": []}},
+                functionality_tests=(),
+            )
+            app = DashboardApplication(root, refresh_seconds=60)
+            status, body, _ = self._request(app, "GET", "/api/feature-runs/try-2")
+
+        self.assertEqual(status, 200)
+        metrics = json.loads(body)["metrics"]
+        # Cumulative across both tries (this exercises dashboard_server's
+        # public delegation to graph_metrics end-to-end over the live HTTP path).
+        self.assertEqual(metrics["cumulative_quality"]["review_cycles"], 3)
+        self.assertEqual(metrics["cumulative_quality"]["try_count"], 2)
+        # Latest-try quality (current-state) is retained, not summed.
+        self.assertEqual(metrics["quality"]["review_cycles"], 1)
 
     def test_cumulative_reused_try_adds_no_spend_and_wall_busy_are_all_or_unavailable(self) -> None:
         def metrics(tokens: int, wall: int | None, busy: int | None) -> dict:

@@ -15,6 +15,7 @@ from typing import Any, Mapping
 from urllib.parse import unquote, urlsplit
 
 from harness_labs.core.audit import AuditError
+from harness_labs.observability import graph_metrics
 from harness_labs.observability.run_catalog import RunCatalog, build_run_detail, merge_run_catalogs
 
 MAX_RUN_DIRECTORIES = 512
@@ -143,7 +144,7 @@ class DashboardApplication:
             if target is None or target.get("status") == "corrupt":
                 return None
             details: dict[str, dict[str, Any]] = {}
-            for history_id in _node_history_run_ids(snapshot.catalog_value, run_id):
+            for history_id in graph_metrics.node_history_run_ids(snapshot.catalog_value, run_id):
                 run = runs.get(history_id)
                 if run is None or run.get("status") == "corrupt":
                     continue
@@ -356,142 +357,12 @@ def _cap_diagnostics(value: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _apply_cumulative_node_metrics(catalog: Mapping[str, Any], details: dict[str, dict[str, Any]]) -> None:
-    """Accumulate verified metrics across tries of one logical PlanGraph node."""
-    base_metrics = {
-        run_id: detail.get("metrics")
-        for run_id, detail in details.items()
-        if isinstance(detail.get("metrics"), Mapping)
-    }
-    histories: dict[tuple[str, str], list[str]] = {}
-    graphs = sorted(catalog.get("plan_graphs", []), key=lambda graph: (str(graph.get("created_at", "")), str(graph.get("run_id", ""))))
-    for graph in graphs:
-        plan_digest = graph.get("plan_digest")
-        if not isinstance(plan_digest, str):
-            continue
-        for node in graph.get("nodes", []):
-            if not isinstance(node, Mapping):
-                continue
-            node_id = node.get("node_id")
-            run_id = node.get("feature_run_id")
-            if not isinstance(node_id, str) or not isinstance(run_id, str) or run_id not in details:
-                continue
-            history = histories.setdefault((plan_digest, node_id), [])
-            if run_id in history:
-                continue
-            history.append(run_id)
-            metrics = [base_metrics.get(item) for item in history]
-            if all(isinstance(item, Mapping) for item in metrics):
-                details[run_id]["metrics"] = _merge_detail_metrics(metrics, history)
+    """Thin delegating shim: the merge implementation lives in ``graph_metrics``.
 
-
-def _node_history_run_ids(catalog: Mapping[str, Any], target_run_id: str) -> list[str]:
-    """Return the ordered tries for the target's logical node through this try."""
-    histories: dict[tuple[str, str], list[str]] = {}
-    graphs = sorted(catalog.get("plan_graphs", []), key=lambda graph: (str(graph.get("created_at", "")), str(graph.get("run_id", ""))))
-    for graph in graphs:
-        plan_digest = graph.get("plan_digest")
-        if not isinstance(plan_digest, str):
-            continue
-        for node in graph.get("nodes", []):
-            if not isinstance(node, Mapping):
-                continue
-            node_id = node.get("node_id")
-            run_id = node.get("feature_run_id")
-            if not isinstance(node_id, str) or not isinstance(run_id, str):
-                continue
-            history = histories.setdefault((plan_digest, node_id), [])
-            if run_id not in history:
-                history.append(run_id)
-            if run_id == target_run_id:
-                return list(history)
-    return [target_run_id]
-
-
-def _merge_detail_metrics(metrics: list[Mapping[str, Any]], run_ids: list[str]) -> dict[str, Any]:
-    latest = metrics[-1]
-    merged = dict(latest)
-    merged["totals"] = _merge_metric_totals([item["totals"] for item in metrics])
-    for key in ("by_phase", "by_agent", "by_agent_type", "by_model", "by_effort", "by_backend"):
-        merged[key] = _merge_metric_breakdown([row for item in metrics for row in item.get(key, [])])
-    merged["by_try"] = [
-        {"label": run_id, **dict(item["totals"])}
-        for run_id, item in zip(run_ids, metrics, strict=True)
-    ]
-    merged["stages"] = [
-        {**stage, "feature_run_id": run_id, "try_index": index}
-        for index, (run_id, item) in enumerate(zip(run_ids, metrics, strict=True), start=1)
-        for stage in item.get("stages", [])
-    ]
-    provenance = dict(latest.get("provenance", {}))
-    provenance.update({
-        "usage_records": sum(int(item.get("provenance", {}).get("usage_records", 0)) for item in metrics),
-        "collection_method": "verified usage accumulated across logical PlanGraph node tries",
-        "attempt_count": len(run_ids),
-        "current_run_id": run_ids[-1],
-        "scope": "cumulative_plan_graph_node",
-    })
-    merged["provenance"] = provenance
-    return merged
-
-
-def _merge_metric_breakdown(rows: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
-    grouped: dict[str, list[Mapping[str, Any]]] = {}
-    for row in rows:
-        grouped.setdefault(str(row.get("label", "Unavailable")), []).append(row)
-    result = []
-    for label, values in grouped.items():
-        row = {"label": label, **_merge_metric_totals(values)}
-        for field in ("phase", "agent_type", "model", "effort", "backend"):
-            items = sorted({str(value[field]) for value in values if value.get(field)})
-            if items:
-                row[field] = ", ".join(items)
-        result.append(row)
-    return sorted(result, key=lambda row: (-row["total_tokens"], row["label"]))
-
-
-def _merge_metric_totals(rows: list[Mapping[str, Any]]) -> dict[str, Any]:
-    result = {
-        key: sum(int(row.get(key, 0)) for row in rows)
-        for key in ("calls", "input_tokens", "cached_input_tokens", "output_tokens", "duration_ms")
-    }
-    result["total_tokens"] = result["input_tokens"] + result["output_tokens"]
-    # None means the backend reported only cumulative session usage; a peak
-    # is only meaningful when at least one row observed a real invocation.
-    known_peaks = [
-        row["peak_input_tokens"]
-        for row in rows
-        if isinstance(row.get("peak_input_tokens"), int)
-    ]
-    result["peak_input_tokens"] = max(known_peaks) if known_peaks else None
-    # Wall and busy time are only meaningful cumulatively when every try
-    # reports them.  Summing a subset (e.g. omitting a still-running try
-    # whose summary does not exist yet) understates wall time while the
-    # summed backend durations keep growing, which falsely displays agent
-    # time exceeding wall time.  Tries execute sequentially, so summing
-    # per-try values never double-counts overlapping intervals.
-    wall = [row.get("wall_clock_ms") for row in rows]
-    if rows and all(type(value) is int for value in wall):
-        result["wall_clock_ms"] = sum(wall)
-    else:
-        result["wall_clock_ms"] = None
-    busy = [row.get("busy_ms") for row in rows]
-    if rows and all(type(value) is int for value in busy):
-        result["busy_ms"] = sum(busy)
-    else:
-        result["busy_ms"] = None
-    costs = [row.get("cost") for row in rows if isinstance(row.get("cost"), Mapping)]
-    unavailable = [cost for cost in costs if cost.get("state") == "unavailable"]
-    estimated = [cost for cost in costs if cost.get("state") == "estimated"]
-    sources = sorted({str(source) for cost in costs for source in cost.get("sources", [])})
-    result["cost"] = {
-        "state": "unavailable" if unavailable or len(costs) != len(rows) else "estimated" if estimated else "available",
-        "usd": None if unavailable or len(costs) != len(rows) else round(sum(float(cost.get("usd") or 0) for cost in costs), 6),
-        "reason": f"{len(unavailable)} node try cost record(s) are unavailable" if unavailable else "Cumulative across verified node tries" if estimated else None,
-        "sources": sources,
-        "estimated_records": sum(int(cost.get("estimated_records", 0)) for cost in costs),
-        "long_context_records": sum(int(cost.get("long_context_records", 0)) for cost in costs),
-    }
-    return result
+    Kept as a module-level name (rather than inlining the call at the call
+    site) because it is part of this module's existing, tested surface.
+    """
+    graph_metrics.apply_cumulative_node_metrics(catalog, details)
 
 
 def _ensure_unique_ids(catalog: Mapping[str, Any]) -> None:
