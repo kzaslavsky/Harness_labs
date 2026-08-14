@@ -17,3 +17,7 @@ experiments/orbit/
 # Plan-approval evidence and persisted registrations are local run state.
 logs/plan-approval/
 logs/registration/
+experiments/archimedes/
+experiments/retinology-demo/
+experiments/rocketship/
+experiments/trebuchet/
