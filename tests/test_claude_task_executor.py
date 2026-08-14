@@ -620,9 +620,9 @@ class ClaudeSemanticTaskExecutorDirtyBaselineTests(unittest.TestCase):
             "a dirty path outside the receipted change set must still be "
             "refused, even though it is one of the worker's own writable_paths",
         )
-        self.assertIn(
-            "clean repository baseline", str(result.payload.get("error", ""))
-        )
+        error = str(result.payload.get("error", ""))
+        self.assertIn("dirty-baseline grant refused", error)
+        self.assertIn("uncovered.txt", error)
 
     def test_dirty_content_mismatch_is_refused_even_when_the_path_matches(
         self,
@@ -660,9 +660,9 @@ class ClaudeSemanticTaskExecutorDirtyBaselineTests(unittest.TestCase):
             "a dirty path whose current content diverges from what the "
             "receipt attests must still be refused",
         )
-        self.assertIn(
-            "clean repository baseline", str(result.payload.get("error", ""))
-        )
+        error = str(result.payload.get("error", ""))
+        self.assertIn("dirty-baseline grant refused", error)
+        self.assertIn("feature.txt", error)
 
     def test_dirty_baseline_without_any_grant_is_refused(self) -> None:
         evidence = EvidenceCatalog()

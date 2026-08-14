@@ -40,6 +40,7 @@ from harness_labs.controller_results import semantic_payload, validate_semantic_
 from harness_labs.controller_scheduler import RoleProfile
 from harness_labs.coordinator_schema import CoordinatorDispatchSchema, CoordinatorSegment
 from harness_labs.feature_run import ReviewFixPolicy, run_feature_worktree
+from harness_labs.git_transaction import workspace_snapshot
 from tests.controller_scenario_fixtures import ScriptedCoordinatorSession
 
 
@@ -131,11 +132,17 @@ class _ImplementerBuildExecutor:
             media_type="text/markdown",
             producer_task_id="build",
         )
+        # Real receipts (see claude_task_executor.py / controller_live.py)
+        # always record actual per-file content state; the shared grant
+        # verifier now checks it, so this hand-rolled receipt must too, or
+        # it can never qualify as a covering receipt.
+        snapshot = workspace_snapshot(self.worktree)
         receipt = self.evidence.add(
             kind="workspace-change-receipt",
             content={
                 "protocol": "workspace-change-receipt/2",
                 "changed_paths": [self.path],
+                "files": {self.path: snapshot["files"].get(self.path)},
             },
             media_type="application/json",
             producer_task_id="build",
@@ -663,9 +670,9 @@ class CodexSemanticTaskExecutorDirtyBaselineTests(unittest.TestCase):
             "a dirty path outside the receipted change set must still be "
             "refused, even though the dirty-baseline flag/grant is engaged",
         )
-        self.assertIn(
-            "clean repository baseline", str(result.payload.get("error", ""))
-        )
+        error = str(result.payload.get("error", ""))
+        self.assertIn("dirty-baseline grant refused", error)
+        self.assertIn("uncovered.txt", error)
 
     def test_dirty_path_covered_by_named_receipt_is_accepted(self) -> None:
         evidence = EvidenceCatalog()

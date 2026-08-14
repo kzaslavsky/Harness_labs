@@ -5,16 +5,20 @@ from __future__ import annotations
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from typing import Callable
+from pathlib import Path
+from typing import Any, Callable
 
 from .attempts import AttemptRunner, Executor, TaskAttempt, TaskResult
+from .audit import AuditActor, AuditJournal
 from .controller_kernel import ControllerKernel, KernelError
 from .controller_commands import (
     CommandActor,
     CommandEnvelope,
     CommandProvenance,
 )
+from .controller_live import select_dirty_baseline_receipt
 from .controller_results import SemanticResultError, validate_semantic_result
+from .git_transaction import workspace_snapshot
 
 
 class SchedulingError(RuntimeError):
@@ -26,7 +30,17 @@ ExecutorFactory = Callable[[dict], Executor]
 
 @dataclass(frozen=True)
 class RoleProfile:
-    """A reusable role/capability profile backed by an executor factory."""
+    """A reusable role/capability profile backed by an executor factory.
+
+    ``allow_dirty_baseline`` is this profile's dirty-baseline eligibility as
+    seen by the dispatch chokepoint (:meth:`CapabilityScheduler.dispatch`):
+    when true, a writable dispatch under this profile may receive an
+    auto-minted adoption grant (see ``_mint_dirty_baseline_grant``) if the
+    workspace is dirty and a receipt exactly covers it. It is independent of
+    any eligibility a hand-wired ``executor_factory`` enforces on its own --
+    both must agree for a grant to actually take effect, since the factory's
+    constructed executor still runs its own preflight.
+    """
 
     profile_id: str
     role: str
@@ -34,6 +48,7 @@ class RoleProfile:
     executor_factory: ExecutorFactory
     backend_id: str = "unspecified"
     details_schemas: frozenset[str] = frozenset()
+    allow_dirty_baseline: bool = False
 
     def __post_init__(self) -> None:
         if not self.profile_id.strip() or not self.role.strip():
@@ -52,6 +67,90 @@ class RoleProfile:
             raise ValueError("role profile details_schemas must be names")
 
 
+def _mint_dirty_baseline_grant(
+    profile: RoleProfile,
+    executor: Executor,
+    attempt: TaskAttempt,
+    *,
+    audit: AuditJournal | None = None,
+) -> None:
+    """Auto-mint a dirty-baseline adoption grant at the dispatch chokepoint.
+
+    Every writable dispatch a scheduler runs -- fresh, retry, or superseding,
+    coordinator-initiated or stage-machine-initiated -- passes through here
+    right after ``executor_factory`` builds the executor, so a program is no
+    longer required to hand-wire its own executor factory around
+    ``agent_mixture``'s per-role grant computation to benefit from adoption.
+
+    A grant is only ever minted when ALL hold: the role profile declares
+    ``allow_dirty_baseline`` (eligibility is unchanged from what role
+    profiles already govern); the constructed executor exposes a settable
+    ``dirty_baseline_grant`` attribute that is still unset (an
+    executor_factory that already computed and attached its own grant -- the
+    agent_mixture case -- is left untouched, never overwritten); the
+    executor declares a ``workspace-write`` sandbox; and the workspace is
+    actually dirty. The receipt is selected by
+    :func:`~harness_labs.controller_live.select_dirty_baseline_receipt`,
+    which resolves each candidate through the shared
+    ``verify_dirty_baseline_grant`` -- content coverage, not recency, and no
+    dependence on catalog ordering; receipts are never unioned. When no
+    single receipt covers the dirty state, nothing is minted and the
+    executor's own preflight refuses exactly as it does today. Either
+    outcome is journaled -- preferring the scheduler's own ``audit`` (see
+    :class:`CapabilityScheduler`), falling back to the executor's ``audit``
+    attribute when the scheduler carries none -- with the receipt ref or the
+    uncovered/mismatched paths, so the decision is diagnosable from the
+    journal regardless of whether the constructed executor happens to expose
+    one itself.
+    """
+
+    if not profile.allow_dirty_baseline:
+        return
+    if not hasattr(executor, "dirty_baseline_grant"):
+        return
+    if getattr(executor, "dirty_baseline_grant", None) is not None:
+        return
+    if getattr(executor, "sandbox", None) != "workspace-write":
+        return
+    repository = getattr(executor, "repository", None)
+    evidence = getattr(executor, "evidence", None)
+    if repository is None or evidence is None:
+        return
+    snapshot = workspace_snapshot(Path(repository))
+    dirty_paths = list(snapshot["changed_paths"])
+    if not dirty_paths:
+        return
+    journal = audit if audit is not None else getattr(executor, "audit", None)
+    actor = AuditActor(profile.profile_id, "capability_scheduler")
+    receipt_ref, failure = select_dirty_baseline_receipt(
+        evidence=evidence, dirty_paths=dirty_paths, dirty_files=snapshot["files"]
+    )
+    if receipt_ref is None:
+        if journal is not None and failure is not None:
+            journal.append(
+                "dirty_baseline_adoption_grant_supplied",
+                status="refused",
+                payload={
+                    "dirty_paths": sorted(dirty_paths),
+                    "uncovered_paths": list(failure.uncovered_paths),
+                    "mismatched_paths": list(failure.mismatched_paths),
+                },
+                actor=actor,
+                attempt_id=attempt.attempt_id,
+            )
+        return
+    grant: dict[str, Any] = {"receipt_ref": receipt_ref}
+    executor.dirty_baseline_grant = grant
+    if journal is not None:
+        journal.append(
+            "dirty_baseline_adoption_grant_supplied",
+            status="granted",
+            payload={"receipt_ref": receipt_ref, "dirty_paths": sorted(dirty_paths)},
+            actor=actor,
+            attempt_id=attempt.attempt_id,
+        )
+
+
 @dataclass(frozen=True)
 class ScheduledOutcome:
     task_id: str
@@ -68,6 +167,7 @@ class CapabilityScheduler:
         profiles: tuple[RoleProfile, ...],
         *,
         runner: AttemptRunner | None = None,
+        audit: AuditJournal | None = None,
     ) -> None:
         if not profiles:
             raise ValueError("scheduler requires at least one role profile")
@@ -76,6 +176,7 @@ class CapabilityScheduler:
             raise ValueError("scheduler role profile ids must be unique")
         self._profiles = profiles
         self._runner = runner or AttemptRunner()
+        self._audit = audit
         self._mutex = threading.Lock()
         self._active = 0
         self._maximum_active = 0
@@ -94,6 +195,7 @@ class CapabilityScheduler:
                 "backend_id": profile.backend_id,
                 "capabilities": sorted(profile.capabilities),
                 "details_schemas": sorted(profile.details_schemas),
+                "allow_dirty_baseline": profile.allow_dirty_baseline,
             }
             for profile in sorted(self._profiles, key=lambda item: item.profile_id)
         )
@@ -143,6 +245,7 @@ class CapabilityScheduler:
                 ),
                 context=task["context"],
             )
+            _mint_dirty_baseline_grant(profile, executor, attempt, audit=self._audit)
             prepared.append((task, profile, executor, attempt))
 
         kernel.mark_tasks_running(task_ids)
