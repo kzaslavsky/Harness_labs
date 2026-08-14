@@ -53,6 +53,7 @@ class ReviewFixLoopTests(unittest.TestCase):
         *,
         policy=ReviewFixPolicy(),
         paths=("feature.txt",),
+        allowed_paths=("feature.txt",),
         **loop_options,
     ):
         temporary = tempfile.TemporaryDirectory()
@@ -71,7 +72,7 @@ class ReviewFixLoopTests(unittest.TestCase):
             acceptance_criteria=(
                 {"id": "correct", "statement": "Feature is correct."},
             ),
-            allowed_paths=("feature.txt",),
+            allowed_paths=allowed_paths,
             changed_paths=paths,
             executor_factory=factory,
             evidence=evidence,
@@ -456,6 +457,7 @@ class ReviewFixLoopTests(unittest.TestCase):
 
         outcome, _, evidence = self.run_loop(
             factory,
+            allowed_paths=("consumer.py",),
             inherited_findings=(inherited,),
             finding_transfer_targets={"consumer.py": "C"},
             origin_node_id="B",
@@ -465,6 +467,85 @@ class ReviewFixLoopTests(unittest.TestCase):
         self.assertEqual(outcome.transferred_findings, ())
         ledger = json.loads(evidence.open(outcome.ledger_ref))
         self.assertEqual(ledger["findings"][key]["outcome"], "fixed")
+        self.assertEqual(
+            [call[0] for call in factory.calls],
+            ["review", "fix", "verify", "review"],
+        )
+
+    def test_inherited_transfer_with_origin_file_anchor_is_not_screened(self):
+        # The transfer stamp leaves "file" at the origin's anchor
+        # (producer.py) while "required_paths" carries the downstream
+        # owner's paths (consumer.py, asserted at line 302 above). The
+        # destination's grant covers required_paths but not the origin
+        # file anchor; the anchor screen must not discharge this inherited
+        # obligation on that basis.
+        key = "producer.py:consumer-integration"
+        inherited = {
+            "key": key,
+            "file": "producer.py",
+            "subject": "consumer integration",
+            "statement": "Wire the producer into the consumer.",
+            "category": "integration",
+            "severity": "major",
+            "score": 90,
+            "fix_cost": "surface-growing",
+            "protects": "AC integration",
+            "requires_disposition": True,
+            "contract_violation": False,
+            "scope_expanding": True,
+            "outcome": "transferred",
+            "outcome_reason": "transferred to downstream owner B",
+            "cycles_seen": [1],
+            "occurrences": 1,
+            "source_finding_ids": ["consumer"],
+            "evidence_refs": ["artifact:producer"],
+            "fix_attempts": [],
+            "reopened_count": 0,
+            "origin_node": "A",
+            "transferred_to": "B",
+            "transfer_eligible": True,
+            "required_paths": ["consumer.py"],
+        }
+        factory = _Factory(
+            {
+                "review": [
+                    lambda attempt: result(
+                        attempt.attempt_id, "review-fix-review/1"
+                    ),
+                    lambda attempt: result(
+                        attempt.attempt_id, "review-fix-review/1"
+                    ),
+                ],
+                "fix": [
+                    lambda attempt: result(
+                        attempt.attempt_id,
+                        "review-fix-fix/1",
+                        details={"addressed_finding_keys": [key]},
+                    )
+                ],
+                "verify": [
+                    lambda attempt: result(
+                        attempt.attempt_id,
+                        "review-fix-verify/1",
+                        details={"verified_finding_keys": [key]},
+                    )
+                ],
+            }
+        )
+
+        outcome, _, evidence = self.run_loop(
+            factory,
+            allowed_paths=("consumer.py",),
+            inherited_findings=(inherited,),
+            finding_transfer_targets={"consumer.py": "C"},
+            origin_node_id="B",
+        )
+
+        self.assertEqual(outcome.status, "succeeded")
+        self.assertEqual(outcome.transferred_findings, ())
+        ledger = json.loads(evidence.open(outcome.ledger_ref))
+        self.assertEqual(ledger["findings"][key]["outcome"], "fixed")
+        self.assertFalse(ledger["findings"][key]["anchor_out_of_grant"])
         self.assertEqual(
             [call[0] for call in factory.calls],
             ["review", "fix", "verify", "review"],
