@@ -48,20 +48,20 @@ from harness_labs.core.controller_evidence import EvidenceCatalog  # noqa: E402
 from harness_labs.core.controller_kernel import RunContract  # noqa: E402
 from harness_labs.core.controller_scheduler import RoleProfile  # noqa: E402
 from harness_labs.core.coordinator_dispatcher import CoordinatorLaunch  # noqa: E402
-from harness_labs.feature_run import (  # noqa: E402
+from harness_labs.featurerun.feature_run import (  # noqa: E402
     PlanGraphFeatureRunBinding,
     ReviewFixPolicy,
     run_plan_graph_feature_worktree,
 )
-from harness_labs.feature_run_policy import (  # noqa: E402
+from harness_labs.featurerun.feature_run_policy import (  # noqa: E402
     standard_feature_run_dispatch_schema,
 )
-from harness_labs.plan_approval import (  # noqa: E402
+from harness_labs.plangraph.plan_approval import (  # noqa: E402
     PlanApprovalAdmission,
     issue_receipt,
     prepare_approval,
 )
-from harness_labs.plan_graph import (  # noqa: E402
+from harness_labs.plangraph.plan_graph import (  # noqa: E402
     FeatureRunOutcome,
     FeatureRunRequest,
     PlanGraph,
@@ -70,7 +70,7 @@ from harness_labs.plan_graph import (  # noqa: E402
     persist_registration,
     register_plan_graph,
 )
-from harness_labs.plan_graph_contract import (  # noqa: E402
+from harness_labs.plangraph.plan_graph_contract import (  # noqa: E402
     canonical_plan_graph_payload,
 )
 
@@ -127,7 +127,7 @@ NODES: tuple[dict[str, Any], ...] = (
         "finding_tests": ["tests/test_relax_plan_gates.py"],
         "regression": ["tests/"],
         "allowed_paths": [
-            "harness_labs/plan_graph.py",
+            "harness_labs/plangraph/plan_graph.py",
             "tests/test_relax_plan_gates.py",
             "tests/test_plan_graph.py",
         ],
@@ -139,7 +139,7 @@ NODES: tuple[dict[str, Any], ...] = (
         "finding_tests": ["tests/test_relax_verification_classes.py"],
         "regression": ["tests/"],
         "allowed_paths": [
-            "harness_labs/feature_run.py",
+            "harness_labs/featurerun/feature_run.py",
             "tests/test_relax_verification_classes.py",
             "tests/test_feature_run.py",
         ],
@@ -151,8 +151,8 @@ NODES: tuple[dict[str, Any], ...] = (
         "finding_tests": ["tests/test_relax_delta_repair.py"],
         "regression": ["tests/"],
         "allowed_paths": [
-            "harness_labs/feature_run.py",
-            "harness_labs/plan_graph_budget.py",
+            "harness_labs/featurerun/feature_run.py",
+            "harness_labs/plangraph/plan_graph_budget.py",
             "tests/test_relax_delta_repair.py",
             "tests/test_feature_run.py",
             "tests/test_plan_graph_budget.py",
@@ -167,7 +167,7 @@ NODES: tuple[dict[str, Any], ...] = (
         "allowed_paths": [
             "harness_labs/core/claude_task_executor.py",
             "harness_labs/core/controller_live.py",
-            "harness_labs/feature_run.py",
+            "harness_labs/featurerun/feature_run.py",
             "harness_labs/agent_mixture.py",
             "tests/test_relax_adoption.py",
             "tests/test_claude_task_executor.py",
@@ -184,7 +184,7 @@ NODES: tuple[dict[str, Any], ...] = (
         "regression": ["tests/"],
         "allowed_paths": [
             "harness_labs/core/controller_kernel.py",
-            "harness_labs/feature_run.py",
+            "harness_labs/featurerun/feature_run.py",
             "tests/test_relax_gate_criteria.py",
             "tests/test_controller_kernel.py",
             "tests/test_feature_run.py",

@@ -27,7 +27,7 @@ from harness_labs.core.coordinator_schema import (  # noqa: E402
     CoordinatorDispatchSchema,
     CoordinatorSegment,
 )
-from harness_labs.feature_run import ReviewFixPolicy, run_feature_worktree  # noqa: E402
+from harness_labs.featurerun.feature_run import ReviewFixPolicy, run_feature_worktree  # noqa: E402
 
 
 BASE_REPOSITORY = ROOT / "experiments" / "retinology-demo"

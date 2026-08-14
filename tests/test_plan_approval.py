@@ -11,14 +11,14 @@ import sys
 import tempfile
 import unittest
 
-from harness_labs.plan_approval import (
+from harness_labs.plangraph.plan_approval import (
     OPERATOR_APPROVAL_PROTOCOL,
     PlanApprovalAdmission,
     PlanApprovalError,
     issue_receipt,
     prepare_approval,
 )
-from harness_labs.plan_graph import (
+from harness_labs.plangraph.plan_graph import (
     PlanGraph,
     PlanGraphError,
     register_plan_graph,

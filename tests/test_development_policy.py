@@ -6,7 +6,7 @@ from harness_labs.core.coordinator_schema import CoordinatorDispatchSchema
 from harness_labs.core.development_policy import (
     DevelopmentPolicy,
 )
-from harness_labs.feature_run_policy import (
+from harness_labs.featurerun.feature_run_policy import (
     standard_feature_run_dispatch_schema,
     standard_feature_run_policy,
 )

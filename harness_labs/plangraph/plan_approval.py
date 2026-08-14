@@ -13,8 +13,8 @@ import subprocess
 import tempfile
 from typing import Mapping, Sequence
 
-from harness_labs.plan_graph import ApprovalEvidence, plan_from_mapping, validate_plan_graph_plan
-from harness_labs.plan_graph_contract import (
+from harness_labs.plangraph.plan_graph import ApprovalEvidence, plan_from_mapping, validate_plan_graph_plan
+from harness_labs.plangraph.plan_graph_contract import (
     PlanGraphContractError,
     canonical_json,
     canonical_plan_graph_payload,

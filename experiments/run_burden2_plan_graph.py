@@ -48,20 +48,20 @@ from harness_labs.core.controller_evidence import EvidenceCatalog  # noqa: E402
 from harness_labs.core.controller_kernel import RunContract  # noqa: E402
 from harness_labs.core.controller_scheduler import RoleProfile  # noqa: E402
 from harness_labs.core.coordinator_dispatcher import CoordinatorLaunch  # noqa: E402
-from harness_labs.feature_run import (  # noqa: E402
+from harness_labs.featurerun.feature_run import (  # noqa: E402
     PlanGraphFeatureRunBinding,
     ReviewFixPolicy,
     run_plan_graph_feature_worktree,
 )
-from harness_labs.feature_run_policy import (  # noqa: E402
+from harness_labs.featurerun.feature_run_policy import (  # noqa: E402
     standard_feature_run_dispatch_schema,
 )
-from harness_labs.plan_approval import (  # noqa: E402
+from harness_labs.plangraph.plan_approval import (  # noqa: E402
     PlanApprovalAdmission,
     issue_receipt,
     prepare_approval,
 )
-from harness_labs.plan_graph import (  # noqa: E402
+from harness_labs.plangraph.plan_graph import (  # noqa: E402
     FeatureRunOutcome,
     FeatureRunRequest,
     PlanGraph,
@@ -70,7 +70,7 @@ from harness_labs.plan_graph import (  # noqa: E402
     persist_registration,
     register_plan_graph,
 )
-from harness_labs.plan_graph_contract import (  # noqa: E402
+from harness_labs.plangraph.plan_graph_contract import (  # noqa: E402
     canonical_plan_graph_payload,
 )
 
@@ -105,7 +105,7 @@ the named workers.
 # document; this table binds structure only.
 # ---------------------------------------------------------------------------
 # Dependency edges exist only where nodes share owned files or consume another
-# node's mechanism. harness_labs/plan_graph.py and harness_labs/feature_run.py
+# node's mechanism. harness_labs/plangraph/plan_graph.py and harness_labs/featurerun/feature_run.py
 # are each owned by several nodes and are serialized through the dependency
 # Roots CB2-01, CB2-02, CB2-03 are file-disjoint and parallel-eligible
 # (max_parallelism=2, at most two admitted). Shared-file spine:
@@ -147,9 +147,9 @@ NODES: tuple[dict[str, Any], ...] = (
         "finding_tests": ["tests/test_relax_gate_concurrency.py"],
         "regression": ["tests/"],
         "allowed_paths": [
-            "harness_labs/plan_graph.py",
-            "harness_labs/plan_graph_audit.py",
-            "harness_labs/feature_run.py",
+            "harness_labs/plangraph/plan_graph.py",
+            "harness_labs/plangraph/plan_graph_audit.py",
+            "harness_labs/featurerun/feature_run.py",
             "tests/test_plan_graph.py",
             "tests/test_plan_graph_parallel_run.py",
             "tests/test_feature_run.py",
@@ -163,8 +163,8 @@ NODES: tuple[dict[str, Any], ...] = (
         "finding_tests": ["tests/test_relax_resume_operability.py"],
         "regression": ["tests/"],
         "allowed_paths": [
-            "harness_labs/plan_graph.py",
-            "harness_labs/plan_graph_audit.py",
+            "harness_labs/plangraph/plan_graph.py",
+            "harness_labs/plangraph/plan_graph_audit.py",
             "tests/test_plan_graph.py",
             "tests/test_plan_graph_recover.py",
             "tests/test_plan_graph_reuse_chain.py",
@@ -178,11 +178,11 @@ NODES: tuple[dict[str, Any], ...] = (
         "finding_tests": ["tests/test_relax_gate_decomposition.py"],
         "regression": ["tests/"],
         "allowed_paths": [
-            "harness_labs/plan_graph.py",
-            "harness_labs/feature_run.py",
-            "harness_labs/plan_graph_budget.py",
-            "harness_labs/plan_graph_contract.py",
-            "harness_labs/plan_approval.py",
+            "harness_labs/plangraph/plan_graph.py",
+            "harness_labs/featurerun/feature_run.py",
+            "harness_labs/plangraph/plan_graph_budget.py",
+            "harness_labs/plangraph/plan_graph_contract.py",
+            "harness_labs/plangraph/plan_approval.py",
             "tests/test_plan_graph.py",
             "tests/test_feature_run.py",
             "tests/test_plan_graph_budget.py",

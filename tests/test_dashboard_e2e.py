@@ -16,8 +16,8 @@ import urllib.request
 from pathlib import Path
 from unittest.mock import patch
 
-from harness_labs.dashboard_server import DashboardApplication, _DashboardHandler, create_dashboard_server
-from harness_labs.run_catalog import RunCatalog
+from harness_labs.observability.dashboard_server import DashboardApplication, _DashboardHandler, create_dashboard_server
+from harness_labs.observability.run_catalog import RunCatalog
 from scripts.dashboard_fixture_run import advance_live_fixture, create_fixture
 
 
@@ -178,7 +178,7 @@ class DashboardEndToEndTests(unittest.TestCase):
             shutil.move(str(root / "completed-child"), str(second_root / "completed-child"))
             before = (_tree_digest(root), _tree_digest(second_root))
             assets = Path("dashboard/plan-graph/dist").resolve()
-            with patch("harness_labs.dashboard_server.RunCatalog", side_effect=lambda source, **options: RunCatalog(source, process_probe=lambda pid: "fixture-process-token", **options)):
+            with patch("harness_labs.observability.dashboard_server.RunCatalog", side_effect=lambda source, **options: RunCatalog(source, process_probe=lambda pid: "fixture-process-token", **options)):
                 app = DashboardApplication([root, second_root], assets_root=assets, refresh_seconds=0.001)
                 server = create_dashboard_server(app, port=0)
                 thread = threading.Thread(target=server.serve_forever, daemon=True)

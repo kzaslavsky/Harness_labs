@@ -116,7 +116,7 @@ from harness_labs.core.controller_scheduler import (
     ScheduledOutcome,
     SchedulingError,
 )
-from harness_labs.feature_run import (
+from harness_labs.featurerun.feature_run import (
     DeterministicVerificationResult,
     FeatureRunHandoffArtifact,
     FeatureRunResult,
@@ -128,7 +128,7 @@ from harness_labs.feature_run import (
     run_plan_graph_feature_worktree,
     run_feature_worktree,
 )
-from harness_labs.plan_graph import (
+from harness_labs.plangraph.plan_graph import (
     FEATURE_RUN_REQUEST_PROTOCOL,
     PLAN_GRAPH_PROTOCOL,
     REGISTRATION_PROTOCOL,
@@ -153,7 +153,7 @@ from harness_labs.plan_graph import (
     validate_plan_graph_plan,
     verify_registration,
 )
-from harness_labs.plan_approval import (
+from harness_labs.plangraph.plan_approval import (
     PlanApprovalAdmission,
     PlanApprovalError,
     PreparedApproval,
@@ -161,7 +161,7 @@ from harness_labs.plan_approval import (
     issue_receipt,
     prepare_approval,
 )
-from harness_labs.review_fix import (
+from harness_labs.featurerun.review_fix import (
     REVIEW_FIX_RESULT_PROTOCOL,
     REVIEW_LEDGER_PROTOCOL,
     ReviewFixError,
@@ -191,7 +191,7 @@ from harness_labs.core.development_policy import (
     DevelopmentPolicy,
     ReviewAssignment,
 )
-from harness_labs.feature_run_policy import (
+from harness_labs.featurerun.feature_run_policy import (
     standard_feature_run_dispatch_schema,
     standard_feature_run_policy,
 )

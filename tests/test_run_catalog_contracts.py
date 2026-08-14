@@ -10,8 +10,8 @@ import unittest
 from datetime import datetime
 from pathlib import Path
 
-from harness_labs.plan_graph_audit import PlanGraphAudit
-from harness_labs.run_catalog import build_run_catalog
+from harness_labs.plangraph.plan_graph_audit import PlanGraphAudit
+from harness_labs.observability.run_catalog import build_run_catalog
 
 ROOT = Path(__file__).resolve().parent.parent
 SCHEMAS = ROOT / "schemas"

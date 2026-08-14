@@ -10,7 +10,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from harness_labs.plan_approval import (  # noqa: E402
+from harness_labs.plangraph.plan_approval import (  # noqa: E402
     PlanApprovalError,
     issue_receipt,
     prepare_approval,

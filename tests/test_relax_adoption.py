@@ -8,7 +8,7 @@ regardless of what is actually dirty; the candidate replaces that
 constructor-frozen boolean with a per-dispatch ``dirty_baseline_grant`` that
 must name an existing ``workspace-change-receipt`` evidence entry whose
 recorded ``changed_paths`` covers every currently dirty path, and
-``harness_labs.feature_run`` supplies that grant automatically for
+``harness_labs.featurerun.feature_run`` supplies that grant automatically for
 verification-repair and review-fix dispatches from the prior attempt's
 receipt.
 
@@ -39,7 +39,7 @@ from harness_labs.core.controller_live import CodexSemanticTaskExecutor
 from harness_labs.core.controller_results import semantic_payload, validate_semantic_result
 from harness_labs.core.controller_scheduler import RoleProfile
 from harness_labs.core.coordinator_schema import CoordinatorDispatchSchema, CoordinatorSegment
-from harness_labs.feature_run import ReviewFixPolicy, run_feature_worktree
+from harness_labs.featurerun.feature_run import ReviewFixPolicy, run_feature_worktree
 from harness_labs.core.git_transaction import workspace_snapshot
 from tests.controller_scenario_fixtures import ScriptedCoordinatorSession
 

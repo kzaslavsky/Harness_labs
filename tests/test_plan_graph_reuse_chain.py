@@ -14,7 +14,7 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 
-from harness_labs.plan_graph import (
+from harness_labs.plangraph.plan_graph import (
     FeatureRunOutcome,
     PlanGraph,
     RepairResumeDirective,

@@ -13,8 +13,8 @@ from typing import Callable
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from harness_labs.plan_approval import PlanApprovalAdmission, PlanApprovalError
-from harness_labs.plan_graph import (
+from harness_labs.plangraph.plan_approval import PlanApprovalAdmission, PlanApprovalError
+from harness_labs.plangraph.plan_graph import (
     FeatureRunOutcome,
     PlanGraph,
     PlanGraphError,
@@ -24,7 +24,7 @@ from harness_labs.plan_graph import (
     persist_registration,
     register_plan_graph,
 )
-from harness_labs.plan_graph_budget import BudgetError, RetryBudgetLedger
+from harness_labs.plangraph.plan_graph_budget import BudgetError, RetryBudgetLedger
 
 
 def _load_callable(reference: str) -> Callable[..., object]:

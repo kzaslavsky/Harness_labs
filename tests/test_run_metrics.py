@@ -6,7 +6,7 @@ from pathlib import Path
 
 from harness_labs.core.audit import AuditActor, AuditJournal
 from harness_labs.core.audit import AuditError
-from harness_labs.run_metrics import project_run_metrics
+from harness_labs.observability.run_metrics import project_run_metrics
 
 
 class RunMetricsTests(unittest.TestCase):

@@ -15,7 +15,7 @@ from typing import Any, Mapping
 from urllib.parse import unquote, urlsplit
 
 from harness_labs.core.audit import AuditError
-from harness_labs.run_catalog import RunCatalog, build_run_detail, merge_run_catalogs
+from harness_labs.observability.run_catalog import RunCatalog, build_run_detail, merge_run_catalogs
 
 MAX_RUN_DIRECTORIES = 512
 MAX_FILES_PER_RUN = 4096

@@ -32,7 +32,7 @@ from harness_labs.core.coordinator_schema import (
     CoordinatorDispatchSchema,
     CoordinatorSegment,
 )
-from harness_labs.feature_run import run_feature_worktree
+from harness_labs.featurerun.feature_run import run_feature_worktree
 
 
 BASE_REPOSITORY = ROOT / "experiments" / "archimedes"

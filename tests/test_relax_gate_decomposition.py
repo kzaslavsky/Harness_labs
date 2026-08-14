@@ -45,9 +45,9 @@ from harness_labs.core.controller_kernel import RunContract
 from harness_labs.core.controller_results import semantic_payload
 from harness_labs.core.controller_scheduler import RoleProfile
 from harness_labs.core.coordinator_schema import CoordinatorDispatchSchema, CoordinatorSegment
-from harness_labs.feature_run import run_feature_worktree
-from harness_labs.plan_graph_budget import BudgetError, RetryBudgetLedger, gate_digest
-from harness_labs.plan_graph_contract import (
+from harness_labs.featurerun.feature_run import run_feature_worktree
+from harness_labs.plangraph.plan_graph_budget import BudgetError, RetryBudgetLedger, gate_digest
+from harness_labs.plangraph.plan_graph_contract import (
     canonical_json,
     canonical_plan_graph_payload,
 )
@@ -57,7 +57,7 @@ from tests.controller_scenario_fixtures import ScriptedCoordinatorSession
 def gate(name: str, argv: tuple[str, ...], timeout_seconds: float) -> SimpleNamespace:
     """Build one duck-typed gate for run_feature_worktree's verification_gates.
 
-    Deliberately not ``harness_labs.feature_run.VerificationGate`` — that
+    Deliberately not ``harness_labs.featurerun.feature_run.VerificationGate`` — that
     class does not exist at the frozen base commit, and importing it at
     module scope would fail collection with an ImportError instead of
     letting the red phase fail behaviorally on the missing

@@ -9,8 +9,8 @@ import unittest
 from pathlib import Path
 
 from harness_labs.core.audit import AuditJournal
-from harness_labs.plan_graph_audit import PlanGraphAudit
-from harness_labs.plan_graph_integration import PlanGraphIntegrationBarrier, PlanGraphIntegrationError
+from harness_labs.plangraph.plan_graph_audit import PlanGraphAudit
+from harness_labs.plangraph.plan_graph_integration import PlanGraphIntegrationBarrier, PlanGraphIntegrationError
 
 
 ARTIFACT = "artifact:sha256:" + "a" * 64

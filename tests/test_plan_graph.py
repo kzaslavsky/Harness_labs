@@ -16,7 +16,7 @@ import unittest
 from unittest.mock import patch
 
 from harness_labs.core.audit import AuditError
-from harness_labs.plan_graph import (
+from harness_labs.plangraph.plan_graph import (
     FEATURE_RUN_REQUEST_PROTOCOL,
     FeatureRunOutcome,
     FeatureRunRequest,
@@ -410,7 +410,7 @@ class PlanGraphTests(unittest.TestCase):
         with self.assertRaises(PlanGraphError):
             load_registration(path)
 
-    @patch("harness_labs.plan_graph.subprocess.run")
+    @patch("harness_labs.plangraph.plan_graph.subprocess.run")
     def test_subprocess_wire_contract_keeps_both_commit_meanings(self, run) -> None:
         request = FeatureRunRequest(
             FEATURE_RUN_REQUEST_PROTOCOL,
@@ -464,10 +464,10 @@ class PlanGraphTests(unittest.TestCase):
                 functionality_tests=("runtime addition",),
             )
 
-    @patch("harness_labs.plan_graph.subprocess.run")
+    @patch("harness_labs.plangraph.plan_graph.subprocess.run")
     def test_default_functionality_clone_uses_explicit_repository(self, run) -> None:
         run.return_value.returncode = 0
-        from harness_labs.plan_graph import _run_functionality_test
+        from harness_labs.plangraph.plan_graph import _run_functionality_test
 
         _run_functionality_test(self.repository, "true", self.base_commit)
         clone = run.call_args_list[0]

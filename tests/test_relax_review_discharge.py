@@ -22,7 +22,7 @@ from harness_labs.core.attempts import TaskResult
 from harness_labs.core.audit import AuditActor, AuditJournal
 from harness_labs.core.controller_evidence import EvidenceCatalog
 from harness_labs.core.controller_results import semantic_payload
-from harness_labs.review_fix import ReviewFixLoop, ReviewFixPolicy
+from harness_labs.featurerun.review_fix import ReviewFixLoop, ReviewFixPolicy
 
 
 def _result(attempt_id, schema, *, findings=(), details=None):

@@ -49,20 +49,20 @@ from harness_labs.core.controller_evidence import EvidenceCatalog  # noqa: E402
 from harness_labs.core.controller_kernel import RunContract  # noqa: E402
 from harness_labs.core.controller_scheduler import RoleProfile  # noqa: E402
 from harness_labs.core.coordinator_dispatcher import CoordinatorLaunch  # noqa: E402
-from harness_labs.feature_run import (  # noqa: E402
+from harness_labs.featurerun.feature_run import (  # noqa: E402
     PlanGraphFeatureRunBinding,
     ReviewFixPolicy,
     run_plan_graph_feature_worktree,
 )
-from harness_labs.feature_run_policy import (  # noqa: E402
+from harness_labs.featurerun.feature_run_policy import (  # noqa: E402
     standard_feature_run_dispatch_schema,
 )
-from harness_labs.plan_approval import (  # noqa: E402
+from harness_labs.plangraph.plan_approval import (  # noqa: E402
     PlanApprovalAdmission,
     issue_receipt,
     prepare_approval,
 )
-from harness_labs.plan_graph import (  # noqa: E402
+from harness_labs.plangraph.plan_graph import (  # noqa: E402
     FeatureRunOutcome,
     FeatureRunRequest,
     PlanGraph,
@@ -71,7 +71,7 @@ from harness_labs.plan_graph import (  # noqa: E402
     persist_registration,
     register_plan_graph,
 )
-from harness_labs.plan_graph_contract import (  # noqa: E402
+from harness_labs.plangraph.plan_graph_contract import (  # noqa: E402
     canonical_plan_graph_payload,
 )
 
@@ -140,7 +140,7 @@ NODES: tuple[dict[str, Any], ...] = (
             "harness_labs/agent_mixture.py",
             "harness_labs/core/claude_task_executor.py",
             "harness_labs/core/controller_live.py",
-            "harness_labs/feature_run.py",
+            "harness_labs/featurerun/feature_run.py",
             "tests/test_agent_mixture.py",
             "tests/test_claude_task_executor.py",
             "tests/test_controller_live.py",
@@ -186,7 +186,7 @@ NODES: tuple[dict[str, Any], ...] = (
         "finding_tests": ["tests/test_relax_review_discharge.py"],
         "regression": ["tests/"],
         "allowed_paths": [
-            "harness_labs/review_fix.py",
+            "harness_labs/featurerun/review_fix.py",
             "tests/test_review_fix.py",
             "tests/test_feature_run.py",
             "tests/test_relax_review_discharge.py",

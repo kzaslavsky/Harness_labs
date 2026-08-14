@@ -17,7 +17,7 @@ from harness_labs.core.controller_evidence import EvidenceCatalog
 from harness_labs.core.controller_kernel import ControllerKernel, RunContract
 from harness_labs.core.controller_results import semantic_payload
 from harness_labs.core.controller_scheduler import RoleProfile
-from harness_labs.feature_run import (
+from harness_labs.featurerun.feature_run import (
     DeterministicVerificationResult,
     FeatureRunHandoffArtifact,
     FeatureRunResult,
@@ -29,7 +29,7 @@ from harness_labs.feature_run import (
     run_plan_graph_feature_worktree,
     classify_verification_failure,
 )
-from harness_labs.feature_run_policy import standard_feature_run_dispatch_schema
+from harness_labs.featurerun.feature_run_policy import standard_feature_run_dispatch_schema
 from harness_labs.core.coordinator_schema import (
     CoordinatorDispatchSchema,
     CoordinatorSegment,
@@ -239,7 +239,7 @@ class FeatureRunTests(unittest.TestCase):
         self.assertEqual(selector_failure["classification"], "indeterminate")
         self.assertEqual(selector_failure["rule_id"], "conservative-default")
 
-    @patch("harness_labs.feature_run.run_feature_worktree")
+    @patch("harness_labs.featurerun.feature_run.run_feature_worktree")
     def test_plan_graph_mode_omits_only_orientation_and_planning(
         self, run_feature
     ) -> None:
@@ -283,7 +283,7 @@ class FeatureRunTests(unittest.TestCase):
 
         sentinel = object()
         run_feature.return_value = sentinel
-        with patch("harness_labs.feature_run.subprocess.run") as git_show:
+        with patch("harness_labs.featurerun.feature_run.subprocess.run") as git_show:
             git_show.return_value = subprocess.CompletedProcess(
                 [], 0, stdout=plan_bytes, stderr=b""
             )
@@ -348,7 +348,7 @@ class FeatureRunTests(unittest.TestCase):
             "plan",
         )
 
-        with patch("harness_labs.feature_run.subprocess.run") as git_show:
+        with patch("harness_labs.featurerun.feature_run.subprocess.run") as git_show:
             git_show.return_value = subprocess.CompletedProcess(
                 [], 0, stdout=plan_bytes, stderr=b""
             )
@@ -365,7 +365,7 @@ class FeatureRunTests(unittest.TestCase):
                     verification_repair_executor_factory=lambda attempt: None,
                 )
 
-    @patch("harness_labs.feature_run.run_feature_worktree")
+    @patch("harness_labs.featurerun.feature_run.run_feature_worktree")
     def test_plan_graph_mode_binds_transfer_obligations_to_review(self, run_feature) -> None:
         plan_bytes = b"registered plan\n"
         binding = PlanGraphFeatureRunBinding(
@@ -381,7 +381,7 @@ class FeatureRunTests(unittest.TestCase):
             finding_transfer_targets={"feature.txt": "FR-02"},
             origin_node_id="FR-01", inherited_ledger_frozen=True,
         )
-        with patch("harness_labs.feature_run.subprocess.run") as git_show:
+        with patch("harness_labs.featurerun.feature_run.subprocess.run") as git_show:
             git_show.return_value = subprocess.CompletedProcess([], 0, stdout=plan_bytes, stderr=b"")
             run_plan_graph_feature_worktree(
                 binding=binding, schema=standard_feature_run_dispatch_schema(),
@@ -413,7 +413,7 @@ class FeatureRunTests(unittest.TestCase):
             ("python3", "-m", "unittest"),
             1200,
         )
-        with patch("harness_labs.feature_run.subprocess.run") as git_show:
+        with patch("harness_labs.featurerun.feature_run.subprocess.run") as git_show:
             git_show.return_value = subprocess.CompletedProcess(
                 [], 0, stdout=b"plan\n", stderr=b""
             )
@@ -427,7 +427,7 @@ class FeatureRunTests(unittest.TestCase):
                     verification_repair_executor_factory=lambda attempt: None,
                 )
 
-    @patch("harness_labs.feature_run.run_feature_worktree")
+    @patch("harness_labs.featurerun.feature_run.run_feature_worktree")
     def test_plan_graph_mode_rejects_registered_plan_hash_drift(self, run_feature) -> None:
         plan_sha256 = hashlib.sha256(b"approved\n").hexdigest()
         binding = PlanGraphFeatureRunBinding(
@@ -445,7 +445,7 @@ class FeatureRunTests(unittest.TestCase):
             ("python3", "-m", "unittest"),
             1200,
         )
-        with patch("harness_labs.feature_run.subprocess.run") as git_show:
+        with patch("harness_labs.featurerun.feature_run.subprocess.run") as git_show:
             git_show.return_value = subprocess.CompletedProcess(
                 [], 0, stdout=b"drifted\n", stderr=b""
             )
@@ -460,7 +460,7 @@ class FeatureRunTests(unittest.TestCase):
                 )
         run_feature.assert_not_called()
 
-    @patch("harness_labs.feature_run.run_feature_worktree")
+    @patch("harness_labs.featurerun.feature_run.run_feature_worktree")
     def test_plan_graph_child_seals_a_lane_without_integration(self, run_feature) -> None:
         criteria = ({"id": "AC-1", "statement": "Works", "source": "plan"},)
         binding = PlanGraphFeatureRunBinding(
@@ -488,7 +488,7 @@ class FeatureRunTests(unittest.TestCase):
             (),
             ("feature.txt",),
         )
-        with patch("harness_labs.feature_run.subprocess.run") as git_show:
+        with patch("harness_labs.featurerun.feature_run.subprocess.run") as git_show:
             git_show.return_value = subprocess.CompletedProcess(
                 [], 0, stdout=b"plan\n", stderr=b""
             )
@@ -521,7 +521,7 @@ class FeatureRunTests(unittest.TestCase):
             "a" * 40, "lane/FR-10", Path("lane"), 1, "alloc-fr-10", 1, "a" * 40,
             "batch-1", (), ("feature.txt",),
         )
-        with patch("harness_labs.feature_run.subprocess.run") as git_show:
+        with patch("harness_labs.featurerun.feature_run.subprocess.run") as git_show:
             git_show.return_value = subprocess.CompletedProcess(
                 [], 0, stdout=b"plan\n", stderr=b""
             )
@@ -538,7 +538,7 @@ class FeatureRunTests(unittest.TestCase):
                     verification_repair_executor_factory=lambda attempt: None,
                 )
 
-    @patch("harness_labs.feature_run.run_feature_worktree")
+    @patch("harness_labs.featurerun.feature_run.run_feature_worktree")
     def test_plan_graph_child_returns_allocation_bound_canonical_seal_receipt(
         self, run_feature
     ) -> None:
@@ -574,7 +574,7 @@ class FeatureRunTests(unittest.TestCase):
             ),
         )
 
-        with patch("harness_labs.feature_run.subprocess.run") as git_show:
+        with patch("harness_labs.featurerun.feature_run.subprocess.run") as git_show:
             git_show.return_value = subprocess.CompletedProcess(
                 [], 0, stdout=b"plan\n", stderr=b""
             )
@@ -611,7 +611,7 @@ class FeatureRunTests(unittest.TestCase):
             f"artifact:sha256:{hashlib.sha256(descriptor_bytes).hexdigest()}",
         )
 
-    @patch("harness_labs.feature_run.run_feature_worktree")
+    @patch("harness_labs.featurerun.feature_run.run_feature_worktree")
     def test_plan_graph_child_preserves_the_complete_dependency_order(self, run_feature) -> None:
         criteria = ({"id": "AC-1", "statement": "Works", "source": "plan"},)
         dependencies = (
@@ -647,7 +647,7 @@ class FeatureRunTests(unittest.TestCase):
             "a" * 40, "lane/FR-10", Path("lane"), 1, "alloc-fr-10", 1, "a" * 40,
             "batch-1", (), ("feature.txt",),
         )
-        with patch("harness_labs.feature_run.subprocess.run") as git_show:
+        with patch("harness_labs.featurerun.feature_run.subprocess.run") as git_show:
             git_show.return_value = subprocess.CompletedProcess(
                 [], 0, stdout=b"plan\n", stderr=b""
             )
@@ -716,7 +716,7 @@ class FeatureRunTests(unittest.TestCase):
             "a" * 40, "lane/FR-10", Path("allocated-lane"), 1, "alloc-fr-10", 1, "a" * 40,
             "batch-1", (), ("feature.txt",),
         )
-        with patch("harness_labs.feature_run.subprocess.run") as git_show:
+        with patch("harness_labs.featurerun.feature_run.subprocess.run") as git_show:
             git_show.return_value = subprocess.CompletedProcess(
                 [], 0, stdout=b"plan\n", stderr=b""
             )
@@ -734,8 +734,8 @@ class FeatureRunTests(unittest.TestCase):
                 )
 
     def test_plan_graph_feature_run_has_no_skill_or_serial_coupling(self) -> None:
-        import harness_labs.feature_run as feature_run_module
-        import harness_labs.feature_run_policy as feature_run_policy_module
+        import harness_labs.featurerun.feature_run as feature_run_module
+        import harness_labs.featurerun.feature_run_policy as feature_run_policy_module
 
         material = "\n".join(
             (
@@ -1263,7 +1263,7 @@ class FeatureRunTests(unittest.TestCase):
             self.assertEqual(recovery_contexts[0].condition, "failed")
             AuditJournal.verify(root / "run")
 
-    @patch("harness_labs.feature_run.ReviewFixLoop")
+    @patch("harness_labs.featurerun.feature_run.ReviewFixLoop")
     def test_recovered_review_retains_transfers_from_failed_attempt(
         self, review_loop
     ) -> None:

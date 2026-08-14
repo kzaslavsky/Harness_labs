@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 from uuid import uuid4
 
-from harness_labs.plan_graph_authority import (
+from harness_labs.plangraph.plan_graph_authority import (
     AutomaticRecoveryAuthority, RecoveryAuthorityError, REVISION_ACTIONS,
     STRUCTURAL_ACTIONS, validate_plan_version_transition,
     validate_recovery_decision,

@@ -10,7 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from harness_labs.core.audit import AuditActor, AuditJournal
-from harness_labs.dashboard_server import (
+from harness_labs.observability.dashboard_server import (
     DashboardApplication,
     DashboardError,
     _DashboardHandler,
@@ -18,7 +18,7 @@ from harness_labs.dashboard_server import (
     build_run_detail,
     load_audit_root_registry,
 )
-from harness_labs.plan_graph_audit import PlanGraphAudit
+from harness_labs.plangraph.plan_graph_audit import PlanGraphAudit
 from scripts.dashboard_fixture_run import create_fixture
 
 
@@ -233,7 +233,7 @@ class DashboardApiTests(unittest.TestCase):
             first_etag = first_options["etag"]
             refreshed = json.loads(first_catalog)
             refreshed["generated_at"] = "2026-08-09T00:00:02Z"
-            with patch("harness_labs.dashboard_server.RunCatalog.snapshot", return_value=refreshed):
+            with patch("harness_labs.observability.dashboard_server.RunCatalog.snapshot", return_value=refreshed):
                 app._snapshot = app._build_snapshot()
             _, refreshed_catalog, refreshed_options = self._request(app, "GET", "/api/catalog")
             self.assertNotEqual(first_catalog, refreshed_catalog)
@@ -247,7 +247,7 @@ class DashboardApiTests(unittest.TestCase):
             root = Path(directory)
             self._run(root)
             app = DashboardApplication(root, refresh_seconds=60)
-            with patch("harness_labs.dashboard_server.build_run_detail", wraps=build_run_detail) as projector:
+            with patch("harness_labs.observability.dashboard_server.build_run_detail", wraps=build_run_detail) as projector:
                 self.assertEqual(self._request(app, "GET", "/api/catalog")[0], 200)
                 projector.assert_not_called()
                 self.assertEqual(self._request(app, "GET", "/api/feature-runs/run-1")[0], 200)
@@ -268,7 +268,7 @@ class DashboardApiTests(unittest.TestCase):
             root = Path(directory)
             app = DashboardApplication(root, refresh_seconds=60)
             duplicate = {"protocol": "harness-run-catalog-snapshot/1", "revision": "x", "generated_at": "2026-08-09T00:00:00Z", "source_root": str(root), "availability": {"state": "available", "reason": None}, "diagnostics": [], "plan_graphs": [], "feature_runs": [{"run_id": "same", "kind": "feature_run", "status": "running", "liveness": {"state": "liveness_unavailable", "reason": "none"}, "evidence": {"state": "available", "reason": None}, "correlation": None}, {"run_id": "same", "kind": "feature_run", "status": "running", "liveness": {"state": "liveness_unavailable", "reason": "none"}, "evidence": {"state": "available", "reason": None}, "correlation": None}], "ungrouped_feature_runs": []}
-            with patch("harness_labs.dashboard_server.RunCatalog.snapshot", return_value=duplicate):
+            with patch("harness_labs.observability.dashboard_server.RunCatalog.snapshot", return_value=duplicate):
                 snapshot = app._build_snapshot()
             self.assertEqual(snapshot.catalog_value["feature_runs"], [])
             self.assertEqual(snapshot.catalog_value["diagnostics"][0]["code"], "ambiguous_run_id")
@@ -377,7 +377,7 @@ class DashboardApiTests(unittest.TestCase):
             root = Path(directory)
             self._run(root)
             with patch(
-                "harness_labs.dashboard_server.build_run_detail",
+                "harness_labs.observability.dashboard_server.build_run_detail",
                 return_value={"blob": "x" * (1024 * 1024)},
             ):
                 app = DashboardApplication(root, refresh_seconds=60)

@@ -36,7 +36,7 @@ from harness_labs.core.git_transaction import (
     workspace_snapshot,
 )
 from harness_labs.core.test_output import failing_identifiers
-from harness_labs.review_fix import (
+from harness_labs.featurerun.review_fix import (
     ReviewFixExecutorFactory,
     ReviewFixLoop,
     ReviewFixPolicy,

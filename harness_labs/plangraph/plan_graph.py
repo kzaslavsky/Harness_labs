@@ -17,10 +17,10 @@ from typing import Callable, Mapping, Sequence
 from uuid import uuid4
 
 from harness_labs.core.audit import AuditError
-from harness_labs.plan_graph_audit import PlanGraphAudit, validate_plan_graph_id
-from harness_labs.plan_graph_budget import BudgetError, RetryBudgetLedger, gate_digest
-from harness_labs.plan_graph_authority import AutomaticRecoveryAuthority, RecoveryAuthorityError
-from harness_labs.plan_graph_contract import (
+from harness_labs.plangraph.plan_graph_audit import PlanGraphAudit, validate_plan_graph_id
+from harness_labs.plangraph.plan_graph_budget import BudgetError, RetryBudgetLedger, gate_digest
+from harness_labs.plangraph.plan_graph_authority import AutomaticRecoveryAuthority, RecoveryAuthorityError
+from harness_labs.plangraph.plan_graph_contract import (
     PLAN_GRAPH_PROTOCOL,
     PlanGraphContractError,
     canonical_plan_graph_payload,
@@ -380,7 +380,7 @@ class GateSlot:
     ``with`` block for the concrete critical section.
 
     Acquisition and release are safe to call from any thread: they only
-    journal through :class:`~harness_labs.plan_graph_audit.PlanGraphAudit`,
+    journal through :class:`~harness_labs.plangraph.plan_graph_audit.PlanGraphAudit`,
     whose underlying journal append is internally mutex-protected.
     """
 

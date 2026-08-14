@@ -1,4 +1,4 @@
-"""Durable audit state for one :mod:`harness_labs.plan_graph` execution.
+"""Durable audit state for one :mod:`harness_labs.plangraph.plan_graph` execution.
 
 This adapter keeps PlanGraph's scheduling state in the repository's canonical
 ``AuditJournal``.  It intentionally contains no liveness information: a
@@ -499,7 +499,7 @@ class PlanGraphAudit:
 
         Emitted from the coordinating thread when a node with
         ``verification_argv`` succeeds without ever entering its minted
-        :class:`~harness_labs.plan_graph.GateSlotHold` — e.g. an
+        :class:`~harness_labs.plangraph.plan_graph.GateSlotHold` — e.g. an
         out-of-process launcher, which has no way to carry the in-process
         hold across the subprocess boundary. Without this record the journal
         would be indistinguishable from a run in which no node needed the
@@ -1599,7 +1599,7 @@ def _timestamp() -> str:
 def _process_start_token(pid: int) -> str | None:
     """Return an immutable process-start token when the host can observe one.
 
-    Deliberately mirrors :func:`harness_labs.plan_graph._local_process_start_token`
+    Deliberately mirrors :func:`harness_labs.plangraph.plan_graph._local_process_start_token`
     rather than importing it: this module sits below ``plan_graph`` in the
     package's layering and must not import back up from it.
     """

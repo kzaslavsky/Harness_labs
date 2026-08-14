@@ -42,7 +42,7 @@ from harness_labs.core.controller_live import CodexSemanticTaskExecutor, LiveExe
 from harness_labs.core.controller_results import semantic_payload
 from harness_labs.core.controller_scheduler import RoleProfile
 from harness_labs.core.coordinator_schema import CoordinatorDispatchSchema, CoordinatorSegment
-from harness_labs.feature_run import ReviewFixPolicy, run_feature_worktree
+from harness_labs.featurerun.feature_run import ReviewFixPolicy, run_feature_worktree
 from harness_labs.core.git_transaction import workspace_snapshot
 from tests.controller_scenario_fixtures import ScriptedCoordinatorSession
 

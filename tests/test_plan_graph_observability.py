@@ -11,14 +11,14 @@ import tempfile
 import unittest
 
 from harness_labs.core.audit import AuditActor, AuditConflictError, AuditError, AuditJournal
-from harness_labs.plan_graph import (
+from harness_labs.plangraph.plan_graph import (
     FeatureRunOutcome,
     PlanGraph,
     PlanGraphError,
     RepairResumeDirective,
     register_plan_graph,
 )
-from harness_labs.plan_graph_budget import RetryBudgetLedger, gate_digest
+from harness_labs.plangraph.plan_graph_budget import RetryBudgetLedger, gate_digest
 from scripts.run_plan_graph import _approval_lineage_id
 
 
@@ -372,7 +372,7 @@ class PlanGraphObservabilityTests(unittest.TestCase):
             "node_id": "first", "allocation": {"batch_id": "batch-first", "logical_attempt": 1,
             "allocation_id": "allocation-first", "checkpoint_revision": attempt["checkpoint_revision"],
             "expected_staging_head": self.base}, "parent_candidate_commit": self.base,
-            "dependency_candidates": [], "lane": {"branch": "lane-first", "worktree": "/lane-first", "may_advance_staging": False}, "writable_paths": ["harness_labs/plan_graph.py"],
+            "dependency_candidates": [], "lane": {"branch": "lane-first", "worktree": "/lane-first", "may_advance_staging": False}, "writable_paths": ["harness_labs/plangraph/plan_graph.py"],
         }
         verification = {"exit_code": 0, "command": "test"}
         candidate = {"operation": "commit", "candidate_commit": "c" * 40}
