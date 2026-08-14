@@ -40,8 +40,35 @@ class BudgetConfig:
             raise BudgetError("budget limits must be positive integers")
 
 
-def gate_digest(argv: tuple[str, ...]) -> str:
-    """Return the explicitly incomplete v1 identity for a node's gate."""
+def gate_digest(
+    argv: tuple[str, ...], gates: Sequence[Mapping[str, Any]] = ()
+) -> str:
+    """Return the explicitly incomplete v1 identity for a node's gate.
+
+    A total function over the declared verification shape: a flat ``argv``
+    with no ``gates`` hashes byte-identically to the original v1 digest, so
+    every existing lineage's gate identity is unaffected. A non-empty
+    ``gates`` tuple (ordered ``{"name", "argv", "timeout_seconds"}`` mappings)
+    hashes its own distinct, order-preserving shape instead — ``argv`` is
+    ignored in that case, since the gate tuple is the node's sole declared
+    verification identity — so two distinct gate tuples never collide with
+    each other or with a flat-argv digest.
+    """
+    if gates:
+        shape = {
+            "protocol": "gate-tuple-identity/1",
+            "gates": [
+                {
+                    "name": gate["name"],
+                    "argv": list(gate["argv"]),
+                    "timeout_seconds": gate["timeout_seconds"],
+                }
+                for gate in gates
+            ],
+        }
+        return hashlib.sha256(
+            json.dumps(shape, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
     return hashlib.sha256(json.dumps(list(argv), separators=(",", ":")).encode()).hexdigest()
 
 
