@@ -1,0 +1,174 @@
+{
+  "protocol": "plan-graph-plan/1",
+  "plan": "docs/automation_helpers/test-pruner-plangraph-plan.md",
+  "plan_sections": {
+    "OVERVIEW": "Build the useless-test pruner as a PlanGraph-developed, FeatureRun-hosted maintenance routine. Evidence tools select deletion candidates; a Codex-exec model seat performs only the bounded deletion.",
+    "BACKENDS": "Every build-time and runtime model seat runs on the Codex exec backend via the agent-mixture provider map; the human-side operator loop is the only exception.",
+    "TP-01": "Mutation engine core: deterministic stdlib-ast mutant enumeration with stable mutant IDs and a fixed classical operator set. Pure enumeration, no execution.",
+    "TP-02": "Mutant execution and scoring: temp-tree materialization, scoped unittest subprocess runs with hard budgets, killed/survived/timeout/error/budget-exhausted classification, and the test-pruner-report/1 schema.",
+    "TP-03": "Static vacuity detector: flags assert-free, tautological, and mock-neutralized tests; must produce zero unreviewed flags on the repository's current suite.",
+    "TP-04": "Candidate selector and routine policy: merge mutation and static evidence into at most five ranked deletion candidates with full evidence chains; author the static-plane policy document.",
+    "TP-05": "All-codex runtime wiring: FeatureRun dispatch of the bounded deletion with codex-exec coordinator, implementer, reviewer, and repair seats; candidate-only integration; PlanGraph launcher variant.",
+    "TP-06": "Pilot and audit evidence: planted fixture corpus, end-to-end selection accuracy assertion, post-deletion green suite, and a recorded pilot report artifact."
+  },
+  "acceptance_criteria": {
+    "AC-ENG-1": "Mutant enumeration is deterministic, stdlib-only, refuses out-of-root targets, and produces stable mutant IDs across repeated invocations.",
+    "AC-ENG-2": "Mutant execution runs each mutant in an isolated subprocess against a scoped test selection under hard per-mutant and total budgets; exhaustion is reported as budget-exhausted, never silently truncated.",
+    "AC-RPT-1": "Every pruner report validates against schemas/test-pruner-report.schema.json and records per-test attribution method, mutant counts, statuses, budgets, environment fingerprint, and target commit.",
+    "AC-DET-1": "The static detector flags planted assert-free, tautological, and mock-neutralized tests in its own fixtures and raises zero unreviewed flags against the repository's current suite.",
+    "AC-SEL-1": "The selector emits at most five deletion candidates per run, each backed by an evidence chain free of timeout, error, budget-exhausted, or fallback-attribution contamination, and the routine policy document exists.",
+    "AC-RUN-1": "Runtime wiring resolves every model seat to the codex-exec provider, confines the deletion lane's writable paths to tests/**, and forces candidate-only integration.",
+    "AC-PIL-1": "On the planted fixture corpus the pruner selects exactly the planted vacuous tests, genuine tests survive, the fixture suite passes after deletion, and the pilot report is recorded as a reviewable artifact."
+  },
+  "runs": [
+    {
+      "id": "TP-01",
+      "objective": "Create the deterministic stdlib-only mutant enumeration engine in scripts/dev/mutation_check.py with unit tests.",
+      "plan_sections": ["TP-01"],
+      "criteria": ["AC-ENG-1"],
+      "depends_on": [],
+      "allowed_paths": [
+        "scripts/dev/mutation_check.py",
+        "tests/test_mutation_check.py"
+      ],
+      "path_intents": [
+        {"path": "scripts/dev/mutation_check.py", "action": "create"},
+        {"path": "tests/test_mutation_check.py", "action": "create"}
+      ],
+      "verification_argv": ["python3", "-m", "unittest", "tests.test_mutation_check", "-v"],
+      "verification_timeout_seconds": 900,
+      "verification_required_paths": [
+        {"path": "tests/__init__.py", "availability": "base"}
+      ]
+    },
+    {
+      "id": "TP-02",
+      "objective": "Create the isolated mutant execution and budgeted scoring engine on top of the TP-01 enumeration API, plus the test-pruner-report/1 schema.",
+      "plan_sections": ["TP-02"],
+      "criteria": ["AC-ENG-2", "AC-RPT-1"],
+      "depends_on": ["TP-01"],
+      "allowed_paths": [
+        "scripts/dev/mutation_score.py",
+        "schemas/test-pruner-report.schema.json",
+        "tests/test_mutation_scoring.py"
+      ],
+      "path_intents": [
+        {"path": "scripts/dev/mutation_score.py", "action": "create"},
+        {"path": "schemas/test-pruner-report.schema.json", "action": "create"},
+        {"path": "tests/test_mutation_scoring.py", "action": "create"}
+      ],
+      "verification_argv": ["python3", "-m", "unittest", "tests.test_mutation_check", "tests.test_mutation_scoring", "-v"],
+      "verification_timeout_seconds": 1800,
+      "verification_required_paths": [
+        {"path": "tests/__init__.py", "availability": "base"}
+      ]
+    },
+    {
+      "id": "TP-03",
+      "objective": "Create the static vacuity detector for assert-free, tautological, and mock-neutralized tests, verified against fixtures and the current suite.",
+      "plan_sections": ["TP-03"],
+      "criteria": ["AC-DET-1"],
+      "depends_on": [],
+      "allowed_paths": [
+        "scripts/dev/vacuous_test_check.py",
+        "tests/test_vacuous_test_check.py"
+      ],
+      "path_intents": [
+        {"path": "scripts/dev/vacuous_test_check.py", "action": "create"},
+        {"path": "tests/test_vacuous_test_check.py", "action": "create"}
+      ],
+      "verification_argv": ["python3", "-m", "unittest", "tests.test_vacuous_test_check", "-v"],
+      "verification_timeout_seconds": 900,
+      "verification_required_paths": [
+        {"path": "tests/__init__.py", "availability": "base"}
+      ]
+    },
+    {
+      "id": "TP-04",
+      "objective": "Create the evidence-merging candidate selector with a five-candidate cap and author the routine's static-plane policy document.",
+      "plan_sections": ["TP-04"],
+      "criteria": ["AC-SEL-1"],
+      "depends_on": ["TP-02", "TP-03"],
+      "allowed_paths": [
+        "scripts/dev/test_pruner_select.py",
+        "docs/automation_helpers/test-pruner-policy.md",
+        "tests/test_pruner_select.py"
+      ],
+      "path_intents": [
+        {"path": "scripts/dev/test_pruner_select.py", "action": "create"},
+        {"path": "docs/automation_helpers/test-pruner-policy.md", "action": "create"},
+        {"path": "tests/test_pruner_select.py", "action": "create"}
+      ],
+      "verification_argv": ["python3", "-m", "unittest", "tests.test_pruner_select", "-v"],
+      "verification_timeout_seconds": 900,
+      "verification_required_paths": [
+        {"path": "tests/__init__.py", "availability": "base"}
+      ]
+    },
+    {
+      "id": "TP-05",
+      "objective": "Create the all-codex FeatureRun wiring and PlanGraph launcher that turn a selector report into a bounded deletion-only candidate branch.",
+      "plan_sections": ["TP-05", "BACKENDS"],
+      "criteria": ["AC-RUN-1"],
+      "depends_on": ["TP-04"],
+      "allowed_paths": [
+        "experiments/run_test_pruner_feature.py",
+        "experiments/run_test_pruner_plan_graph.py",
+        "tests/test_pruner_runtime_config.py"
+      ],
+      "path_intents": [
+        {"path": "experiments/run_test_pruner_feature.py", "action": "create"},
+        {"path": "experiments/run_test_pruner_plan_graph.py", "action": "create"},
+        {"path": "tests/test_pruner_runtime_config.py", "action": "create"}
+      ],
+      "verification_argv": ["python3", "-m", "unittest", "tests.test_pruner_runtime_config", "-v"],
+      "verification_timeout_seconds": 900,
+      "verification_required_paths": [
+        {"path": "tests/__init__.py", "availability": "base"}
+      ]
+    },
+    {
+      "id": "TP-06",
+      "objective": "Create the planted fixture corpus and end-to-end pilot proving selection accuracy and post-deletion suite health, recording the pilot report artifact.",
+      "plan_sections": ["TP-06"],
+      "criteria": ["AC-PIL-1"],
+      "depends_on": ["TP-05"],
+      "allowed_paths": [
+        "tests/fixtures/test_pruner_pilot",
+        "tests/test_pruner_pilot.py",
+        "docs/automation_helpers/pilot-report.json"
+      ],
+      "path_intents": [
+        {"path": "tests/fixtures/test_pruner_pilot", "action": "create"},
+        {"path": "tests/test_pruner_pilot.py", "action": "create"},
+        {"path": "docs/automation_helpers/pilot-report.json", "action": "create"}
+      ],
+      "verification_argv": ["python3", "-m", "unittest", "tests.test_pruner_pilot", "-v"],
+      "verification_timeout_seconds": 1800,
+      "verification_required_paths": [
+        {"path": "tests/__init__.py", "availability": "base"}
+      ]
+    }
+  ],
+  "functionality_tests": [
+    {
+      "argv": ["python3", "-m", "unittest", "discover", "-s", "tests"],
+      "timeout_seconds": 3600,
+      "required_paths": [
+        {"path": "tests/__init__.py", "availability": "base"}
+      ]
+    },
+    {
+      "argv": ["python3", "scripts/check_repository_contracts.py"],
+      "timeout_seconds": 600,
+      "required_paths": [
+        {"path": "scripts/check_repository_contracts.py", "availability": "base"}
+      ]
+    }
+  ],
+  "referenced_artifacts": [
+    "docs/automation_helpers/automation-routines-analysis.md",
+    "docs/automation_helpers/boris-cherny-automation-routines.md",
+    "AGENTS.md"
+  ]
+}
