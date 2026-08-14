@@ -14,7 +14,7 @@ from pathlib import Path
 from time import monotonic_ns, sleep
 from typing import Any, Mapping
 
-from .usage import build_run_summary
+from harness_labs.core.usage import build_run_summary
 
 try:
     import fcntl

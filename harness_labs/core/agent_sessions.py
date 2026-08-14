@@ -8,16 +8,16 @@ from dataclasses import dataclass, field
 from time import monotonic_ns
 from typing import Any, Mapping, Protocol, TypeAlias
 
-from .attempts import TaskAttempt, TaskResult
-from .audit import AuditActor, AuditJournal
-from .composition import (
+from harness_labs.core.attempts import TaskAttempt, TaskResult
+from harness_labs.core.audit import AuditActor, AuditJournal
+from harness_labs.core.composition import (
     ChildBatchRequest,
     ChildBatchResult,
     ChildDispatcher,
     ChildRequest,
     ChildRequestDenied,
 )
-from .text_executor import InMemoryReferenceStore
+from harness_labs.core.text_executor import InMemoryReferenceStore
 
 
 TOOL_UNAVAILABLE_REFUSAL = "sorry, I cannot do that, Dave."

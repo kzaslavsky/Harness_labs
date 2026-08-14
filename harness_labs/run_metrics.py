@@ -10,7 +10,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from .audit import AuditError, AuditJournal
+from harness_labs.core.audit import AuditError, AuditJournal
 
 
 TERMINAL_STATUSES = frozenset({"succeeded", "failed", "blocked", "interrupted"})

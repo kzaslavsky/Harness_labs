@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from .development_policy import DevelopmentPolicy
+from harness_labs.core.development_policy import DevelopmentPolicy
 
 
 def standard_feature_run_policy() -> DevelopmentPolicy:
@@ -157,7 +157,7 @@ def standard_feature_run_policy() -> DevelopmentPolicy:
 def standard_feature_run_dispatch_schema():
     """Compile the neutral standard seven-phase FeatureRun lifecycle."""
 
-    from .coordinator_schema import CoordinatorDispatchSchema, CoordinatorSegment
+    from harness_labs.core.coordinator_schema import CoordinatorDispatchSchema, CoordinatorSegment
 
     policy = standard_feature_run_policy()
     return CoordinatorDispatchSchema(

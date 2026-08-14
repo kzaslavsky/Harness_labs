@@ -5,8 +5,8 @@ from __future__ import annotations
 import copy
 from typing import Any
 
-from .controller_evidence import EvidenceCatalog
-from .controller_kernel import ControllerKernel
+from harness_labs.core.controller_evidence import EvidenceCatalog
+from harness_labs.core.controller_kernel import ControllerKernel
 
 
 QUERY_NAMES = frozenset(

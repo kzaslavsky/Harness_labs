@@ -2,7 +2,7 @@
 
 A FeatureRun already chooses its agents seat-by-seat: the coordinator through
 ``session_factory`` and each worker role through a
-:class:`~harness_labs.controller_scheduler.RoleProfile` executor factory. This
+:class:`~harness_labs.core.controller_scheduler.RoleProfile` executor factory. This
 module adds the declarative layer on top: a run (or a PlanGraph node packet)
 names its mixture as ``{role: "provider:model@effort"}`` and gets back the
 ``RoleProfile`` tuple, so which agent runs which role becomes recorded
@@ -16,19 +16,19 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
-from .agent_sessions import AgentSession
-from .audit import AuditJournal
-from .claude_agent_session import ClaudeAgentSession
-from .claude_task_executor import ClaudeSemanticTaskExecutor
-from .codex_agent_session import CodexAppServerSession
-from .controller_evidence import EvidenceCatalog
-from .controller_live import (
+from harness_labs.core.agent_sessions import AgentSession
+from harness_labs.core.audit import AuditJournal
+from harness_labs.core.claude_agent_session import ClaudeAgentSession
+from harness_labs.core.claude_task_executor import ClaudeSemanticTaskExecutor
+from harness_labs.core.codex_agent_session import CodexAppServerSession
+from harness_labs.core.controller_evidence import EvidenceCatalog
+from harness_labs.core.controller_live import (
     CodexSemanticTaskExecutor,
     select_dirty_baseline_receipt,
 )
-from .controller_scheduler import RoleProfile
-from .git_transaction import workspace_snapshot
-from .usage import ModelPrice
+from harness_labs.core.controller_scheduler import RoleProfile
+from harness_labs.core.git_transaction import workspace_snapshot
+from harness_labs.core.usage import ModelPrice
 
 
 _PROVIDER_BACKEND_IDS = {
@@ -198,7 +198,7 @@ def build_role_profiles(
     (``"claude:claude-opus-5@high"``, ``"codex:gpt-5.6-terra@medium"``, or a
     :class:`BackendSpec`). ``executables`` optionally overrides the CLI binary
     per provider, and ``pricing`` optionally supplies a
-    :class:`~harness_labs.usage.ModelPrice` per provider.
+    :class:`~harness_labs.core.usage.ModelPrice` per provider.
     """
 
     if not roles:
@@ -304,8 +304,8 @@ def _controller_dirty_baseline_grant(
     of time can never itself bypass the executor's clean-baseline preflight,
     and no dispatched task can choose or influence which receipt is offered.
     The candidate is checked with the same shared
-    :func:`~harness_labs.controller_live.select_dirty_baseline_receipt` (which
-    itself runs :func:`~harness_labs.controller_live.verify_dirty_baseline_grant`,
+    :func:`~harness_labs.core.controller_live.select_dirty_baseline_receipt` (which
+    itself runs :func:`~harness_labs.core.controller_live.verify_dirty_baseline_grant`,
     the same check the executor runs at preflight: path coverage *and*
     content state), so a grant issued here is never journaled as granted
     against a workspace state that would fail preflight. When no candidate

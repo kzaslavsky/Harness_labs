@@ -6,7 +6,7 @@ import hashlib
 from dataclasses import dataclass
 from typing import Any, Mapping, Protocol
 
-from .attempts import TaskAttempt, TaskResult
+from harness_labs.core.attempts import TaskAttempt, TaskResult
 
 
 class TextBackend(Protocol):

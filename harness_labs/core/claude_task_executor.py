@@ -1,6 +1,6 @@
 """Live Claude-backed semantic task execution for the hybrid controller.
 
-This mirrors :class:`harness_labs.controller_live.CodexSemanticTaskExecutor`
+This mirrors :class:`harness_labs.core.controller_live.CodexSemanticTaskExecutor`
 over headless Claude Code (`claude -p`). One enforcement difference is
 deliberate: `codex exec --sandbox read-only` is an OS-level sandbox, while
 `claude -p` bounds tools at the permission layer. To compensate, read-only
@@ -20,10 +20,10 @@ from pathlib import Path
 from time import monotonic_ns
 from typing import Any, Mapping
 
-from .attempts import TaskAttempt, TaskResult
-from .audit import AuditActor, AuditJournal
-from .controller_evidence import EvidenceCatalog
-from .controller_live import (
+from harness_labs.core.attempts import TaskAttempt, TaskResult
+from harness_labs.core.audit import AuditActor, AuditJournal
+from harness_labs.core.controller_evidence import EvidenceCatalog
+from harness_labs.core.controller_live import (
     ATTEMPT_START_BASELINE_RESTORATION_EVENT,
     _RAW_OUTPUT_SCHEMA,
     _WORKSPACE_CHANGE_RECEIPT_KIND,
@@ -39,19 +39,19 @@ from .controller_live import (
     select_dirty_baseline_receipt,
     verify_dirty_baseline_grant,
 )
-from .controller_results import (
+from harness_labs.core.controller_results import (
     DeliverableFloorViolation,
     enforce_deliverable_floor,
     semantic_payload,
     validate_semantic_result,
 )
-from .git_transaction import (
+from harness_labs.core.git_transaction import (
     GitTransactionError,
     normalize_allowed_paths,
     paths_outside_scope,
     workspace_snapshot,
 )
-from .usage import ModelPrice, parse_claude_result_usage, usage_payload
+from harness_labs.core.usage import ModelPrice, parse_claude_result_usage, usage_payload
 
 
 _READ_ONLY_TOOLS = "Read,Glob,Grep"

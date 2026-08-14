@@ -16,14 +16,14 @@ ROOT = Path(__file__).resolve().parents[1]
 HARNESS_SOURCE = Path(os.environ.get("HARNESS_LABS_SOURCE", str(ROOT)))
 sys.path.insert(0, str(HARNESS_SOURCE))
 
-from harness_labs.agent_sessions import AgentSession  # noqa: E402
-from harness_labs.codex_agent_session import CodexAppServerSession  # noqa: E402
-from harness_labs.controller_evidence import EvidenceCatalog  # noqa: E402
-from harness_labs.controller_kernel import RunContract  # noqa: E402
-from harness_labs.controller_live import CodexSemanticTaskExecutor  # noqa: E402
-from harness_labs.controller_scheduler import RoleProfile  # noqa: E402
-from harness_labs.coordinator_dispatcher import CoordinatorLaunch  # noqa: E402
-from harness_labs.coordinator_schema import (  # noqa: E402
+from harness_labs.core.agent_sessions import AgentSession  # noqa: E402
+from harness_labs.core.codex_agent_session import CodexAppServerSession  # noqa: E402
+from harness_labs.core.controller_evidence import EvidenceCatalog  # noqa: E402
+from harness_labs.core.controller_kernel import RunContract  # noqa: E402
+from harness_labs.core.controller_live import CodexSemanticTaskExecutor  # noqa: E402
+from harness_labs.core.controller_scheduler import RoleProfile  # noqa: E402
+from harness_labs.core.coordinator_dispatcher import CoordinatorLaunch  # noqa: E402
+from harness_labs.core.coordinator_schema import (  # noqa: E402
     CoordinatorDispatchSchema,
     CoordinatorSegment,
 )

@@ -6,8 +6,8 @@ import unittest
 from decimal import Decimal
 from pathlib import Path
 
-from harness_labs.audit import AuditActor, AuditJournal
-from harness_labs.usage import ModelPrice, parse_codex_jsonl_usage, usage_payload
+from harness_labs.core.audit import AuditActor, AuditJournal
+from harness_labs.core.usage import ModelPrice, parse_codex_jsonl_usage, usage_payload
 
 
 class UsageTests(unittest.TestCase):

@@ -2,7 +2,7 @@
 from __future__ import annotations
 from pathlib import Path
 from typing import Any, Iterable
-from .run_metrics import project_run_metrics
+from harness_labs.run_metrics import project_run_metrics
 
 
 def build_run_metrics_index(run_dirs: Iterable[Path]) -> dict[str, Any]:

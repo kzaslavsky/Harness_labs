@@ -9,15 +9,15 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from harness_labs.attempts import TaskResult
-from harness_labs.audit import AuditActor, AuditJournal
-from harness_labs.controller_coordinator import CoordinatorLoop
-from harness_labs.controller_evidence import EvidenceCatalog
-from harness_labs.controller_kernel import ControllerKernel, RunContract
-from harness_labs.controller_projection import ControllerQueries
-from harness_labs.controller_results import semantic_payload
-from harness_labs.controller_run import resume_controller, run_fixture_spec
-from harness_labs.controller_scheduler import CapabilityScheduler, RoleProfile
+from harness_labs.core.attempts import TaskResult
+from harness_labs.core.audit import AuditActor, AuditJournal
+from harness_labs.core.controller_coordinator import CoordinatorLoop
+from harness_labs.core.controller_evidence import EvidenceCatalog
+from harness_labs.core.controller_kernel import ControllerKernel, RunContract
+from harness_labs.core.controller_projection import ControllerQueries
+from harness_labs.core.controller_results import semantic_payload
+from harness_labs.core.controller_run import resume_controller, run_fixture_spec
+from harness_labs.core.controller_scheduler import CapabilityScheduler, RoleProfile
 
 from tests.controller_scenario_fixtures import (
     FixtureExecutor,
@@ -129,7 +129,7 @@ class ControllerRunTests(unittest.TestCase):
                 [
                     sys.executable,
                     "-m",
-                    "harness_labs.controller_run",
+                    "harness_labs.core.controller_run",
                     "--fixture",
                     str(fixture_path),
                     "--run-dir",
@@ -318,7 +318,7 @@ class ControllerRunTests(unittest.TestCase):
                 raise RuntimeError("simulated crash before checkpoint")
 
             audit.merge_checkpoint = crash_before_checkpoint  # type: ignore[method-assign]
-            from harness_labs.controller_commands import (
+            from harness_labs.core.controller_commands import (
                 CommandActor,
                 CommandEnvelope,
             )

@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-from .agent_sessions import (
+from harness_labs.core.agent_sessions import (
     AgentSession,
     BackendCapabilities,
     FinalOutput,
@@ -17,14 +17,14 @@ from .agent_sessions import (
     ToolCall,
     ToolResult,
 )
-from .attempts import TaskAttempt, TaskResult
-from .audit import AuditActor, AuditJournal
-from .controller_coordinator import CoordinatorLoop
-from .controller_evidence import EvidenceCatalog
-from .controller_kernel import ControllerKernel, RunContract, RunLimits
-from .controller_commands import CommandActor, KernelEvent
-from .controller_projection import ControllerQueries, project_run_view
-from .controller_scheduler import CapabilityScheduler, RoleProfile
+from harness_labs.core.attempts import TaskAttempt, TaskResult
+from harness_labs.core.audit import AuditActor, AuditJournal
+from harness_labs.core.controller_coordinator import CoordinatorLoop
+from harness_labs.core.controller_evidence import EvidenceCatalog
+from harness_labs.core.controller_kernel import ControllerKernel, RunContract, RunLimits
+from harness_labs.core.controller_commands import CommandActor, KernelEvent
+from harness_labs.core.controller_projection import ControllerQueries, project_run_view
+from harness_labs.core.controller_scheduler import CapabilityScheduler, RoleProfile
 
 
 SessionBuilder = Callable[[EvidenceCatalog], AgentSession]
@@ -433,7 +433,7 @@ def _settle_nonterminal(kernel: ControllerKernel, result: TaskResult) -> None:
     reason = result.payload.get("error") or result.payload.get("text")
     if not isinstance(reason, str) or not reason.strip():
         reason = f"coordinator terminated with status {result.status}"
-    from .controller_commands import CommandEnvelope
+    from harness_labs.core.controller_commands import CommandEnvelope
 
     receipt = kernel.handle(
         CommandEnvelope(

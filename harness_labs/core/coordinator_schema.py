@@ -7,7 +7,7 @@ import json
 from dataclasses import dataclass
 from typing import Any, Mapping
 
-from .development_policy import DevelopmentPolicy
+from harness_labs.core.development_policy import DevelopmentPolicy
 
 COORDINATOR_SCHEMA_PROTOCOL = "coordinator-dispatch-schema/1"
 

@@ -8,11 +8,11 @@ import re
 from dataclasses import asdict, dataclass
 from typing import Any, Mapping, Protocol
 
-from .attempts import AttemptRunner, Executor, TaskAttempt, TaskResult
-from .audit import AuditActor, AuditJournal
-from .controller_evidence import EvidenceCatalog
-from .controller_results import validate_semantic_result
-from .git_transaction import paths_outside_scope
+from harness_labs.core.attempts import AttemptRunner, Executor, TaskAttempt, TaskResult
+from harness_labs.core.audit import AuditActor, AuditJournal
+from harness_labs.core.controller_evidence import EvidenceCatalog
+from harness_labs.core.controller_results import validate_semantic_result
+from harness_labs.core.git_transaction import paths_outside_scope
 
 
 REVIEW_LEDGER_PROTOCOL = "review-ledger/1"

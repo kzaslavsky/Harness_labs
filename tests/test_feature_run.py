@@ -11,12 +11,12 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from harness_labs.attempts import TaskResult
-from harness_labs.audit import AuditJournal
-from harness_labs.controller_evidence import EvidenceCatalog
-from harness_labs.controller_kernel import ControllerKernel, RunContract
-from harness_labs.controller_results import semantic_payload
-from harness_labs.controller_scheduler import RoleProfile
+from harness_labs.core.attempts import TaskResult
+from harness_labs.core.audit import AuditJournal
+from harness_labs.core.controller_evidence import EvidenceCatalog
+from harness_labs.core.controller_kernel import ControllerKernel, RunContract
+from harness_labs.core.controller_results import semantic_payload
+from harness_labs.core.controller_scheduler import RoleProfile
 from harness_labs.feature_run import (
     DeterministicVerificationResult,
     FeatureRunHandoffArtifact,
@@ -30,7 +30,7 @@ from harness_labs.feature_run import (
     classify_verification_failure,
 )
 from harness_labs.feature_run_policy import standard_feature_run_dispatch_schema
-from harness_labs.coordinator_schema import (
+from harness_labs.core.coordinator_schema import (
     CoordinatorDispatchSchema,
     CoordinatorSegment,
 )

@@ -6,9 +6,9 @@ import hashlib
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
-from .attempts import TaskAttempt, TaskResult
-from .audit import AuditActor, AuditJournal
-from .text_executor import InMemoryReferenceStore, TextBackend, TextBackendError
+from harness_labs.core.attempts import TaskAttempt, TaskResult
+from harness_labs.core.audit import AuditActor, AuditJournal
+from harness_labs.core.text_executor import InMemoryReferenceStore, TextBackend, TextBackendError
 
 
 @dataclass

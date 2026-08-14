@@ -40,14 +40,14 @@ HARNESS_SOURCE = Path(os.environ.get("HARNESS_LABS_SOURCE", str(ROOT)))
 sys.path.insert(0, str(HARNESS_SOURCE))
 
 from harness_labs.agent_mixture import build_coordinator_session  # noqa: E402
-from harness_labs.agent_sessions import AgentSession  # noqa: E402
-from harness_labs.claude_task_executor import (  # noqa: E402
+from harness_labs.core.agent_sessions import AgentSession  # noqa: E402
+from harness_labs.core.claude_task_executor import (  # noqa: E402
     ClaudeSemanticTaskExecutor,
 )
-from harness_labs.controller_evidence import EvidenceCatalog  # noqa: E402
-from harness_labs.controller_kernel import RunContract  # noqa: E402
-from harness_labs.controller_scheduler import RoleProfile  # noqa: E402
-from harness_labs.coordinator_dispatcher import CoordinatorLaunch  # noqa: E402
+from harness_labs.core.controller_evidence import EvidenceCatalog  # noqa: E402
+from harness_labs.core.controller_kernel import RunContract  # noqa: E402
+from harness_labs.core.controller_scheduler import RoleProfile  # noqa: E402
+from harness_labs.core.coordinator_dispatcher import CoordinatorLaunch  # noqa: E402
 from harness_labs.feature_run import (  # noqa: E402
     PlanGraphFeatureRunBinding,
     ReviewFixPolicy,
@@ -122,8 +122,8 @@ NODES: tuple[dict[str, Any], ...] = (
         "finding_tests": ["tests/test_relax_claims.py"],
         "regression": ["tests/"],
         "allowed_paths": [
-            "harness_labs/controller_live.py",
-            "harness_labs/claude_task_executor.py",
+            "harness_labs/core/controller_live.py",
+            "harness_labs/core/claude_task_executor.py",
             "tests/test_controller_live.py",
             "tests/test_claude_task_executor.py",
             "tests/test_relax_claims.py",

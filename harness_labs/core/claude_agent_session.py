@@ -3,9 +3,9 @@
 Claude Code executes tools internally — including MCP tools — so controller
 tools cannot be injected the way Codex accepts ``dynamicTools``. Instead the
 session owns a loopback HTTP MCP bridge (stdlib only): every controller
-:class:`~harness_labs.agent_sessions.ToolSpec` is served as an MCP tool whose
+:class:`~harness_labs.core.agent_sessions.ToolSpec` is served as an MCP tool whose
 ``tools/call`` handler blocks until the harness supplies the matching
-:class:`~harness_labs.agent_sessions.ToolResult` through ``step()``.
+:class:`~harness_labs.core.agent_sessions.ToolResult` through ``step()``.
 
 This inversion is safe because of a live-verified ordering fact (probed
 2026-08-12 against claude 2.1.226): with ``--output-format stream-json`` the
@@ -31,8 +31,8 @@ from pathlib import Path
 from time import monotonic
 from typing import Any, Mapping
 
-from .audit import AuditActor, AuditJournal
-from .agent_sessions import (
+from harness_labs.core.audit import AuditActor, AuditJournal
+from harness_labs.core.agent_sessions import (
     BackendCapabilities,
     BackendFailure,
     FinalOutput,
@@ -44,7 +44,7 @@ from .agent_sessions import (
     Usage,
     tool_result_json,
 )
-from .usage import ModelPrice, parse_claude_result_usage
+from harness_labs.core.usage import ModelPrice, parse_claude_result_usage
 
 
 class ClaudeSessionError(RuntimeError):

@@ -14,23 +14,23 @@ from pathlib import Path
 from time import monotonic_ns
 from typing import Any, Mapping
 
-from .attempts import TaskAttempt, TaskResult
-from .audit import AuditActor, AuditJournal
-from .controller_evidence import EvidenceCatalog, EvidenceError
-from .controller_results import (
+from harness_labs.core.attempts import TaskAttempt, TaskResult
+from harness_labs.core.audit import AuditActor, AuditJournal
+from harness_labs.core.controller_evidence import EvidenceCatalog, EvidenceError
+from harness_labs.core.controller_results import (
     DeliverableFloorViolation,
     MIN_DELIVERABLE_LENGTH,
     enforce_deliverable_floor,
     semantic_payload,
     validate_semantic_result,
 )
-from .git_transaction import (
+from harness_labs.core.git_transaction import (
     GitTransactionError,
     normalize_allowed_paths,
     paths_outside_scope,
     workspace_snapshot,
 )
-from .usage import ModelPrice, parse_codex_jsonl_usage, usage_payload
+from harness_labs.core.usage import ModelPrice, parse_codex_jsonl_usage, usage_payload
 
 
 class LiveExecutionError(RuntimeError):

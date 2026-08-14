@@ -13,30 +13,30 @@ from pathlib import Path
 from time import monotonic_ns
 from typing import Any, Callable, Literal, Mapping, Protocol
 
-from .agent_sessions import AgentSession
-from .attempts import AttemptRunner, Executor, TaskAttempt, TaskResult
-from .audit import AuditActor, AuditJournal
-from .controller_commands import CommandActor, CommandEnvelope
-from .controller_evidence import EvidenceCatalog
-from .controller_kernel import ControllerKernel, RunContract
-from .controller_live import DirtyBaselineGrantVerification, verify_dirty_baseline_grant
-from .controller_projection import project_run_view
-from .controller_scheduler import CapabilityScheduler, RoleProfile
-from .coordinator_dispatcher import (
+from harness_labs.core.agent_sessions import AgentSession
+from harness_labs.core.attempts import AttemptRunner, Executor, TaskAttempt, TaskResult
+from harness_labs.core.audit import AuditActor, AuditJournal
+from harness_labs.core.controller_commands import CommandActor, CommandEnvelope
+from harness_labs.core.controller_evidence import EvidenceCatalog
+from harness_labs.core.controller_kernel import ControllerKernel, RunContract
+from harness_labs.core.controller_live import DirtyBaselineGrantVerification, verify_dirty_baseline_grant
+from harness_labs.core.controller_projection import project_run_view
+from harness_labs.core.controller_scheduler import CapabilityScheduler, RoleProfile
+from harness_labs.core.coordinator_dispatcher import (
     CoordinatorDispatchResult,
     CoordinatorDispatcher,
     CoordinatorLaunch,
 )
-from .coordinator_schema import CoordinatorDispatchSchema
-from .git_transaction import (
+from harness_labs.core.coordinator_schema import CoordinatorDispatchSchema
+from harness_labs.core.git_transaction import (
     GitTransactionError,
     GitWorktreeTransaction,
     normalize_allowed_paths,
     paths_outside_scope,
     workspace_snapshot,
 )
-from .core.test_output import failing_identifiers
-from .review_fix import (
+from harness_labs.core.test_output import failing_identifiers
+from harness_labs.review_fix import (
     ReviewFixExecutorFactory,
     ReviewFixLoop,
     ReviewFixPolicy,
@@ -1534,7 +1534,7 @@ def _dirty_baseline_receipt_ref(
     """Return a workspace-change receipt covering every dirty path's path and content.
 
     A candidate receipt qualifies only when the shared
-    :func:`~harness_labs.controller_live.verify_dirty_baseline_grant` accepts
+    :func:`~harness_labs.core.controller_live.verify_dirty_baseline_grant` accepts
     it -- changed-path coverage *and* per-file content-state match against
     ``dirty_files`` -- the same check the executor runs at preflight, so a
     grant issued from the selection here can never be journaled as granted

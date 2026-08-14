@@ -15,7 +15,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from harness_labs.audit import AuditError
+from harness_labs.core.audit import AuditError
 from harness_labs.plan_graph import (
     FEATURE_RUN_REQUEST_PROTOCOL,
     FeatureRunOutcome,

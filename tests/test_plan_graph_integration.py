@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from harness_labs.audit import AuditJournal
+from harness_labs.core.audit import AuditJournal
 from harness_labs.plan_graph_audit import PlanGraphAudit
 from harness_labs.plan_graph_integration import PlanGraphIntegrationBarrier, PlanGraphIntegrationError
 

@@ -12,9 +12,9 @@ from pathlib import Path
 from time import monotonic_ns
 from typing import Mapping
 
-from .attempts import TaskAttempt, TaskResult
-from .audit import AuditActor, AuditJournal
-from .text_executor import InMemoryReferenceStore
+from harness_labs.core.attempts import TaskAttempt, TaskResult
+from harness_labs.core.audit import AuditActor, AuditJournal
+from harness_labs.core.text_executor import InMemoryReferenceStore
 
 
 class CodexDelegationError(RuntimeError):

@@ -41,14 +41,14 @@ HARNESS_SOURCE = Path(os.environ.get("HARNESS_LABS_SOURCE", str(ROOT)))
 sys.path.insert(0, str(HARNESS_SOURCE))
 
 from harness_labs.agent_mixture import build_coordinator_session  # noqa: E402
-from harness_labs.agent_sessions import AgentSession  # noqa: E402
-from harness_labs.claude_task_executor import (  # noqa: E402
+from harness_labs.core.agent_sessions import AgentSession  # noqa: E402
+from harness_labs.core.claude_task_executor import (  # noqa: E402
     ClaudeSemanticTaskExecutor,
 )
-from harness_labs.controller_evidence import EvidenceCatalog  # noqa: E402
-from harness_labs.controller_kernel import RunContract  # noqa: E402
-from harness_labs.controller_scheduler import RoleProfile  # noqa: E402
-from harness_labs.coordinator_dispatcher import CoordinatorLaunch  # noqa: E402
+from harness_labs.core.controller_evidence import EvidenceCatalog  # noqa: E402
+from harness_labs.core.controller_kernel import RunContract  # noqa: E402
+from harness_labs.core.controller_scheduler import RoleProfile  # noqa: E402
+from harness_labs.core.coordinator_dispatcher import CoordinatorLaunch  # noqa: E402
 from harness_labs.feature_run import (  # noqa: E402
     PlanGraphFeatureRunBinding,
     ReviewFixPolicy,
@@ -106,7 +106,7 @@ the named workers.
 # document; this table binds structure only.
 # ---------------------------------------------------------------------------
 # Dependency edges exist only where nodes share owned files or consume another
-# node's mechanism. harness_labs/controller_live.py and
+# node's mechanism. harness_labs/core/controller_live.py and
 # harness_labs/agent_mixture.py are each owned by several nodes and are
 # serialized through the dependency spine CB3-02 -> CB3-03 -> CB3-04; CB3-06
 # consumes CB3-02's shared verifier semantics but is path-disjoint from
@@ -124,7 +124,7 @@ NODES: tuple[dict[str, Any], ...] = (
         "finding_tests": ["tests/test_relax_ref_resolution.py"],
         "regression": ["tests/"],
         "allowed_paths": [
-            "harness_labs/controller_kernel.py",
+            "harness_labs/core/controller_kernel.py",
             "tests/test_controller_kernel.py",
             "tests/test_relax_kernel.py",
             "tests/test_relax_ref_resolution.py",
@@ -138,8 +138,8 @@ NODES: tuple[dict[str, Any], ...] = (
         "regression": ["tests/"],
         "allowed_paths": [
             "harness_labs/agent_mixture.py",
-            "harness_labs/claude_task_executor.py",
-            "harness_labs/controller_live.py",
+            "harness_labs/core/claude_task_executor.py",
+            "harness_labs/core/controller_live.py",
             "harness_labs/feature_run.py",
             "tests/test_agent_mixture.py",
             "tests/test_claude_task_executor.py",
@@ -156,8 +156,8 @@ NODES: tuple[dict[str, Any], ...] = (
         "finding_tests": ["tests/test_relax_followup_grants.py"],
         "regression": ["tests/"],
         "allowed_paths": [
-            "harness_labs/controller_scheduler.py",
-            "harness_labs/controller_live.py",
+            "harness_labs/core/controller_scheduler.py",
+            "harness_labs/core/controller_live.py",
             "harness_labs/agent_mixture.py",
             "tests/test_controller_scheduler.py",
             "tests/test_controller_live.py",
@@ -172,8 +172,8 @@ NODES: tuple[dict[str, Any], ...] = (
         "finding_tests": ["tests/test_relax_baseline_restoration.py"],
         "regression": ["tests/"],
         "allowed_paths": [
-            "harness_labs/controller_live.py",
-            "harness_labs/claude_task_executor.py",
+            "harness_labs/core/controller_live.py",
+            "harness_labs/core/claude_task_executor.py",
             "tests/test_controller_live.py",
             "tests/test_claude_task_executor.py",
             "tests/test_relax_baseline_restoration.py",

@@ -8,7 +8,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from harness_labs.audit import AuditActor, AuditJournal
+from harness_labs.core.audit import AuditActor, AuditJournal
 from harness_labs.plan_graph_audit import PlanGraphAudit
 from harness_labs.run_catalog import _ID_MATCH_REASON, _REUSE_UNRESOLVED_REASON, _detail_metrics, _graph_execution, _snapshot, build_run_catalog, build_run_detail, merge_run_catalogs
 

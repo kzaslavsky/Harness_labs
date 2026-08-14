@@ -9,12 +9,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .codex_agent_session import CodexAppServerSession
-from .controller_evidence import EvidenceCatalog
-from .controller_kernel import RunContract, RunLimits
-from .controller_live import CodexSemanticTaskExecutor
-from .controller_run import ControllerRunResult, run_controller
-from .controller_scheduler import RoleProfile
+from harness_labs.core.codex_agent_session import CodexAppServerSession
+from harness_labs.core.controller_evidence import EvidenceCatalog
+from harness_labs.core.controller_kernel import RunContract, RunLimits
+from harness_labs.core.controller_live import CodexSemanticTaskExecutor
+from harness_labs.core.controller_run import ControllerRunResult, run_controller
+from harness_labs.core.controller_scheduler import RoleProfile
 
 
 _COORDINATOR_INSTRUCTIONS = """\

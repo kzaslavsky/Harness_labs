@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 from uuid import uuid4
 
-from .audit import AuditActor, AuditConflictError, AuditError, AuditJournal
+from harness_labs.core.audit import AuditActor, AuditConflictError, AuditError, AuditJournal
 
 
 _ACTOR = AuditActor("plan-graph", "plan_graph_controller")

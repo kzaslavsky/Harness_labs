@@ -7,17 +7,17 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-from .agent_sessions import AgentSession, ModelRequest, ToolResult
-from .attempts import TaskResult
-from .audit import AuditActor, AuditJournal
-from .controller_commands import CommandActor, CommandEnvelope
-from .controller_coordinator import CoordinatorLoop
-from .controller_evidence import EvidenceCatalog
-from .controller_kernel import ControllerKernel, RunContract
-from .controller_projection import ControllerQueries, project_run_view
-from .controller_run import restore_controller_checkpoint
-from .controller_scheduler import CapabilityScheduler, RoleProfile
-from .coordinator_schema import CoordinatorDispatchSchema, CoordinatorSegment
+from harness_labs.core.agent_sessions import AgentSession, ModelRequest, ToolResult
+from harness_labs.core.attempts import TaskResult
+from harness_labs.core.audit import AuditActor, AuditJournal
+from harness_labs.core.controller_commands import CommandActor, CommandEnvelope
+from harness_labs.core.controller_coordinator import CoordinatorLoop
+from harness_labs.core.controller_evidence import EvidenceCatalog
+from harness_labs.core.controller_kernel import ControllerKernel, RunContract
+from harness_labs.core.controller_projection import ControllerQueries, project_run_view
+from harness_labs.core.controller_run import restore_controller_checkpoint
+from harness_labs.core.controller_scheduler import CapabilityScheduler, RoleProfile
+from harness_labs.core.coordinator_schema import CoordinatorDispatchSchema, CoordinatorSegment
 
 
 @dataclass(frozen=True)

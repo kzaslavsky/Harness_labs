@@ -12,8 +12,8 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-from .audit import AuditError
-from .run_metrics import TERMINAL_STATUSES, availability, project_run_metrics
+from harness_labs.core.audit import AuditError
+from harness_labs.run_metrics import TERMINAL_STATUSES, availability, project_run_metrics
 
 Clock = Callable[[], datetime]
 ProcessProbe = Callable[[int], str | None]

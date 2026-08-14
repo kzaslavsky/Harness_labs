@@ -14,7 +14,7 @@ clean repository baseline" message, with no restoration bookkeeping anywhere
 in the audit journal.
 
 Every entry point this test drives (``CodexSemanticTaskExecutor.execute``,
-``harness_labs.git_transaction.workspace_snapshot``, ``AuditJournal``) already
+``harness_labs.core.git_transaction.workspace_snapshot``, ``AuditJournal``) already
 exists at the frozen base commit; the failure this test exercises is a
 behavioral gap (no restoration occurs, the tree stays dirty, the follow-up
 dispatch is stranded), not an import-time one.
@@ -29,11 +29,11 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from harness_labs.attempts import TaskAttempt
-from harness_labs.audit import AuditActor, AuditJournal
-from harness_labs.controller_evidence import EvidenceCatalog
-from harness_labs.controller_live import CodexSemanticTaskExecutor
-from harness_labs.git_transaction import workspace_snapshot
+from harness_labs.core.attempts import TaskAttempt
+from harness_labs.core.audit import AuditActor, AuditJournal
+from harness_labs.core.controller_evidence import EvidenceCatalog
+from harness_labs.core.controller_live import CodexSemanticTaskExecutor
+from harness_labs.core.git_transaction import workspace_snapshot
 
 _RESTORATION_EVENT_TYPE = "attempt_start_baseline_restoration"
 
@@ -139,10 +139,10 @@ class AttemptStartBaselineRestorationTest(unittest.TestCase):
 
             with (
                 patch(
-                    "harness_labs.controller_live.shutil.which",
+                    "harness_labs.core.controller_live.shutil.which",
                     return_value="codex",
                 ),
-                patch("harness_labs.controller_live.subprocess.run", side_effect=run),
+                patch("harness_labs.core.controller_live.subprocess.run", side_effect=run),
             ):
                 result = executor.execute(
                     TaskAttempt(
@@ -211,11 +211,11 @@ class AttemptStartBaselineRestorationTest(unittest.TestCase):
 
             with (
                 patch(
-                    "harness_labs.controller_live.shutil.which",
+                    "harness_labs.core.controller_live.shutil.which",
                     return_value="codex",
                 ),
                 patch(
-                    "harness_labs.controller_live.subprocess.run",
+                    "harness_labs.core.controller_live.subprocess.run",
                     side_effect=run_followup,
                 ),
             ):
@@ -311,10 +311,10 @@ class AttemptStartedDirtyIsNeverRestoredTest(unittest.TestCase):
 
             with (
                 patch(
-                    "harness_labs.controller_live.shutil.which",
+                    "harness_labs.core.controller_live.shutil.which",
                     return_value="codex",
                 ),
-                patch("harness_labs.controller_live.subprocess.run", side_effect=run),
+                patch("harness_labs.core.controller_live.subprocess.run", side_effect=run),
             ):
                 result = executor.execute(
                     TaskAttempt(
@@ -434,7 +434,7 @@ class NoNewerAttemptDeclinesRestorationTest(unittest.TestCase):
                 # running -- B's residue must survive whatever A's own
                 # restoration later decides.
                 with patch(
-                    "harness_labs.controller_live.subprocess.run",
+                    "harness_labs.core.controller_live.subprocess.run",
                     side_effect=run_b,
                 ):
                     b_result = executor_b.execute(
@@ -457,11 +457,11 @@ class NoNewerAttemptDeclinesRestorationTest(unittest.TestCase):
 
             with (
                 patch(
-                    "harness_labs.controller_live.shutil.which",
+                    "harness_labs.core.controller_live.shutil.which",
                     return_value="codex",
                 ),
                 patch(
-                    "harness_labs.controller_live.subprocess.run",
+                    "harness_labs.core.controller_live.subprocess.run",
                     side_effect=run_a,
                 ),
             ):
@@ -574,11 +574,11 @@ class HeadOrBranchMovedDuringAttemptDeclinesRestorationTest(unittest.TestCase):
 
             with (
                 patch(
-                    "harness_labs.controller_live.shutil.which",
+                    "harness_labs.core.controller_live.shutil.which",
                     return_value="codex",
                 ),
                 patch(
-                    "harness_labs.controller_live.subprocess.run", side_effect=run
+                    "harness_labs.core.controller_live.subprocess.run", side_effect=run
                 ),
             ):
                 result = executor.execute(
@@ -678,11 +678,11 @@ class RestorationSkippedBeforePostWorkerSnapshotTest(unittest.TestCase):
 
             with (
                 patch(
-                    "harness_labs.controller_live.shutil.which",
+                    "harness_labs.core.controller_live.shutil.which",
                     return_value="codex",
                 ),
                 patch(
-                    "harness_labs.controller_live.subprocess.run", side_effect=run
+                    "harness_labs.core.controller_live.subprocess.run", side_effect=run
                 ),
             ):
                 result = executor.execute(

@@ -16,11 +16,11 @@ import threading
 from typing import Callable, Mapping, Sequence
 from uuid import uuid4
 
-from .audit import AuditError
-from .plan_graph_audit import PlanGraphAudit, validate_plan_graph_id
-from .plan_graph_budget import BudgetError, RetryBudgetLedger, gate_digest
-from .plan_graph_authority import AutomaticRecoveryAuthority, RecoveryAuthorityError
-from .plan_graph_contract import (
+from harness_labs.core.audit import AuditError
+from harness_labs.plan_graph_audit import PlanGraphAudit, validate_plan_graph_id
+from harness_labs.plan_graph_budget import BudgetError, RetryBudgetLedger, gate_digest
+from harness_labs.plan_graph_authority import AutomaticRecoveryAuthority, RecoveryAuthorityError
+from harness_labs.plan_graph_contract import (
     PLAN_GRAPH_PROTOCOL,
     PlanGraphContractError,
     canonical_plan_graph_payload,

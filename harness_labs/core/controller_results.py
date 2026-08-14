@@ -6,7 +6,7 @@ import string
 from dataclasses import dataclass
 from typing import Any, Mapping
 
-from .attempts import TaskResult
+from harness_labs.core.attempts import TaskResult
 
 
 SEMANTIC_RESULT_PROTOCOL = "semantic-task-result/1"

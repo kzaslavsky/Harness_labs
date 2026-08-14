@@ -22,13 +22,13 @@ HARNESS_SOURCE = Path(
 )
 sys.path.insert(0, str(HARNESS_SOURCE))
 
-from harness_labs.codex_agent_session import CodexAppServerSession
-from harness_labs.controller_evidence import EvidenceCatalog
-from harness_labs.controller_kernel import RunContract
-from harness_labs.controller_live import CodexSemanticTaskExecutor
-from harness_labs.controller_scheduler import RoleProfile
-from harness_labs.coordinator_dispatcher import CoordinatorLaunch
-from harness_labs.coordinator_schema import (
+from harness_labs.core.codex_agent_session import CodexAppServerSession
+from harness_labs.core.controller_evidence import EvidenceCatalog
+from harness_labs.core.controller_kernel import RunContract
+from harness_labs.core.controller_live import CodexSemanticTaskExecutor
+from harness_labs.core.controller_scheduler import RoleProfile
+from harness_labs.core.coordinator_dispatcher import CoordinatorLaunch
+from harness_labs.core.coordinator_schema import (
     CoordinatorDispatchSchema,
     CoordinatorSegment,
 )

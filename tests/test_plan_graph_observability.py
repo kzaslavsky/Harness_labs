@@ -10,7 +10,7 @@ import sys
 import tempfile
 import unittest
 
-from harness_labs.audit import AuditActor, AuditConflictError, AuditError, AuditJournal
+from harness_labs.core.audit import AuditActor, AuditConflictError, AuditError, AuditJournal
 from harness_labs.plan_graph import (
     FeatureRunOutcome,
     PlanGraph,

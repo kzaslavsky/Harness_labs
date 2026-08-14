@@ -24,7 +24,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from harness_labs.audit import AuditActor, AuditJournal
+from harness_labs.core.audit import AuditActor, AuditJournal
 from harness_labs.plan_graph import (
     FeatureRunOutcome,
     PlanGraph,

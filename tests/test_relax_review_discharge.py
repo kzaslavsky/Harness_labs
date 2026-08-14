@@ -18,10 +18,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from harness_labs.attempts import TaskResult
-from harness_labs.audit import AuditActor, AuditJournal
-from harness_labs.controller_evidence import EvidenceCatalog
-from harness_labs.controller_results import semantic_payload
+from harness_labs.core.attempts import TaskResult
+from harness_labs.core.audit import AuditActor, AuditJournal
+from harness_labs.core.controller_evidence import EvidenceCatalog
+from harness_labs.core.controller_results import semantic_payload
 from harness_labs.review_fix import ReviewFixLoop, ReviewFixPolicy
 
 

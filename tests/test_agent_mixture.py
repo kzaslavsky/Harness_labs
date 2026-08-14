@@ -20,7 +20,7 @@ from harness_labs import (
     resolve_backend_spec,
     task_with_artifact_kind,
 )
-from harness_labs.controller_evidence import EvidenceCatalog
+from harness_labs.core.controller_evidence import EvidenceCatalog
 
 
 def _role(**overrides) -> WorkerRole:

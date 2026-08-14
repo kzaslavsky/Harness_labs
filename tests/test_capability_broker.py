@@ -5,17 +5,17 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from harness_labs.audit import AuditActor, AuditJournal
-from harness_labs.capability_broker import (
+from harness_labs.core.audit import AuditActor, AuditJournal
+from harness_labs.core.capability_broker import (
     BrokeredCapabilityExecutor,
     CapabilityBroker,
     CapabilityDenied,
     CapabilityPolicy,
     CapabilityRequest,
 )
-from harness_labs.attempts import TaskAttempt
-from harness_labs.controller_evidence import EvidenceCatalog
-from harness_labs.controller_results import validate_semantic_result
+from harness_labs.core.attempts import TaskAttempt
+from harness_labs.core.controller_evidence import EvidenceCatalog
+from harness_labs.core.controller_results import validate_semantic_result
 
 
 class CapabilityBrokerTests(unittest.TestCase):

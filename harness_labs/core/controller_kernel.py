@@ -9,16 +9,16 @@ import threading
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Mapping
 
-from .attempts import TaskResult
-from .audit import AuditActor, AuditJournal
-from .controller_commands import (
+from harness_labs.core.attempts import TaskResult
+from harness_labs.core.audit import AuditActor, AuditJournal
+from harness_labs.core.controller_commands import (
     CommandActor,
     CommandEnvelope,
     CommandReceipt,
     KernelEvent,
 )
-from .controller_evidence import EvidenceCatalog, EvidenceError
-from .controller_results import SemanticResultError, validate_semantic_result
+from harness_labs.core.controller_evidence import EvidenceCatalog, EvidenceError
+from harness_labs.core.controller_results import SemanticResultError, validate_semantic_result
 
 
 COORDINATOR_COMMANDS = frozenset(

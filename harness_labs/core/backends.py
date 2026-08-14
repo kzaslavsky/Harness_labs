@@ -15,10 +15,10 @@ from time import monotonic_ns
 from typing import Any, Literal, Mapping
 from urllib.parse import urlparse
 
-from .audit import AuditActor, AuditJournal
-from .agent_sessions import Usage
-from .usage import ModelPrice, parse_claude_result_usage, usage_payload
-from .text_executor import TextBackendError
+from harness_labs.core.audit import AuditActor, AuditJournal
+from harness_labs.core.agent_sessions import Usage
+from harness_labs.core.usage import ModelPrice, parse_claude_result_usage, usage_payload
+from harness_labs.core.text_executor import TextBackendError
 
 
 @dataclass(frozen=True)

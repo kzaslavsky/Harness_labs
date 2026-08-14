@@ -6,7 +6,7 @@ import copy
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
-from .agent_sessions import (
+from harness_labs.core.agent_sessions import (
     AgentSession,
     BackendFailure,
     FinalOutput,
@@ -15,17 +15,17 @@ from .agent_sessions import (
     ToolResult,
     ToolSpec,
 )
-from .attempts import TaskResult
-from .audit import AuditActor
-from .controller_commands import (
+from harness_labs.core.attempts import TaskResult
+from harness_labs.core.audit import AuditActor
+from harness_labs.core.controller_commands import (
     CommandActor,
     CommandEnvelope,
     CommandProvenance,
 )
-from .controller_kernel import ControllerKernel
-from .controller_projection import ControllerQueries, project_run_view
-from .controller_scheduler import CapabilityScheduler, SchedulingError
-from .usage import usage_payload
+from harness_labs.core.controller_kernel import ControllerKernel
+from harness_labs.core.controller_projection import ControllerQueries, project_run_view
+from harness_labs.core.controller_scheduler import CapabilityScheduler, SchedulingError
+from harness_labs.core.usage import usage_payload
 
 
 QUERY_TOOL_MAP = {

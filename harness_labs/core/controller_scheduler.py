@@ -8,17 +8,17 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from .attempts import AttemptRunner, Executor, TaskAttempt, TaskResult
-from .audit import AuditActor, AuditJournal
-from .controller_kernel import ControllerKernel, KernelError
-from .controller_commands import (
+from harness_labs.core.attempts import AttemptRunner, Executor, TaskAttempt, TaskResult
+from harness_labs.core.audit import AuditActor, AuditJournal
+from harness_labs.core.controller_kernel import ControllerKernel, KernelError
+from harness_labs.core.controller_commands import (
     CommandActor,
     CommandEnvelope,
     CommandProvenance,
 )
-from .controller_live import select_dirty_baseline_receipt
-from .controller_results import SemanticResultError, validate_semantic_result
-from .git_transaction import workspace_snapshot
+from harness_labs.core.controller_live import select_dirty_baseline_receipt
+from harness_labs.core.controller_results import SemanticResultError, validate_semantic_result
+from harness_labs.core.git_transaction import workspace_snapshot
 
 
 class SchedulingError(RuntimeError):
@@ -90,7 +90,7 @@ def _mint_dirty_baseline_grant(
     agent_mixture case -- is left untouched, never overwritten); the
     executor declares a ``workspace-write`` sandbox; and the workspace is
     actually dirty. The receipt is selected by
-    :func:`~harness_labs.controller_live.select_dirty_baseline_receipt`,
+    :func:`~harness_labs.core.controller_live.select_dirty_baseline_receipt`,
     which resolves each candidate through the shared
     ``verify_dirty_baseline_grant`` -- content coverage, not recency, and no
     dependence on catalog ordering; receipts are never unioned. When no

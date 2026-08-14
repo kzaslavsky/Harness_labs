@@ -7,26 +7,26 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from harness_labs.agent_sessions import (
+from harness_labs.core.agent_sessions import (
     BackendCapabilities,
     BackendFailure,
     ModelRequest,
     ToolResult,
 )
-from harness_labs.coordinator_dispatcher import (
+from harness_labs.core.coordinator_dispatcher import (
     CoordinatorDispatcher,
     CoordinatorLaunch,
     resume_dispatched_controller,
     run_dispatched_controller,
 )
-from harness_labs.audit import AuditJournal
-from harness_labs.attempts import TaskResult
-from harness_labs.controller_commands import CommandActor, CommandEnvelope
-from harness_labs.controller_evidence import EvidenceCatalog
-from harness_labs.controller_kernel import ControllerKernel, RunContract
-from harness_labs.controller_scheduler import CapabilityScheduler, RoleProfile
-from harness_labs.controller_results import semantic_payload
-from harness_labs.coordinator_schema import CoordinatorDispatchSchema
+from harness_labs.core.audit import AuditJournal
+from harness_labs.core.attempts import TaskResult
+from harness_labs.core.controller_commands import CommandActor, CommandEnvelope
+from harness_labs.core.controller_evidence import EvidenceCatalog
+from harness_labs.core.controller_kernel import ControllerKernel, RunContract
+from harness_labs.core.controller_scheduler import CapabilityScheduler, RoleProfile
+from harness_labs.core.controller_results import semantic_payload
+from harness_labs.core.coordinator_schema import CoordinatorDispatchSchema
 
 from tests.controller_scenario_fixtures import ScriptedCoordinatorSession
 

@@ -8,7 +8,7 @@ import threading
 from dataclasses import dataclass
 from typing import Any, Mapping
 
-from .audit import AuditJournal
+from harness_labs.core.audit import AuditJournal
 
 
 class EvidenceError(ValueError):

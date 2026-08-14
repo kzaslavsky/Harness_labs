@@ -6,7 +6,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Any
 
-from .agent_sessions import (
+from harness_labs.core.agent_sessions import (
     BackendCapabilities,
     BackendFailure,
     FinalOutput,
@@ -16,8 +16,8 @@ from .agent_sessions import (
     ToolResult,
     Usage,
 )
-from .backends import OmlxBackend
-from .text_executor import TextBackendError
+from harness_labs.core.backends import OmlxBackend
+from harness_labs.core.text_executor import TextBackendError
 
 
 @dataclass

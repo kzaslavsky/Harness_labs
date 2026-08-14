@@ -1,6 +1,6 @@
 """Core primitives for Harness Labs."""
 
-from .attempts import (
+from harness_labs.core.attempts import (
     AttemptRunner,
     Executor,
     InvalidAttempt,
@@ -8,7 +8,7 @@ from .attempts import (
     TaskAttempt,
     TaskResult,
 )
-from .agent_sessions import (
+from harness_labs.core.agent_sessions import (
     TOOL_UNAVAILABLE_REFUSAL,
     AgentSession,
     BackendCapabilities,
@@ -22,8 +22,8 @@ from .agent_sessions import (
     ToolSpec,
     Usage,
 )
-from .backends import ClaudePrintBackend, CodexExecBackend, OmlxBackend, PoemBackend
-from .agent_mixture import (
+from harness_labs.core.backends import ClaudePrintBackend, CodexExecBackend, OmlxBackend, PoemBackend
+from harness_labs.agent_mixture import (
     BackendSpec,
     WorkerRole,
     build_coordinator_session,
@@ -32,10 +32,10 @@ from .agent_mixture import (
     resolve_backend_spec,
     task_with_artifact_kind,
 )
-from .claude_agent_session import ClaudeAgentSession, ClaudeSessionError
-from .claude_task_executor import ClaudeSemanticTaskExecutor
-from .audit import AuditActor, AuditArtifact, AuditError, AuditJournal
-from .composition import (
+from harness_labs.core.claude_agent_session import ClaudeAgentSession, ClaudeSessionError
+from harness_labs.core.claude_task_executor import ClaudeSemanticTaskExecutor
+from harness_labs.core.audit import AuditActor, AuditArtifact, AuditError, AuditJournal
+from harness_labs.core.composition import (
     ChildAuthorization,
     ChildBatchRequest,
     ChildBatchResult,
@@ -45,21 +45,21 @@ from .composition import (
     ChildRequestDenied,
     ConversationalExecutor,
 )
-from .codex_delegation import (
+from harness_labs.core.codex_delegation import (
     CodexDelegationError,
     CodexFileReaderExecutor,
     CodexReadOnlyWorktreeExecutor,
 )
-from .codex_agent_session import CodexAppServerSession, CodexSessionError
-from .omlx_agent_session import OmlxAgentSession
-from .model_capability_executor import ModelCapabilityExecutor
-from .text_executor import (
+from harness_labs.core.codex_agent_session import CodexAppServerSession, CodexSessionError
+from harness_labs.core.omlx_agent_session import OmlxAgentSession
+from harness_labs.core.model_capability_executor import ModelCapabilityExecutor
+from harness_labs.core.text_executor import (
     InMemoryReferenceStore,
     TextBackend,
     TextBackendError,
     TextExecutor,
 )
-from .controller_commands import (
+from harness_labs.core.controller_commands import (
     COMMAND_PROTOCOL,
     RECEIPT_PROTOCOL,
     CommandActor,
@@ -68,8 +68,8 @@ from .controller_commands import (
     CommandReceipt,
     KernelEvent,
 )
-from .controller_coordinator import CoordinatorLoop
-from .coordinator_dispatcher import (
+from harness_labs.core.controller_coordinator import CoordinatorLoop
+from harness_labs.core.coordinator_dispatcher import (
     CoordinatorDispatchResult,
     CoordinatorDispatcher,
     CoordinatorLaunch,
@@ -78,45 +78,45 @@ from .coordinator_dispatcher import (
     resume_dispatched_controller,
     run_dispatched_controller,
 )
-from .coordinator_schema import (
+from harness_labs.core.coordinator_schema import (
     COORDINATOR_SCHEMA_PROTOCOL,
     CoordinatorDispatchSchema,
     CoordinatorSegment,
 )
-from .controller_evidence import (
+from harness_labs.core.controller_evidence import (
     EvidenceCatalog,
     EvidenceError,
     EvidenceRecord,
 )
-from .controller_kernel import (
+from harness_labs.core.controller_kernel import (
     ControllerKernel,
     KernelError,
     RunContract,
     RunLimits,
 )
-from .controller_live import CodexSemanticTaskExecutor, LiveExecutionError
-from .controller_projection import ControllerQueries, project_run_view
-from .controller_results import (
+from harness_labs.core.controller_live import CodexSemanticTaskExecutor, LiveExecutionError
+from harness_labs.core.controller_projection import ControllerQueries, project_run_view
+from harness_labs.core.controller_results import (
     SEMANTIC_RESULT_PROTOCOL,
     SemanticResultError,
     SemanticTaskResult,
     semantic_payload,
     validate_semantic_result,
 )
-from .controller_run import (
+from harness_labs.core.controller_run import (
     ControllerRunResult,
     restore_controller_checkpoint,
     resume_controller,
     run_controller,
     run_fixture_spec,
 )
-from .controller_scheduler import (
+from harness_labs.core.controller_scheduler import (
     CapabilityScheduler,
     RoleProfile,
     ScheduledOutcome,
     SchedulingError,
 )
-from .feature_run import (
+from harness_labs.feature_run import (
     DeterministicVerificationResult,
     FeatureRunHandoffArtifact,
     FeatureRunResult,
@@ -128,7 +128,7 @@ from .feature_run import (
     run_plan_graph_feature_worktree,
     run_feature_worktree,
 )
-from .plan_graph import (
+from harness_labs.plan_graph import (
     FEATURE_RUN_REQUEST_PROTOCOL,
     PLAN_GRAPH_PROTOCOL,
     REGISTRATION_PROTOCOL,
@@ -153,7 +153,7 @@ from .plan_graph import (
     validate_plan_graph_plan,
     verify_registration,
 )
-from .plan_approval import (
+from harness_labs.plan_approval import (
     PlanApprovalAdmission,
     PlanApprovalError,
     PreparedApproval,
@@ -161,7 +161,7 @@ from .plan_approval import (
     issue_receipt,
     prepare_approval,
 )
-from .review_fix import (
+from harness_labs.review_fix import (
     REVIEW_FIX_RESULT_PROTOCOL,
     REVIEW_LEDGER_PROTOCOL,
     ReviewFixError,
@@ -171,7 +171,7 @@ from .review_fix import (
     ReviewFixResult,
     ReviewLedger,
 )
-from .git_transaction import (
+from harness_labs.core.git_transaction import (
     GitTransactionError,
     GitWorktreeTransaction,
     changed_paths,
@@ -179,7 +179,7 @@ from .git_transaction import (
     paths_outside_scope,
     workspace_snapshot,
 )
-from .capability_broker import (
+from harness_labs.core.capability_broker import (
     BrokeredCapabilityExecutor,
     CapabilityBroker,
     CapabilityDenied,
@@ -187,15 +187,15 @@ from .capability_broker import (
     CapabilityReceipt,
     CapabilityRequest,
 )
-from .development_policy import (
+from harness_labs.core.development_policy import (
     DevelopmentPolicy,
     ReviewAssignment,
 )
-from .feature_run_policy import (
+from harness_labs.feature_run_policy import (
     standard_feature_run_dispatch_schema,
     standard_feature_run_policy,
 )
-from .usage import ModelPrice, build_run_summary, usage_payload
+from harness_labs.core.usage import ModelPrice, build_run_summary, usage_payload
 
 __all__ = [
     "AttemptRunner",

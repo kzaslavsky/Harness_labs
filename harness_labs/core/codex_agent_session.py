@@ -15,8 +15,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
-from .audit import AuditActor, AuditJournal
-from .agent_sessions import (
+from harness_labs.core.audit import AuditActor, AuditJournal
+from harness_labs.core.agent_sessions import (
     BackendCapabilities,
     BackendFailure,
     FinalOutput,
@@ -27,7 +27,7 @@ from .agent_sessions import (
     Usage,
     tool_result_json,
 )
-from .usage import ModelPrice
+from harness_labs.core.usage import ModelPrice
 
 
 class CodexSessionError(RuntimeError):

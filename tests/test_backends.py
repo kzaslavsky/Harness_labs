@@ -32,8 +32,8 @@ class BackendTests(unittest.TestCase):
         self.assertIn("operator", poem.lower())
         self.assertGreaterEqual(len(poem.splitlines()), 2)
 
-    @patch("harness_labs.backends.shutil.which", return_value="/fake/codex")
-    @patch("harness_labs.backends.subprocess.run")
+    @patch("harness_labs.core.backends.shutil.which", return_value="/fake/codex")
+    @patch("harness_labs.core.backends.subprocess.run")
     def test_codex_backend_invokes_isolated_read_only_cli(
         self,
         run_mock,
@@ -61,8 +61,8 @@ class BackendTests(unittest.TestCase):
         self.assertIn('"subject": "the operator"', prompt)
         which_mock.assert_called_once_with("codex")
 
-    @patch("harness_labs.backends.shutil.which", return_value="/fake/codex")
-    @patch("harness_labs.backends.subprocess.run")
+    @patch("harness_labs.core.backends.shutil.which", return_value="/fake/codex")
+    @patch("harness_labs.core.backends.subprocess.run")
     def test_codex_backend_reports_nonzero_exit(self, run_mock, _which_mock) -> None:
         run_mock.return_value = subprocess.CompletedProcess(
             ["/fake/codex"],
@@ -74,8 +74,8 @@ class BackendTests(unittest.TestCase):
         with self.assertRaisesRegex(TextBackendError, "backend unavailable"):
             CodexExecBackend().generate("task", {})
 
-    @patch("harness_labs.backends.shutil.which", return_value="/fake/claude")
-    @patch("harness_labs.backends.subprocess.run")
+    @patch("harness_labs.core.backends.shutil.which", return_value="/fake/claude")
+    @patch("harness_labs.core.backends.subprocess.run")
     def test_claude_backend_invokes_isolated_toolless_cli(
         self,
         run_mock,
@@ -124,8 +124,8 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(backend.last_usage.output_tokens, 50)
         which_mock.assert_called_once_with("claude")
 
-    @patch("harness_labs.backends.shutil.which", return_value="/fake/claude")
-    @patch("harness_labs.backends.subprocess.run")
+    @patch("harness_labs.core.backends.shutil.which", return_value="/fake/claude")
+    @patch("harness_labs.core.backends.subprocess.run")
     def test_claude_backend_reports_error_envelope(
         self, run_mock, _which_mock
     ) -> None:
@@ -144,8 +144,8 @@ class BackendTests(unittest.TestCase):
         with self.assertRaisesRegex(TextBackendError, "Not logged in"):
             ClaudePrintBackend().generate("task", {})
 
-    @patch("harness_labs.backends.shutil.which", return_value="/fake/claude")
-    @patch("harness_labs.backends.subprocess.run")
+    @patch("harness_labs.core.backends.shutil.which", return_value="/fake/claude")
+    @patch("harness_labs.core.backends.subprocess.run")
     def test_claude_backend_reports_nonzero_exit(
         self, run_mock, _which_mock
     ) -> None:
@@ -159,7 +159,7 @@ class BackendTests(unittest.TestCase):
         with self.assertRaisesRegex(TextBackendError, "backend unavailable"):
             ClaudePrintBackend().generate("task", {})
 
-    @patch("harness_labs.backends.urllib.request.urlopen")
+    @patch("harness_labs.core.backends.urllib.request.urlopen")
     def test_omlx_backend_calls_qwen_over_loopback(self, urlopen_mock) -> None:
         class Response(BytesIO):
             def __enter__(self):
@@ -198,7 +198,7 @@ class BackendTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "loopback"):
             OmlxBackend(endpoint="https://example.com/v1/chat/completions")
 
-    @patch("harness_labs.backends.urllib.request.urlopen")
+    @patch("harness_labs.core.backends.urllib.request.urlopen")
     def test_omlx_audit_retains_exact_request_and_response(
         self, urlopen_mock
     ) -> None:
@@ -240,7 +240,7 @@ class BackendTests(unittest.TestCase):
             self.assertEqual(artifacts[0], urlopen_mock.call_args.args[0].data)
             self.assertEqual(artifacts[1], raw_response)
 
-    @patch("harness_labs.backends.urllib.request.urlopen")
+    @patch("harness_labs.core.backends.urllib.request.urlopen")
     def test_omlx_backend_reports_connection_failure(self, urlopen_mock) -> None:
         urlopen_mock.side_effect = URLError("connection refused")
 

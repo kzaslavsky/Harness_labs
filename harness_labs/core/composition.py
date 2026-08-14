@@ -9,8 +9,8 @@ import threading
 from time import monotonic_ns
 from typing import Literal, Mapping, Protocol
 
-from .attempts import AttemptRunner, Executor, TaskAttempt, TaskResult
-from .audit import AuditActor, AuditJournal
+from harness_labs.core.attempts import AttemptRunner, Executor, TaskAttempt, TaskResult
+from harness_labs.core.audit import AuditActor, AuditJournal
 
 
 class ChildRequestDenied(RuntimeError):

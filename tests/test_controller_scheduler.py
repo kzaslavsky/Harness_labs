@@ -9,18 +9,18 @@ import time
 import unittest
 from pathlib import Path
 
-from harness_labs.attempts import TaskAttempt, TaskResult
-from harness_labs.audit import AuditActor, AuditJournal
-from harness_labs.controller_commands import CommandActor, CommandEnvelope
-from harness_labs.controller_evidence import EvidenceCatalog
-from harness_labs.controller_kernel import ControllerKernel, RunContract, RunLimits
-from harness_labs.controller_results import semantic_payload
-from harness_labs.controller_scheduler import (
+from harness_labs.core.attempts import TaskAttempt, TaskResult
+from harness_labs.core.audit import AuditActor, AuditJournal
+from harness_labs.core.controller_commands import CommandActor, CommandEnvelope
+from harness_labs.core.controller_evidence import EvidenceCatalog
+from harness_labs.core.controller_kernel import ControllerKernel, RunContract, RunLimits
+from harness_labs.core.controller_results import semantic_payload
+from harness_labs.core.controller_scheduler import (
     CapabilityScheduler,
     RoleProfile,
     SchedulingError,
 )
-from harness_labs.git_transaction import workspace_snapshot
+from harness_labs.core.git_transaction import workspace_snapshot
 
 
 class ResultExecutor:

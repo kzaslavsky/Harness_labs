@@ -10,9 +10,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
-from .audit import AuditActor
-from .git_transaction import GitTransactionError, git_output
-from .plan_graph_audit import PlanGraphAudit
+from harness_labs.core.audit import AuditActor
+from harness_labs.core.git_transaction import GitTransactionError, git_output
+from harness_labs.plan_graph_audit import PlanGraphAudit
 
 
 class PlanGraphIntegrationError(RuntimeError):

@@ -9,10 +9,10 @@ from time import monotonic_ns
 from typing import Any, Callable, Mapping
 from urllib.parse import urlsplit
 
-from .attempts import TaskAttempt, TaskResult
-from .audit import AuditActor, AuditJournal
-from .controller_evidence import EvidenceCatalog
-from .controller_results import semantic_payload
+from harness_labs.core.attempts import TaskAttempt, TaskResult
+from harness_labs.core.audit import AuditActor, AuditJournal
+from harness_labs.core.controller_evidence import EvidenceCatalog
+from harness_labs.core.controller_results import semantic_payload
 
 
 CAPABILITY_REQUEST_PROTOCOL = "capability-request/1"
