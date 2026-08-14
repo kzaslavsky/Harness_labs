@@ -34,16 +34,16 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from harness_labs.attempts import TaskAttempt, TaskResult
-from harness_labs.audit import AuditJournal
-from harness_labs.controller_evidence import EvidenceCatalog
-from harness_labs.controller_kernel import RunContract
-from harness_labs.controller_live import CodexSemanticTaskExecutor, LiveExecutionError
-from harness_labs.controller_results import semantic_payload
-from harness_labs.controller_scheduler import RoleProfile
-from harness_labs.coordinator_schema import CoordinatorDispatchSchema, CoordinatorSegment
-from harness_labs.feature_run import ReviewFixPolicy, run_feature_worktree
-from harness_labs.git_transaction import workspace_snapshot
+from harness_labs.core.attempts import TaskAttempt, TaskResult
+from harness_labs.core.audit import AuditJournal
+from harness_labs.core.controller_evidence import EvidenceCatalog
+from harness_labs.core.controller_kernel import RunContract
+from harness_labs.core.controller_live import CodexSemanticTaskExecutor, LiveExecutionError
+from harness_labs.core.controller_results import semantic_payload
+from harness_labs.core.controller_scheduler import RoleProfile
+from harness_labs.core.coordinator_schema import CoordinatorDispatchSchema, CoordinatorSegment
+from harness_labs.featurerun.feature_run import ReviewFixPolicy, run_feature_worktree
+from harness_labs.core.git_transaction import workspace_snapshot
 from tests.controller_scenario_fixtures import ScriptedCoordinatorSession
 
 

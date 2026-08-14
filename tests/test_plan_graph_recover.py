@@ -8,7 +8,7 @@ import subprocess
 import sys
 import unittest
 
-from harness_labs.plan_graph import FeatureRunOutcome, PlanGraph, persist_registration, register_plan_graph
+from harness_labs.plangraph.plan_graph import FeatureRunOutcome, PlanGraph, persist_registration, register_plan_graph
 from scripts.plan_graph_recover import RecoveryCoordinator
 
 

@@ -24,8 +24,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from harness_labs.audit import AuditActor, AuditJournal
-from harness_labs.plan_graph import (
+from harness_labs.core.audit import AuditActor, AuditJournal
+from harness_labs.plangraph.plan_graph import (
     FeatureRunOutcome,
     PlanGraph,
     PlanGraphError,
@@ -233,7 +233,7 @@ class ResumeOperabilityTests(unittest.TestCase):
         # disk but before the plan_graph_repair_successor_allocated event, the
         # exact window this defect class is about.
         with patch(
-            "harness_labs.plan_graph_audit._validate_repair_contracts",
+            "harness_labs.plangraph.plan_graph_audit._validate_repair_contracts",
             side_effect=RuntimeError("simulated admission crash"),
         ):
             with self.assertRaises(RuntimeError):

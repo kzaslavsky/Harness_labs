@@ -22,17 +22,17 @@ HARNESS_SOURCE = Path(
 )
 sys.path.insert(0, str(HARNESS_SOURCE))
 
-from harness_labs.codex_agent_session import CodexAppServerSession  # noqa: E402
-from harness_labs.controller_evidence import EvidenceCatalog  # noqa: E402
-from harness_labs.controller_kernel import RunContract  # noqa: E402
-from harness_labs.controller_live import CodexSemanticTaskExecutor  # noqa: E402
-from harness_labs.controller_scheduler import RoleProfile  # noqa: E402
-from harness_labs.coordinator_dispatcher import CoordinatorLaunch  # noqa: E402
-from harness_labs.coordinator_schema import (  # noqa: E402
+from harness_labs.core.codex_agent_session import CodexAppServerSession  # noqa: E402
+from harness_labs.core.controller_evidence import EvidenceCatalog  # noqa: E402
+from harness_labs.core.controller_kernel import RunContract  # noqa: E402
+from harness_labs.core.controller_live import CodexSemanticTaskExecutor  # noqa: E402
+from harness_labs.core.controller_scheduler import RoleProfile  # noqa: E402
+from harness_labs.core.coordinator_dispatcher import CoordinatorLaunch  # noqa: E402
+from harness_labs.core.coordinator_schema import (  # noqa: E402
     CoordinatorDispatchSchema,
     CoordinatorSegment,
 )
-from harness_labs.feature_run import (  # noqa: E402
+from harness_labs.featurerun.feature_run import (  # noqa: E402
     ReviewFixPolicy,
     run_feature_worktree,
 )

@@ -4,9 +4,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from harness_labs.plan_graph import PlanGraph, PlanGraphError, PlanGraphResult
-from harness_labs.plan_graph_authority import AutomaticRecoveryAuthority, RecoveryAuthorityError, validate_plan_version_transition, validate_recovery_decision
-from harness_labs.plan_graph_budget import BudgetError, RetryBudgetLedger
+from harness_labs.plangraph.plan_graph import PlanGraph, PlanGraphError, PlanGraphResult
+from harness_labs.plangraph.plan_graph_authority import AutomaticRecoveryAuthority, RecoveryAuthorityError, validate_plan_version_transition, validate_recovery_decision
+from harness_labs.plangraph.plan_graph_budget import BudgetError, RetryBudgetLedger
 
 
 class RecoveryAuthorityTests(unittest.TestCase):

@@ -40,29 +40,29 @@ ROOT = Path(__file__).resolve().parents[1]
 HARNESS_SOURCE = Path(os.environ.get("HARNESS_LABS_SOURCE", str(ROOT)))
 sys.path.insert(0, str(HARNESS_SOURCE))
 
-from harness_labs.agent_mixture import build_coordinator_session  # noqa: E402
-from harness_labs.agent_sessions import AgentSession  # noqa: E402
-from harness_labs.claude_task_executor import (  # noqa: E402
+from harness_labs.graphrun.agent_mixture import build_coordinator_session  # noqa: E402
+from harness_labs.core.agent_sessions import AgentSession  # noqa: E402
+from harness_labs.core.claude_task_executor import (  # noqa: E402
     ClaudeSemanticTaskExecutor,
 )
-from harness_labs.controller_evidence import EvidenceCatalog  # noqa: E402
-from harness_labs.controller_kernel import RunContract  # noqa: E402
-from harness_labs.controller_scheduler import RoleProfile  # noqa: E402
-from harness_labs.coordinator_dispatcher import CoordinatorLaunch  # noqa: E402
-from harness_labs.feature_run import (  # noqa: E402
+from harness_labs.core.controller_evidence import EvidenceCatalog  # noqa: E402
+from harness_labs.core.controller_kernel import RunContract  # noqa: E402
+from harness_labs.core.controller_scheduler import RoleProfile  # noqa: E402
+from harness_labs.core.coordinator_dispatcher import CoordinatorLaunch  # noqa: E402
+from harness_labs.featurerun.feature_run import (  # noqa: E402
     PlanGraphFeatureRunBinding,
     ReviewFixPolicy,
     run_plan_graph_feature_worktree,
 )
-from harness_labs.feature_run_policy import (  # noqa: E402
+from harness_labs.featurerun.feature_run_policy import (  # noqa: E402
     standard_feature_run_dispatch_schema,
 )
-from harness_labs.plan_approval import (  # noqa: E402
+from harness_labs.plangraph.plan_approval import (  # noqa: E402
     PlanApprovalAdmission,
     issue_receipt,
     prepare_approval,
 )
-from harness_labs.plan_graph import (  # noqa: E402
+from harness_labs.plangraph.plan_graph import (  # noqa: E402
     FeatureRunOutcome,
     FeatureRunRequest,
     PlanGraph,
@@ -71,7 +71,7 @@ from harness_labs.plan_graph import (  # noqa: E402
     persist_registration,
     register_plan_graph,
 )
-from harness_labs.plan_graph_contract import (  # noqa: E402
+from harness_labs.plangraph.plan_graph_contract import (  # noqa: E402
     canonical_plan_graph_payload,
 )
 
@@ -106,8 +106,8 @@ the named workers.
 # document; this table binds structure only.
 # ---------------------------------------------------------------------------
 # Dependency edges exist only where nodes share owned files or consume another
-# node's mechanism. harness_labs/controller_live.py and
-# harness_labs/agent_mixture.py are each owned by several nodes and are
+# node's mechanism. harness_labs/core/controller_live.py and
+# harness_labs/graphrun/agent_mixture.py are each owned by several nodes and are
 # serialized through the dependency spine CB3-02 -> CB3-03 -> CB3-04; CB3-06
 # consumes CB3-02's shared verifier semantics but is path-disjoint from
 # CB3-03. Roots CB3-01, CB3-02 are file-disjoint and parallel-eligible
@@ -124,7 +124,7 @@ NODES: tuple[dict[str, Any], ...] = (
         "finding_tests": ["tests/test_relax_ref_resolution.py"],
         "regression": ["tests/"],
         "allowed_paths": [
-            "harness_labs/controller_kernel.py",
+            "harness_labs/core/controller_kernel.py",
             "tests/test_controller_kernel.py",
             "tests/test_relax_kernel.py",
             "tests/test_relax_ref_resolution.py",
@@ -137,10 +137,10 @@ NODES: tuple[dict[str, Any], ...] = (
         "finding_tests": ["tests/test_relax_grant_verification.py"],
         "regression": ["tests/"],
         "allowed_paths": [
-            "harness_labs/agent_mixture.py",
-            "harness_labs/claude_task_executor.py",
-            "harness_labs/controller_live.py",
-            "harness_labs/feature_run.py",
+            "harness_labs/graphrun/agent_mixture.py",
+            "harness_labs/core/claude_task_executor.py",
+            "harness_labs/core/controller_live.py",
+            "harness_labs/featurerun/feature_run.py",
             "tests/test_agent_mixture.py",
             "tests/test_claude_task_executor.py",
             "tests/test_controller_live.py",
@@ -156,9 +156,9 @@ NODES: tuple[dict[str, Any], ...] = (
         "finding_tests": ["tests/test_relax_followup_grants.py"],
         "regression": ["tests/"],
         "allowed_paths": [
-            "harness_labs/controller_scheduler.py",
-            "harness_labs/controller_live.py",
-            "harness_labs/agent_mixture.py",
+            "harness_labs/core/controller_scheduler.py",
+            "harness_labs/core/controller_live.py",
+            "harness_labs/graphrun/agent_mixture.py",
             "tests/test_controller_scheduler.py",
             "tests/test_controller_live.py",
             "tests/test_agent_mixture.py",
@@ -172,8 +172,8 @@ NODES: tuple[dict[str, Any], ...] = (
         "finding_tests": ["tests/test_relax_baseline_restoration.py"],
         "regression": ["tests/"],
         "allowed_paths": [
-            "harness_labs/controller_live.py",
-            "harness_labs/claude_task_executor.py",
+            "harness_labs/core/controller_live.py",
+            "harness_labs/core/claude_task_executor.py",
             "tests/test_controller_live.py",
             "tests/test_claude_task_executor.py",
             "tests/test_relax_baseline_restoration.py",
@@ -186,7 +186,7 @@ NODES: tuple[dict[str, Any], ...] = (
         "finding_tests": ["tests/test_relax_review_discharge.py"],
         "regression": ["tests/"],
         "allowed_paths": [
-            "harness_labs/review_fix.py",
+            "harness_labs/featurerun/review_fix.py",
             "tests/test_review_fix.py",
             "tests/test_feature_run.py",
             "tests/test_relax_review_discharge.py",

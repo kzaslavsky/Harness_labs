@@ -7,21 +7,21 @@ import unittest
 from pathlib import Path
 
 
-from harness_labs.attempts import TaskResult
-from harness_labs.controller_commands import (
+from harness_labs.core.attempts import TaskResult
+from harness_labs.core.controller_commands import (
     CommandActor,
     CommandEnvelope,
     CommandProvenance,
 )
-from harness_labs.controller_evidence import EvidenceCatalog
-from harness_labs.controller_kernel import (
+from harness_labs.core.controller_evidence import EvidenceCatalog
+from harness_labs.core.controller_kernel import (
     ControllerKernel,
     KernelError,
     RunContract,
     RunLimits,
 )
-from harness_labs.controller_projection import ControllerQueries, project_run_view
-from harness_labs.controller_results import semantic_payload
+from harness_labs.core.controller_projection import ControllerQueries, project_run_view
+from harness_labs.core.controller_results import semantic_payload
 
 
 class ControllerKernelTests(unittest.TestCase):

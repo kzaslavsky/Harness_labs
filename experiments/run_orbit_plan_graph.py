@@ -40,35 +40,35 @@ ROOT = Path(__file__).resolve().parents[1]
 HARNESS_SOURCE = Path(os.environ.get("HARNESS_LABS_SOURCE", str(ROOT)))
 sys.path.insert(0, str(HARNESS_SOURCE))
 
-from harness_labs.agent_mixture import build_coordinator_session  # noqa: E402
-from harness_labs.agent_sessions import AgentSession  # noqa: E402
-from harness_labs.claude_task_executor import (  # noqa: E402
+from harness_labs.graphrun.agent_mixture import build_coordinator_session  # noqa: E402
+from harness_labs.core.agent_sessions import AgentSession  # noqa: E402
+from harness_labs.core.claude_task_executor import (  # noqa: E402
     ClaudeSemanticTaskExecutor,
 )
-from harness_labs.controller_evidence import EvidenceCatalog  # noqa: E402
-from harness_labs.controller_kernel import RunContract  # noqa: E402
-from harness_labs.controller_scheduler import RoleProfile  # noqa: E402
-from harness_labs.coordinator_dispatcher import CoordinatorLaunch  # noqa: E402
-from harness_labs.feature_run import (  # noqa: E402
+from harness_labs.core.controller_evidence import EvidenceCatalog  # noqa: E402
+from harness_labs.core.controller_kernel import RunContract  # noqa: E402
+from harness_labs.core.controller_scheduler import RoleProfile  # noqa: E402
+from harness_labs.core.coordinator_dispatcher import CoordinatorLaunch  # noqa: E402
+from harness_labs.featurerun.feature_run import (  # noqa: E402
     PlanGraphFeatureRunBinding,
     ReviewFixPolicy,
     run_plan_graph_feature_worktree,
 )
-from harness_labs.feature_run_policy import (  # noqa: E402
+from harness_labs.featurerun.feature_run_policy import (  # noqa: E402
     standard_feature_run_dispatch_schema,
 )
-from harness_labs.plan_approval import (  # noqa: E402
+from harness_labs.plangraph.plan_approval import (  # noqa: E402
     PlanApprovalAdmission,
     prepare_approval,
     issue_receipt,
 )
-from harness_labs.plan_graph import (  # noqa: E402
+from harness_labs.plangraph.plan_graph import (  # noqa: E402
     FeatureRunOutcome,
     FeatureRunRequest,
     PlanGraph,
     register_plan_graph,
 )
-from harness_labs.plan_graph_contract import (  # noqa: E402
+from harness_labs.plangraph.plan_graph_contract import (  # noqa: E402
     PlanGraphContractError,
     canonical_plan_graph_payload,
 )

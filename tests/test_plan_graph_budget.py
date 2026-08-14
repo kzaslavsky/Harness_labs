@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from unittest.mock import call, patch
 
-from harness_labs.plan_graph_budget import BudgetConfig, BudgetError, RetryBudgetLedger
+from harness_labs.plangraph.plan_graph_budget import BudgetConfig, BudgetError, RetryBudgetLedger
 
 
 class RetryBudgetLedgerTests(unittest.TestCase):
@@ -49,11 +49,11 @@ class RetryBudgetLedgerTests(unittest.TestCase):
         ledger_directory_fd = 8675310
         with (
             patch(
-                "harness_labs.plan_graph_budget.os.open",
+                "harness_labs.plangraph.plan_graph_budget.os.open",
                 side_effect=(root_directory_fd, ledger_directory_fd),
             ) as open_directory,
-            patch("harness_labs.plan_graph_budget.os.fsync") as fsync,
-            patch("harness_labs.plan_graph_budget.os.close") as close_directory,
+            patch("harness_labs.plangraph.plan_graph_budget.os.fsync") as fsync,
+            patch("harness_labs.plangraph.plan_graph_budget.os.close") as close_directory,
         ):
             ledger.register(plan_sha256="a" * 64, gates={"node": "gate"})
         flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)

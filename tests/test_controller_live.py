@@ -9,13 +9,13 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from harness_labs.attempts import TaskAttempt
-from harness_labs.controller_evidence import EvidenceCatalog
-from harness_labs.controller_live import (
+from harness_labs.core.attempts import TaskAttempt
+from harness_labs.core.controller_evidence import EvidenceCatalog
+from harness_labs.core.controller_live import (
     CodexSemanticTaskExecutor,
     select_dirty_baseline_receipt,
 )
-from harness_labs.controller_results import validate_semantic_result
+from harness_labs.core.controller_results import validate_semantic_result
 
 
 class CodexSemanticTaskExecutorTests(unittest.TestCase):
@@ -131,9 +131,9 @@ class CodexSemanticTaskExecutorTests(unittest.TestCase):
             )
             with (
                 patch(
-                    "harness_labs.controller_live.shutil.which", return_value="codex"
+                    "harness_labs.core.controller_live.shutil.which", return_value="codex"
                 ),
-                patch("harness_labs.controller_live.subprocess.run", side_effect=run),
+                patch("harness_labs.core.controller_live.subprocess.run", side_effect=run),
             ):
                 result = executor.execute(attempt)
 
@@ -217,11 +217,11 @@ class CodexSemanticTaskExecutorTests(unittest.TestCase):
             )
             with (
                 patch(
-                    "harness_labs.controller_live.shutil.which", return_value="codex"
+                    "harness_labs.core.controller_live.shutil.which", return_value="codex"
                 ),
-                patch("harness_labs.controller_live.subprocess.run", side_effect=run),
+                patch("harness_labs.core.controller_live.subprocess.run", side_effect=run),
                 patch(
-                    "harness_labs.controller_live.workspace_snapshot",
+                    "harness_labs.core.controller_live.workspace_snapshot",
                     side_effect=snapshots,
                 ),
             ):
@@ -292,10 +292,10 @@ class CodexSemanticTaskExecutorTests(unittest.TestCase):
             return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
 
         with (
-            patch("harness_labs.controller_live.shutil.which", return_value="codex"),
-            patch("harness_labs.controller_live.subprocess.run", side_effect=run),
+            patch("harness_labs.core.controller_live.shutil.which", return_value="codex"),
+            patch("harness_labs.core.controller_live.subprocess.run", side_effect=run),
             patch(
-                "harness_labs.controller_live.workspace_snapshot",
+                "harness_labs.core.controller_live.workspace_snapshot",
                 side_effect=snapshots,
             ),
             patch.object(Path, "exists", return_value=True),
@@ -363,10 +363,10 @@ class CodexSemanticTaskExecutorTests(unittest.TestCase):
             return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
 
         with (
-            patch("harness_labs.controller_live.shutil.which", return_value="codex"),
-            patch("harness_labs.controller_live.subprocess.run", side_effect=run),
+            patch("harness_labs.core.controller_live.shutil.which", return_value="codex"),
+            patch("harness_labs.core.controller_live.subprocess.run", side_effect=run),
             patch(
-                "harness_labs.controller_live.workspace_snapshot",
+                "harness_labs.core.controller_live.workspace_snapshot",
                 side_effect=snapshots,
             ),
             patch.object(Path, "exists", return_value=True),
@@ -454,11 +454,11 @@ class CodexSemanticTaskExecutorTests(unittest.TestCase):
             )
             with (
                 patch(
-                    "harness_labs.controller_live.shutil.which", return_value="codex"
+                    "harness_labs.core.controller_live.shutil.which", return_value="codex"
                 ),
-                patch("harness_labs.controller_live.subprocess.run", side_effect=run),
+                patch("harness_labs.core.controller_live.subprocess.run", side_effect=run),
                 patch(
-                    "harness_labs.controller_live.workspace_snapshot",
+                    "harness_labs.core.controller_live.workspace_snapshot",
                     side_effect=(before, after),
                 ),
             ):
@@ -558,10 +558,10 @@ class CodexSemanticTaskExecutorTests(unittest.TestCase):
             return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
 
         with (
-            patch("harness_labs.controller_live.shutil.which", return_value="codex"),
-            patch("harness_labs.controller_live.subprocess.run", side_effect=run),
+            patch("harness_labs.core.controller_live.shutil.which", return_value="codex"),
+            patch("harness_labs.core.controller_live.subprocess.run", side_effect=run),
             patch(
-                "harness_labs.controller_live.workspace_snapshot",
+                "harness_labs.core.controller_live.workspace_snapshot",
                 side_effect=snapshots,
             ),
             patch.object(Path, "exists", return_value=True),
@@ -622,10 +622,10 @@ class CodexSemanticTaskExecutorTests(unittest.TestCase):
             return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
 
         with (
-            patch("harness_labs.controller_live.shutil.which", return_value="codex"),
-            patch("harness_labs.controller_live.subprocess.run", side_effect=run),
+            patch("harness_labs.core.controller_live.shutil.which", return_value="codex"),
+            patch("harness_labs.core.controller_live.subprocess.run", side_effect=run),
             patch(
-                "harness_labs.controller_live.workspace_snapshot",
+                "harness_labs.core.controller_live.workspace_snapshot",
                 side_effect=(
                     {"head": "abc", "branch": "feature", "changed_paths": [], "files": {}},
                     {"head": "abc", "branch": "feature", "changed_paths": [], "files": {}},

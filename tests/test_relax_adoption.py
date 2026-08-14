@@ -8,7 +8,7 @@ regardless of what is actually dirty; the candidate replaces that
 constructor-frozen boolean with a per-dispatch ``dirty_baseline_grant`` that
 must name an existing ``workspace-change-receipt`` evidence entry whose
 recorded ``changed_paths`` covers every currently dirty path, and
-``harness_labs.feature_run`` supplies that grant automatically for
+``harness_labs.featurerun.feature_run`` supplies that grant automatically for
 verification-repair and review-fix dispatches from the prior attempt's
 receipt.
 
@@ -31,16 +31,16 @@ from pathlib import Path
 from typing import Mapping
 from unittest.mock import patch
 
-from harness_labs.attempts import TaskAttempt, TaskResult
-from harness_labs.audit import AuditJournal
-from harness_labs.controller_evidence import EvidenceCatalog
-from harness_labs.controller_kernel import RunContract
-from harness_labs.controller_live import CodexSemanticTaskExecutor
-from harness_labs.controller_results import semantic_payload, validate_semantic_result
-from harness_labs.controller_scheduler import RoleProfile
-from harness_labs.coordinator_schema import CoordinatorDispatchSchema, CoordinatorSegment
-from harness_labs.feature_run import ReviewFixPolicy, run_feature_worktree
-from harness_labs.git_transaction import workspace_snapshot
+from harness_labs.core.attempts import TaskAttempt, TaskResult
+from harness_labs.core.audit import AuditJournal
+from harness_labs.core.controller_evidence import EvidenceCatalog
+from harness_labs.core.controller_kernel import RunContract
+from harness_labs.core.controller_live import CodexSemanticTaskExecutor
+from harness_labs.core.controller_results import semantic_payload, validate_semantic_result
+from harness_labs.core.controller_scheduler import RoleProfile
+from harness_labs.core.coordinator_schema import CoordinatorDispatchSchema, CoordinatorSegment
+from harness_labs.featurerun.feature_run import ReviewFixPolicy, run_feature_worktree
+from harness_labs.core.git_transaction import workspace_snapshot
 from tests.controller_scenario_fixtures import ScriptedCoordinatorSession
 
 
@@ -605,10 +605,10 @@ class CodexSemanticTaskExecutorDirtyBaselineTests(unittest.TestCase):
             return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
 
         with (
-            patch("harness_labs.controller_live.shutil.which", return_value="codex"),
-            patch("harness_labs.controller_live.subprocess.run", side_effect=run),
+            patch("harness_labs.core.controller_live.shutil.which", return_value="codex"),
+            patch("harness_labs.core.controller_live.subprocess.run", side_effect=run),
             patch(
-                "harness_labs.controller_live.workspace_snapshot",
+                "harness_labs.core.controller_live.workspace_snapshot",
                 side_effect=snapshots,
             ),
             patch.object(Path, "exists", return_value=True),

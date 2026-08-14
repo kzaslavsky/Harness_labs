@@ -24,12 +24,12 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from harness_labs.attempts import TaskAttempt, TaskResult
-from harness_labs.audit import AuditActor, AuditJournal
-from harness_labs.claude_task_executor import ClaudeSemanticTaskExecutor
-from harness_labs.controller_evidence import EvidenceCatalog
-from harness_labs.controller_live import CodexSemanticTaskExecutor
-from harness_labs.controller_results import (
+from harness_labs.core.attempts import TaskAttempt, TaskResult
+from harness_labs.core.audit import AuditActor, AuditJournal
+from harness_labs.core.claude_task_executor import ClaudeSemanticTaskExecutor
+from harness_labs.core.controller_evidence import EvidenceCatalog
+from harness_labs.core.controller_live import CodexSemanticTaskExecutor
+from harness_labs.core.controller_results import (
     SemanticResultError,
     semantic_payload,
     validate_semantic_result,
@@ -189,11 +189,11 @@ class CodexExecutorFloorTests(unittest.TestCase):
             )
             with (
                 patch(
-                    "harness_labs.controller_live.shutil.which",
+                    "harness_labs.core.controller_live.shutil.which",
                     return_value="codex",
                 ),
                 patch(
-                    "harness_labs.controller_live.subprocess.run",
+                    "harness_labs.core.controller_live.subprocess.run",
                     side_effect=run,
                 ),
             ):
@@ -263,15 +263,15 @@ class ClaudeExecutorFloorTests(unittest.TestCase):
             )
             with (
                 patch(
-                    "harness_labs.claude_task_executor.shutil.which",
+                    "harness_labs.core.claude_task_executor.shutil.which",
                     return_value="claude",
                 ),
                 patch(
-                    "harness_labs.claude_task_executor.subprocess.run",
+                    "harness_labs.core.claude_task_executor.subprocess.run",
                     side_effect=run,
                 ),
                 patch(
-                    "harness_labs.claude_task_executor.workspace_snapshot",
+                    "harness_labs.core.claude_task_executor.workspace_snapshot",
                     side_effect=(_snapshot(), _snapshot()),
                 ),
             ):

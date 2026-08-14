@@ -9,10 +9,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from harness_labs.attempts import TaskAttempt
-from harness_labs.claude_task_executor import ClaudeSemanticTaskExecutor
-from harness_labs.controller_evidence import EvidenceCatalog
-from harness_labs.controller_results import validate_semantic_result
+from harness_labs.core.attempts import TaskAttempt
+from harness_labs.core.claude_task_executor import ClaudeSemanticTaskExecutor
+from harness_labs.core.controller_evidence import EvidenceCatalog
+from harness_labs.core.controller_results import validate_semantic_result
 
 
 def _raw_result(**overrides):
@@ -164,15 +164,15 @@ class ClaudeSemanticTaskExecutorTests(unittest.TestCase):
             )
             with (
                 patch(
-                    "harness_labs.claude_task_executor.shutil.which",
+                    "harness_labs.core.claude_task_executor.shutil.which",
                     return_value="claude",
                 ),
                 patch(
-                    "harness_labs.claude_task_executor.subprocess.run",
+                    "harness_labs.core.claude_task_executor.subprocess.run",
                     side_effect=run,
                 ),
                 patch(
-                    "harness_labs.claude_task_executor.workspace_snapshot",
+                    "harness_labs.core.claude_task_executor.workspace_snapshot",
                     side_effect=(_snapshot(), _snapshot()),
                 ),
             ):
@@ -234,15 +234,15 @@ class ClaudeSemanticTaskExecutorTests(unittest.TestCase):
 
         with (
             patch(
-                "harness_labs.claude_task_executor.shutil.which",
+                "harness_labs.core.claude_task_executor.shutil.which",
                 return_value="claude",
             ),
             patch(
-                "harness_labs.claude_task_executor.subprocess.run",
+                "harness_labs.core.claude_task_executor.subprocess.run",
                 side_effect=run,
             ),
             patch(
-                "harness_labs.claude_task_executor.workspace_snapshot",
+                "harness_labs.core.claude_task_executor.workspace_snapshot",
                 side_effect=snapshots,
             ),
             patch.object(Path, "exists", return_value=True),
@@ -316,15 +316,15 @@ class ClaudeSemanticTaskExecutorTests(unittest.TestCase):
             )
             with (
                 patch(
-                    "harness_labs.claude_task_executor.shutil.which",
+                    "harness_labs.core.claude_task_executor.shutil.which",
                     return_value="claude",
                 ),
                 patch(
-                    "harness_labs.claude_task_executor.subprocess.run",
+                    "harness_labs.core.claude_task_executor.subprocess.run",
                     side_effect=run,
                 ),
                 patch(
-                    "harness_labs.claude_task_executor.workspace_snapshot",
+                    "harness_labs.core.claude_task_executor.workspace_snapshot",
                     side_effect=snapshots,
                 ),
             ):
@@ -381,15 +381,15 @@ class ClaudeSemanticTaskExecutorTests(unittest.TestCase):
 
         with (
             patch(
-                "harness_labs.claude_task_executor.shutil.which",
+                "harness_labs.core.claude_task_executor.shutil.which",
                 return_value="claude",
             ),
             patch(
-                "harness_labs.claude_task_executor.subprocess.run",
+                "harness_labs.core.claude_task_executor.subprocess.run",
                 side_effect=run,
             ),
             patch(
-                "harness_labs.claude_task_executor.workspace_snapshot",
+                "harness_labs.core.claude_task_executor.workspace_snapshot",
                 side_effect=snapshots,
             ),
             patch.object(Path, "exists", return_value=True),
@@ -438,15 +438,15 @@ class ClaudeSemanticTaskExecutorTests(unittest.TestCase):
 
         with (
             patch(
-                "harness_labs.claude_task_executor.shutil.which",
+                "harness_labs.core.claude_task_executor.shutil.which",
                 return_value="claude",
             ),
             patch(
-                "harness_labs.claude_task_executor.subprocess.run",
+                "harness_labs.core.claude_task_executor.subprocess.run",
                 side_effect=run,
             ),
             patch(
-                "harness_labs.claude_task_executor.workspace_snapshot",
+                "harness_labs.core.claude_task_executor.workspace_snapshot",
                 side_effect=(_snapshot(), _snapshot()),
             ),
             patch.object(Path, "exists", return_value=True),
@@ -492,15 +492,15 @@ class ClaudeSemanticTaskExecutorTests(unittest.TestCase):
 
         with (
             patch(
-                "harness_labs.claude_task_executor.shutil.which",
+                "harness_labs.core.claude_task_executor.shutil.which",
                 return_value="claude",
             ),
             patch(
-                "harness_labs.claude_task_executor.subprocess.run",
+                "harness_labs.core.claude_task_executor.subprocess.run",
                 side_effect=run,
             ),
             patch(
-                "harness_labs.claude_task_executor.workspace_snapshot",
+                "harness_labs.core.claude_task_executor.workspace_snapshot",
                 side_effect=(_snapshot(), _snapshot()),
             ),
             patch.object(Path, "exists", return_value=True),
@@ -530,15 +530,15 @@ class ClaudeSemanticTaskExecutorDirtyBaselineTests(unittest.TestCase):
 
         with (
             patch(
-                "harness_labs.claude_task_executor.shutil.which",
+                "harness_labs.core.claude_task_executor.shutil.which",
                 return_value="claude",
             ),
             patch(
-                "harness_labs.claude_task_executor.subprocess.run",
+                "harness_labs.core.claude_task_executor.subprocess.run",
                 side_effect=run,
             ),
             patch(
-                "harness_labs.claude_task_executor.workspace_snapshot",
+                "harness_labs.core.claude_task_executor.workspace_snapshot",
                 side_effect=snapshots,
             ),
             patch.object(Path, "exists", return_value=True),
@@ -741,15 +741,15 @@ class ClaudeSemanticTaskExecutorDirtyBaselineTests(unittest.TestCase):
 
         with (
             patch(
-                "harness_labs.claude_task_executor.shutil.which",
+                "harness_labs.core.claude_task_executor.shutil.which",
                 return_value="claude",
             ),
             patch(
-                "harness_labs.claude_task_executor.subprocess.run",
+                "harness_labs.core.claude_task_executor.subprocess.run",
                 side_effect=run,
             ),
             patch(
-                "harness_labs.claude_task_executor.workspace_snapshot",
+                "harness_labs.core.claude_task_executor.workspace_snapshot",
                 side_effect=(_snapshot(), _snapshot()),
             ),
             patch.object(Path, "exists", return_value=True),

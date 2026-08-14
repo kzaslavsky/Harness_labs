@@ -19,14 +19,14 @@ from typing import Any, Callable, Mapping, Sequence
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from harness_labs.plan_graph import (
+from harness_labs.plangraph.plan_graph import (
     PlanGraphRegistration,
     load_registration,
     plan_from_registration,
 )
-from harness_labs.plan_graph_authority import AutomaticRecoveryAuthority
-from harness_labs.plan_graph_budget import BudgetError, RetryBudgetLedger
-from harness_labs.feature_run import classify_verification_failure
+from harness_labs.plangraph.plan_graph_authority import AutomaticRecoveryAuthority
+from harness_labs.plangraph.plan_graph_budget import BudgetError, RetryBudgetLedger
+from harness_labs.featurerun.feature_run import classify_verification_failure
 
 
 _HUMAN_CLASSIFICATIONS = {"policy_violation", "structural_decision"}

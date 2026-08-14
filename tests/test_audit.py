@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from harness_labs.audit import AuditActor, AuditConflictError, AuditError, AuditJournal
+from harness_labs.core.audit import AuditActor, AuditConflictError, AuditError, AuditJournal
 
 
 class AuditJournalTests(unittest.TestCase):
@@ -312,7 +312,7 @@ class AuditJournalTests(unittest.TestCase):
                     raise PermissionError(1, "transient denial", str(path))
                 return original_open(path, flags, mode)
 
-            with patch("harness_labs.audit.os.open", side_effect=transient_open):
+            with patch("harness_labs.core.audit.os.open", side_effect=transient_open):
                 journal.append(
                     "retry_probe",
                     status="succeeded",

@@ -20,7 +20,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from harness_labs.feature_run import classify_verification_failure
+from harness_labs.featurerun.feature_run import classify_verification_failure
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "dev" / "red_green_check.py"
 

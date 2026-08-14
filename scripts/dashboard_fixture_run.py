@@ -18,8 +18,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from harness_labs.audit import AuditActor, AuditJournal
-from harness_labs.plan_graph_audit import PlanGraphAudit
+from harness_labs.core.audit import AuditActor, AuditJournal
+from harness_labs.plangraph.plan_graph_audit import PlanGraphAudit
 
 _ACTOR = AuditActor("dashboard-fixture", "test")
 _BASE = "a" * 40

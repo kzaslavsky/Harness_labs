@@ -12,15 +12,15 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from harness_labs.attempts import TaskResult
-from harness_labs.audit import AuditActor, AuditJournal
-from harness_labs.controller_commands import (
+from harness_labs.core.attempts import TaskResult
+from harness_labs.core.audit import AuditActor, AuditJournal
+from harness_labs.core.controller_commands import (
     CommandActor,
     CommandEnvelope,
     CommandProvenance,
 )
-from harness_labs.controller_evidence import EvidenceCatalog
-from harness_labs.controller_kernel import ControllerKernel, RunContract
+from harness_labs.core.controller_evidence import EvidenceCatalog
+from harness_labs.core.controller_kernel import ControllerKernel, RunContract
 
 
 class RelaxKernelTests(unittest.TestCase):
@@ -350,7 +350,7 @@ class RelaxKernelTests(unittest.TestCase):
         )
 
     def test_coordinator_criterion_schema_offers_plan_source(self) -> None:
-        from harness_labs.controller_coordinator import _tool_specs
+        from harness_labs.core.controller_coordinator import _tool_specs
 
         spec = next(
             tool for tool in _tool_specs() if tool.name == "criterion_propose"

@@ -8,7 +8,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from harness_labs.dashboard_server import (
+from harness_labs.observability.dashboard_server import (
     DashboardApplication,
     create_dashboard_server,
     load_audit_root_registry,

@@ -14,7 +14,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from harness_labs.agent_sessions import (
+from harness_labs.core.agent_sessions import (
     BackendFailure,
     FinalOutput,
     ModelRequest,
@@ -22,7 +22,7 @@ from harness_labs.agent_sessions import (
     ToolResult,
     ToolSpec,
 )
-from harness_labs.claude_agent_session import (
+from harness_labs.core.claude_agent_session import (
     ClaudeAgentSession,
     ClaudeSessionError,
 )

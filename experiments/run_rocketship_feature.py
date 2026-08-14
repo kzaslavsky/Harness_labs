@@ -13,16 +13,16 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from harness_labs.codex_agent_session import CodexAppServerSession
-from harness_labs.controller_evidence import EvidenceCatalog
-from harness_labs.controller_kernel import RunContract, RunLimits
-from harness_labs.controller_live import CodexSemanticTaskExecutor
-from harness_labs.controller_scheduler import RoleProfile
-from harness_labs.coordinator_dispatcher import (
+from harness_labs.core.codex_agent_session import CodexAppServerSession
+from harness_labs.core.controller_evidence import EvidenceCatalog
+from harness_labs.core.controller_kernel import RunContract, RunLimits
+from harness_labs.core.controller_live import CodexSemanticTaskExecutor
+from harness_labs.core.controller_scheduler import RoleProfile
+from harness_labs.core.coordinator_dispatcher import (
     CoordinatorLaunch,
     run_dispatched_controller,
 )
-from harness_labs.coordinator_schema import (
+from harness_labs.core.coordinator_schema import (
     CoordinatorDispatchSchema,
     CoordinatorSegment,
 )

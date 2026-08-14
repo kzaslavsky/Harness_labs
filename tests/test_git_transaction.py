@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from harness_labs.git_transaction import (
+from harness_labs.core.git_transaction import (
     GitTransactionError,
     GitWorktreeTransaction,
 )

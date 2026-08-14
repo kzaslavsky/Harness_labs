@@ -4,14 +4,14 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from harness_labs.agent_sessions import (
+from harness_labs.core.agent_sessions import (
     BackendCapabilities,
     FinalOutput,
     ModelRequest,
     ToolCall,
     ToolResult,
 )
-from harness_labs.attempts import TaskAttempt, TaskResult
+from harness_labs.core.attempts import TaskAttempt, TaskResult
 
 
 class ScriptedCoordinatorSession:

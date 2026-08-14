@@ -11,14 +11,14 @@ from __future__ import annotations
 
 import unittest
 
-from harness_labs.attempts import TaskResult
-from harness_labs.controller_commands import (
+from harness_labs.core.attempts import TaskResult
+from harness_labs.core.controller_commands import (
     CommandActor,
     CommandEnvelope,
     CommandProvenance,
 )
-from harness_labs.controller_evidence import EvidenceCatalog
-from harness_labs.controller_kernel import ControllerKernel, RunContract
+from harness_labs.core.controller_evidence import EvidenceCatalog
+from harness_labs.core.controller_kernel import ControllerKernel, RunContract
 
 
 class RelaxRefResolutionTests(unittest.TestCase):

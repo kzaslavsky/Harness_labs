@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import unittest
 
-from harness_labs.attempts import TaskResult
-from harness_labs.controller_coordinator import CoordinatorLoop
-from harness_labs.controller_evidence import EvidenceCatalog
-from harness_labs.controller_kernel import ControllerKernel, RunContract
-from harness_labs.controller_projection import ControllerQueries
-from harness_labs.controller_results import semantic_payload
-from harness_labs.controller_scheduler import CapabilityScheduler, RoleProfile
+from harness_labs.core.attempts import TaskResult
+from harness_labs.core.controller_coordinator import CoordinatorLoop
+from harness_labs.core.controller_evidence import EvidenceCatalog
+from harness_labs.core.controller_kernel import ControllerKernel, RunContract
+from harness_labs.core.controller_projection import ControllerQueries
+from harness_labs.core.controller_results import semantic_payload
+from harness_labs.core.controller_scheduler import CapabilityScheduler, RoleProfile
 
 from tests.controller_scenario_fixtures import (
     FixtureExecutor,

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import unittest
 
-from harness_labs.plan_graph import (
+from harness_labs.plangraph.plan_graph import (
     PLAN_GRAPH_PROTOCOL,
     PathIntent,
     PlanGraphError,

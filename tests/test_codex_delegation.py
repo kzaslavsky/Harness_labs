@@ -55,8 +55,8 @@ class CodexFileReaderExecutorTests(unittest.TestCase):
             "there is booty here",
         )
 
-    @patch("harness_labs.codex_delegation.shutil.which", return_value="/fake/codex")
-    @patch("harness_labs.codex_delegation.subprocess.run")
+    @patch("harness_labs.core.codex_delegation.shutil.which", return_value="/fake/codex")
+    @patch("harness_labs.core.codex_delegation.subprocess.run")
     def test_supplied_context_leads_reader_through_locator_file(
         self,
         run_mock,
@@ -123,8 +123,8 @@ class CodexFileReaderExecutorTests(unittest.TestCase):
         self.assertEqual(result.status, "succeeded")
         self.assertEqual(result.payload["text"], "there is booty here")
 
-    @patch("harness_labs.codex_delegation.shutil.which", return_value="/fake/codex")
-    @patch("harness_labs.codex_delegation.subprocess.run")
+    @patch("harness_labs.core.codex_delegation.shutil.which", return_value="/fake/codex")
+    @patch("harness_labs.core.codex_delegation.subprocess.run")
     def test_reader_must_execute_command_against_granted_file(
         self,
         run_mock,
@@ -173,8 +173,8 @@ class CodexFileReaderExecutorTests(unittest.TestCase):
         self.assertEqual(result.payload["text"], "there is booty here")
         self.assertTrue(result.evidence[0].startswith("file:sha256:"))
 
-    @patch("harness_labs.codex_delegation.shutil.which", return_value="/fake/codex")
-    @patch("harness_labs.codex_delegation.subprocess.run")
+    @patch("harness_labs.core.codex_delegation.shutil.which", return_value="/fake/codex")
+    @patch("harness_labs.core.codex_delegation.subprocess.run")
     def test_reader_rejects_answer_without_command_evidence(
         self,
         run_mock,
@@ -217,8 +217,8 @@ class CodexFileReaderExecutorTests(unittest.TestCase):
         self.assertEqual(result.status, "failed")
         self.assertIn("did not perform a file read", result.payload["error"])
 
-    @patch("harness_labs.codex_delegation.shutil.which", return_value="/fake/codex")
-    @patch("harness_labs.codex_delegation.subprocess.run")
+    @patch("harness_labs.core.codex_delegation.shutil.which", return_value="/fake/codex")
+    @patch("harness_labs.core.codex_delegation.subprocess.run")
     def test_retained_reader_resumes_same_thread_then_closes(
         self,
         run_mock,

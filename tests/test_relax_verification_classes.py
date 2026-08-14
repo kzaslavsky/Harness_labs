@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import unittest
 
-from harness_labs.feature_run import classify_verification_failure
+from harness_labs.featurerun.feature_run import classify_verification_failure
 
 
 class RelaxVerificationClassesTests(unittest.TestCase):
