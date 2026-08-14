@@ -33,10 +33,9 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _graph_ids(run_root: Path, explicit: str | None) -> list[str]:
+def _graph_ids(catalog: dict, explicit: str | None) -> list[str]:
     if explicit is not None:
         return [explicit]
-    catalog = build_run_catalog(run_root)
     return sorted(item["run_id"] for item in catalog.get("plan_graphs", []) if isinstance(item.get("run_id"), str))
 
 
@@ -44,7 +43,8 @@ def main() -> int:
     arguments = _parser().parse_args()
     run_root = arguments.run_root.resolve()
     repository = arguments.repository.resolve() if arguments.repository else None
-    graph_ids = _graph_ids(run_root, arguments.graph)
+    catalog = build_run_catalog(run_root)
+    graph_ids = _graph_ids(catalog, arguments.graph)
 
     reconstructed: list[str] = []
     skipped: list[dict[str, str]] = []
@@ -80,6 +80,8 @@ def main() -> int:
         "reconstructed_graph_ids": reconstructed,
         "skipped_details": skipped,
         "failed_details": failed,
+        "scanned_total": len(catalog.get("plan_graphs", [])) + len(catalog.get("feature_runs", [])),
+        "diagnostics": catalog.get("diagnostics", []),
     }
     print(json.dumps(report, sort_keys=True))
     return 1 if failed else 0
