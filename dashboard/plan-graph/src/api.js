@@ -24,9 +24,19 @@ function validFeatureRun(value) {
     && (value.correlation === null || isObject(value.correlation));
 }
 
+function validNodeCorrelation(value) {
+  if (value === undefined || value === null) return true;
+  return isObject(value) && value.state === 'reused'
+    && isText(value.origin_attempt_id) && isText(value.origin_feature_run_id)
+    && isText(value.reused_from_attempt) && isText(value.reason);
+}
+
 function validNode(value) {
   return isObject(value) && isText(value.node_id) && nodeStatuses.has(value.status)
     && (value.feature_run_id === null || isText(value.feature_run_id))
+    && (value.reused_from_attempt === undefined || nullableText(value.reused_from_attempt))
+    && (value.candidate_commit === undefined || nullableText(value.candidate_commit))
+    && validNodeCorrelation(value.correlation)
     && Array.isArray(value.depends_on) && value.depends_on.every(isText)
     && validLiveness(value.liveness) && validAvailability(value.evidence);
 }
@@ -181,7 +191,9 @@ export function graphProjection(catalog, graph) {
   const rows = new Map();
   const nodes = graph.nodes.map((node) => {
     const run = node.feature_run_id ? runs.get(node.feature_run_id) : null;
-    const record = run || node;
+    const reused = !run && node.correlation?.state === 'reused' ? node.correlation : null;
+    const originRun = reused ? runs.get(reused.origin_feature_run_id) : null;
+    const record = run || originRun || node;
     const depth = depths.get(node.node_id) || 0;
     const row = rows.get(depth) || 0;
     rows.set(depth, row + 1);
@@ -189,7 +201,7 @@ export function graphProjection(catalog, graph) {
       id: `${graph.run_id}:${node.node_id}`,
       type: 'featureRun',
       position: { x: 40 + depth * 300, y: 40 + row * 150 },
-      data: { graphId: graph.run_id, nodeId: node.node_id, plannedRunId: node.feature_run_id, runId: run?.run_id || null, nodeRecord: node, record, title: node.node_id },
+      data: { graphId: graph.run_id, nodeId: node.node_id, plannedRunId: node.feature_run_id, runId: run?.run_id || originRun?.run_id || null, reused, nodeRecord: node, record, title: node.node_id },
     };
   });
   const nodeIds = new Set(graph.nodes.map((node) => node.node_id));

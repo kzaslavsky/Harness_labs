@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "cb-dashboard",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["scripts/run_dashboard.py", "--audit-root", "logs/runs/cb-graph", "--assets-root", "dashboard/plan-graph/dist", "--port", "8321", "--refresh-seconds", "10"],
+      "port": 8321
+    }
+  ]
+}

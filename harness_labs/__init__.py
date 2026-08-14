@@ -22,7 +22,18 @@ from .agent_sessions import (
     ToolSpec,
     Usage,
 )
-from .backends import CodexExecBackend, OmlxBackend, PoemBackend
+from .backends import ClaudePrintBackend, CodexExecBackend, OmlxBackend, PoemBackend
+from .agent_mixture import (
+    BackendSpec,
+    WorkerRole,
+    build_coordinator_session,
+    build_role_profiles,
+    parse_backend_spec,
+    resolve_backend_spec,
+    task_with_artifact_kind,
+)
+from .claude_agent_session import ClaudeAgentSession, ClaudeSessionError
+from .claude_task_executor import ClaudeSemanticTaskExecutor
 from .audit import AuditActor, AuditArtifact, AuditError, AuditJournal
 from .composition import (
     ChildAuthorization,
@@ -211,6 +222,11 @@ __all__ = [
     "ChildRequest",
     "ChildRequestDenied",
     "ConversationalExecutor",
+    "BackendSpec",
+    "ClaudePrintBackend",
+    "ClaudeAgentSession",
+    "ClaudeSemanticTaskExecutor",
+    "ClaudeSessionError",
     "CodexExecBackend",
     "CodexDelegationError",
     "CodexFileReaderExecutor",
@@ -344,4 +360,10 @@ __all__ = [
     "standard_feature_run_dispatch_schema",
     "standard_feature_run_policy",
     "usage_payload",
+    "WorkerRole",
+    "build_coordinator_session",
+    "build_role_profiles",
+    "parse_backend_spec",
+    "resolve_backend_spec",
+    "task_with_artifact_kind",
 ]

@@ -10,3 +10,10 @@ logs/runs/*
 # Temporary directories produced by initializer smoke tests.
 initializing-compose.*
 initializing-smoke.*
+
+# Local experiment base repositories are embedded git repos, not branch content.
+experiments/orbit/
+
+# Plan-approval evidence and persisted registrations are local run state.
+logs/plan-approval/
+logs/registration/

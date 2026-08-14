@@ -1,0 +1,452 @@
+{
+  "acceptance_criteria": {
+    "AC-CB201-1": "a worker result whose `satisfied_criteria` names criteria outside the task's assigned set completes the task; the out-of-assignment ids are removed from the recorded satisfied set and journaled as a distinct annotation event carrying the dropped ids; the comparison-and-drop rule is implemented once in a shared helper and neither `controller_live.py` nor `claude_task_executor.py` retains its own copy.",
+    "AC-CB201-2": "entries within the assigned set are validated and recorded exactly as before; `criterion_coverage` is derived from the filtered set, and the kernel's own rejection of criterion coverage outside the task's assignment is unchanged.",
+    "AC-CB201-3": "tests/test_relax_claims.py fails behaviorally against the frozen base harness (a review-shaped dispatch with empty acceptance_criteria dies with \"worker claimed unassigned criteria\" in each executor) and passes on the candidate together with the full suite.",
+    "AC-CB202-1": "red_green_check.py exits with code 124 and emits a top-level \"timed_out\": true field in its JSON verdict when either phase times out; non-timeout verdicts keep their current exit codes and shape byte-for-byte.",
+    "AC-CB202-2": "`classify_verification_failure` is not modified; the finding test proves the existing `timeout-exit-124` structured rule fires on the new verdict and asserts the emitted rule id.",
+    "AC-CB202-3": "tests/test_relax_gate_timeout_classification.py fails behaviorally against the frozen base harness \u2014 a phase-timeout verdict (exit 1, no top-level timed_out) classifies as something other than infrastructure_transient (base yields product or indeterminate depending on captured tail length; both charge the repair class) \u2014 and passes on the candidate together with the full suite.",
+    "AC-CB203-1": "when max_parallelism exceeds 1, verification-command execution is mutually exclusive across concurrently admitted nodes via a graph-held slot threaded through the feature-run request; node work outside the verification stage (dispatch, review, fix) remains parallel; slot acquisition and release are journaled per node through a typed PlanGraphAudit method carrying the admitted-concurrency count.",
+    "AC-CB203-2": "with max_parallelism=1 behavior is byte-identical to today \u2014 no slot events, no runtime value diverging from the registered plan run payload; the registered verification_argv and its gate digest are unchanged by admitted concurrency.",
+    "AC-CB203-3": "tests/test_relax_gate_concurrency.py fails behaviorally against the frozen base harness (two admitted nodes' stub verification commands are observed executing with overlapping spans and no slot events in the graph journal) and passes on the candidate together with the full suite.",
+    "AC-CB205-1": "a RepairResumeDirective whose blocker_evidence_ref names an artifact recorded in a child run's journal (reachable from the predecessor graph journal, resolved through the existing child-evidence indexing) is accepted; refs recorded nowhere in the lineage are still rejected.",
+    "AC-CB205-2": "absent an explicit logical_graph_id, the graph defaults to registration.logical_graph_id \u2014 never to graph_run_id and never to a freshly minted value \u2014 and RepairResumeDirective.logical_graph_id becomes optional, resolved from the predecessor attempt's persisted registration binding, with a typed PlanGraphError if the binding is absent or disagrees with an explicitly supplied id; successor directory naming and lock ids are unchanged.",
+    "AC-CB205-3": "PlanGraph.resume called with a graph_run_id kwarg raises PlanGraphError naming the conflict before any lock or directory is created.",
+    "AC-CB205-4": "a successor attempt directory carrying no successor-allocation event is reclaimed only when (i) that event is absent, (ii) the child liveness probe reports no live process for it, and (iii) the exclusive lineage flock is held; reclaim renames the directory (never deletes a journal), appends a reclamation event through the existing append-only reconciliation path, makes the ordinal re-allocatable, and AuditJournal verification passes over the lineage afterwards; absent any condition the resume deterministically declines and mints the next ordinal as today.",
+    "AC-CB205-5": "tests/test_relax_resume_operability.py fails behaviorally against the frozen base harness with one test method per defect class above, each independently red, and passes on the candidate together with the full suite.",
+    "AC-CB206-1": "the canonical run payload accepts an optional verification_gates key (ordered tuple of named gates, each with argv and timeout); its absence produces a byte-identical canonical payload and plan digest for every existing decomposition, and each gate's timeout is checked against the approval policy's MAX_TIMEOUT_SECONDS in prepare_approval.",
+    "AC-CB206-2": "a node declaring multiple named gates runs them in order, records one command attempt with classification and evidence per gate, and each gate's failing-identifier set drives the existing strict-subset repair renewal scoped to the gate that motivated the repair; an infrastructure_transient failure on one gate does not void the passing evidence of the others.",
+    "AC-CB206-3": "a repair dispatch is scoped to the failing gate's evidence and identifiers, but re-verification after any repair re-runs the full gate tuple from the first gate, so a passing certification always reflects one consistent tree state; only infrastructure_transient retries (no tree mutation) may resume at the failed gate.",
+    "AC-CB206-4": "gate_digest becomes a total function over the declared verification shape \u2014 flat argv or gate tuple \u2014 such that a flat-argv node's digest is byte-identical to today's and two distinct gate tuples never collide; registration, reservation, and resume revalidation all route through it, and the ledger's gate-change authorization is proven to fire on a gate-tuple edit.",
+    "AC-CB206-5": "nodes declaring the existing single verification_argv are unaffected \u2014 same events, same budget accounting \u2014 and tests/test_relax_gate_decomposition.py fails behaviorally against the frozen base harness (a gate-tuple declaration is rejected by the canonical contract; per-gate classification is impossible) and passes on the candidate together with the full suite.",
+    "AC-CB208-1": "the claims_rule block and its injection into review/fix/verify instructions are removed from experiments/run_burden_plan_graph.py (the inert CB-1 launcher); the live CB-2 runner is explicitly exempt while the program runs, and the living doc records its post-program retirement as an operator step.",
+    "AC-CB208-2": "docs/development/contract-burden-reduction.md statuses for items 8, 10, 11, 14, and 16 are closed with the sealing node and a 40-hex commit named; item 10's closure records the direct-path composition recipe and cites the base test; the strike-through history rule is preserved.",
+    "AC-CB208-3": "scripts/dev/check_workaround_retirement.py gains a dual-phase mode \u2014 run against a RED_BASE checkout it exits non-zero naming each pending retirement and closure; run against the candidate worktree it exits zero \u2014 asserting per item in {8, 10, 11, 14, 16} the presence of a landed (CB2- marker with a commit sha and the absence of a residual open or landed-in-part status, with regexes that count CB2-era closures.",
+    "AC-CB208-4": "this node's verification gate runs the dual-phase retirement check AND the full test suite over its joined tree (the union of every surviving node's candidate), so the program's final join is verified inside a repairable node."
+  },
+  "functionality_tests": [
+    {
+      "argv": [
+        "python3",
+        "-m",
+        "pytest",
+        "tests/",
+        "-q"
+      ],
+      "required_paths": [
+        {
+          "availability": "base",
+          "path": "tests/__init__.py"
+        }
+      ],
+      "timeout_seconds": 3600
+    }
+  ],
+  "plan": "docs/development/CONTRACT_BURDEN_RELAXATION_2_PLAN.md",
+  "plan_sections": {
+    "CB2-01": "## CB2-01 \u2014 Claims vocabulary becomes annotation, not violation\n\nObjective: Implement one shared helper, consumed by both live executors, that records out-of-assignment entries in a worker result's satisfied_criteria field as an audited annotation and drops them from the accepted payload instead of raising \"worker claimed unassigned criteria\", so review/fix/verify workers that echo criterion vocabulary can no longer kill a gate-passing node. (Item 11.)\n\nOwned paths: `harness_labs/controller_live.py`, `harness_labs/claude_task_executor.py`, `tests/test_controller_live.py`, `tests/test_claude_task_executor.py`, `tests/test_relax_claims.py`.\n\n- AC-CB201-1: a worker result whose `satisfied_criteria` names criteria outside the task's assigned set completes the task; the out-of-assignment ids are removed from the recorded satisfied set and journaled as a distinct annotation event carrying the dropped ids; the comparison-and-drop rule is implemented once in a shared helper and neither `controller_live.py` nor `claude_task_executor.py` retains its own copy.\n- AC-CB201-2: entries within the assigned set are validated and recorded exactly as before; `criterion_coverage` is derived from the filtered set, and the kernel's own rejection of criterion coverage outside the task's assignment is unchanged.\n- AC-CB201-3: tests/test_relax_claims.py fails behaviorally against the frozen base harness (a review-shaped dispatch with empty acceptance_criteria dies with \"worker claimed unassigned criteria\" in each executor) and passes on the candidate together with the full suite.",
+    "CB2-02": "## CB2-02 \u2014 Gate timeouts tell the truth to the classifier\n\nObjective: Make a red_green_check phase timeout machine-readable to the existing verification-failure classifier \u2014 the script exits 124 and emits a top-level timed_out marker in its JSON verdict when either phase times out \u2014 so the already-landed structured rules (timed_out flag, exit 124) classify gate timeouts infrastructure_transient with zero change to feature_run.py. (Item 14, classification half.)\n\nOwned paths: `scripts/dev/red_green_check.py`, `tests/test_relax_gate_timeout_classification.py`.\n\n- AC-CB202-1: red_green_check.py exits with code 124 and emits a top-level \"timed_out\": true field in its JSON verdict when either phase times out; non-timeout verdicts keep their current exit codes and shape byte-for-byte.\n- AC-CB202-2: `classify_verification_failure` is not modified; the finding test proves the existing `timeout-exit-124` structured rule fires on the new verdict and asserts the emitted rule id.\n- AC-CB202-3: tests/test_relax_gate_timeout_classification.py fails behaviorally against the frozen base harness \u2014 a phase-timeout verdict (exit 1, no top-level timed_out) classifies as something other than infrastructure_transient (base yields product or indeterminate depending on captured tail length; both charge the repair class) \u2014 and passes on the candidate together with the full suite.",
+    "CB2-03": "## CB2-03 \u2014 Exclusive gate execution slot under parallel admission\n\nObjective: Serialize deterministic gate execution across the ready set \u2014 when more than one node is admitted, at most one node's verification command runs at a time under a graph-owned exclusive slot, with acquisition and release journaled per node \u2014 so admitting siblings can never silently halve a gate's effective wall-clock budget, while the registered verification_argv, verification_timeout_seconds, and every approval-bound digest remain untouched at runtime. (Item 14, load half; the CB-06 failure mode.)\n\nOwned paths: `harness_labs/plan_graph.py`, `harness_labs/plan_graph_audit.py`, `harness_labs/feature_run.py`, `tests/test_plan_graph.py`, `tests/test_plan_graph_parallel_run.py`, `tests/test_feature_run.py`, `tests/test_relax_gate_concurrency.py`.\n\n- AC-CB203-1: when max_parallelism exceeds 1, verification-command execution is mutually exclusive across concurrently admitted nodes via a graph-held slot threaded through the feature-run request; node work outside the verification stage (dispatch, review, fix) remains parallel; slot acquisition and release are journaled per node through a typed PlanGraphAudit method carrying the admitted-concurrency count.\n- AC-CB203-2: with max_parallelism=1 behavior is byte-identical to today \u2014 no slot events, no runtime value diverging from the registered plan run payload; the registered verification_argv and its gate digest are unchanged by admitted concurrency.\n- AC-CB203-3: tests/test_relax_gate_concurrency.py fails behaviorally against the frozen base harness (two admitted nodes' stub verification commands are observed executing with overlapping spans and no slot events in the graph journal) and passes on the candidate together with the full suite.",
+    "CB2-04": "## CB2-04 \u2014 (deleted)\n\nWithdrawn after adjudication: the blocked run's review ledger proved the\nceiling bound on recurring findings (non-convergence), not new-scope\ndiscovery, and the plan's red scenario is unreachable by code reading\n(`review_fix.py:239-247, 302-304, 532-544`). Item 15 is withdrawn in the\nliving doc. See `plan-review-cb2/adjudication.md` \u00a71.",
+    "CB2-05": "## CB2-05 \u2014 Recovery API operability\n\nObjective: Remove the verified resume-operability defects \u2014 blocker evidence refs resolve through child-run journals reachable from the graph journal, the logical graph id defaults from the registration and is resolved from the predecessor's persisted binding on resume, a graph_run_id kwarg is rejected with a typed error, and a partial successor directory left by an admission crash is safely reclaimed through the existing append-only reconciliation instead of inflating the attempt ordinal. (Item 16.)\n\nOwned paths: `harness_labs/plan_graph.py`, `harness_labs/plan_graph_audit.py`, `tests/test_plan_graph.py`, `tests/test_plan_graph_recover.py`, `tests/test_plan_graph_reuse_chain.py`, `tests/test_relax_resume_operability.py`.\n\n- AC-CB205-1: a RepairResumeDirective whose blocker_evidence_ref names an artifact recorded in a child run's journal (reachable from the predecessor graph journal, resolved through the existing child-evidence indexing) is accepted; refs recorded nowhere in the lineage are still rejected.\n- AC-CB205-2: absent an explicit logical_graph_id, the graph defaults to registration.logical_graph_id \u2014 never to graph_run_id and never to a freshly minted value \u2014 and RepairResumeDirective.logical_graph_id becomes optional, resolved from the predecessor attempt's persisted registration binding, with a typed PlanGraphError if the binding is absent or disagrees with an explicitly supplied id; successor directory naming and lock ids are unchanged.\n- AC-CB205-3: PlanGraph.resume called with a graph_run_id kwarg raises PlanGraphError naming the conflict before any lock or directory is created.\n- AC-CB205-4: a successor attempt directory carrying no successor-allocation event is reclaimed only when (i) that event is absent, (ii) the child liveness probe reports no live process for it, and (iii) the exclusive lineage flock is held; reclaim renames the directory (never deletes a journal), appends a reclamation event through the existing append-only reconciliation path, makes the ordinal re-allocatable, and AuditJournal verification passes over the lineage afterwards; absent any condition the resume deterministically declines and mints the next ordinal as today.\n- AC-CB205-5: tests/test_relax_resume_operability.py fails behaviorally against the frozen base harness with one test method per defect class above, each independently red, and passes on the candidate together with the full suite.",
+    "CB2-06": "## CB2-06 \u2014 Per-gate verification decomposition\n\nObjective: Allow a node's deterministic verification to be declared as an ordered tuple of named gates each with its own argv and timeout \u2014 expressible through the canonical plan contract, capped per gate by the approval policy, digest-covered as a total function of the declared shape \u2014 executed and classified per gate with per-gate strict-subset repair renewal, while a single flat verification_argv remains valid and byte-identical in behavior. (Item 8, second half.)\n\nOwned paths: `harness_labs/plan_graph.py`, `harness_labs/feature_run.py`, `harness_labs/plan_graph_budget.py`, `harness_labs/plan_graph_contract.py`, `harness_labs/plan_approval.py`, `tests/test_plan_graph.py`, `tests/test_feature_run.py`, `tests/test_plan_graph_budget.py`, `tests/test_relax_gate_decomposition.py`.\n\n- AC-CB206-1: the canonical run payload accepts an optional verification_gates key (ordered tuple of named gates, each with argv and timeout); its absence produces a byte-identical canonical payload and plan digest for every existing decomposition, and each gate's timeout is checked against the approval policy's MAX_TIMEOUT_SECONDS in prepare_approval.\n- AC-CB206-2: a node declaring multiple named gates runs them in order, records one command attempt with classification and evidence per gate, and each gate's failing-identifier set drives the existing strict-subset repair renewal scoped to the gate that motivated the repair; an infrastructure_transient failure on one gate does not void the passing evidence of the others.\n- AC-CB206-3: a repair dispatch is scoped to the failing gate's evidence and identifiers, but re-verification after any repair re-runs the full gate tuple from the first gate, so a passing certification always reflects one consistent tree state; only infrastructure_transient retries (no tree mutation) may resume at the failed gate.\n- AC-CB206-4: gate_digest becomes a total function over the declared verification shape \u2014 flat argv or gate tuple \u2014 such that a flat-argv node's digest is byte-identical to today's and two distinct gate tuples never collide; registration, reservation, and resume revalidation all route through it, and the ledger's gate-change authorization is proven to fire on a gate-tuple edit.\n- AC-CB206-5: nodes declaring the existing single verification_argv are unaffected \u2014 same events, same budget accounting \u2014 and tests/test_relax_gate_decomposition.py fails behaviorally against the frozen base harness (a gate-tuple declaration is rejected by the canonical contract; per-gate classification is impossible) and passes on the candidate together with the full suite.",
+    "CB2-07": "## CB2-07 \u2014 (deleted)\n\nWithdrawn after adjudication: no restriction exists to lift \u2014\n`tests/test_feature_run.py:939` drives the direct path with gate-backed\ncriteria plus verification_argv to `succeeded` at RED_BASE, and\n`completion_failures` excludes gate-backed criteria unconditionally. The\nresidual is a composition recipe (pair gate criteria with a verify-free\nsegment schema, as the plan-graph binding composes), recorded by CB2-08's doc\nclosure of item 10. See `plan-review-cb2/adjudication.md` \u00a72.",
+    "CB2-08": "## CB2-08 \u2014 Workaround retirement and diagnosis closure\n\nObjective: Retire the claims_rule pin from the inert CB-1 launcher now that CB2-01 lands the executor-side fix, extend the retirement check into a dual-phase gate that fails against the pre-program tree and passes on the candidate, and close items 8, 10, 11, 14, and 16 in the living diagnosis with commit-bound status entries \u2014 leaving behind neither the pins nor the stale statuses this program made obsolete.\n\nOwned paths: `experiments/run_burden_plan_graph.py`, `docs/development/contract-burden-reduction.md`, `scripts/dev/check_workaround_retirement.py`.\n\n- AC-CB208-1: the claims_rule block and its injection into review/fix/verify instructions are removed from experiments/run_burden_plan_graph.py (the inert CB-1 launcher); the live CB-2 runner is explicitly exempt while the program runs, and the living doc records its post-program retirement as an operator step.\n- AC-CB208-2: docs/development/contract-burden-reduction.md statuses for items 8, 10, 11, 14, and 16 are closed with the sealing node and a 40-hex commit named; item 10's closure records the direct-path composition recipe and cites the base test; the strike-through history rule is preserved.\n- AC-CB208-3: scripts/dev/check_workaround_retirement.py gains a dual-phase mode \u2014 run against a RED_BASE checkout it exits non-zero naming each pending retirement and closure; run against the candidate worktree it exits zero \u2014 asserting per item in {8, 10, 11, 14, 16} the presence of a landed (CB2- marker with a commit sha and the absence of a residual open or landed-in-part status, with regexes that count CB2-era closures.\n- AC-CB208-4: this node's verification gate runs the dual-phase retirement check AND the full test suite over its joined tree (the union of every surviving node's candidate), so the program's final join is verified inside a repairable node."
+  },
+  "protocol": "plan-graph-plan/1",
+  "referenced_artifacts": [
+    "docs/development/contract-burden-reduction.md",
+    "scripts/dev/red_green_check.py",
+    "scripts/dev/check_workaround_retirement.py",
+    "docs/development/CONTRACT_BURDEN_RELAXATION_PLAN.md",
+    "docs/development/contract-burden-decomposition.json"
+  ],
+  "runs": [
+    {
+      "allowed_paths": [
+        "harness_labs/controller_live.py",
+        "harness_labs/claude_task_executor.py",
+        "tests/test_controller_live.py",
+        "tests/test_claude_task_executor.py",
+        "tests/test_relax_claims.py"
+      ],
+      "criteria": [
+        "AC-CB201-1",
+        "AC-CB201-2",
+        "AC-CB201-3"
+      ],
+      "depends_on": [],
+      "id": "CB2-01",
+      "objective": "Implement one shared helper, consumed by both live executors, that records out-of-assignment entries in a worker result's satisfied_criteria field as an audited annotation and drops them from the accepted payload instead of raising \"worker claimed unassigned criteria\", so review/fix/verify workers that echo criterion vocabulary can no longer kill a gate-passing node. (Item 11.)",
+      "path_intents": [
+        {
+          "action": "modify",
+          "path": "harness_labs/controller_live.py"
+        },
+        {
+          "action": "modify",
+          "path": "harness_labs/claude_task_executor.py"
+        },
+        {
+          "action": "modify",
+          "path": "tests/test_controller_live.py"
+        },
+        {
+          "action": "modify",
+          "path": "tests/test_claude_task_executor.py"
+        },
+        {
+          "action": "create",
+          "path": "tests/test_relax_claims.py"
+        }
+      ],
+      "plan_sections": [
+        "CB2-01"
+      ],
+      "verification_argv": [
+        "python3",
+        "scripts/dev/red_green_check.py",
+        "--base",
+        "e605fffc90d880fc7e5bb3d779b82b29f74f8e20",
+        "--finding-tests",
+        "tests/test_relax_claims.py",
+        "--regression",
+        "tests/",
+        "--timeout",
+        "1400"
+      ],
+      "verification_required_paths": [
+        {
+          "availability": "base",
+          "path": "scripts/dev/red_green_check.py"
+        }
+      ],
+      "verification_timeout_seconds": 3600
+    },
+    {
+      "allowed_paths": [
+        "scripts/dev/red_green_check.py",
+        "tests/test_relax_gate_timeout_classification.py"
+      ],
+      "criteria": [
+        "AC-CB202-1",
+        "AC-CB202-2",
+        "AC-CB202-3"
+      ],
+      "depends_on": [],
+      "id": "CB2-02",
+      "objective": "Make a red_green_check phase timeout machine-readable to the existing verification-failure classifier \u2014 the script exits 124 and emits a top-level timed_out marker in its JSON verdict when either phase times out \u2014 so the already-landed structured rules (timed_out flag, exit 124) classify gate timeouts infrastructure_transient with zero change to feature_run.py. (Item 14, classification half.)",
+      "path_intents": [
+        {
+          "action": "modify",
+          "path": "scripts/dev/red_green_check.py"
+        },
+        {
+          "action": "create",
+          "path": "tests/test_relax_gate_timeout_classification.py"
+        }
+      ],
+      "plan_sections": [
+        "CB2-02"
+      ],
+      "verification_argv": [
+        "python3",
+        "scripts/dev/red_green_check.py",
+        "--base",
+        "e605fffc90d880fc7e5bb3d779b82b29f74f8e20",
+        "--finding-tests",
+        "tests/test_relax_gate_timeout_classification.py",
+        "--regression",
+        "tests/",
+        "--timeout",
+        "1400"
+      ],
+      "verification_required_paths": [
+        {
+          "availability": "base",
+          "path": "scripts/dev/red_green_check.py"
+        }
+      ],
+      "verification_timeout_seconds": 3600
+    },
+    {
+      "allowed_paths": [
+        "harness_labs/plan_graph.py",
+        "harness_labs/plan_graph_audit.py",
+        "harness_labs/feature_run.py",
+        "tests/test_plan_graph.py",
+        "tests/test_plan_graph_parallel_run.py",
+        "tests/test_feature_run.py",
+        "tests/test_relax_gate_concurrency.py"
+      ],
+      "criteria": [
+        "AC-CB203-1",
+        "AC-CB203-2",
+        "AC-CB203-3"
+      ],
+      "depends_on": [],
+      "id": "CB2-03",
+      "objective": "Serialize deterministic gate execution across the ready set \u2014 when more than one node is admitted, at most one node's verification command runs at a time under a graph-owned exclusive slot, with acquisition and release journaled per node \u2014 so admitting siblings can never silently halve a gate's effective wall-clock budget, while the registered verification_argv, verification_timeout_seconds, and every approval-bound digest remain untouched at runtime. (Item 14, load half; the CB-06 failure mode.)",
+      "path_intents": [
+        {
+          "action": "modify",
+          "path": "harness_labs/plan_graph.py"
+        },
+        {
+          "action": "modify",
+          "path": "harness_labs/plan_graph_audit.py"
+        },
+        {
+          "action": "modify",
+          "path": "harness_labs/feature_run.py"
+        },
+        {
+          "action": "modify",
+          "path": "tests/test_plan_graph.py"
+        },
+        {
+          "action": "modify",
+          "path": "tests/test_plan_graph_parallel_run.py"
+        },
+        {
+          "action": "modify",
+          "path": "tests/test_feature_run.py"
+        },
+        {
+          "action": "create",
+          "path": "tests/test_relax_gate_concurrency.py"
+        }
+      ],
+      "plan_sections": [
+        "CB2-03"
+      ],
+      "verification_argv": [
+        "python3",
+        "scripts/dev/red_green_check.py",
+        "--base",
+        "e605fffc90d880fc7e5bb3d779b82b29f74f8e20",
+        "--finding-tests",
+        "tests/test_relax_gate_concurrency.py",
+        "--regression",
+        "tests/",
+        "--timeout",
+        "1400"
+      ],
+      "verification_required_paths": [
+        {
+          "availability": "base",
+          "path": "scripts/dev/red_green_check.py"
+        }
+      ],
+      "verification_timeout_seconds": 3600
+    },
+    {
+      "allowed_paths": [
+        "harness_labs/plan_graph.py",
+        "harness_labs/plan_graph_audit.py",
+        "tests/test_plan_graph.py",
+        "tests/test_plan_graph_recover.py",
+        "tests/test_plan_graph_reuse_chain.py",
+        "tests/test_relax_resume_operability.py"
+      ],
+      "criteria": [
+        "AC-CB205-1",
+        "AC-CB205-2",
+        "AC-CB205-3",
+        "AC-CB205-4",
+        "AC-CB205-5"
+      ],
+      "depends_on": [
+        "CB2-03"
+      ],
+      "id": "CB2-05",
+      "objective": "Remove the verified resume-operability defects \u2014 blocker evidence refs resolve through child-run journals reachable from the graph journal, the logical graph id defaults from the registration and is resolved from the predecessor's persisted binding on resume, a graph_run_id kwarg is rejected with a typed error, and a partial successor directory left by an admission crash is safely reclaimed through the existing append-only reconciliation instead of inflating the attempt ordinal. (Item 16.)",
+      "path_intents": [
+        {
+          "action": "modify",
+          "path": "harness_labs/plan_graph.py"
+        },
+        {
+          "action": "modify",
+          "path": "harness_labs/plan_graph_audit.py"
+        },
+        {
+          "action": "modify",
+          "path": "tests/test_plan_graph.py"
+        },
+        {
+          "action": "modify",
+          "path": "tests/test_plan_graph_recover.py"
+        },
+        {
+          "action": "modify",
+          "path": "tests/test_plan_graph_reuse_chain.py"
+        },
+        {
+          "action": "create",
+          "path": "tests/test_relax_resume_operability.py"
+        }
+      ],
+      "plan_sections": [
+        "CB2-05"
+      ],
+      "verification_argv": [
+        "python3",
+        "scripts/dev/red_green_check.py",
+        "--base",
+        "e605fffc90d880fc7e5bb3d779b82b29f74f8e20",
+        "--finding-tests",
+        "tests/test_relax_resume_operability.py",
+        "--regression",
+        "tests/",
+        "--timeout",
+        "1400"
+      ],
+      "verification_required_paths": [
+        {
+          "availability": "base",
+          "path": "scripts/dev/red_green_check.py"
+        }
+      ],
+      "verification_timeout_seconds": 3600
+    },
+    {
+      "allowed_paths": [
+        "harness_labs/plan_graph.py",
+        "harness_labs/feature_run.py",
+        "harness_labs/plan_graph_budget.py",
+        "harness_labs/plan_graph_contract.py",
+        "harness_labs/plan_approval.py",
+        "tests/test_plan_graph.py",
+        "tests/test_feature_run.py",
+        "tests/test_plan_graph_budget.py",
+        "tests/test_relax_gate_decomposition.py"
+      ],
+      "criteria": [
+        "AC-CB206-1",
+        "AC-CB206-2",
+        "AC-CB206-3",
+        "AC-CB206-4",
+        "AC-CB206-5"
+      ],
+      "depends_on": [
+        "CB2-05"
+      ],
+      "id": "CB2-06",
+      "objective": "Allow a node's deterministic verification to be declared as an ordered tuple of named gates each with its own argv and timeout \u2014 expressible through the canonical plan contract, capped per gate by the approval policy, digest-covered as a total function of the declared shape \u2014 executed and classified per gate with per-gate strict-subset repair renewal, while a single flat verification_argv remains valid and byte-identical in behavior. (Item 8, second half.)",
+      "path_intents": [
+        {
+          "action": "modify",
+          "path": "harness_labs/plan_graph.py"
+        },
+        {
+          "action": "modify",
+          "path": "harness_labs/feature_run.py"
+        },
+        {
+          "action": "modify",
+          "path": "harness_labs/plan_graph_budget.py"
+        },
+        {
+          "action": "modify",
+          "path": "harness_labs/plan_graph_contract.py"
+        },
+        {
+          "action": "modify",
+          "path": "harness_labs/plan_approval.py"
+        },
+        {
+          "action": "modify",
+          "path": "tests/test_plan_graph.py"
+        },
+        {
+          "action": "modify",
+          "path": "tests/test_feature_run.py"
+        },
+        {
+          "action": "modify",
+          "path": "tests/test_plan_graph_budget.py"
+        },
+        {
+          "action": "create",
+          "path": "tests/test_relax_gate_decomposition.py"
+        }
+      ],
+      "plan_sections": [
+        "CB2-06"
+      ],
+      "verification_argv": [
+        "python3",
+        "scripts/dev/red_green_check.py",
+        "--base",
+        "e605fffc90d880fc7e5bb3d779b82b29f74f8e20",
+        "--finding-tests",
+        "tests/test_relax_gate_decomposition.py",
+        "--regression",
+        "tests/",
+        "--timeout",
+        "1400"
+      ],
+      "verification_required_paths": [
+        {
+          "availability": "base",
+          "path": "scripts/dev/red_green_check.py"
+        }
+      ],
+      "verification_timeout_seconds": 3600
+    },
+    {
+      "allowed_paths": [
+        "experiments/run_burden_plan_graph.py",
+        "docs/development/contract-burden-reduction.md",
+        "scripts/dev/check_workaround_retirement.py"
+      ],
+      "criteria": [
+        "AC-CB208-1",
+        "AC-CB208-2",
+        "AC-CB208-3",
+        "AC-CB208-4"
+      ],
+      "depends_on": [
+        "CB2-01",
+        "CB2-02",
+        "CB2-06"
+      ],
+      "id": "CB2-08",
+      "objective": "Retire the claims_rule pin from the inert CB-1 launcher now that CB2-01 lands the executor-side fix, extend the retirement check into a dual-phase gate that fails against the pre-program tree and passes on the candidate, and close items 8, 10, 11, 14, and 16 in the living diagnosis with commit-bound status entries \u2014 leaving behind neither the pins nor the stale statuses this program made obsolete.",
+      "path_intents": [
+        {
+          "action": "modify",
+          "path": "experiments/run_burden_plan_graph.py"
+        },
+        {
+          "action": "modify",
+          "path": "docs/development/contract-burden-reduction.md"
+        },
+        {
+          "action": "modify",
+          "path": "scripts/dev/check_workaround_retirement.py"
+        }
+      ],
+      "plan_sections": [
+        "CB2-08"
+      ],
+      "verification_argv": [
+        "python3",
+        "scripts/dev/check_workaround_retirement.py",
+        "--dual-phase",
+        "--base",
+        "e605fffc90d880fc7e5bb3d779b82b29f74f8e20",
+        "--regression",
+        "tests/"
+      ],
+      "verification_required_paths": [
+        {
+          "availability": "base",
+          "path": "scripts/dev/check_workaround_retirement.py"
+        }
+      ],
+      "verification_timeout_seconds": 3600
+    }
+  ]
+}

@@ -38,6 +38,26 @@ test('runtime validation accepts recorded execution state and rejects incomplete
   assert.throws(() => validateCatalog(catalog));
 });
 
+test('a reused node validates and projects the origin run for inspection', () => {
+  const originRun = { ...feature, run_id: 'graph-root-CB-01', kind: 'legacy_feature_run', status: 'succeeded', liveness: liveness('terminal') };
+  const reusedCorrelation = { state: 'reused', origin_attempt_id: 'graph-root', origin_feature_run_id: 'graph-root-CB-01', reused_from_attempt: 'graph-attempt-1', reason: 'node was reused from attempt graph-root; metrics come from origin run graph-root-CB-01' };
+  const reusedNode = { ...node('CB-01', [], 'graph-attempt-2-CB-01'), status: 'succeeded', reused_from_attempt: 'graph-attempt-1', candidate_commit: 'f'.repeat(40), correlation: reusedCorrelation, evidence: { state: 'partial', reason: reusedCorrelation.reason } };
+  const catalog = { protocol: 'harness-run-catalog-snapshot/1', revision: 'rev', generated_at: '2026-08-09T00:00:00Z', source_root: '/audit', availability, diagnostics: [], feature_runs: [originRun], ungrouped_feature_runs: [], plan_graphs: [graph('graph-attempt-2', '2026-08-09T02:00:00Z', 'running', [reusedNode])] };
+  assert.equal(validateCatalog(catalog), catalog);
+  const projection = graphProjection(catalog, catalog.plan_graphs[0]);
+  assert.equal(projection.nodes[0].data.runId, 'graph-root-CB-01');
+  assert.equal(projection.nodes[0].data.plannedRunId, 'graph-attempt-2-CB-01');
+  assert.equal(projection.nodes[0].data.reused.origin_attempt_id, 'graph-root');
+  assert.equal(projection.nodes[0].data.record.run_id, 'graph-root-CB-01');
+  // A malformed reuse correlation is rejected rather than displayed.
+  reusedNode.correlation = { state: 'reused', origin_attempt_id: 'graph-root' };
+  assert.throws(() => validateCatalog(catalog));
+  // An unresolved reuse stays visibly unresolved: no origin run is invented.
+  reusedNode.correlation = null;
+  assert.equal(validateCatalog(catalog), catalog);
+  assert.equal(graphProjection(catalog, catalog.plan_graphs[0]).nodes[0].data.runId, null);
+});
+
 test('attempts are grouped by logical graph identity and newest live attempt is selected', () => {
   const older = graph('attempt-old', '2026-08-09T00:00:00Z', 'failed', [node('root')]);
   const live = graph('attempt-live', '2026-08-09T00:02:00Z', 'running', [node('root')]);

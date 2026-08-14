@@ -99,6 +99,33 @@ def parse_codex_jsonl_usage(stdout: str) -> Mapping[str, int] | None:
     return found
 
 
+def parse_claude_result_usage(payload: Mapping[str, Any]) -> Mapping[str, int] | None:
+    """Normalize a `claude -p --output-format json` result usage object.
+
+    Claude reports uncached, cache-read, and cache-creation input separately;
+    the harness usage protocol counts total input with cache reads as the
+    cached subset.
+    """
+
+    raw = payload.get("usage")
+    if not isinstance(raw, Mapping):
+        return None
+    try:
+        uncached = int(raw["input_tokens"])
+        cache_read = int(raw.get("cache_read_input_tokens", 0))
+        cache_creation = int(raw.get("cache_creation_input_tokens", 0))
+        output = int(raw["output_tokens"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if min(uncached, cache_read, cache_creation, output) < 0:
+        return None
+    return {
+        "input_tokens": uncached + cache_read + cache_creation,
+        "cached_input_tokens": cache_read,
+        "output_tokens": output,
+    }
+
+
 def build_run_summary(
     events_path: Path,
     *,

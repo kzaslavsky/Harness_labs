@@ -10,7 +10,7 @@ from pathlib import Path
 
 from harness_labs.audit import AuditActor, AuditJournal
 from harness_labs.plan_graph_audit import PlanGraphAudit
-from harness_labs.run_catalog import _detail_metrics, _graph_execution, _snapshot, build_run_catalog, build_run_detail
+from harness_labs.run_catalog import _ID_MATCH_REASON, _REUSE_UNRESOLVED_REASON, _detail_metrics, _graph_execution, _snapshot, build_run_catalog, build_run_detail, merge_run_catalogs
 
 
 def _registration_binding(graph_run_id: str) -> dict[str, str]:
@@ -89,7 +89,7 @@ class RunCatalogTests(unittest.TestCase):
         self.assertEqual(projected["totals"]["cached_input_tokens"], 40)
         self.assertEqual(projected["totals"]["cost"]["usd"], 0.125)
         self.assertEqual(projected["by_phase"][0]["label"], "implement")
-        self.assertEqual(projected["by_agent"][0]["peak_input_tokens"], 100)
+        self.assertIsNone(projected["by_agent"][0]["peak_input_tokens"])  # claude-print usage is cumulative; no per-invocation peak
         self.assertEqual(projected["by_model"][0]["label"], "gpt-test")
         self.assertEqual(projected["by_effort"][0]["label"], "high")
         self.assertEqual(projected["quality"]["criteria_satisfied"], 1)
@@ -134,6 +134,67 @@ class RunCatalogTests(unittest.TestCase):
         self.assertEqual(cost["long_context_records"], 1)
         self.assertIn("gpt-5.6-terra", cost["sources"][0])
 
+    def test_detail_infers_claude_cost_without_long_context_premium(self) -> None:
+        # Claude 4.6+ bills the full context window at standard rates, and
+        # claude-print usage is cumulative across turns, so a large input sum
+        # must never trigger the GPT long-context multipliers.
+        metrics = _detail_metrics({
+            "events": [{
+                "event_type": "backend_transport", "attempt_id": "implement-cost/attempt-1",
+                "actor": {"id": "worker", "role": "semantic_worker"}, "backend_id": "claude-print", "duration_ms": 1,
+                "payload": {"model": "claude-sonnet-5", "reasoning": "medium", "usage": {
+                    "input_tokens": 3_000_000, "cached_input_tokens": 2_000_000, "output_tokens": 50_000, "cost_usd": None,
+                }},
+            }],
+            "checkpoint": {"state": {}}, "summary": None,
+        })
+        cost = metrics["totals"]["cost"]
+        self.assertEqual(cost["state"], "estimated")
+        # 1M uncached * $2 + 2M cache-read * $0.20 + 50k output * $10, per MTok
+        self.assertEqual(cost["usd"], 2.9)
+        self.assertEqual(cost["long_context_records"], 0)
+        self.assertIn("platform.claude.com", cost["sources"][0])
+
+    def test_detail_projects_claude_session_stream_coordinator_row(self) -> None:
+        # ClaudeAgentSession coordinators journal their stream-json transcript
+        # but never emit a backend_transport usage record; the projection must
+        # recover their tokens, authoritative cost, and per-request context
+        # peak from the stream — deduplicating repeated per-content-block
+        # assistant events and merging events journaled before the session id
+        # was identified.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); run = self._run(root, "claude-session-run")
+            journal = AuditJournal.open_existing(run, actor=AuditActor("claude-session", "backend"))
+            journal.append("backend_process_started", status="started", backend_id="claude-session", payload={"model": "claude-fable-5", "effort": "medium", "pid": 123})
+            init = journal.write_artifact("claude-stream-inbound", {"type": "system", "subtype": "init", "model": "claude-fable-5", "session_id": "sess-1"}, media_type="application/x-ndjson")
+            journal.append("transport_message", status="received", backend_id="claude-session", artifacts=(init,), payload={"direction": "inbound", "type": "system", "subtype": "init"})
+            turn_one = {"type": "assistant", "session_id": "sess-1", "message": {"id": "msg_1", "model": "claude-fable-5", "usage": {"input_tokens": 10, "cache_read_input_tokens": 100, "cache_creation_input_tokens": 40, "output_tokens": 5}}}
+            for _ in range(2):  # stream repeats the event per content block
+                artifact = journal.write_artifact("claude-stream-inbound", turn_one, media_type="application/x-ndjson")
+                journal.append("transport_message", status="received", backend_id="claude-session", artifacts=(artifact,), payload={"direction": "inbound", "type": "assistant"})
+            turn_two = {"type": "assistant", "session_id": "sess-1", "message": {"id": "msg_2", "model": "claude-fable-5", "usage": {"input_tokens": 12, "cache_read_input_tokens": 400, "cache_creation_input_tokens": 0, "output_tokens": 9}}}
+            artifact = journal.write_artifact("claude-stream-inbound", turn_two, media_type="application/x-ndjson")
+            journal.append("transport_message", status="received", backend_id="claude-session", artifacts=(artifact,), payload={"direction": "inbound", "type": "assistant"})
+            result = {"type": "result", "session_id": "sess-1", "num_turns": 2, "total_cost_usd": 1.25, "usage": {"input_tokens": 22, "cache_read_input_tokens": 500, "cache_creation_input_tokens": 40, "output_tokens": 14}}
+            artifact = journal.write_artifact("claude-stream-inbound", result, media_type="application/x-ndjson")
+            journal.append("transport_message", status="received", backend_id="claude-session", artifacts=(artifact,), payload={"direction": "inbound", "type": "result", "subtype": "success"})
+            journal.checkpoint("running", {"controller": {"criteria": {}, "tasks": {}, "findings": {}}})
+            detail = build_run_detail(root, "claude-session-run")
+        projected = detail["metrics"]
+        self.assertEqual(len(projected["by_agent"]), 1)
+        row = projected["by_agent"][0]
+        self.assertEqual(row["label"], "claude-session coordinator")
+        self.assertEqual(row["model"], "claude-fable-5")
+        self.assertEqual(row["phase"], "coordinate")  # not the overseen controller phase
+        self.assertEqual(row["effort"], "medium")
+        self.assertEqual(row["calls"], 2)
+        self.assertEqual(row["total_tokens"], 576)  # result usage: 22+500+40 in, 14 out
+        self.assertEqual(row["peak_input_tokens"], 412)  # msg_2 context: 12+400+0
+        self.assertEqual(row["cost"]["state"], "available")
+        self.assertEqual(row["cost"]["usd"], 1.25)
+        self.assertEqual(projected["totals"]["peak_input_tokens"], 412)
+        self.assertIn("claude session stream artifacts", projected["provenance"]["collection_method"])
+
     def test_detail_projects_recorded_execution_stages_without_usage(self) -> None:
         metrics = _detail_metrics({
             "events": [{
@@ -172,7 +233,78 @@ class RunCatalogTests(unittest.TestCase):
         snapshot = _snapshot(Path("/runs"), now, [], records)
         self.assertEqual([record["run_id"] for record in snapshot["ungrouped_feature_runs"]], ["child"])
 
+    def test_id_matched_legacy_child_correlates_without_descriptor(self) -> None:
+        now = datetime(2026, 8, 9, tzinfo=timezone.utc)
+        records = [
+            {"run_id": "graph", "status": "running", "liveness": {"state": "liveness_unavailable", "reason": "no lease"}, "evidence": {"state": "available", "reason": None}, "nodes": [
+                {"node_id": "matched", "status": "succeeded", "feature_run_id": "graph-matched", "liveness": {"state": "not_applicable", "reason": None}, "evidence": {"state": "available", "reason": None}},
+                {"node_id": "attested", "status": "running", "feature_run_id": "attested-child", "liveness": {"state": "not_applicable", "reason": None}, "evidence": {"state": "available", "reason": None}},
+                {"node_id": "missing", "status": "queued", "feature_run_id": "graph-missing", "liveness": {"state": "not_applicable", "reason": None}, "evidence": {"state": "available", "reason": None}},
+            ]},
+            {"run_id": "graph-matched", "kind": "legacy_feature_run", "status": "succeeded", "liveness": {"state": "terminal", "reason": None}, "evidence": {"state": "partial", "reason": "descriptor was absent for the legacy run"}, "correlation": None},
+            {"run_id": "attested-child", "kind": "feature_run", "status": "running", "liveness": {"state": "liveness_unavailable", "reason": "no lease"}, "evidence": {"state": "available", "reason": None}, "correlation": {"plan_graph_id": "graph", "plan_node_id": "attested", "parent_run_id": "graph"}},
+        ]
+
+        snapshot = _snapshot(Path("/runs"), now, [], records)
+
+        nodes = {node["node_id"]: node for node in snapshot["plan_graphs"][0]["nodes"]}
+        self.assertEqual(nodes["matched"]["evidence"], {"state": "partial", "reason": _ID_MATCH_REASON})
+        self.assertEqual(nodes["matched"]["liveness"], {"state": "terminal", "reason": None})
+        self.assertEqual(nodes["attested"]["evidence"], {"state": "available", "reason": None})
+        self.assertEqual(nodes["missing"]["evidence"], {"state": "partial", "reason": "child correlation is not verified"})
+        runs = {record["run_id"]: record for record in snapshot["feature_runs"]}
+        self.assertEqual(runs["graph-matched"]["correlation"], {
+            "plan_graph_id": "graph", "plan_node_id": "matched", "parent_run_id": "graph",
+            "state": "id_matched", "reason": _ID_MATCH_REASON,
+        })
+        self.assertEqual(runs["attested-child"]["correlation"], {"plan_graph_id": "graph", "plan_node_id": "attested", "parent_run_id": "graph"})
+        self.assertEqual(snapshot["ungrouped_feature_runs"], [])
+
+    def test_id_matching_is_reserved_for_descriptor_less_legacy_runs(self) -> None:
+        now = datetime(2026, 8, 9, tzinfo=timezone.utc)
+        records = [
+            {"run_id": "graph", "status": "running", "liveness": {"state": "liveness_unavailable", "reason": "no lease"}, "evidence": {"state": "available", "reason": None}, "nodes": [
+                {"node_id": "standalone", "status": "running", "feature_run_id": "standalone-child", "liveness": {"state": "not_applicable", "reason": None}, "evidence": {"state": "available", "reason": None}},
+                {"node_id": "broken", "status": "failed", "feature_run_id": "corrupt-child", "liveness": {"state": "not_applicable", "reason": None}, "evidence": {"state": "available", "reason": None}},
+            ]},
+            {"run_id": "standalone-child", "kind": "feature_run", "status": "running", "liveness": {"state": "liveness_unavailable", "reason": "no lease"}, "evidence": {"state": "available", "reason": None}, "correlation": None},
+            {"run_id": "corrupt-child", "kind": "legacy_feature_run", "status": "corrupt", "liveness": {"state": "liveness_unavailable", "reason": "run is corrupt"}, "evidence": {"state": "unavailable", "reason": "corrupt"}, "correlation": None},
+        ]
+
+        snapshot = _snapshot(Path("/runs"), now, [], records)
+
+        for node in snapshot["plan_graphs"][0]["nodes"]:
+            self.assertEqual(node["evidence"], {"state": "partial", "reason": "child correlation is not verified"})
+        for record in snapshot["feature_runs"]:
+            self.assertIsNone(record["correlation"])
+        self.assertEqual([record["run_id"] for record in snapshot["ungrouped_feature_runs"]], ["standalone-child", "corrupt-child"])
+
+    def test_merged_roots_id_match_without_upgrading_to_attested_evidence(self) -> None:
+        graph_catalog = {
+            "availability": {"state": "available", "reason": None}, "generated_at": "2026-08-09T00:00:00Z", "diagnostics": [],
+            "plan_graphs": [{"run_id": "graph", "status": "running", "liveness": {"state": "liveness_unavailable", "reason": "no lease"}, "evidence": {"state": "available", "reason": None}, "nodes": [
+                {"node_id": "node", "status": "succeeded", "feature_run_id": "graph-node", "liveness": {"state": "not_applicable", "reason": None}, "evidence": {"state": "partial", "reason": "child correlation is not verified"}},
+            ]}],
+            "feature_runs": [], "ungrouped_feature_runs": [],
+        }
+        child = {"run_id": "graph-node", "kind": "legacy_feature_run", "status": "succeeded", "liveness": {"state": "terminal", "reason": None}, "evidence": {"state": "partial", "reason": "descriptor was absent for the legacy run"}, "correlation": None}
+        child_catalog = {
+            "availability": {"state": "available", "reason": None}, "generated_at": "2026-08-09T00:00:01Z", "diagnostics": [],
+            "plan_graphs": [], "feature_runs": [child], "ungrouped_feature_runs": [child],
+        }
+
+        merged = merge_run_catalogs([(Path("/roots/a"), graph_catalog), (Path("/roots/b"), child_catalog)])
+
+        node = merged["plan_graphs"][0]["nodes"][0]
+        self.assertEqual(node["evidence"], {"state": "partial", "reason": _ID_MATCH_REASON})
+        self.assertEqual(node["liveness"], {"state": "terminal", "reason": None})
+        merged_child = merged["feature_runs"][0]
+        self.assertEqual(merged_child["correlation"]["state"], "id_matched")
+        self.assertEqual(merged_child["correlation"]["plan_node_id"], "node")
+        self.assertEqual(merged["ungrouped_feature_runs"], [])
+
     def test_legacy_graph_node_recovers_unique_child_by_audited_merge_commit(self) -> None:
+
         now = datetime(2026, 8, 9, tzinfo=timezone.utc)
         records = [
             {"run_id": "graph", "status": "succeeded", "liveness": {"state": "terminal", "reason": None}, "evidence": {"state": "available", "reason": None}, "nodes": [{"node_id": "node", "status": "succeeded", "feature_run_id": "legacy-reservation", "liveness": {"state": "not_applicable", "reason": None}, "evidence": {"state": "available", "reason": None}, "_candidate_commit": "b" * 40}]},
@@ -391,6 +523,130 @@ class RunCatalogTests(unittest.TestCase):
         ]
         snapshot = _snapshot(Path("/runs"), now, [], records)
         self.assertEqual(snapshot["plan_graphs"][0]["nodes"][0]["liveness"]["state"], "stale")
+
+    @staticmethod
+    def _reuse_graph(run_id: str, *, reused_from: str | None, commit: str | None = "c" * 40, node_id: str = "N") -> dict:
+        return {
+            "run_id": run_id, "status": "running",
+            "liveness": {"state": "liveness_unavailable", "reason": "no lease"},
+            "evidence": {"state": "available", "reason": None},
+            "nodes": [{
+                "node_id": node_id, "status": "succeeded", "feature_run_id": f"{run_id}-{node_id}",
+                "depends_on": [], "liveness": {"state": "not_applicable", "reason": None},
+                "evidence": {"state": "available", "reason": None},
+                "reused_from_attempt": reused_from, "candidate_commit": commit,
+            }],
+        }
+
+    @staticmethod
+    def _legacy_run(run_id: str, status: str = "succeeded") -> dict:
+        liveness = {"state": "terminal", "reason": None} if status != "corrupt" else {"state": "liveness_unavailable", "reason": "run is corrupt"}
+        evidence = {"state": "partial", "reason": "descriptor was absent for the legacy run"} if status != "corrupt" else {"state": "unavailable", "reason": "corrupt"}
+        return {"run_id": run_id, "kind": "legacy_feature_run", "status": status, "liveness": liveness, "evidence": evidence, "correlation": None}
+
+    def test_reused_nodes_resolve_origin_across_two_hop_chain(self) -> None:
+        now = datetime(2026, 8, 9, tzinfo=timezone.utc)
+        records = [
+            self._reuse_graph("root", reused_from=None),
+            self._reuse_graph("attempt-1", reused_from="root"),
+            self._reuse_graph("attempt-2", reused_from="attempt-1"),
+            self._legacy_run("root-N"),
+        ]
+
+        snapshot = _snapshot(Path("/runs"), now, [], records)
+
+        graphs = {graph["run_id"]: graph for graph in snapshot["plan_graphs"]}
+        two_hop = graphs["attempt-2"]["nodes"][0]
+        self.assertEqual(two_hop["correlation"]["state"], "reused")
+        self.assertEqual(two_hop["correlation"]["origin_attempt_id"], "root")
+        self.assertEqual(two_hop["correlation"]["origin_feature_run_id"], "root-N")
+        self.assertEqual(two_hop["correlation"]["reused_from_attempt"], "attempt-1")
+        self.assertEqual(two_hop["evidence"]["state"], "partial")
+        self.assertIn("root-N", two_hop["evidence"]["reason"])
+        self.assertEqual(two_hop["liveness"], {"state": "terminal", "reason": None})
+        one_hop = graphs["attempt-1"]["nodes"][0]
+        self.assertEqual(one_hop["correlation"]["origin_attempt_id"], "root")
+        # The origin node keeps its own (stronger) direct correlation path.
+        self.assertNotIn("correlation", graphs["root"]["nodes"][0])
+        self.assertEqual(graphs["root"]["nodes"][0]["evidence"]["reason"], _ID_MATCH_REASON)
+
+    def test_reuse_resolution_refuses_broken_chains_without_fabricating_origins(self) -> None:
+        now = datetime(2026, 8, 9, tzinfo=timezone.utc)
+        missing_chain = self._reuse_graph("gone-attempt", reused_from="never-recorded")
+        mismatched_origin = self._reuse_graph("swapped-attempt", reused_from="swapped-root", commit="d" * 40)
+        swapped_root = self._reuse_graph("swapped-root", reused_from=None, commit="e" * 40)
+        corrupt_attempt = self._reuse_graph("corrupt-attempt", reused_from="corrupt-root")
+        corrupt_root = self._reuse_graph("corrupt-root", reused_from=None)
+        records = [
+            missing_chain, mismatched_origin, swapped_root, corrupt_attempt, corrupt_root,
+            self._legacy_run("swapped-root-N"),
+            self._legacy_run("corrupt-root-N", status="corrupt"),
+        ]
+
+        snapshot = _snapshot(Path("/runs"), now, [], records)
+
+        graphs = {graph["run_id"]: graph for graph in snapshot["plan_graphs"]}
+        for run_id in ("gone-attempt", "swapped-attempt", "corrupt-attempt"):
+            node = graphs[run_id]["nodes"][0]
+            self.assertIsNone(node["correlation"], run_id)
+            self.assertEqual(node["evidence"], {"state": "partial", "reason": _REUSE_UNRESOLVED_REASON}, run_id)
+
+    def test_merged_roots_resolve_reuse_chain_across_audit_roots(self) -> None:
+        def catalog(graphs: list[dict], features: list[dict]) -> dict:
+            return {
+                "availability": {"state": "available", "reason": None}, "generated_at": "2026-08-09T00:00:00Z",
+                "diagnostics": [], "plan_graphs": graphs, "feature_runs": features,
+                "ungrouped_feature_runs": list(features),
+            }
+
+        successor_catalog = catalog([self._reuse_graph("attempt-2", reused_from="attempt-1")], [])
+        origin_catalog = catalog(
+            [self._reuse_graph("attempt-1", reused_from="root"), self._reuse_graph("root", reused_from=None)],
+            [self._legacy_run("root-N")],
+        )
+
+        merged = merge_run_catalogs([(Path("/roots/a"), successor_catalog), (Path("/roots/b"), origin_catalog)])
+
+        graphs = {graph["run_id"]: graph for graph in merged["plan_graphs"]}
+        node = graphs["attempt-2"]["nodes"][0]
+        self.assertEqual(node["correlation"]["state"], "reused")
+        self.assertEqual(node["correlation"]["origin_attempt_id"], "root")
+        self.assertEqual(node["correlation"]["origin_feature_run_id"], "root-N")
+        self.assertEqual(node["liveness"], {"state": "terminal", "reason": None})
+
+    def test_detail_busy_time_is_interval_union_not_summed_duration(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); run = self._run(root, "busy")
+            journal = AuditJournal.open_existing(run, actor=AuditActor("controller", "controller"))
+            usage = {"input_tokens": 10, "cached_input_tokens": 0, "output_tokens": 5}
+            for attempt in ("implement-busy/attempt-1", "implement-busy/attempt-1/verify"):
+                journal.append(
+                    "backend_transport", status="succeeded", attempt_id=attempt,
+                    actor=AuditActor(attempt, "semantic_worker"), backend_id="codex-exec", duration_ms=1_000,
+                    payload={"model": "gpt-test", "usage": usage},
+                )
+            journal.checkpoint("running", journal.checkpoint_state())
+            totals = build_run_detail(root, "busy")["metrics"]["totals"]
+        # The two 1000 ms activity intervals were recorded back-to-back and
+        # overlap in monotonic time, so the honest busy union is strictly
+        # smaller than the summed backend durations.
+        self.assertEqual(totals["duration_ms"], 2_000)
+        self.assertIsInstance(totals["busy_ms"], int)
+        self.assertGreaterEqual(totals["busy_ms"], 1_000)
+        self.assertLess(totals["busy_ms"], 2_000)
+
+    def test_detail_busy_time_is_unavailable_when_a_record_lacks_timing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); run = self._run(root, "untimed")
+            journal = AuditJournal.open_existing(run, actor=AuditActor("controller", "controller"))
+            journal.append(
+                "backend_transport", status="succeeded", attempt_id="implement-untimed/attempt-1",
+                actor=AuditActor("implement-untimed/attempt-1", "semantic_worker"), backend_id="codex-exec",
+                payload={"model": "gpt-test", "usage": {"input_tokens": 10, "cached_input_tokens": 0, "output_tokens": 5}},
+            )
+            journal.checkpoint("running", journal.checkpoint_state())
+            totals = build_run_detail(root, "untimed")["metrics"]["totals"]
+        self.assertIsNone(totals["busy_ms"])
 
 
 if __name__ == "__main__":

@@ -17,7 +17,7 @@ from urllib.parse import urlparse
 
 from .audit import AuditActor, AuditJournal
 from .agent_sessions import Usage
-from .usage import ModelPrice, usage_payload
+from .usage import ModelPrice, parse_claude_result_usage, usage_payload
 from .text_executor import TextBackendError
 
 
@@ -187,6 +187,162 @@ class CodexExecBackend:
             if not text:
                 raise TextBackendError("Codex returned an empty final message")
             return text
+
+
+@dataclass(frozen=True)
+class ClaudePrintBackend:
+    """Generate text with an isolated, tool-less `claude -p` subprocess."""
+
+    model: str = "claude-sonnet-5"
+    executable: str = "claude"
+    timeout_seconds: float | None = None
+    audit: AuditJournal | None = field(default=None, compare=False, repr=False)
+    pricing: ModelPrice | None = field(default=None, compare=False, repr=False)
+    _last_usage: Usage | None = field(
+        default=None, init=False, compare=False, repr=False
+    )
+
+    def generate(self, task: str, context: Mapping[str, Any]) -> str:
+        object.__setattr__(self, "_last_usage", None)
+        claude = shutil.which(self.executable)
+        if claude is None:
+            raise TextBackendError(f"Claude executable not found: {self.executable}")
+
+        try:
+            context_json = json.dumps(context, sort_keys=True)
+        except (TypeError, ValueError) as exc:
+            raise TextBackendError(f"context is not JSON-serializable: {exc}") from exc
+
+        prompt = (
+            "Act only as a text-generation backend. Do not use tools. "
+            "Perform the task using the supplied context. Return only the requested "
+            "text, with no preface, explanation, quotation marks, or markdown fence.\n\n"
+            f"Task:\n{task}\n\nContext:\n{context_json}\n"
+        )
+        executable_artifact = None
+        prompt_artifact = None
+        if self.audit is not None:
+            executable_artifact = self.audit.write_artifact(
+                "claude-executable-identity",
+                {"path": claude, "sha256": _file_sha256(Path(claude))},
+            )
+            prompt_artifact = self.audit.write_artifact(
+                "claude-print-prompt",
+                prompt,
+                media_type="text/plain",
+            )
+
+        with tempfile.TemporaryDirectory(prefix="harness-claude-text-") as temporary:
+            argv = [
+                claude,
+                "-p",
+                "--output-format",
+                "json",
+                "--model",
+                self.model,
+                "--tools",
+                "",
+                "--setting-sources",
+                "",
+                "--strict-mcp-config",
+                "--no-session-persistence",
+            ]
+            started_ns = monotonic_ns()
+            try:
+                completed = subprocess.run(
+                    argv,
+                    cwd=temporary,
+                    input=prompt,
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                    timeout=self.timeout_seconds,
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise TextBackendError("Claude execution timed out") from exc
+            except OSError as exc:
+                raise TextBackendError(
+                    f"Claude execution failed to start: {exc}"
+                ) from exc
+
+        payload: Mapping[str, Any] | None = None
+        try:
+            parsed = json.loads(completed.stdout)
+            if isinstance(parsed, Mapping):
+                payload = parsed
+        except json.JSONDecodeError:
+            payload = None
+        normalized_usage = (
+            parse_claude_result_usage(payload) if payload is not None else None
+        )
+        if normalized_usage is not None:
+            object.__setattr__(self, "_last_usage", Usage(**normalized_usage))
+        if self.audit is not None:
+            stdout_artifact = self.audit.write_artifact(
+                "claude-print-stdout",
+                completed.stdout,
+                media_type="application/json",
+            )
+            stderr_artifact = self.audit.write_artifact(
+                "claude-print-stderr",
+                completed.stderr,
+                media_type="text/plain",
+            )
+            succeeded = (
+                completed.returncode == 0
+                and payload is not None
+                and not payload.get("is_error", False)
+            )
+            self.audit.append(
+                "backend_transport",
+                status="succeeded" if succeeded else "failed",
+                payload={
+                    "transport": "claude-print",
+                    "model": self.model,
+                    "executable_path": claude,
+                    "executable_sha256": _file_sha256(Path(claude)),
+                    "argv": argv,
+                    "returncode": completed.returncode,
+                    "usage": (
+                        usage_payload(
+                            model=self.model,
+                            pricing=self.pricing,
+                            **normalized_usage,
+                        )
+                        if normalized_usage is not None
+                        else None
+                    ),
+                },
+                actor=AuditActor("claude-print", "backend"),
+                backend_id="claude-print",
+                duration_ms=(monotonic_ns() - started_ns) // 1_000_000,
+                artifacts=(
+                    prompt_artifact,
+                    executable_artifact,
+                    stdout_artifact,
+                    stderr_artifact,
+                ),
+            )
+
+        if completed.returncode != 0:
+            detail = completed.stderr.strip() or completed.stdout.strip()
+            raise TextBackendError(
+                f"Claude exited with status {completed.returncode}: {detail}"
+            )
+        if payload is None:
+            raise TextBackendError("Claude did not return a JSON result envelope")
+        result = payload.get("result")
+        if payload.get("is_error", False):
+            detail = str(result).strip() if isinstance(result, str) else ""
+            suffix = f": {detail}" if detail else ""
+            raise TextBackendError(f"Claude reported an execution error{suffix}")
+        if not isinstance(result, str) or not result.strip():
+            raise TextBackendError("Claude returned an empty result")
+        return result.strip()
+
+    @property
+    def last_usage(self) -> Usage | None:
+        return self._last_usage
 
 
 @dataclass(frozen=True)

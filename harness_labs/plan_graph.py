@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import asdict, dataclass, replace
 import errno
 import fcntl
@@ -11,6 +12,7 @@ import os
 from pathlib import Path, PurePosixPath
 import subprocess
 import tempfile
+import threading
 from typing import Callable, Mapping, Sequence
 from uuid import uuid4
 
@@ -92,6 +94,21 @@ class ApprovalEvidence:
 
 
 @dataclass(frozen=True)
+class VerificationGate:
+    """One named, independently timed command within a node's gate tuple.
+
+    An ordered tuple of these replaces a single flat ``verification_argv``
+    when a node's deterministic verification is decomposed: each gate runs,
+    is classified, and is repaired independently, while a full re-run after
+    any repair always restarts at the first gate.
+    """
+
+    name: str
+    argv: tuple[str, ...]
+    timeout_seconds: float = 1200.0
+
+
+@dataclass(frozen=True)
 class PlanRun:
     id: str
     objective: str
@@ -103,6 +120,7 @@ class PlanRun:
     path_intents: tuple[PathIntent, ...] = ()
     verification_timeout_seconds: float = 1200.0
     verification_required_paths: tuple[RequiredPath, ...] = ()
+    verification_gates: tuple[VerificationGate, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -345,6 +363,105 @@ class PlanGraphRegistration:
     plan_version_transition: Mapping[str, object] | None = None
 
 
+class GateSlot:
+    """Graph-owned mutual-exclusion slot for verification-command execution.
+
+    One instance is shared by every :class:`FeatureRunRequest` issued for a
+    single ready-set run (``max_parallelism`` > 1), so concurrently admitted
+    siblings' deterministic verification commands run one at a time instead
+    of silently splitting the gate's wall-clock budget across them (item 14,
+    the CB-06 failure mode). Node work outside the verification stage —
+    dispatch, review, fix — is untouched and keeps running in parallel; only
+    whichever caller wraps its verification-command execution in the
+    :class:`GateSlotHold` returned by :meth:`hold` is serialized. That wrap
+    spans the whole verification stage as the caller defines it, including
+    any recovery retries and recovery-agent invocations attempted before the
+    stage is considered done — see ``run_feature_worktree``'s gate-slot
+    ``with`` block for the concrete critical section.
+
+    Acquisition and release are safe to call from any thread: they only
+    journal through :class:`~harness_labs.plan_graph_audit.PlanGraphAudit`,
+    whose underlying journal append is internally mutex-protected.
+    """
+
+    def __init__(self, audit: PlanGraphAudit) -> None:
+        self._semaphore = threading.Semaphore(1)
+        self._audit = audit
+        self._lock = threading.Lock()
+        self._contending = 0
+
+    def hold(self, node_id: str) -> "GateSlotHold":
+        """Return one node's single-use hold on this exclusive slot.
+
+        The hold exposes only bound acquire/release closures and an
+        ``entered`` flag — never the slot or its audit — so a launcher that
+        receives the hold cannot reach the controller's audit journal
+        through it.
+        """
+        entered = threading.Event()
+
+        def acquire() -> None:
+            with self._lock:
+                self._contending += 1
+            self._semaphore.acquire()
+            try:
+                with self._lock:
+                    concurrency = self._contending
+                self._audit.gate_slot_acquired(node_id, concurrency)
+            except BaseException:
+                with self._lock:
+                    self._contending -= 1
+                self._semaphore.release()
+                raise
+            entered.set()
+
+        def release() -> None:
+            with self._lock:
+                concurrency = self._contending
+                self._contending -= 1
+            try:
+                self._audit.gate_slot_released(node_id, concurrency)
+            finally:
+                self._semaphore.release()
+
+        return GateSlotHold(acquire, release, entered)
+
+
+class GateSlotHold:
+    """One node's context-managed hold on a :class:`GateSlot`.
+
+    Threaded through :attr:`FeatureRunRequest.verification_gate_slot` so the
+    launcher (or, for an in-process ready-set run, ``run_feature_worktree``
+    itself) can wrap exactly its verification-command execution and nothing
+    else. Single use: acquire on ``__enter__``, release on ``__exit__``.
+    Built from acquire/release closures rather than a direct reference to
+    the owning :class:`GateSlot`, so nothing reachable from this object's
+    attributes leads back to the graph's audit journal.
+    """
+
+    def __init__(
+        self,
+        acquire: Callable[[], None],
+        release: Callable[[], None],
+        entered: threading.Event,
+    ) -> None:
+        self._acquire = acquire
+        self._release = release
+        self._entered = entered
+
+    def __enter__(self) -> "GateSlotHold":
+        self._acquire()
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self._release()
+
+    @property
+    def entered(self) -> bool:
+        """Whether this hold's exclusive slot was ever actually acquired."""
+        return self._entered.is_set()
+
+
 @dataclass(frozen=True)
 class FeatureRunRequest:
     protocol: str
@@ -360,6 +477,7 @@ class FeatureRunRequest:
     finding_obligations: tuple[Mapping[str, object], ...] = ()
     finding_transfer_targets: Mapping[str, str] | None = None
     inherited_ledger_frozen: bool = False
+    verification_gate_slot: "GateSlotHold | None" = None
 
     def __post_init__(self) -> None:
         if self.protocol != FEATURE_RUN_REQUEST_PROTOCOL:
@@ -377,6 +495,18 @@ class FeatureRunOutcome:
     plan_node_id: str | None = None
     feature_run_id: str | None = None
     run_dir: str | None = None
+
+
+@dataclass(frozen=True)
+class _SealDecision:
+    """The caller's next move after one launcher outcome is recorded."""
+
+    kind: str  # "sealed" | "blocked" | "failed"
+    result: "PlanGraphResult | None" = None
+    reason: str | None = None
+    evidence: object | None = None
+    evidence_ref: str | None = None
+    finding_obligations: "dict[str, list[Mapping[str, object]]] | None" = None
 
 
 @dataclass(frozen=True)
@@ -403,12 +533,21 @@ class PlanGraphResult:
 
 @dataclass(frozen=True)
 class RepairResumeDirective:
-    """Controller-authorized retry frontier for an immutable successor attempt."""
+    """Controller-authorized retry frontier for an immutable successor attempt.
 
-    logical_graph_id: str
-    predecessor_attempt_id: str
-    retry_frontier: tuple[str, ...]
-    blocker_evidence_ref: str
+    ``logical_graph_id`` is optional: when omitted, :meth:`PlanGraph.resume`
+    resolves it from the predecessor attempt's persisted registration
+    binding (``registration.logical_graph_id``) instead of requiring an
+    operator-supplied value.  ``predecessor_attempt_id`` and
+    ``blocker_evidence_ref`` carry default values only so this field can
+    precede them without breaking positional construction; both remain
+    effectively required and are validated by :meth:`PlanGraph.resume`.
+    """
+
+    logical_graph_id: str | None = None
+    predecessor_attempt_id: str = ""
+    retry_frontier: tuple[str, ...] = ()
+    blocker_evidence_ref: str = ""
 
 
 FeatureRunLauncher = Callable[[FeatureRunRequest], FeatureRunOutcome]
@@ -455,6 +594,9 @@ class SubprocessFeatureRunLauncher:
                 "verification_required_paths": [
                     _required_path_mapping(value)
                     for value in request.run.verification_required_paths
+                ],
+                "verification_gates": [
+                    _gate_mapping(value) for value in request.run.verification_gates
                 ],
             },
             "base_commit": request.base_commit,
@@ -544,6 +686,41 @@ def _required_path_mapping(value: RequiredPath) -> dict[str, object]:
     return result
 
 
+def _gate_mapping(value: VerificationGate) -> dict[str, object]:
+    return {
+        "name": value.name,
+        "argv": list(value.argv),
+        "timeout_seconds": value.timeout_seconds,
+    }
+
+
+def _gate_identity_shape(run: PlanRun) -> tuple[Mapping[str, object], ...]:
+    """Return the ordered shape ``gate_digest`` hashes for one run's gates."""
+    return tuple(_gate_mapping(gate) for gate in run.verification_gates)
+
+
+def _contract_verification_argv(run: PlanRun) -> list[object]:
+    """Return the value ``_plan_graph_digest``'s fixed ``verification_argv``
+    projection sees for one run.
+
+    ``_plan_graph_digest`` (plan_graph_audit.py) projects each node onto a
+    fixed ``contract_keys`` tuple that ends at ``verification_argv`` and has
+    no ``verification_gates`` key of its own, so a gate-tuple node's declared
+    verification must be carried inside ``verification_argv`` itself to stay
+    covered by that digest. A flat-argv node (no gates) is unaffected and
+    stays byte-identical to the base contract. Both the registration-time
+    digest input (``PlanGraph._audit_for_run``) and the repair-resume
+    comparison input (``PlanGraph._contract_nodes``) must call this so the
+    two digests of an unchanged node keep matching.
+    """
+    if not run.verification_gates:
+        return list(run.verification_argv)
+    return [
+        json.dumps(gate, sort_keys=True, separators=(",", ":"))
+        for gate in _gate_identity_shape(run)
+    ]
+
+
 def _command_mapping(value: FunctionalityCommand) -> dict[str, object]:
     return {
         "argv": list(value.argv),
@@ -559,7 +736,7 @@ def _functionality_test_payload(value: FunctionalityCommand | str) -> object:
 
 
 def _run_mapping(value: PlanRun) -> dict[str, object]:
-    return {
+    mapping: dict[str, object] = {
         "id": value.id,
         "objective": value.objective,
         "plan_sections": list(value.plan_sections),
@@ -577,6 +754,11 @@ def _run_mapping(value: PlanRun) -> dict[str, object]:
             for item in value.verification_required_paths
         ],
     }
+    if value.verification_gates:
+        mapping["verification_gates"] = [
+            _gate_mapping(gate) for gate in value.verification_gates
+        ]
+    return mapping
 
 
 def _normalize_functionality_command(
@@ -940,9 +1122,22 @@ class PlanGraph:
         reused_completed: Mapping[str, str] | None = None,
         predecessor_checkpoint: Mapping[str, object] | None = None,
         on_block_argv: Sequence[str] | None = None,
+        max_parallelism: int = 1,
     ) -> None:
         if run_root is None:
             raise PlanGraphError("run_root is required for audited PlanGraph execution")
+        if (
+            isinstance(max_parallelism, bool)
+            or not isinstance(max_parallelism, int)
+            or max_parallelism < 1
+        ):
+            raise PlanGraphError("max_parallelism must be a positive integer")
+        # max_parallelism > 1 selects the ready-set execution path: admission
+        # through ReadySetScheduler, launcher calls on worker threads, every
+        # audit/ledger mutation on the coordinating thread. The launcher must
+        # be safe to invoke concurrently (each call owns its own run_dir and
+        # feature worktree).
+        self.max_parallelism = max_parallelism
         self.repository = repository.resolve()
         self.registration = registration
         self.plan = verify_registration(self.repository, registration)
@@ -983,7 +1178,7 @@ class PlanGraph:
         try:
             self.budget.register(
                 plan_sha256=registration.plan_sha256,
-                gates={run.id: gate_digest(run.verification_argv) for run in self.plan.runs},
+                gates={run.id: gate_digest(run.verification_argv, _gate_identity_shape(run)) for run in self.plan.runs},
                 automatic_recovery=registration.automatic_recovery,
                 transition=registration.plan_version_transition,
             )
@@ -1001,45 +1196,79 @@ class PlanGraph:
         directive: RepairResumeDirective,
         **kwargs: object,
     ) -> "PlanGraph":
-        """Create a new repair attempt without mutating its predecessor."""
+        """Create a new repair attempt without mutating its predecessor.
+
+        ``resume`` derives ``graph_run_id``, ``logical_graph_id``,
+        ``predecessor_attempt_id``, ``resume_directive``,
+        ``reused_completed``, and ``predecessor_checkpoint`` itself from
+        ``directive`` and the resolved predecessor; a caller supplying any
+        of those as a kwarg is a conflicting request, rejected up front
+        before any lock or directory is touched.
+        """
+        _RESUME_OWNED_KWARGS = (
+            "graph_run_id", "logical_graph_id", "predecessor_attempt_id",
+            "resume_directive", "reused_completed", "predecessor_checkpoint",
+        )
+        conflicting = [name for name in _RESUME_OWNED_KWARGS if name in kwargs]
+        if conflicting:
+            raise PlanGraphError(
+                "PlanGraph.resume derives "
+                + ", ".join(conflicting)
+                + " itself from directive and the resolved predecessor; an "
+                "explicit kwarg of that name conflicts with it"
+            )
         repository = repository.resolve()
         plan = verify_registration(repository, registration)
 
-        for value, label in (
-            (directive.logical_graph_id, "logical_graph_id"),
-            (directive.predecessor_attempt_id, "predecessor_attempt_id"),
+        if not isinstance(directive.predecessor_attempt_id, str) or not directive.predecessor_attempt_id or directive.predecessor_attempt_id in {".", ".."} or "/" in directive.predecessor_attempt_id or "\\" in directive.predecessor_attempt_id:
+            raise PlanGraphError("predecessor_attempt_id must be a non-empty path-safe name")
+        if directive.logical_graph_id is not None and (
+            not isinstance(directive.logical_graph_id, str)
+            or not directive.logical_graph_id
+            or directive.logical_graph_id in {".", ".."}
+            or "/" in directive.logical_graph_id
+            or "\\" in directive.logical_graph_id
         ):
-            if not isinstance(value, str) or not value or value in {".", ".."} or "/" in value or "\\" in value:
-                raise PlanGraphError(f"{label} must be a non-empty path-safe name")
+            raise PlanGraphError("logical_graph_id must be a non-empty path-safe name")
         if not isinstance(directive.blocker_evidence_ref, str) or not directive.blocker_evidence_ref.startswith("artifact:sha256:"):
             raise PlanGraphError("repair resume requires a blocker evidence reference")
         run_root = run_root.resolve()
+        supplied_tests = tuple(
+            _functionality_test_payload(command)
+            for command in plan.functionality_tests
+        )
+        contract_nodes = cls._contract_nodes(plan)
+        try:
+            # Reading a finalized (failed/blocked) predecessor is safe without
+            # the lineage flock: it is immutable from here on.  This also
+            # resolves an omitted logical_graph_id from the predecessor's
+            # persisted registration binding before the lock id (which is
+            # keyed by that same resolved value) is computed.
+            predecessor = PlanGraphAudit.open_repair_predecessor(
+                run_root=run_root,
+                graph_run_id=directive.predecessor_attempt_id,
+                plan=plan.plan,
+                plan_sha256=registration.plan_sha256,
+                base_commit=plan.base_commit,
+                logical_graph_id=directive.logical_graph_id,
+                plan_graph_digest=PlanGraphAudit.repair_contract_digest(
+                    plan=plan.plan, plan_sha256=registration.plan_sha256,
+                    base_commit=plan.base_commit,
+                    nodes=contract_nodes, functionality_tests=supplied_tests,
+                    plan_sections=plan.plan_sections,
+                    acceptance_criteria=plan.acceptance_criteria,
+                ),
+            )
+        except (AuditError, OSError, ValueError) as exc:
+            raise PlanGraphError(f"could not allocate repair successor: {exc}") from exc
+        logical_graph_id = predecessor.logical_graph_id
+        process_probe = kwargs.get("child_liveness_probe") or _local_process_start_token
         lock_dir = run_root / ".plan-graph-locks"
         lock_dir.mkdir(parents=True, exist_ok=True)
-        lock_id = hashlib.sha256(directive.logical_graph_id.encode("utf-8")).hexdigest()
+        lock_id = hashlib.sha256(logical_graph_id.encode("utf-8")).hexdigest()
         with (lock_dir / f"{lock_id}.lock").open("a+") as lock:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
             try:
-                supplied_tests = tuple(
-                    _functionality_test_payload(command)
-                    for command in plan.functionality_tests
-                )
-                contract_nodes = cls._contract_nodes(plan)
-                predecessor = PlanGraphAudit.open_repair_predecessor(
-                    run_root=run_root,
-                    graph_run_id=directive.predecessor_attempt_id,
-                    plan=plan.plan,
-                    plan_sha256=registration.plan_sha256,
-                    base_commit=plan.base_commit,
-                    logical_graph_id=directive.logical_graph_id,
-                    plan_graph_digest=PlanGraphAudit.repair_contract_digest(
-                        plan=plan.plan, plan_sha256=registration.plan_sha256,
-                        base_commit=plan.base_commit,
-                        nodes=contract_nodes, functionality_tests=supplied_tests,
-                        plan_sections=plan.plan_sections,
-                        acceptance_criteria=plan.acceptance_criteria,
-                    ),
-                )
                 selection = predecessor.repair_selection(
                     retry_frontier=directive.retry_frontier,
                     blocker_evidence_ref=directive.blocker_evidence_ref,
@@ -1060,12 +1289,12 @@ class PlanGraph:
                 for run in plan.runs:
                     if run.id not in invalidated:
                         continue
-                    budget.verdict(node_id=run.id, gate=gate_digest(run.verification_argv))
-                attempt_id = f"{directive.logical_graph_id}-attempt-{cls._next_repair_ordinal(run_root, directive.logical_graph_id)}"
+                    budget.verdict(node_id=run.id, gate=gate_digest(run.verification_argv, _gate_identity_shape(run)))
+                attempt_id = f"{logical_graph_id}-attempt-{cls._next_repair_ordinal(run_root, logical_graph_id, process_probe)}"
                 graph = cls(
                     repository, registration, launcher,
                     run_root=run_root, graph_run_id=attempt_id,
-                    logical_graph_id=directive.logical_graph_id,
+                    logical_graph_id=logical_graph_id,
                     predecessor_attempt_id=directive.predecessor_attempt_id,
                     resume_directive=directive,
                     reused_completed=selection["reused_completed"],
@@ -1083,13 +1312,52 @@ class PlanGraph:
 
     @staticmethod
     def _contract_nodes(plan: PlanGraphPlan) -> dict[str, dict[str, object]]:
-        return {run.id: {"objective": run.objective, "plan_sections": list(run.plan_sections), "depends_on": list(run.depends_on), "criteria": list(run.criteria), "verification_argv": list(run.verification_argv)} for run in plan.runs}
+        return {
+            run.id: {
+                "objective": run.objective,
+                "plan_sections": list(run.plan_sections),
+                "depends_on": list(run.depends_on),
+                "criteria": list(run.criteria),
+                "verification_argv": _contract_verification_argv(run),
+                "verification_gates": [
+                    dict(gate) for gate in _gate_identity_shape(run)
+                ],
+            }
+            for run in plan.runs
+        }
 
     @staticmethod
-    def _next_repair_ordinal(run_root: Path, logical_graph_id: str) -> int:
+    def _next_repair_ordinal(
+        run_root: Path,
+        logical_graph_id: str,
+        process_probe: Callable[[int], str | None],
+    ) -> int:
+        """Return the next free repair ordinal, reclaiming a crash-orphaned top one.
+
+        A repair successor directory that carries no successor-allocation
+        event (the controller crashed during admission, before that event
+        was written) is reclaimed in place — renamed aside, never deleted —
+        so its ordinal is re-allocated here instead of being permanently
+        skipped.  Reclaim only fires for the highest existing ordinal, and
+        only when :meth:`PlanGraphAudit.reclaim_orphaned_successor_attempt`
+        confirms the allocation event is absent and the admission process is
+        dead; any other case declines and this simply returns the next one.
+        """
         prefix = f"{logical_graph_id}-attempt-"
-        ordinals = [int(path.name.removeprefix(prefix)) for path in run_root.glob(f"{prefix}*") if path.is_dir() and path.name.removeprefix(prefix).isdigit()]
-        return max(ordinals, default=0) + 1
+        ordinals = sorted(
+            int(path.name.removeprefix(prefix))
+            for path in run_root.glob(f"{prefix}*")
+            if path.is_dir() and path.name.removeprefix(prefix).isdigit()
+        )
+        if not ordinals:
+            return 1
+        highest = ordinals[-1]
+        candidate_dir = run_root / f"{prefix}{highest}"
+        if PlanGraphAudit.reclaim_orphaned_successor_attempt(
+            candidate_dir, process_probe=process_probe
+        ):
+            return highest
+        return highest + 1
 
     def validate(self) -> None:
         validate_plan_graph_plan(self.plan)
@@ -1156,6 +1424,10 @@ class PlanGraph:
         finding_obligations = self._load_finding_obligations(audit)
         ordered_runs = _ordered_runs(self.plan)
         self._validate_completed_dependencies(ordered_runs, completed)
+        if self.max_parallelism > 1:
+            return self._run_ready_set(
+                audit, completed, finding_obligations, ordered_runs
+            )
         candidate_commit = self.plan.base_commit
         admission_rechecked = False
         for run in ordered_runs:
@@ -1172,7 +1444,7 @@ class PlanGraph:
             )
             try:
                 reservation = self.budget.reserve(
-                    node_id=run.id, gate=gate_digest(run.verification_argv),
+                    node_id=run.id, gate=gate_digest(run.verification_argv, _gate_identity_shape(run)),
                     failure_keys=self._finding_keys_for_reservation(finding_obligations.get(run.id, ())),
                     failure_reason=self._failure_reason_for_reservation(run.id),
                     graph_attempt_id=self.graph_run_id,
@@ -1184,72 +1456,116 @@ class PlanGraph:
                 return self._transition_to_blocked(audit, result, reason=str(exc))
             audit.node_started(run.id)
             outcome = self.launcher(request)
-            if not self._outcome_matches_reservation(outcome, request):
-                outcome = FeatureRunOutcome(
-                    "failed",
-                    evidence={"error": "launcher result does not match reserved child identity"},
-                )
-            if isinstance(outcome.evidence, Mapping):
-                try:
-                    self.budget.import_child_evidence(
-                        node_id=run.id, evidence=outcome.evidence
-                    )
-                except BudgetError as exc:
-                    raise PlanGraphError(str(exc)) from exc
-            if outcome.status != "succeeded":
-                self.budget.completed(reservation, outcome.status if outcome.status == "blocked" else "failed")
-                result = self._with_deviation_records(PlanGraphResult(
-                    status=outcome.status if outcome.status == "blocked" else "failed",
-                    candidate_commit=None,
-                    completed=dict(completed),
-                    failed_run_id=run.id,
-                ))
-                audit.node_failed(run.id, result.status, outcome.evidence)
-                if result.status == "blocked":
-                    return self._transition_to_blocked(
-                        audit, result, reason="FeatureRun reported blocked", evidence=outcome.evidence
-                    )
-                audit.finalize(result.status, self._result_payload(result))
-                return result
-            if not outcome.candidate_commit:
-                self.budget.completed(reservation, "failed")
-                raise PlanGraphError(
-                    f"successful FeatureRun {run.id!r} did not provide a candidate commit"
-                )
-            audit.candidate_verified_pending_transfer(
-                run.id,
-                outcome.candidate_commit,
-                outcome.evidence,
+            decision = self._seal_outcome(
+                audit, run, request, reservation, outcome,
+                completed, finding_obligations,
             )
-            try:
-                finding_obligations = self._advance_finding_obligations(
-                    run,
-                    request,
-                    outcome,
-                    finding_obligations,
-                    completed,
-                )
-            except PlanGraphError as exc:
-                self.budget.completed(reservation, "blocked")
-                conflict_ref = audit.transfer_conflict_blocked(run.id, str(exc))
-                result = self._with_deviation_records(PlanGraphResult(
-                    status="blocked",
-                    candidate_commit=outcome.candidate_commit,
-                    completed=dict(completed),
-                    failed_run_id=run.id,
-                ))
+            if decision.kind == "sealed":
+                finding_obligations = decision.finding_obligations
+                candidate_commit = completed[run.id]
+                continue
+            if decision.kind == "blocked":
                 return self._transition_to_blocked(
-                    audit, result, reason=str(exc), evidence_ref=conflict_ref
+                    audit, decision.result,
+                    reason=decision.reason,
+                    evidence=decision.evidence,
+                    evidence_ref=decision.evidence_ref,
                 )
-            completed[run.id] = outcome.candidate_commit
-            self.budget.completed(reservation, "succeeded")
-            candidate_commit = outcome.candidate_commit
-            audit.node_completed(
-                run.id,
-                candidate_commit,
-                finding_obligations=finding_obligations,
+            audit.finalize(
+                decision.result.status, self._result_payload(decision.result)
             )
+            return decision.result
 
+        return self._finalize_with_functionality(audit, candidate_commit, completed)
+
+    def _seal_outcome(
+        self,
+        audit: PlanGraphAudit,
+        run: PlanRun,
+        request: FeatureRunRequest,
+        reservation: str,
+        outcome: FeatureRunOutcome,
+        completed: dict[str, str],
+        finding_obligations: dict[str, list[Mapping[str, object]]],
+    ) -> "_SealDecision":
+        """Record one launcher outcome against the ledger and audit journal.
+
+        Mutates ``completed`` on success and returns the caller's next move;
+        the caller owns graph finalization so the ready-set path can drain
+        in-flight siblings before transitioning.
+        """
+        if not self._outcome_matches_reservation(outcome, request):
+            outcome = FeatureRunOutcome(
+                "failed",
+                evidence={"error": "launcher result does not match reserved child identity"},
+            )
+        if isinstance(outcome.evidence, Mapping):
+            try:
+                self.budget.import_child_evidence(
+                    node_id=run.id, evidence=outcome.evidence
+                )
+            except BudgetError as exc:
+                raise PlanGraphError(str(exc)) from exc
+        if outcome.status != "succeeded":
+            self.budget.completed(reservation, outcome.status if outcome.status == "blocked" else "failed")
+            result = self._with_deviation_records(PlanGraphResult(
+                status=outcome.status if outcome.status == "blocked" else "failed",
+                candidate_commit=None,
+                completed=dict(completed),
+                failed_run_id=run.id,
+            ))
+            audit.node_failed(run.id, result.status, outcome.evidence)
+            if result.status == "blocked":
+                return _SealDecision(
+                    "blocked", result=result,
+                    reason="FeatureRun reported blocked", evidence=outcome.evidence,
+                )
+            return _SealDecision("failed", result=result)
+        if not outcome.candidate_commit:
+            self.budget.completed(reservation, "failed")
+            raise PlanGraphError(
+                f"successful FeatureRun {run.id!r} did not provide a candidate commit"
+            )
+        audit.candidate_verified_pending_transfer(
+            run.id,
+            outcome.candidate_commit,
+            outcome.evidence,
+        )
+        try:
+            finding_obligations = self._advance_finding_obligations(
+                run,
+                request,
+                outcome,
+                finding_obligations,
+                completed,
+            )
+        except PlanGraphError as exc:
+            self.budget.completed(reservation, "blocked")
+            conflict_ref = audit.transfer_conflict_blocked(run.id, str(exc))
+            result = self._with_deviation_records(PlanGraphResult(
+                status="blocked",
+                candidate_commit=outcome.candidate_commit,
+                completed=dict(completed),
+                failed_run_id=run.id,
+            ))
+            return _SealDecision(
+                "blocked", result=result, reason=str(exc), evidence_ref=conflict_ref
+            )
+        completed[run.id] = outcome.candidate_commit
+        self.budget.completed(reservation, "succeeded")
+        audit.node_completed(
+            run.id,
+            outcome.candidate_commit,
+            finding_obligations=finding_obligations,
+        )
+        return _SealDecision("sealed", finding_obligations=finding_obligations)
+
+    def _finalize_with_functionality(
+        self,
+        audit: PlanGraphAudit,
+        candidate_commit: str,
+        completed: dict[str, str],
+    ) -> PlanGraphResult:
         for command in self.functionality_tests:
             recorded = _functionality_test_payload(command)
             rendered = (
@@ -1277,6 +1593,242 @@ class PlanGraph:
         )
         audit.finalize(result.status, self._result_payload(result))
         return result
+
+    def _run_ready_set(
+        self,
+        audit: PlanGraphAudit,
+        completed: dict[str, str],
+        finding_obligations: dict[str, list[Mapping[str, object]]],
+        ordered_runs: Sequence[PlanRun],
+    ) -> PlanGraphResult:
+        """Execute the graph through ReadySetScheduler admission.
+
+        Launcher calls run on worker threads; every node-content checkpoint
+        mutation, ledger update, and Git mutation stays on this coordinating
+        thread. The sole exception is the shared ``gate_slot``: its
+        acquire/release journal entries and the checkpoint re-stamp that
+        follows each of them change no per-node field, only re-binding the
+        checkpoint to the journal head those entries just advanced, so it is
+        safe to write from the worker thread holding the slot around its own
+        verification-command execution — the journal's internal mutex
+        serializes it against this thread's own checkpoint writes. Sibling
+        candidates branch from their dependencies' candidates and are joined
+        with controller-owned merge commits; the final graph candidate joins
+        the sink nodes' candidates.
+        """
+        scheduler = ReadySetScheduler(
+            ordered_runs, max_parallelism=self.max_parallelism
+        )
+        by_id = {run.id: run for run in ordered_runs}
+        self._revalidate_approval()
+        # max_parallelism > 1 is exactly this method's precondition, so one
+        # exclusive gate slot is always created here and shared by every
+        # request this run issues; the legacy sequential path never builds
+        # one, so max_parallelism=1 stays byte-identical (no slot, no
+        # verification_gate_slot value, no gate slot journal events).
+        gate_slot = GateSlot(audit)
+        in_flight: dict[str, tuple[Future, FeatureRunRequest, str]] = {}
+        terminal: _SealDecision | None = None
+        deferred_error: PlanGraphError | None = None
+        with ThreadPoolExecutor(
+            max_workers=self.max_parallelism, thread_name_prefix="plan-graph-node"
+        ) as pool:
+            while True:
+                if terminal is None and deferred_error is None:
+                    active = tuple(
+                        ReadySetDispatch(node_id, "feature_run")
+                        for node_id in sorted(in_flight)
+                    )
+                    for unit in scheduler.select(set(completed), active=active):
+                        run = by_id[unit.node_id]
+                        try:
+                            base = self._base_commit_for_run(run, completed)
+                        except PlanGraphError as exc:
+                            audit.node_failed(
+                                run.id, "blocked",
+                                {"error": str(exc), "classification": "harness_or_configuration"},
+                            )
+                            terminal = _SealDecision(
+                                "blocked",
+                                result=PlanGraphResult("blocked", None, dict(completed), run.id),
+                                reason=str(exc),
+                            )
+                            break
+                        request = self._request_for_run(
+                            run, base, tuple(finding_obligations.get(run.id, ())),
+                            verification_gate_slot=gate_slot.hold(run.id),
+                        )
+                        try:
+                            reservation = self.budget.reserve(
+                                node_id=run.id, gate=gate_digest(run.verification_argv, _gate_identity_shape(run)),
+                                failure_keys=self._finding_keys_for_reservation(
+                                    finding_obligations.get(run.id, ())
+                                ),
+                                failure_reason=self._failure_reason_for_reservation(run.id),
+                                graph_attempt_id=self.graph_run_id,
+                            )
+                            self.budget.started(reservation)
+                        except BudgetError as exc:
+                            audit.node_failed(
+                                run.id, "blocked",
+                                {"error": str(exc), "classification": "harness_or_configuration"},
+                            )
+                            terminal = _SealDecision(
+                                "blocked",
+                                result=PlanGraphResult("blocked", None, dict(completed), run.id),
+                                reason=str(exc),
+                            )
+                            break
+                        audit.node_started(run.id)
+                        in_flight[run.id] = (
+                            pool.submit(self.launcher, request), request, reservation
+                        )
+                if not in_flight:
+                    break
+                done_ids = [
+                    node_id for node_id, (future, _, _) in in_flight.items()
+                    if future.done()
+                ]
+                if not done_ids:
+                    wait(
+                        [future for future, _, _ in in_flight.values()],
+                        return_when=FIRST_COMPLETED,
+                    )
+                    done_ids = [
+                        node_id for node_id, (future, _, _) in in_flight.items()
+                        if future.done()
+                    ]
+                for node_id in sorted(done_ids):
+                    future, request, reservation = in_flight.pop(node_id)
+                    run = by_id[node_id]
+                    try:
+                        outcome = future.result()
+                    except Exception as exc:  # noqa: BLE001 — launcher escape is child failure
+                        outcome = FeatureRunOutcome(
+                            "failed",
+                            evidence={"error": str(exc), "error_type": type(exc).__name__},
+                        )
+                    # A successful outcome for a node with verification_argv
+                    # only happens once its verification command has actually
+                    # run (see run_feature_worktree). If this node's slot was
+                    # never entered, the launcher could not have serialized
+                    # that run against its concurrently admitted siblings —
+                    # e.g. an out-of-process launcher, which has no way to
+                    # carry the in-process hold across the subprocess
+                    # boundary — so record that the mutual-exclusion
+                    # guarantee did not apply, instead of leaving the journal
+                    # indistinguishable from a run that never needed it.
+                    if (
+                        outcome.status == "succeeded"
+                        and (run.verification_argv or run.verification_gates)
+                        and request.verification_gate_slot is not None
+                        and not request.verification_gate_slot.entered
+                    ):
+                        audit.gate_slot_bypassed(run.id)
+                    try:
+                        decision = self._seal_outcome(
+                            audit, run, request, reservation, outcome,
+                            completed, finding_obligations,
+                        )
+                    except PlanGraphError as exc:
+                        if deferred_error is None:
+                            deferred_error = exc
+                        continue
+                    if decision.kind == "sealed":
+                        finding_obligations = decision.finding_obligations
+                        continue
+                    if terminal is None:
+                        terminal = decision
+        if deferred_error is not None and terminal is None:
+            raise deferred_error
+        if terminal is not None:
+            result = replace(terminal.result, completed=dict(completed))
+            if terminal.kind == "blocked":
+                return self._transition_to_blocked(
+                    audit, result,
+                    reason=terminal.reason or "FeatureRun reported blocked",
+                    evidence=terminal.evidence,
+                    evidence_ref=terminal.evidence_ref,
+                )
+            audit.finalize(result.status, self._result_payload(result))
+            return result
+        candidate_commit = self._final_candidate(ordered_runs, completed)
+        return self._finalize_with_functionality(audit, candidate_commit, completed)
+
+    def _base_commit_for_run(
+        self, run: PlanRun, completed: Mapping[str, str]
+    ) -> str:
+        parents: list[str] = []
+        for dependency in run.depends_on:
+            candidate = completed.get(dependency)
+            if candidate is None:
+                raise PlanGraphError(
+                    f"run {run.id!r} admitted before dependency {dependency!r} sealed"
+                )
+            parents.append(candidate)
+        if not parents:
+            return self.plan.base_commit
+        return self._join_candidates(run.id, parents)
+
+    def _final_candidate(
+        self, ordered_runs: Sequence[PlanRun], completed: Mapping[str, str]
+    ) -> str:
+        depended = {
+            dependency for run in ordered_runs for dependency in run.depends_on
+        }
+        sinks = [run.id for run in ordered_runs if run.id not in depended]
+        return self._join_candidates("final", [completed[sink] for sink in sinks])
+
+    def _join_candidates(self, label: str, parents: Sequence[str]) -> str:
+        """Join divergent sibling candidates with controller-owned merges.
+
+        Ancestor parents are pruned first, so a linear lineage joins to its
+        tip without creating a merge commit. Conflicting joins raise — a
+        conflict between siblings means their allowed paths were not disjoint
+        in effect, which is a plan defect, not a repair target.
+        """
+        unique = list(dict.fromkeys(parents))
+        pruned = [
+            parent for parent in unique
+            if not any(
+                other != parent and self._is_ancestor(parent, other)
+                for other in unique
+            )
+        ]
+        if not pruned:
+            raise PlanGraphError(f"join {label!r} has no candidate parents")
+        merged = pruned[0]
+        for parent in pruned[1:]:
+            tree_run = subprocess.run(
+                ["git", "merge-tree", "--write-tree", merged, parent],
+                cwd=self.repository, text=True, capture_output=True, check=False,
+            )
+            if tree_run.returncode != 0:
+                raise PlanGraphError(
+                    f"PlanGraph join {label!r} has merge conflicts between "
+                    f"{merged[:12]} and {parent[:12]}: "
+                    + tree_run.stdout.strip().splitlines()[-1][:200]
+                )
+            tree = tree_run.stdout.strip().splitlines()[0]
+            merged = _git(
+                self.repository, "commit-tree", tree,
+                "-p", merged, "-p", parent,
+                "-m", f"PlanGraph join {label} ({self.graph_run_id})",
+            ).decode().strip()
+        if merged not in unique:
+            # Protect the synthetic join commit from gc for the run's lifetime.
+            _git(
+                self.repository, "update-ref",
+                f"refs/plan-graph/{self.graph_run_id}/join-{label}", merged,
+            )
+        return merged
+
+    def _is_ancestor(self, ancestor: str, descendant: str) -> bool:
+        probe = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", ancestor, descendant],
+            cwd=self.repository, capture_output=True, check=False,
+        )
+        return probe.returncode == 0
 
     def _revalidate_approval(self) -> ApprovalEvidence | None:
         if self.approval_validator is None:
@@ -1337,6 +1889,11 @@ class PlanGraph:
                 run.id: {
                     "status": "succeeded" if run.id in self.reused_completed else "queued",
                     **_run_mapping(run),
+                    # Keep this projection aligned with ``_contract_nodes`` so a
+                    # gate-tuple node's registration-time digest (computed here)
+                    # and its repair-resume comparison digest stay identical for
+                    # an unchanged node — see ``_contract_verification_argv``.
+                    "verification_argv": _contract_verification_argv(run),
                     "feature_run_id": self._feature_run_id(run.id),
                     "run_dir": str((self.run_root / self._feature_run_id(run.id)).resolve()),
                     "started_at": None,
@@ -1407,6 +1964,8 @@ class PlanGraph:
         run: PlanRun,
         candidate_commit: str,
         finding_obligations: tuple[Mapping[str, object], ...] = (),
+        *,
+        verification_gate_slot: "GateSlotHold | None" = None,
     ) -> FeatureRunRequest:
         if self._audit is None:
             raise PlanGraphError("FeatureRun request requires an initialized PlanGraph audit")
@@ -1425,6 +1984,7 @@ class PlanGraph:
             finding_obligations=finding_obligations,
             finding_transfer_targets=self._transfer_targets_for(run),
             inherited_ledger_frozen=bool(finding_obligations),
+            verification_gate_slot=verification_gate_slot,
         )
 
     @staticmethod
@@ -1850,15 +2410,16 @@ class PlanGraph:
     def _validate_completed_dependencies(
         ordered_runs: Sequence[PlanRun], completed: Mapping[str, str]
     ) -> None:
-        seen_incomplete = False
+        # Completion is a DAG property, not a topological prefix: under
+        # parallel dispatch a node legitimately completes while an
+        # earlier-ordered sibling is still open, so the only checkpoint
+        # invariant is that no node is marked complete before its own
+        # dependencies.  Commit-level custody is enforced separately by
+        # integration barriers and digest-verified reuse receipts.
         for run in ordered_runs:
-            if run.id not in completed:
-                seen_incomplete = True
-            elif seen_incomplete:
-                raise PlanGraphError(
-                    f"PlanGraph state marks {run.id!r} complete outside sequential candidate lineage"
-                )
-            elif any(dependency not in completed for dependency in run.depends_on):
+            if run.id in completed and any(
+                dependency not in completed for dependency in run.depends_on
+            ):
                 raise PlanGraphError(
                     f"PlanGraph state marks {run.id!r} complete before its dependency"
                 )
@@ -1902,10 +2463,31 @@ def validate_plan_graph_plan(plan: PlanGraphPlan) -> None:
             raise PlanGraphError(f"run {run.id!r} has incomplete approved context")
         if any(not value for value in run.verification_argv):
             raise PlanGraphError(f"run {run.id!r} verification_argv contains an empty value")
-        if strict and not run.verification_argv:
+        if strict and not run.verification_argv and not run.verification_gates:
             raise PlanGraphError(
                 f"run {run.id!r} requires controller-owned verification"
             )
+        if run.verification_argv and run.verification_gates:
+            raise PlanGraphError(
+                f"run {run.id!r} may declare verification_argv or "
+                "verification_gates, not both"
+            )
+        gate_names = [gate.name for gate in run.verification_gates]
+        if len(gate_names) != len(set(gate_names)):
+            raise PlanGraphError(f"run {run.id!r} verification_gates has duplicate names")
+        for gate in run.verification_gates:
+            if not gate.name.strip():
+                raise PlanGraphError(f"run {run.id!r} verification_gates has an empty name")
+            if not gate.argv or any(not value for value in gate.argv):
+                raise PlanGraphError(
+                    f"run {run.id!r} verification_gates[{gate.name!r}] argv "
+                    "contains an empty value"
+                )
+            if gate.timeout_seconds <= 0:
+                raise PlanGraphError(
+                    f"run {run.id!r} verification_gates[{gate.name!r}] timeout "
+                    "must be positive"
+                )
         if any(not value for value in run.allowed_paths):
             raise PlanGraphError(f"run {run.id!r} allowed_paths contains an empty value")
         if strict and not run.allowed_paths:
@@ -1923,17 +2505,12 @@ def validate_plan_graph_plan(plan: PlanGraphPlan) -> None:
                 raise PlanGraphError(
                     f"run {run.id!r} path intent {intent.path!r} is outside allowed_paths"
                 )
-        cited = "\n".join(plan.plan_sections.get(section, "") for section in run.plan_sections)
         for section in run.plan_sections:
             if section not in plan.plan_sections:
                 raise PlanGraphError(f"run {run.id!r} references unknown plan section {section!r}")
-        if run.objective not in cited:
-            raise PlanGraphError(f"run {run.id!r} objective is absent from its cited plan sections")
         for criterion in run.criteria:
             if criterion not in plan.acceptance_criteria:
                 raise PlanGraphError(f"run {run.id!r} references unknown criterion {criterion!r}")
-            if criterion not in cited or plan.acceptance_criteria[criterion] not in cited:
-                raise PlanGraphError(f"run {run.id!r} criterion {criterion!r} is absent from its cited plan sections")
             covered.add(criterion)
         for dependency in run.depends_on:
             if dependency not in known_runs:
@@ -2134,6 +2711,10 @@ def plan_from_mapping(
                     _required_path_from_mapping(value)
                     for value in item.get("verification_required_paths", ())
                 ),
+                verification_gates=tuple(
+                    _gate_from_mapping(value)
+                    for value in item.get("verification_gates", ())
+                ),
             )
             for item in payload["runs"]  # type: ignore[index]
         )
@@ -2172,6 +2753,18 @@ def _run_from_mapping(value: Mapping[str, object]) -> PlanRun:
             _required_path_from_mapping(item)
             for item in value["verification_required_paths"]  # type: ignore[union-attr]
         ),
+        verification_gates=tuple(
+            _gate_from_mapping(item)
+            for item in value.get("verification_gates", ())  # type: ignore[union-attr]
+        ),
+    )
+
+
+def _gate_from_mapping(value: Mapping[str, object]) -> VerificationGate:
+    return VerificationGate(
+        name=str(value["name"]),
+        argv=tuple(str(item) for item in value["argv"]),  # type: ignore[union-attr]
+        timeout_seconds=float(value["timeout_seconds"]),  # type: ignore[arg-type]
     )
 
 
@@ -2216,6 +2809,8 @@ __all__ = [
     "FeatureRunOutcome",
     "FeatureRunRequest",
     "FunctionalityCommand",
+    "GateSlot",
+    "GateSlotHold",
     "PathIntent",
     "PlanGraph",
     "RequiredPath",
@@ -2227,6 +2822,7 @@ __all__ = [
     "ReadySetDispatch",
     "ReadySetScheduler",
     "SubprocessFeatureRunLauncher",
+    "VerificationGate",
     "canonical_definition",
     "load_registration",
     "persist_registration",

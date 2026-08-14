@@ -104,9 +104,15 @@ class ReviewFixResult:
 class ReviewLedger:
     """Authoritative finding identity, disposition, and cycle history."""
 
-    def __init__(self, policy: ReviewFixPolicy, risk_tier: str) -> None:
+    def __init__(
+        self,
+        policy: ReviewFixPolicy,
+        risk_tier: str,
+        allowed_paths: tuple[str, ...] = (),
+    ) -> None:
         self.policy = policy
         self.risk_tier = risk_tier
+        self.allowed_paths = tuple(allowed_paths)
         self.findings: dict[str, dict[str, Any]] = {}
         self.cycles: list[dict[str, Any]] = []
         self.discovery_frozen = False
@@ -140,6 +146,7 @@ class ReviewLedger:
             record.setdefault("fix_attempts", [])
             record.setdefault("reopened_count", 0)
             record.setdefault("required_paths", [])
+            record.setdefault("anchor_out_of_grant", False)
             self.findings[key] = record
 
     def seed_retained_transfers(
@@ -168,6 +175,7 @@ class ReviewLedger:
             record.setdefault("fix_attempts", [])
             record.setdefault("reopened_count", 0)
             record.setdefault("required_paths", [])
+            record.setdefault("anchor_out_of_grant", False)
             self.findings[key] = record
 
     def freeze_discovery(self) -> None:
@@ -184,9 +192,11 @@ class ReviewLedger:
 
         transferred: list[str] = []
         for key, record in self.findings.items():
+            anchor_out = bool(record.get("anchor_out_of_grant", False))
+            eligible_outcomes = {"open", "scope_screened"} if anchor_out else {"open"}
             if (
-                record["outcome"] != "open"
-                or not record["scope_expanding"]
+                record["outcome"] not in eligible_outcomes
+                or (not record["scope_expanding"] and not anchor_out)
                 or not record.get("transfer_eligible", True)
             ):
                 continue
@@ -194,6 +204,10 @@ class ReviewLedger:
             downstream_paths = [
                 str(path) for path in required_paths if str(path) not in current_paths
             ]
+            if not downstream_paths and anchor_out:
+                anchor_path = str(record.get("file", ""))
+                if anchor_path and anchor_path not in current_paths:
+                    downstream_paths = [anchor_path]
             resolved = [_target_for_path(path, targets) for path in downstream_paths]
             owners = set(resolved)
             if not downstream_paths or None in owners or len(owners) != 1:
@@ -273,6 +287,23 @@ class ReviewLedger:
 
         for record in self.findings.values():
             if record["outcome"] != "open":
+                continue
+            if record.get("origin_node"):
+                # Inherited via cross-node transfer: the file anchor still
+                # names the origin node's path, not this node's. Screening
+                # against that anchor would silently discharge an obligation
+                # this node now owns through required_paths.
+                record["anchor_out_of_grant"] = False
+                continue
+            anchor_out_of_grant = bool(record["file"]) and bool(
+                paths_outside_scope((record["file"],), self.allowed_paths)
+            )
+            record["anchor_out_of_grant"] = anchor_out_of_grant
+            if self.policy.scope_expansion_guard_enabled and anchor_out_of_grant:
+                record["outcome"] = "scope_screened"
+                record["outcome_reason"] = (
+                    "finding file anchor is outside the node's writable paths"
+                )
                 continue
             if (
                 self.policy.scope_expansion_guard_enabled
@@ -411,6 +442,7 @@ class ReviewLedger:
             "transferred_to": "",
             "transfer_eligible": True,
             "required_paths": list(finding.get("required_paths", ())),
+            "anchor_out_of_grant": False,
         }
 
     @staticmethod
@@ -478,7 +510,7 @@ class ReviewFixLoop:
 
     def run(self) -> ReviewFixResult:
         risk_tier = _risk_tier(self.changed_paths, self.policy)
-        ledger = ReviewLedger(self.policy, risk_tier)
+        ledger = ReviewLedger(self.policy, risk_tier, allowed_paths=self.allowed_paths)
         ledger.seed_transferred(self.inherited_findings)
         ledger.seed_retained_transfers(self.retained_transfers)
         if self.inherited_ledger_frozen:

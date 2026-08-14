@@ -88,6 +88,82 @@ class DashboardApiTests(unittest.TestCase):
         self.assertEqual([row["label"] for row in cumulative["by_try"]], ["try-1", "try-2"])
         self.assertEqual([row["feature_run_id"] for row in cumulative["stages"]], ["try-1", "try-2"])
         self.assertEqual(details["try-3"]["metrics"]["totals"]["total_tokens"], 150)
+
+    def test_cumulative_reused_try_adds_no_spend_and_wall_busy_are_all_or_unavailable(self) -> None:
+        def metrics(tokens: int, wall: int | None, busy: int | None) -> dict:
+            totals = {"calls": 1, "input_tokens": tokens - 5, "cached_input_tokens": 0, "output_tokens": 5, "total_tokens": tokens, "duration_ms": 30, "wall_clock_ms": wall, "busy_ms": busy, "peak_input_tokens": tokens - 5, "cost": {"state": "estimated", "usd": 0.1, "reason": "estimate", "sources": ["pricing"], "estimated_records": 1, "long_context_records": 0}}
+            return {"protocol": "harness-run-detail-metrics/1", "totals": totals, "quality": {}, "by_phase": [], "by_agent": [], "by_agent_type": [], "by_model": [], "by_effort": [], "by_backend": [], "stages": [], "provenance": {"usage_records": 1, "collection_method": "verified", "peak_context_definition": "peak"}}
+
+        catalog = {"plan_graphs": [
+            {"run_id": "graph-1", "created_at": "2026-08-09T00:00:00Z", "plan_digest": "plan", "nodes": [{"node_id": "FR-1", "feature_run_id": "try-1"}]},
+            {"run_id": "graph-2", "created_at": "2026-08-09T01:00:00Z", "plan_digest": "plan", "nodes": [{"node_id": "FR-1", "feature_run_id": "try-2"}]},
+            # The newest attempt REUSES the sealed node: its planned run
+            # directory never existed, so a reuse contributes no new spend.
+            {"run_id": "graph-3", "created_at": "2026-08-09T02:00:00Z", "plan_digest": "plan", "nodes": [{"node_id": "FR-1", "feature_run_id": "graph-3-FR-1", "reused_from_attempt": "graph-2"}]},
+        ]}
+        details = {"try-1": {"metrics": metrics(100, wall=20, busy=8)}, "try-2": {"metrics": metrics(40, wall=None, busy=9)}}
+
+        _apply_cumulative_node_metrics(catalog, details)
+
+        cumulative = details["try-2"]["metrics"]
+        self.assertEqual(cumulative["provenance"]["attempt_count"], 2)
+        self.assertEqual([row["label"] for row in cumulative["by_try"]], ["try-1", "try-2"])
+        self.assertEqual(cumulative["totals"]["total_tokens"], 140)
+        self.assertEqual(cumulative["totals"]["duration_ms"], 60)
+        # One try is still running (no summary): a partial wall sum would
+        # falsely display summed agent time exceeding wall time.
+        self.assertIsNone(cumulative["totals"]["wall_clock_ms"])
+        # Tries are sequential, so per-try busy unions add without overlap.
+        self.assertEqual(cumulative["totals"]["busy_ms"], 17)
+
+    def test_reused_node_resolves_origin_run_through_catalog_endpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            plan = root / "plan.md"
+            plan.write_text("approved plan\n", encoding="utf-8")
+            plan_sha = hashlib.sha256(plan.read_bytes()).hexdigest()
+            commit = "f" * 40
+            PlanGraphAudit(
+                repository=root, run_root=root, graph_run_id="graph-root", plan=str(plan), plan_sha256=plan_sha,
+                base_commit="a" * 40, registration_binding=_registration_binding("graph-root"),
+                objective="origin attempt",
+                nodes={"CB-01": {"status": "succeeded", "feature_run_id": "graph-root-CB-01", "depends_on": [], "candidate_commit": commit}},
+                functionality_tests=(),
+            )
+            PlanGraphAudit(
+                repository=root, run_root=root, graph_run_id="graph-attempt-1", plan=str(plan), plan_sha256=plan_sha,
+                base_commit="a" * 40, registration_binding=_registration_binding("graph-attempt-1"),
+                objective="first successor reuses the sealed node",
+                nodes={"CB-01": {"status": "succeeded", "feature_run_id": "graph-attempt-1-CB-01", "depends_on": [], "candidate_commit": commit, "reused_from_attempt": "graph-root"}},
+                functionality_tests=(),
+            )
+            PlanGraphAudit(
+                repository=root, run_root=root, graph_run_id="graph-attempt-2", plan=str(plan), plan_sha256=plan_sha,
+                base_commit="a" * 40, registration_binding=_registration_binding("graph-attempt-2"),
+                objective="second successor reuses across two hops",
+                nodes={"CB-01": {"status": "succeeded", "feature_run_id": "graph-attempt-2-CB-01", "depends_on": [], "candidate_commit": commit, "reused_from_attempt": "graph-attempt-1"}},
+                functionality_tests=(),
+            )
+            self._run(root, "graph-root-CB-01")
+            (root / "graph-root-CB-01" / "descriptor.json").unlink()
+            app = DashboardApplication(root, refresh_seconds=60)
+            status, catalog_body, _ = self._request(app, "GET", "/api/catalog")
+            detail_status, detail_body, _ = self._request(app, "GET", "/api/feature-runs/graph-root-CB-01")
+
+        self.assertEqual(status, 200)
+        graphs = {graph["run_id"]: graph for graph in json.loads(catalog_body)["plan_graphs"]}
+        two_hop = graphs["graph-attempt-2"]["nodes"][0]
+        self.assertEqual(two_hop["correlation"]["state"], "reused")
+        self.assertEqual(two_hop["correlation"]["origin_attempt_id"], "graph-root")
+        self.assertEqual(two_hop["correlation"]["origin_feature_run_id"], "graph-root-CB-01")
+        self.assertEqual(two_hop["evidence"]["state"], "partial")
+        one_hop = graphs["graph-attempt-1"]["nodes"][0]
+        self.assertEqual(one_hop["correlation"]["origin_attempt_id"], "graph-root")
+        # The origin run's verified detail (and thus its metrics) stays
+        # inspectable for a node clicked on the successor attempt.
+        self.assertEqual(detail_status, 200)
+        self.assertIn("metrics", json.loads(detail_body))
+
     def test_plan_graph_endpoint_discovers_lineage_bearing_descriptor(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -113,6 +189,40 @@ class DashboardApiTests(unittest.TestCase):
         self.assertEqual(graph["retention_constraints"]["state"], "unavailable")
         self.assertEqual(detail_status, 200)
         self.assertEqual(json.loads(detail_body)["run_id"], "graph-attempt-2")
+
+    def test_descriptorless_child_with_matching_run_id_is_id_matched_and_inspectable(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            plan = root / "plan.md"
+            plan.write_text("approved plan\n", encoding="utf-8")
+            PlanGraphAudit(
+                repository=root, run_root=root, graph_run_id="graph-1", plan=str(plan),
+                plan_sha256=hashlib.sha256(plan.read_bytes()).hexdigest(),
+                base_commit="a" * 40, registration_binding=_registration_binding("graph-1"),
+                objective="id-matched correlation",
+                nodes={"CB-01": {"status": "running", "feature_run_id": "graph-1-CB-01", "depends_on": []}},
+                functionality_tests=(),
+            )
+            self._run(root, "graph-1-CB-01")
+            (root / "graph-1-CB-01" / "descriptor.json").unlink()
+            app = DashboardApplication(root, refresh_seconds=60)
+            status, catalog_body, _ = self._request(app, "GET", "/api/catalog")
+            detail_status, detail_body, _ = self._request(app, "GET", "/api/feature-runs/graph-1-CB-01")
+
+        self.assertEqual(status, 200)
+        catalog = json.loads(catalog_body)
+        node = catalog["plan_graphs"][0]["nodes"][0]
+        self.assertEqual(node["feature_run_id"], "graph-1-CB-01")
+        self.assertEqual(node["evidence"]["state"], "partial")
+        self.assertEqual(node["evidence"]["reason"], "correlated by exact run id; descriptor attestation absent")
+        run = catalog["feature_runs"][0]
+        self.assertEqual(run["kind"], "legacy_feature_run")
+        self.assertEqual(run["correlation"]["state"], "id_matched")
+        self.assertEqual(run["correlation"]["plan_graph_id"], "graph-1")
+        self.assertEqual(run["correlation"]["plan_node_id"], "CB-01")
+        self.assertEqual(catalog["ungrouped_feature_runs"], [])
+        self.assertEqual(detail_status, 200)
+        self.assertIn("metrics", json.loads(detail_body))
 
     def test_catalog_etag_is_stable_across_refreshes_without_a_new_revision(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

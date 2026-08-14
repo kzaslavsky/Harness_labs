@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+from contextlib import AbstractContextManager, nullcontext
 import hashlib
 import json
+import re
 import subprocess
 from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
 from pathlib import Path
 from time import monotonic_ns
-from typing import Callable, Literal, Mapping, Protocol
+from typing import Any, Callable, Literal, Mapping, Protocol
 
 from .agent_sessions import AgentSession
 from .attempts import AttemptRunner, Executor, TaskAttempt, TaskResult
@@ -16,6 +19,7 @@ from .audit import AuditActor, AuditJournal
 from .controller_commands import CommandActor, CommandEnvelope
 from .controller_evidence import EvidenceCatalog
 from .controller_kernel import ControllerKernel, RunContract
+from .controller_live import DirtyBaselineGrantVerification, verify_dirty_baseline_grant
 from .controller_projection import project_run_view
 from .controller_scheduler import CapabilityScheduler, RoleProfile
 from .coordinator_dispatcher import (
@@ -31,6 +35,7 @@ from .git_transaction import (
     paths_outside_scope,
     workspace_snapshot,
 )
+from .plan_graph_budget import failing_identifiers
 from .review_fix import (
     ReviewFixExecutorFactory,
     ReviewFixLoop,
@@ -83,6 +88,36 @@ class FeatureRunHandoffArtifact:
 
 
 @dataclass(frozen=True)
+class VerificationGate:
+    """One named, independently timed command within a node's gate tuple.
+
+    An ordered tuple of these replaces a single flat ``verification_argv``
+    when a node's deterministic verification is decomposed: each gate runs,
+    is classified, and is repaired independently, while a full re-run after
+    any repair always restarts at the first gate. A flat ``verification_argv``
+    remains valid and byte-identical in behavior when no gates are declared.
+    """
+
+    name: str
+    argv: tuple[str, ...]
+    timeout_seconds: float = 1200.0
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.name, str) or not self.name.strip():
+            raise ValueError("verification gate name must be non-empty")
+        if not self.argv or any(
+            not isinstance(value, str) or not value for value in self.argv
+        ):
+            raise ValueError("verification gate argv must contain non-empty strings")
+        if (
+            not isinstance(self.timeout_seconds, (int, float))
+            or isinstance(self.timeout_seconds, bool)
+            or self.timeout_seconds <= 0
+        ):
+            raise ValueError("verification gate timeout_seconds must be positive")
+
+
+@dataclass(frozen=True)
 class PlanGraphFeatureRunBinding:
     """Approved PlanGraph handoff replacing only FeatureRun orient and plan."""
 
@@ -113,6 +148,7 @@ class PlanGraphFeatureRunBinding:
     finding_transfer_targets: Mapping[str, str] | None = None
     origin_node_id: str = ""
     inherited_ledger_frozen: bool = False
+    verification_gates: tuple[VerificationGate, ...] = ()
 
     def __post_init__(self) -> None:
         if not all(
@@ -135,12 +171,32 @@ class PlanGraphFeatureRunBinding:
                 raise ValueError(f"PlanGraph FeatureRun binding {name} must be non-empty")
         if not self.allowed_paths or any(not value for value in self.allowed_paths):
             raise ValueError("PlanGraph FeatureRun binding requires allowed_paths")
-        if not self.verification_argv or any(
-            not value for value in self.verification_argv
-        ):
-            raise ValueError("PlanGraph FeatureRun binding requires verification argv")
-        if self.verification_timeout_seconds <= 0:
-            raise ValueError("PlanGraph FeatureRun binding requires a positive timeout")
+        if self.verification_argv and self.verification_gates:
+            raise ValueError(
+                "PlanGraph FeatureRun binding may declare verification_argv or "
+                "verification_gates, not both"
+            )
+        if self.verification_argv:
+            if any(not value for value in self.verification_argv):
+                raise ValueError(
+                    "PlanGraph FeatureRun binding requires verification argv"
+                )
+            if self.verification_timeout_seconds <= 0:
+                raise ValueError(
+                    "PlanGraph FeatureRun binding requires a positive timeout"
+                )
+        elif self.verification_gates:
+            gate_names = [gate.name for gate in self.verification_gates]
+            if len(gate_names) != len(set(gate_names)):
+                raise ValueError(
+                    "PlanGraph FeatureRun binding verification_gates must have "
+                    "unique names"
+                )
+        else:
+            raise ValueError(
+                "PlanGraph FeatureRun binding requires verification argv or "
+                "verification_gates"
+            )
         if not isinstance(self.finding_obligations, tuple) or not all(
             isinstance(item, Mapping) for item in self.finding_obligations
         ):
@@ -382,7 +438,7 @@ class DeterministicVerificationResult:
     command_attempts: tuple[Mapping[str, object], ...]
     repair_attempts: int
     repair_invocation_ids: tuple[str, ...] = ()
-    repair_invocations: tuple[Mapping[str, str], ...] = ()
+    repair_invocations: tuple[Mapping[str, object], ...] = ()
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -401,15 +457,64 @@ _VERIFICATION_FAILURE_CLASSES = frozenset({
 })
 
 
+_DRIVER_CRASH_MARKERS = (
+    "walk driver",
+    "driver crashed",
+    "browser crashed",
+    "webdriver crashed",
+    "browser has disconnected",
+    "target closed",
+)
+_PYTEST_PASSED_RE = re.compile(r"\d+ passed\b")
+_PYTEST_FAILING_RE = re.compile(r"\b(?!0\b)\d+ (?:failed|errors?)\b")
+_PYTEST_FAILED_NODE_RE = re.compile(r"^failed ", re.MULTILINE)
+
+
+def _is_driver_crash_with_green_pytest(lowered_full_text: str) -> bool:
+    """True when a browser/driver crash marker sits next to a clean pytest run.
+
+    Distinguishes a live-browser walk-driver crash (environment fault) from a
+    genuine assertion failure inside the same pytest invocation: pytest's own
+    summary line is the ground truth for whether the product code failed.
+    """
+    if not any(marker in lowered_full_text for marker in _DRIVER_CRASH_MARKERS):
+        return False
+    if not _PYTEST_PASSED_RE.search(lowered_full_text):
+        return False
+    if _PYTEST_FAILING_RE.search(lowered_full_text):
+        return False
+    if _PYTEST_FAILED_NODE_RE.search(lowered_full_text):
+        return False
+    return True
+
+
 def classify_verification_failure(command: Mapping[str, object]) -> dict[str, str]:
     """Classify only evidence present in one deterministic command result.
 
-    The conservative default deliberately treats timeouts and selector/browser
-    failures as indeterminate: neither proves a product defect nor transient
-    infrastructure.
+    Structured fields are checked before any output-text heuristic: a timeout
+    (the `timed_out` flag or exit code 124) or a signal termination (a
+    negative exit code) is an environment fault by construction, so it must
+    not depend on what the command happened to print. The conservative
+    default still treats unrecognized output as indeterminate: neither proves
+    a product defect nor transient infrastructure.
     """
-    excerpt = "\n".join(str(command.get(key, "")) for key in ("stderr", "stdout"))[:500]
+    full_text = "\n".join(str(command.get(key, "")) for key in ("stderr", "stdout"))
+    excerpt = full_text[:500]
     lowered = excerpt.lower()
+    if command.get("timed_out") is True:
+        return {"classification": "infrastructure_transient", "rule_id": "timeout-flag", "evidence_excerpt": excerpt}
+    exit_code = command.get("exit_code")
+    if isinstance(exit_code, int):
+        if exit_code == 124:
+            return {"classification": "infrastructure_transient", "rule_id": "timeout-exit-124", "evidence_excerpt": excerpt}
+        if exit_code < 0:
+            return {
+                "classification": "infrastructure_transient",
+                "rule_id": f"signal-terminated-{-exit_code}",
+                "evidence_excerpt": excerpt,
+            }
+    if _is_driver_crash_with_green_pytest(full_text.lower()):
+        return {"classification": "infrastructure_transient", "rule_id": "driver-crash-pytest-green", "evidence_excerpt": excerpt}
     if any(marker in lowered for marker in ("connection reset", "temporary failure", "dns", "network is unreachable")):
         return {"classification": "infrastructure_transient", "rule_id": "transient-network", "evidence_excerpt": excerpt}
     if any(marker in lowered for marker in ("permission denied", "outside_allowed_paths", "outside allowed paths")):
@@ -482,41 +587,61 @@ def run_feature_worktree(
     review_origin_node_id: str = "",
     review_inherited_ledger_frozen: bool = False,
     verification_argv: tuple[str, ...] = (),
+    verification_gates: tuple[VerificationGate, ...] = (),
     verification_repair_executor_factory: (
         VerificationRepairExecutorFactory | None
     ) = None,
     verification_repair_limit: int = 1,
     verification_timeout_seconds: float | None = 1200,
+    verification_gate_slot: AbstractContextManager[None] | None = None,
     recovery_agent: RecoveryAgent | None = None,
     recovery_limit: int = 3,
     evidence_classification: str = "production_lifecycle",
     initial_evidence: tuple[FeatureRunHandoffArtifact, ...] = (),
+    descriptor_correlation: Mapping[str, str] | None = None,
+    descriptor_plan: Mapping[str, str] | None = None,
 ) -> FeatureRunResult:
     """Create, execute, commit, and optionally merge one isolated FeatureRun."""
 
     if review_fix_policy.enabled and review_fix_executor_factory is None:
         raise ValueError("enabled review_fix_policy requires an executor factory")
-    if verification_argv:
+    if verification_argv and verification_gates:
+        raise ValueError(
+            "verification_argv and verification_gates are mutually exclusive"
+        )
+    has_verification = bool(verification_argv) or bool(verification_gates)
+    if has_verification:
         if any("verify" in segment.phases for segment in schema.segments):
             raise ValueError(
                 "controller-owned verification cannot be combined with a "
                 "coordinator verify phase"
             )
-        if any(not isinstance(value, str) or not value for value in verification_argv):
-            raise ValueError("verification_argv must contain non-empty strings")
+        if verification_argv:
+            if any(
+                not isinstance(value, str) or not value for value in verification_argv
+            ):
+                raise ValueError("verification_argv must contain non-empty strings")
+            if (
+                verification_timeout_seconds is not None
+                and verification_timeout_seconds <= 0
+            ):
+                raise ValueError(
+                    "verification_timeout_seconds must be positive or None"
+                )
+        else:
+            gate_names = [gate.name for gate in verification_gates]
+            if len(gate_names) != len(set(gate_names)):
+                raise ValueError("verification_gates must have unique names")
         if verification_repair_executor_factory is None:
             raise ValueError(
                 "deterministic verification requires a repair executor factory"
             )
         if verification_repair_limit < 1:
             raise ValueError("verification_repair_limit must be positive")
-        if (
-            verification_timeout_seconds is not None
-            and verification_timeout_seconds <= 0
-        ):
-            raise ValueError("verification_timeout_seconds must be positive or None")
     elif verification_repair_executor_factory is not None:
-        raise ValueError("verification repair requires verification_argv")
+        raise ValueError(
+            "verification repair requires verification_argv or verification_gates"
+        )
     if recovery_limit < 1:
         raise ValueError("recovery_limit must be positive")
     handoff_kinds = [artifact.kind for artifact in initial_evidence]
@@ -534,13 +659,73 @@ def run_feature_worktree(
     creation = transaction.creation_receipt()
     contract = contract_factory(transaction.worktree_path, creation)
     _validate_repository_binding(contract, creation)
+    gate_criterion_ids = tuple(
+        sorted(
+            str(item.get("id"))
+            for item in contract.criteria
+            if item.get("adjudication") == "deterministic_verification"
+        )
+    )
+    if gate_criterion_ids and not verification_argv and not verification_gates:
+        raise ValueError(
+            "run-contract criteria declare deterministic-verification "
+            "adjudication but no verification_argv or verification_gates was "
+            "supplied: " + ", ".join(gate_criterion_ids)
+        )
     audit = AuditJournal(
         run_dir,
         contract.run_id,
         actor=AuditActor("kernel", "controller_kernel"),
         evidence_classification=evidence_classification,
     )
+    # Bind a run descriptor so the catalog can correlate this run (dashboard
+    # metrics join graph nodes to FeatureRuns through parent_correlation);
+    # without it the run projects as an uncorrelated legacy record.
+    descriptor_raw = (
+        json.dumps(
+            {
+                "protocol": "harness-run-descriptor/1",
+                "run_kind": "feature_run",
+                "run_id": contract.run_id,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "objective": contract.objective,
+                "evidence_classification": evidence_classification,
+                "repository": {
+                    "path": str(transaction.worktree_path),
+                    "base_branch": base_branch,
+                    "base_commit": str(creation["base_commit"]),
+                },
+                "approved_plan": dict(descriptor_plan) if descriptor_plan else None,
+                "parent_correlation": (
+                    dict(descriptor_correlation) if descriptor_correlation else None
+                ),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+    ).encode("utf-8")
+    (audit.run_dir / "descriptor.json").write_bytes(descriptor_raw)
+    audit.append(
+        "run_descriptor_bound",
+        status="succeeded",
+        payload={"descriptor_sha256": hashlib.sha256(descriptor_raw).hexdigest()},
+    )
     evidence = EvidenceCatalog(audit=audit)
+    if verification_repair_executor_factory is not None:
+        verification_repair_executor_factory = _grant_aware_repair_factory(
+            verification_repair_executor_factory,
+            evidence=evidence,
+            worktree_path=transaction.worktree_path,
+            audit=audit,
+        )
+    if review_fix_executor_factory is not None:
+        review_fix_executor_factory = _grant_aware_review_fix_factory(
+            review_fix_executor_factory,
+            evidence=evidence,
+            worktree_path=transaction.worktree_path,
+            audit=audit,
+        )
     recovery = _RecoveryState(recovery_limit)
     handoff_records = []
     for handoff in initial_evidence:
@@ -633,54 +818,65 @@ def run_feature_worktree(
     review_transfers: dict[str, Mapping[str, object]] = {}
     pre_review_workspace = None
     if status == "succeeded" and project_run_view(kernel)["status"] == "succeeded":
-        if verification_argv:
+        if has_verification:
             assert verification_repair_executor_factory is not None
-            verification_result = _verify_with_recovery(
-                run_id=contract.run_id,
-                objective=contract.objective,
-                acceptance_criteria=contract.criteria,
-                worktree_path=transaction.worktree_path,
-                allowed_paths=allowed_paths,
-                argv=verification_argv,
-                repair_executor_factory=verification_repair_executor_factory,
-                repair_limit=verification_repair_limit,
-                timeout_seconds=verification_timeout_seconds,
-                evidence=evidence,
-                audit=audit,
-            )
-            status = verification_result.status
-            while status in {"blocked", "failed", "interrupted"}:
-                if not _recover_abnormal(
-                    agent=recovery_agent,
-                    recovery=recovery,
-                    audit=audit,
-                    contract=contract,
-                    worktree_path=transaction.worktree_path,
-                    allowed_paths=allowed_paths,
-                    stage="verification",
-                    condition=status,
-                    reason=verification_result.reason,
-                ):
-                    break
-                retried_verification = _verify_with_recovery(
+            # A graph-owned exclusive gate slot, when supplied by a PlanGraph
+            # ready-set run, serializes this whole verification stage —
+            # including its recovery retries and their recovery-agent
+            # invocations below, which run for an unbounded duration —
+            # across concurrently admitted siblings; dispatch above and
+            # review/fix below stay parallel. Solo FeatureRuns and
+            # max_parallelism=1 pass no slot, so `nullcontext()` makes this a
+            # no-op identical to before.
+            with (verification_gate_slot or nullcontext()):
+                verification_result = _run_verification_stage(
                     run_id=contract.run_id,
                     objective=contract.objective,
                     acceptance_criteria=contract.criteria,
                     worktree_path=transaction.worktree_path,
                     allowed_paths=allowed_paths,
-                    argv=verification_argv,
+                    verification_argv=verification_argv,
+                    verification_gates=verification_gates,
                     repair_executor_factory=verification_repair_executor_factory,
                     repair_limit=verification_repair_limit,
                     timeout_seconds=verification_timeout_seconds,
                     evidence=evidence,
                     audit=audit,
-                    stage="recovery",
                 )
-                verification_result = _combine_verification_results(
-                    verification_result,
-                    retried_verification,
-                )
-                status = retried_verification.status
+                status = verification_result.status
+                while status in {"blocked", "failed", "interrupted"}:
+                    if not _recover_abnormal(
+                        agent=recovery_agent,
+                        recovery=recovery,
+                        audit=audit,
+                        contract=contract,
+                        worktree_path=transaction.worktree_path,
+                        allowed_paths=allowed_paths,
+                        stage="verification",
+                        condition=status,
+                        reason=verification_result.reason,
+                    ):
+                        break
+                    retried_verification = _run_verification_stage(
+                        run_id=contract.run_id,
+                        objective=contract.objective,
+                        acceptance_criteria=contract.criteria,
+                        worktree_path=transaction.worktree_path,
+                        allowed_paths=allowed_paths,
+                        verification_argv=verification_argv,
+                        verification_gates=verification_gates,
+                        repair_executor_factory=verification_repair_executor_factory,
+                        repair_limit=verification_repair_limit,
+                        timeout_seconds=verification_timeout_seconds,
+                        evidence=evidence,
+                        audit=audit,
+                        stage="recovery",
+                    )
+                    verification_result = _combine_verification_results(
+                        verification_result,
+                        retried_verification,
+                    )
+                    status = retried_verification.status
     if status == "succeeded" and project_run_view(kernel)["status"] == "succeeded":
         if review_fix_policy.enabled:
             assert review_fix_executor_factory is not None
@@ -752,18 +948,19 @@ def run_feature_worktree(
     if (
         status == "succeeded"
         and project_run_view(kernel)["status"] == "succeeded"
-        and verification_argv
+        and has_verification
         and pre_review_workspace is not None
         and workspace_snapshot(transaction.worktree_path) != pre_review_workspace
     ):
         assert verification_repair_executor_factory is not None
-        post_review = _verify_with_recovery(
+        post_review = _run_verification_stage(
             run_id=contract.run_id,
             objective=contract.objective,
             acceptance_criteria=contract.criteria,
             worktree_path=transaction.worktree_path,
             allowed_paths=allowed_paths,
-            argv=verification_argv,
+            verification_argv=verification_argv,
+            verification_gates=verification_gates,
             repair_executor_factory=verification_repair_executor_factory,
             repair_limit=verification_repair_limit,
             timeout_seconds=verification_timeout_seconds,
@@ -789,13 +986,14 @@ def run_feature_worktree(
                 reason=post_review.reason,
             ):
                 break
-            retried_post_review = _verify_with_recovery(
+            retried_post_review = _run_verification_stage(
                 run_id=contract.run_id,
                 objective=contract.objective,
                 acceptance_criteria=contract.criteria,
                 worktree_path=transaction.worktree_path,
                 allowed_paths=allowed_paths,
-                argv=verification_argv,
+                verification_argv=verification_argv,
+                verification_gates=verification_gates,
                 repair_executor_factory=verification_repair_executor_factory,
                 repair_limit=verification_repair_limit,
                 timeout_seconds=verification_timeout_seconds,
@@ -809,6 +1007,13 @@ def run_feature_worktree(
             )
             post_review = retried_post_review
             status = post_review.status
+    if (
+        status == "succeeded"
+        and project_run_view(kernel)["status"] == "succeeded"
+        and verification_result is not None
+        and verification_result.status == "succeeded"
+    ):
+        _promote_gate_criteria(kernel, verification_result)
     if status == "succeeded" and project_run_view(kernel)["status"] == "succeeded":
         while True:
             try:
@@ -862,6 +1067,13 @@ def run_feature_worktree(
                 break
 
     view = project_run_view(kernel)
+    if (
+        view["status"] == "succeeded"
+        and status != "succeeded"
+        and verification_result is not None
+    ):
+        _record_gate_verification_failure(kernel, verification_result)
+        view = project_run_view(kernel)
     terminal_status = (
         "succeeded"
         if status == "succeeded" and view["status"] == "succeeded"
@@ -988,6 +1200,7 @@ def run_plan_graph_feature_worktree(
         "allowed_paths",
         "verification_argv",
         "verification_timeout_seconds",
+        "verification_gates",
     }
     if binding.is_child_lane:
         reserved.update({"base_commit", "candidate_only"})
@@ -1087,6 +1300,17 @@ def run_plan_graph_feature_worktree(
         review_inherited_ledger_frozen=binding.inherited_ledger_frozen,
         verification_argv=binding.verification_argv,
         verification_timeout_seconds=binding.verification_timeout_seconds,
+        verification_gates=binding.verification_gates,
+        descriptor_correlation={
+            "plan_graph_id": binding.plan_graph_id,
+            "plan_node_id": binding.plan_node_id,
+            "parent_run_id": binding.plan_graph_id,
+        },
+        descriptor_plan=(
+            {"path": binding.plan, "sha256": binding.plan_sha256}
+            if binding.plan and binding.plan_sha256
+            else None
+        ),
         **child_options,
         **feature_run_options,
     )
@@ -1302,6 +1526,249 @@ def _resume_kernel_after_recovery(
         raise ValueError(f"recovery could not resume run: {receipt.message}")
 
 
+def _dirty_baseline_receipt_ref(
+    evidence: EvidenceCatalog,
+    dirty_paths: list[str],
+    dirty_files: Mapping[str, Any],
+) -> tuple[str | None, DirtyBaselineGrantVerification | None]:
+    """Return a workspace-change receipt covering every dirty path's path and content.
+
+    A candidate receipt qualifies only when the shared
+    :func:`~harness_labs.controller_live.verify_dirty_baseline_grant` accepts
+    it -- changed-path coverage *and* per-file content-state match against
+    ``dirty_files`` -- the same check the executor runs at preflight, so a
+    grant issued from the selection here can never be journaled as granted
+    against a workspace state that would fail preflight. Among qualifying
+    receipts the tightest-covering one is preferred (fewest paths beyond
+    what's dirty), ties broken by evidence ref for determinism, so a stale
+    receipt from before further edits is passed over once a newer one covers
+    everything.
+
+    When no candidate qualifies, the second element carries the
+    closest-covering candidate's failed verification (fewest uncovered and
+    mismatched paths combined), or a receipt-less verification against every
+    dirty path when the catalog holds no ``workspace-change-receipt`` at all
+    -- so a caller can journal exactly which paths defeated the grant.
+    """
+
+    dirty = set(dirty_paths)
+    if not dirty:
+        return None, None
+    best_ref: str | None = None
+    best_extra: int | None = None
+    best_failure: DirtyBaselineGrantVerification | None = None
+    best_defects: int | None = None
+    for record in evidence.list():
+        if record.kind != "workspace-change-receipt":
+            continue
+        verification = verify_dirty_baseline_grant(
+            evidence=evidence,
+            grant={"receipt_ref": record.ref},
+            dirty_paths=dirty_paths,
+            dirty_files=dirty_files,
+        )
+        if verification.ok:
+            extra = len(verification.receipted_paths) - len(dirty)
+            if best_extra is None or extra < best_extra or (
+                extra == best_extra and (best_ref is None or record.ref < best_ref)
+            ):
+                best_ref = record.ref
+                best_extra = extra
+        elif best_ref is None:
+            defects = len(verification.uncovered_paths) + len(
+                verification.mismatched_paths
+            )
+            if best_defects is None or defects < best_defects:
+                best_failure = verification
+                best_defects = defects
+    if best_ref is not None:
+        return best_ref, None
+    if best_failure is not None:
+        return None, best_failure
+    return None, verify_dirty_baseline_grant(
+        evidence=evidence,
+        grant=None,
+        dirty_paths=dirty_paths,
+        dirty_files=dirty_files,
+    )
+
+
+def _attach_dirty_baseline_grant(
+    executor: Executor,
+    *,
+    evidence: EvidenceCatalog,
+    worktree_path: Path,
+    audit: AuditJournal,
+    attempt: TaskAttempt,
+    actor: AuditActor,
+) -> None:
+    """Supply a repair/fix executor an audited grant for the current dirty baseline.
+
+    Only executors that expose a settable ``dirty_baseline_grant`` attribute
+    (the two live semantic executors) participate; anything else is left
+    untouched. A grant is only ever attached when an existing
+    ``workspace-change-receipt`` in this run's evidence catalog truthfully
+    covers every path currently dirty *and* matches its on-disk content, per
+    the shared ``verify_dirty_baseline_grant`` check -- the same check the
+    executor re-runs at preflight -- so a grant journaled here as granted
+    cannot then be refused there for the same workspace state, and that
+    decision is recorded in the audit journal so the adoption is provable,
+    not merely asserted. When no candidate qualifies, the decline is
+    journaled too (status ``"refused"``, naming the uncovered and
+    content-mismatched paths) so a workspace that drifted between a prior
+    receipt and now is diagnosable from the journal instead of surfacing
+    only as the executor's later generic clean-baseline refusal.
+    """
+
+    if not hasattr(executor, "dirty_baseline_grant"):
+        return
+    snapshot = workspace_snapshot(worktree_path)
+    dirty_paths = list(snapshot["changed_paths"])
+    if not dirty_paths:
+        return
+    receipt_ref, failure = _dirty_baseline_receipt_ref(
+        evidence, dirty_paths, snapshot["files"]
+    )
+    if receipt_ref is None:
+        if failure is not None:
+            audit.append(
+                "dirty_baseline_adoption_grant_supplied",
+                status="refused",
+                payload={
+                    "dirty_paths": sorted(dirty_paths),
+                    "uncovered_paths": list(failure.uncovered_paths),
+                    "mismatched_paths": list(failure.mismatched_paths),
+                },
+                actor=actor,
+                attempt_id=attempt.attempt_id,
+            )
+        return
+    grant = {"receipt_ref": receipt_ref}
+    executor.dirty_baseline_grant = grant
+    audit.append(
+        "dirty_baseline_adoption_grant_supplied",
+        status="granted",
+        payload={
+            "receipt_ref": receipt_ref,
+            "dirty_paths": sorted(dirty_paths),
+        },
+        actor=actor,
+        attempt_id=attempt.attempt_id,
+    )
+
+
+def _grant_aware_repair_factory(
+    factory: VerificationRepairExecutorFactory,
+    *,
+    evidence: EvidenceCatalog,
+    worktree_path: Path,
+    audit: AuditJournal,
+) -> VerificationRepairExecutorFactory:
+    """Wrap a repair executor factory to auto-supply the adoption grant.
+
+    Converts the constructor-frozen ``allow_dirty_baseline`` escape hatch into
+    a per-dispatch runtime grant: the factory owned outside this module still
+    decides everything else about the repair executor, but every dispatch it
+    produces is offered whatever receipted baseline this run's evidence
+    catalog can prove covers the current dirty workspace.
+    """
+
+    def wrapped(attempt: TaskAttempt) -> Executor:
+        executor = factory(attempt)
+        _attach_dirty_baseline_grant(
+            executor,
+            evidence=evidence,
+            worktree_path=worktree_path,
+            audit=audit,
+            attempt=attempt,
+            actor=AuditActor("verification-owner", "verification_owner"),
+        )
+        return executor
+
+    return wrapped
+
+
+def _grant_aware_review_fix_factory(
+    factory: ReviewFixExecutorFactory,
+    *,
+    evidence: EvidenceCatalog,
+    worktree_path: Path,
+    audit: AuditJournal,
+) -> ReviewFixExecutorFactory:
+    """Wrap a review-fix executor factory to auto-supply the adoption grant.
+
+    Only the writable ``"fix"`` stage can face a dirty baseline; ``"review"``
+    and ``"verify"`` stay read-only and are passed through unchanged.
+    """
+
+    def wrapped(stage: str, attempt: TaskAttempt) -> Executor:
+        executor = factory(stage, attempt)
+        if stage == "fix":
+            _attach_dirty_baseline_grant(
+                executor,
+                evidence=evidence,
+                worktree_path=worktree_path,
+                audit=audit,
+                attempt=attempt,
+                actor=AuditActor("review-fix-controller", "controller"),
+            )
+        return executor
+
+    return wrapped
+
+
+def _run_verification_stage(
+    *,
+    run_id: str,
+    objective: str,
+    acceptance_criteria: tuple[Mapping[str, object], ...],
+    worktree_path: Path,
+    allowed_paths: tuple[str, ...],
+    verification_argv: tuple[str, ...],
+    verification_gates: tuple[VerificationGate, ...],
+    repair_executor_factory: VerificationRepairExecutorFactory,
+    repair_limit: int,
+    timeout_seconds: float | None,
+    evidence: EvidenceCatalog,
+    audit: AuditJournal,
+    stage: str = "post_implementation",
+) -> DeterministicVerificationResult:
+    """Route to the flat or gate-tuple verification loop for one call site.
+
+    A declared gate tuple always takes this branch; the flat path below is
+    untouched code exercised exactly as before, so a node declaring only
+    ``verification_argv`` gets byte-identical events and budget accounting.
+    """
+    if verification_gates:
+        return _verify_gates_with_recovery(
+            run_id=run_id,
+            objective=objective,
+            acceptance_criteria=acceptance_criteria,
+            worktree_path=worktree_path,
+            allowed_paths=allowed_paths,
+            gates=verification_gates,
+            repair_executor_factory=repair_executor_factory,
+            repair_limit=repair_limit,
+            evidence=evidence,
+            audit=audit,
+            stage=stage,
+        )
+    return _verify_with_recovery(
+        run_id=run_id,
+        objective=objective,
+        acceptance_criteria=acceptance_criteria,
+        worktree_path=worktree_path,
+        allowed_paths=allowed_paths,
+        argv=verification_argv,
+        repair_executor_factory=repair_executor_factory,
+        repair_limit=repair_limit,
+        timeout_seconds=timeout_seconds,
+        evidence=evidence,
+        audit=audit,
+        stage=stage,
+    )
+
+
 def _verify_with_recovery(
     *,
     run_id: str,
@@ -1319,9 +1786,20 @@ def _verify_with_recovery(
 ) -> DeterministicVerificationResult:
     command_attempts: list[Mapping[str, object]] = []
     repair_attempts = 0
+    # Repair allowance actually charged: distinct from repair_attempts (the
+    # dispatch count) so a renewal can give an allowance unit back without
+    # making repair_attempts contradict repair_invocation_ids.
+    repair_budget_consumed = 0
     repair_invocation_ids: list[str] = []
-    repair_invocations: list[Mapping[str, str]] = []
+    repair_invocations: list[Mapping[str, object]] = []
     env_retries = 0
+    # The failing-identifier set that motivated the most recently dispatched
+    # repair; compared against each rerun's set to decide renewal. ``None``
+    # can mean either "no repair dispatched yet" or "the dispatching rerun's
+    # output was unparseable", so a separate flag disambiguates those cases
+    # for the audit-emission guard below.
+    previous_failing_ids: frozenset[str] | None = None
+    awaiting_repair_delta = False
     runner = AttemptRunner()
     actor = AuditActor("verification-owner", "verification_owner")
 
@@ -1373,7 +1851,43 @@ def _verify_with_recovery(
             # repair allowance; their invocation evidence remains explicit.
             env_retries += 1
             continue
-        if repair_attempts >= repair_limit:
+        current_failing_ids = failing_identifiers(command)
+        if awaiting_repair_delta:
+            # A strict subset (not merely a smaller count) proves every
+            # currently-failing test was already failing and at least one
+            # previously-failing test is now gone; an unparseable baseline or
+            # rerun, an equal/larger set, or a set with a new member are all
+            # non-improving and must not renew the allowance.
+            renewed = (
+                current_failing_ids is not None
+                and previous_failing_ids is not None
+                and bool(current_failing_ids)
+                and current_failing_ids < previous_failing_ids
+            )
+            audit.append(
+                "deterministic_verification_repair_budget_delta",
+                status="renewed" if renewed else "consumed",
+                payload={
+                    "repair_attempt": ordinal,
+                    "previous_failing_ids": (
+                        sorted(previous_failing_ids)
+                        if previous_failing_ids is not None
+                        else None
+                    ),
+                    "current_failing_ids": (
+                        sorted(current_failing_ids)
+                        if current_failing_ids is not None
+                        else None
+                    ),
+                    "renewed": renewed,
+                },
+                actor=actor,
+            )
+            if renewed:
+                # A repair that strictly shrank the observed failing set does
+                # not spend the declared repair limit; give the unit back.
+                repair_budget_consumed -= 1
+        if repair_budget_consumed >= repair_limit:
             return DeterministicVerificationResult(
                 "blocked",
                 "declared verification command still fails after repair budget",
@@ -1406,11 +1920,19 @@ def _verify_with_recovery(
         repair_invocation_id = f"{run_id}:verification-repair:{stage}:{ordinal}"
         # Record the dispatch before execution so an interrupted worker is still
         # visible to the parent ledger and can be idempotently reconciled.
+        previous_failing_ids = current_failing_ids
+        awaiting_repair_delta = True
         repair_attempts += 1
+        repair_budget_consumed += 1
         repair_invocation_ids.append(repair_invocation_id)
         repair_invocations.append({
             "invocation_id": repair_invocation_id,
             "classification": classification,
+            # Carried on the structured evidence so the parent ledger's
+            # import_child_evidence sees the same failure_keys substrate
+            # reserve() uses, instead of the loop being the only place that
+            # knows which tests motivated this dispatch.
+            "failure_keys": sorted(current_failing_ids) if current_failing_ids else [],
         })
         try:
             repair = runner.run(attempt, repair_executor_factory(attempt))
@@ -1518,10 +2040,12 @@ def _verify_with_recovery(
                     f"{run_id}:verification-repair:{stage}:{ordinal}:recovery-1"
                 )
                 repair_attempts += 1
+                repair_budget_consumed += 1
                 repair_invocation_ids.append(recovery_invocation_id)
                 repair_invocations.append({
                     "invocation_id": recovery_invocation_id,
                     "classification": classification,
+                    "failure_keys": sorted(current_failing_ids) if current_failing_ids else [],
                 })
                 recovery = runner.run(
                     recovery_attempt,
@@ -1572,7 +2096,376 @@ def _verify_with_recovery(
                 tuple(repair_invocations),
             )
 
-    raise AssertionError("verification loop did not terminate")
+    # A renewed allowance can let the loop dispatch more repairs than the
+    # non-delta-scoped design assumed, so the fixed iteration bound above can
+    # now be reached while still mid-repair rather than only through the
+    # defensive branch it was originally written for. That is a legitimate
+    # exhaustion of the loop's own hard bound (AC-CB04-2), not a programming
+    # error, so it must resolve to the same terminal `blocked` outcome every
+    # other bound in this loop returns rather than escape as an exception.
+    return DeterministicVerificationResult(
+        "blocked",
+        "verification did not converge within the loop's bounded iteration limit",
+        tuple(command_attempts),
+        repair_attempts,
+        tuple(repair_invocation_ids),
+        tuple(repair_invocations),
+    )
+
+
+def _verify_gates_with_recovery(
+    *,
+    run_id: str,
+    objective: str,
+    acceptance_criteria: tuple[Mapping[str, object], ...],
+    worktree_path: Path,
+    allowed_paths: tuple[str, ...],
+    gates: tuple[VerificationGate, ...],
+    repair_executor_factory: VerificationRepairExecutorFactory,
+    repair_limit: int,
+    evidence: EvidenceCatalog,
+    audit: AuditJournal,
+    stage: str = "post_implementation",
+) -> DeterministicVerificationResult:
+    """Run an ordered named-gate tuple with per-gate classification and repair.
+
+    Each gate runs, is classified, and is evidenced independently — an
+    ``infrastructure_transient`` failure on one gate resumes only that gate
+    (no tree mutation) and never voids an earlier gate's passing evidence.
+    A repair dispatch is scoped to the motivating gate's own evidence and
+    failing-identifier delta (the same strict-subset renewal rule
+    :func:`_verify_with_recovery` uses), but because a repair mutates the
+    tree, the next re-verification always restarts at the first gate so a
+    passing certification reflects one consistent tree state.
+    """
+    command_attempts: list[Mapping[str, object]] = []
+    repair_attempts = 0
+    repair_budget_consumed = 0
+    repair_invocation_ids: list[str] = []
+    repair_invocations: list[Mapping[str, object]] = []
+    env_retries: dict[str, int] = {gate.name: 0 for gate in gates}
+    previous_failing_ids: dict[str, frozenset[str] | None] = {}
+    awaiting_repair_delta: dict[str, bool] = {}
+    runner = AttemptRunner()
+    actor = AuditActor("verification-owner", "verification_owner")
+
+    gate_index = 0
+    for full_attempt in range(1, repair_limit + 4):
+        while gate_index < len(gates):
+            gate = gates[gate_index]
+            ordinal = len(command_attempts) + 1
+            command = _run_verification_command(
+                worktree_path,
+                gate.argv,
+                gate.timeout_seconds,
+                ordinal,
+                stage,
+            )
+            artifact = evidence.add(
+                kind="deterministic-verification-output",
+                content=command,
+                media_type="application/json",
+                producer_task_id="verification-owner",
+            )
+            recorded = {
+                **command,
+                "evidence_ref": artifact.ref,
+                "invocation_id": f"{run_id}:verification-command:{stage}:{ordinal}",
+                "gate": gate.name,
+            }
+            if command["exit_code"] != 0:
+                recorded["failure"] = classify_verification_failure(command)
+            command_attempts.append(recorded)
+            audit.append(
+                "deterministic_verification_completed",
+                status="succeeded" if command["exit_code"] == 0 else "failed",
+                payload=recorded,
+                actor=actor,
+            )
+            if command["exit_code"] == 0:
+                gate_index += 1
+                continue
+
+            failure = recorded.get("failure")
+            if (
+                isinstance(failure, Mapping)
+                and failure.get("classification") == "infrastructure_transient"
+                and env_retries[gate.name] < 2
+            ):
+                # Infrastructure retries consume neither a repair dispatch nor
+                # its allowance, and resume at exactly this gate — the tree
+                # was never mutated, so earlier gates' passing evidence in
+                # command_attempts above stands untouched.
+                env_retries[gate.name] += 1
+                continue
+
+            current_failing_ids = failing_identifiers(command)
+            if awaiting_repair_delta.get(gate.name):
+                previous = previous_failing_ids.get(gate.name)
+                renewed = (
+                    current_failing_ids is not None
+                    and previous is not None
+                    and bool(current_failing_ids)
+                    and current_failing_ids < previous
+                )
+                audit.append(
+                    "deterministic_verification_repair_budget_delta",
+                    status="renewed" if renewed else "consumed",
+                    payload={
+                        "repair_attempt": ordinal,
+                        "gate": gate.name,
+                        "previous_failing_ids": (
+                            sorted(previous) if previous is not None else None
+                        ),
+                        "current_failing_ids": (
+                            sorted(current_failing_ids)
+                            if current_failing_ids is not None
+                            else None
+                        ),
+                        "renewed": renewed,
+                    },
+                    actor=actor,
+                )
+                if renewed:
+                    repair_budget_consumed -= 1
+            if repair_budget_consumed >= repair_limit:
+                return DeterministicVerificationResult(
+                    "blocked",
+                    "declared verification command still fails after repair budget",
+                    tuple(command_attempts),
+                    repair_attempts,
+                    tuple(repair_invocation_ids),
+                    tuple(repair_invocations),
+                )
+
+            attempt = TaskAttempt(
+                attempt_id=f"{run_id}/verification-repair/{ordinal}",
+                task_ref="verification-repair",
+                context_ref=artifact.ref,
+                grant_ref="verification-repair-write-grant",
+                context=json.dumps(
+                    {
+                        "objective": objective,
+                        "acceptance_criteria": list(acceptance_criteria),
+                        "allowed_paths": list(allowed_paths),
+                        "failed_verification": recorded,
+                        "repair_attempt": ordinal,
+                        "repair_limit": repair_limit,
+                        "gate": gate.name,
+                    },
+                    sort_keys=True,
+                ),
+            )
+            assert isinstance(failure, Mapping)
+            classification = failure.get("classification")
+            assert isinstance(classification, str)
+            repair_invocation_id = f"{run_id}:verification-repair:{stage}:{ordinal}"
+            previous_failing_ids[gate.name] = current_failing_ids
+            awaiting_repair_delta[gate.name] = True
+            repair_attempts += 1
+            repair_budget_consumed += 1
+            repair_invocation_ids.append(repair_invocation_id)
+            repair_invocations.append({
+                "invocation_id": repair_invocation_id,
+                "classification": classification,
+                "failure_keys": sorted(current_failing_ids) if current_failing_ids else [],
+                "gate": gate.name,
+            })
+            try:
+                repair = runner.run(attempt, repair_executor_factory(attempt))
+            except InterruptedError as exc:
+                audit.append(
+                    "deterministic_verification_repair_completed",
+                    status="interrupted",
+                    payload={
+                        "repair_attempt": ordinal,
+                        "gate": gate.name,
+                        "error": str(exc),
+                        "failed_command_evidence_ref": artifact.ref,
+                    },
+                    actor=actor,
+                    attempt_id=attempt.attempt_id,
+                )
+                return DeterministicVerificationResult(
+                    "interrupted",
+                    str(exc) or "verification repair interrupted",
+                    tuple(command_attempts),
+                    repair_attempts,
+                    tuple(repair_invocation_ids),
+                    tuple(repair_invocations),
+                )
+            repaired_workspace = workspace_snapshot(worktree_path)
+            prior_workspace = command["workspace"]
+            assert isinstance(prior_workspace, Mapping)
+            outside_scope = paths_outside_scope(
+                repaired_workspace["changed_paths"],
+                allowed_paths,
+            )
+            identity_changed = any(
+                repaired_workspace[key] != prior_workspace[key]
+                for key in ("head", "branch")
+            )
+            repair_status = (
+                "failed"
+                if outside_scope or identity_changed
+                else repair.status
+            )
+            audit.append(
+                "deterministic_verification_repair_completed",
+                status=repair_status,
+                payload={
+                    "repair_attempt": ordinal,
+                    "gate": gate.name,
+                    "result": dict(repair.payload),
+                    "evidence_refs": list(repair.evidence),
+                    "failed_command_evidence_ref": artifact.ref,
+                    "workspace": repaired_workspace,
+                    "outside_allowed_paths": list(outside_scope),
+                    "repository_identity_changed": identity_changed,
+                },
+                actor=actor,
+                attempt_id=attempt.attempt_id,
+            )
+            if repair_status != "succeeded":
+                if (
+                    not outside_scope
+                    and not identity_changed
+                    and repair.status == "failed"
+                    and repair.payload.get("error")
+                    == "writable worker completed without changing the repository"
+                ):
+                    recovery_attempt = TaskAttempt(
+                        attempt_id=(
+                            f"{run_id}/verification-repair/"
+                            f"{ordinal}-recovery-1"
+                        ),
+                        task_ref="verification-repair",
+                        context_ref=artifact.ref,
+                        grant_ref="verification-repair-write-grant",
+                        context=json.dumps(
+                            {
+                                "objective": objective,
+                                "acceptance_criteria": list(acceptance_criteria),
+                                "allowed_paths": list(allowed_paths),
+                                "failed_verification": recorded,
+                                "repair_attempt": ordinal,
+                                "repair_limit": repair_limit,
+                                "gate": gate.name,
+                                "recovery": {
+                                    "attempt": 1,
+                                    "reason": repair.payload["error"],
+                                    "instruction": (
+                                        "Use a changed implementation method for "
+                                        "the same failed verification; preserve "
+                                        "scope and candidate identity."
+                                    ),
+                                },
+                            },
+                            sort_keys=True,
+                        ),
+                    )
+                    audit.append(
+                        "deterministic_verification_recovery_triggered",
+                        status="recovering",
+                        payload={
+                            "repair_attempt": ordinal,
+                            "gate": gate.name,
+                            "recovery_attempt": 1,
+                            "reason": repair.payload["error"],
+                            "failed_command_evidence_ref": artifact.ref,
+                        },
+                        actor=actor,
+                        attempt_id=recovery_attempt.attempt_id,
+                    )
+                    recovery_invocation_id = (
+                        f"{run_id}:verification-repair:{stage}:{ordinal}:recovery-1"
+                    )
+                    repair_attempts += 1
+                    repair_budget_consumed += 1
+                    repair_invocation_ids.append(recovery_invocation_id)
+                    repair_invocations.append({
+                        "invocation_id": recovery_invocation_id,
+                        "classification": classification,
+                        "failure_keys": sorted(current_failing_ids) if current_failing_ids else [],
+                        "gate": gate.name,
+                    })
+                    recovery = runner.run(
+                        recovery_attempt,
+                        repair_executor_factory(recovery_attempt),
+                    )
+                    recovered_workspace = workspace_snapshot(worktree_path)
+                    recovery_outside = paths_outside_scope(
+                        recovered_workspace["changed_paths"],
+                        allowed_paths,
+                    )
+                    recovery_identity_changed = any(
+                        recovered_workspace[key] != prior_workspace[key]
+                        for key in ("head", "branch")
+                    )
+                    recovery_status = (
+                        "failed"
+                        if recovery_outside or recovery_identity_changed
+                        else recovery.status
+                    )
+                    audit.append(
+                        "deterministic_verification_repair_completed",
+                        status=recovery_status,
+                        payload={
+                            "repair_attempt": ordinal,
+                            "gate": gate.name,
+                            "recovery_attempt": 1,
+                            "result": dict(recovery.payload),
+                            "evidence_refs": list(recovery.evidence),
+                            "failed_command_evidence_ref": artifact.ref,
+                            "workspace": recovered_workspace,
+                            "outside_allowed_paths": list(recovery_outside),
+                            "repository_identity_changed": recovery_identity_changed,
+                        },
+                        actor=actor,
+                        attempt_id=recovery_attempt.attempt_id,
+                    )
+                    if recovery_status == "succeeded":
+                        # A successful recovery is itself a tree mutation, so
+                        # the full gate tuple must restart at the first gate.
+                        gate_index = 0
+                        break
+                return DeterministicVerificationResult(
+                    "blocked",
+                    (
+                        "verification repair escaped its grant"
+                        if outside_scope or identity_changed
+                        else f"verification repair {repair.status}"
+                    ),
+                    tuple(command_attempts),
+                    repair_attempts,
+                    tuple(repair_invocation_ids),
+                    tuple(repair_invocations),
+                )
+            # A successful repair mutated the tree: AC-CB206-3 requires the
+            # next re-verification to reflect one consistent tree state, so
+            # restart at the first gate rather than resuming mid-tuple.
+            gate_index = 0
+            break
+        else:
+            # The while loop exhausted every gate without a break: each one
+            # passed in this full attempt.
+            return DeterministicVerificationResult(
+                "succeeded",
+                "declared verification gate tuple passed",
+                tuple(command_attempts),
+                repair_attempts,
+                tuple(repair_invocation_ids),
+                tuple(repair_invocations),
+            )
+
+    return DeterministicVerificationResult(
+        "blocked",
+        "verification did not converge within the loop's bounded iteration limit",
+        tuple(command_attempts),
+        repair_attempts,
+        tuple(repair_invocation_ids),
+        tuple(repair_invocations),
+    )
 
 
 def _run_verification_command(
@@ -1633,6 +2526,75 @@ def _combine_verification_results(
         repair_attempts=first.repair_attempts + second.repair_attempts,
         repair_invocation_ids=first.repair_invocation_ids + second.repair_invocation_ids,
         repair_invocations=first.repair_invocations + second.repair_invocations,
+    )
+
+
+def _promote_gate_criteria(
+    kernel: ControllerKernel,
+    verification_result: DeterministicVerificationResult,
+) -> None:
+    """Satisfy any pending gate-backed criteria from the controller-owned
+    verification command's own passing evidence.
+
+    Called only after the declared verification command has actually
+    succeeded, so a criterion the coordinator left pending at
+    run.complete_request (because it could not truthfully claim it) is
+    satisfied from real command evidence rather than from any claim.
+    """
+
+    criteria = kernel.snapshot()["criteria"]
+    pending_gate_ids = tuple(
+        criterion_id
+        for criterion_id, criterion in criteria.items()
+        if criterion.get("adjudication") == "deterministic_verification"
+        and criterion["status"] != "satisfied"
+    )
+    if not pending_gate_ids:
+        return
+    passing_ref = None
+    for attempt in reversed(verification_result.command_attempts):
+        if attempt.get("exit_code") == 0:
+            passing_ref = attempt.get("evidence_ref")
+            break
+    if not isinstance(passing_ref, str):
+        raise ValueError(
+            "successful verification result has no passing command evidence"
+        )
+    kernel.record_gate_verification(
+        criterion_ids=pending_gate_ids,
+        evidence_ref=passing_ref,
+    )
+
+
+def _record_gate_verification_failure(
+    kernel: ControllerKernel,
+    verification_result: DeterministicVerificationResult,
+) -> None:
+    """Walk a run a coordinator completion request marked "succeeded" back
+    off that status once the declared verification command has actually
+    failed, so a gate-backed criterion left pending never persists inside a
+    kernel snapshot that still claims the run "succeeded".
+    """
+
+    criteria = kernel.snapshot()["criteria"]
+    pending_gate_ids = tuple(
+        criterion_id
+        for criterion_id, criterion in criteria.items()
+        if criterion.get("adjudication") == "deterministic_verification"
+        and criterion["status"] != "satisfied"
+    )
+    if not pending_gate_ids:
+        return
+    failing_ref = None
+    for attempt in reversed(verification_result.command_attempts):
+        if attempt.get("exit_code") != 0:
+            failing_ref = attempt.get("evidence_ref")
+            break
+    if not isinstance(failing_ref, str):
+        return
+    kernel.record_gate_verification_failure(
+        criterion_ids=pending_gate_ids,
+        evidence_ref=failing_ref,
     )
 
 
@@ -1793,6 +2755,7 @@ __all__ = [
     "FeatureRunResult",
     "FeatureSessionFactory",
     "ReviewFixPolicy",
+    "VerificationGate",
     "VerificationRepairExecutorFactory",
     "run_feature_worktree",
     "run_plan_graph_feature_worktree",

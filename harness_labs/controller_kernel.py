@@ -55,6 +55,16 @@ DISPATCHER_COMMANDS = frozenset(
         "run.block_request",
     }
 )
+CRITERION_ADJUDICATIONS = frozenset({"claimed", "deterministic_verification"})
+GATE_VERIFICATION_EVIDENCE_KIND = "deterministic-verification-output"
+GATE_VERIFICATION_OWNER = "verification-owner"
+PROVENANCE_REF_SHAPES = (
+    "artifact:sha256:<hex>",
+    "command:<id>",
+    "task:<id>",
+    "system-result:<id>:<n>",
+    "decision:<id>",
+)
 
 
 class KernelError(RuntimeError):
@@ -172,6 +182,7 @@ class ControllerKernel:
                 "active_session": None,
                 "sessions": [],
             },
+            "rejected_task_dispatch_refs": [],
         }
         if audit is not None:
             audit.append(
@@ -229,6 +240,7 @@ class ControllerKernel:
             "coordinator_dispatch",
             {"schema": None, "active_session": None, "sessions": []},
         )
+        state.setdefault("rejected_task_dispatch_refs", [])
         instance._state = state
         instance._receipts = {}
         for key, value in state.get("receipts", {}).items():
@@ -391,6 +403,129 @@ class ControllerKernel:
             self._persist(events)
             return tuple(events)
 
+    def record_gate_verification(
+        self,
+        *,
+        criterion_ids: Iterable[str],
+        evidence_ref: str,
+    ) -> tuple[KernelEvent, ...]:
+        """Satisfy deterministic-verification criteria from the verification
+        owner's own passing command evidence.
+
+        This is a trusted-integration entry point, not a coordinator command:
+        it is the only path that can move a gate-backed criterion to
+        "satisfied", and it is reachable only from the controller-owned
+        verification stage (never from a coordinator or worker claim).
+        """
+
+        with self._mutex:
+            ids = tuple(dict.fromkeys(criterion_ids))
+            if not ids:
+                raise KernelError("gate verification requires at least one criterion")
+            self._verification_owner_evidence(evidence_ref, expect_exit_code_zero=True)
+            for criterion_id in ids:
+                criterion = self._state["criteria"].get(criterion_id)
+                if criterion is None:
+                    raise KernelError(f"unknown gate criterion: {criterion_id}")
+                if criterion["adjudication"] != "deterministic_verification":
+                    raise KernelError(f"criterion is not gate-backed: {criterion_id}")
+            revision = int(self._state["revision"]) + 1
+            actor = CommandActor("verification-owner", "verification_owner")
+            events = []
+            for criterion_id in ids:
+                event = self._new_event(
+                    revision=revision,
+                    event_type="criterion.gate_verified",
+                    actor=actor,
+                    command_id=f"system-gate-verification:{criterion_id}:{revision}",
+                    payload={
+                        "criterion_id": criterion_id,
+                        "evidence_ref": evidence_ref,
+                    },
+                )
+                self._apply(event)
+                events.append(event)
+            self._state["revision"] = revision
+            self._persist(events)
+            return tuple(events)
+
+    def record_gate_verification_failure(
+        self,
+        *,
+        criterion_ids: Iterable[str],
+        evidence_ref: str,
+    ) -> tuple[KernelEvent, ...]:
+        """Record that the declared deterministic verification command
+        failed while gate-backed criteria were still pending.
+
+        A coordinator completion request may go "succeeded" while a
+        gate-backed criterion is pending (see run.complete_request); if the
+        verification owner's own command then fails, this walks the run
+        back to "blocked" so kernel "succeeded" continues to imply every
+        criterion is satisfied instead of silently persisting a successful
+        run whose gate never passed. Trusted-integration entry point,
+        reachable only from the controller-owned verification stage, never
+        a coordinator or worker claim.
+        """
+
+        with self._mutex:
+            ids = tuple(dict.fromkeys(criterion_ids))
+            if not ids:
+                raise KernelError(
+                    "gate verification failure requires at least one criterion"
+                )
+            self._verification_owner_evidence(evidence_ref, expect_exit_code_zero=False)
+            for criterion_id in ids:
+                criterion = self._state["criteria"].get(criterion_id)
+                if criterion is None:
+                    raise KernelError(f"unknown gate criterion: {criterion_id}")
+                if criterion["adjudication"] != "deterministic_verification":
+                    raise KernelError(f"criterion is not gate-backed: {criterion_id}")
+            revision = int(self._state["revision"]) + 1
+            actor = CommandActor("verification-owner", "verification_owner")
+            event = self._new_event(
+                revision=revision,
+                event_type="run.gate_verification_failed",
+                actor=actor,
+                command_id=f"system-gate-verification-failed:{revision}",
+                payload={"criterion_ids": list(ids), "evidence_ref": evidence_ref},
+            )
+            self._apply(event)
+            self._state["revision"] = revision
+            self._persist((event,))
+            return (event,)
+
+    def _verification_owner_evidence(
+        self, evidence_ref: str, *, expect_exit_code_zero: bool
+    ) -> Any:
+        if not self.evidence.contains(evidence_ref):
+            raise KernelError("gate verification references unknown evidence")
+        record = self.evidence.metadata(evidence_ref)
+        if record.kind != GATE_VERIFICATION_EVIDENCE_KIND:
+            raise KernelError("gate verification evidence has the wrong kind")
+        if record.producer_task_id != GATE_VERIFICATION_OWNER:
+            raise KernelError(
+                "gate verification evidence was not produced by the verification owner"
+            )
+        # Kind and producer only prove the record came from the verification
+        # stage, not which of its (possibly several) attempts it is: without
+        # this the same receipt could pass off a failing attempt as the one
+        # that satisfies a criterion, or a passing attempt as the one that
+        # walks a run back to "blocked".
+        content = json.loads(self.evidence.open(evidence_ref))
+        exit_code = content.get("exit_code") if isinstance(content, Mapping) else None
+        if not isinstance(exit_code, int):
+            raise KernelError("gate verification evidence has no exit_code")
+        if expect_exit_code_zero and exit_code != 0:
+            raise KernelError(
+                "gate verification evidence is not a passing command result"
+            )
+        if not expect_exit_code_zero and exit_code == 0:
+            raise KernelError(
+                "gate verification failure evidence is not a failing command result"
+            )
+        return record
+
     def task(self, task_id: str) -> dict[str, Any]:
         with self._mutex:
             task = self._state["tasks"].get(task_id)
@@ -424,9 +559,36 @@ class ControllerKernel:
         if command.type not in allowed:
             return "unauthorized_command", "actor may not issue this command"
         for ref in command.provenance.evidence_refs:
-            if not self.evidence.contains(ref):
-                return "unknown_evidence", f"unknown provenance reference: {ref}"
+            if self.evidence.contains(ref):
+                continue
+            if ref in self._state["rejected_task_dispatch_refs"]:
+                continue
+            if self._resolves_kernel_entity_ref(ref):
+                continue
+            return "unknown_evidence", (
+                f"unknown provenance reference: {ref} "
+                "(accepted ref shapes: " + ", ".join(PROVENANCE_REF_SHAPES) + ")"
+            )
         return None
+
+    def _resolves_kernel_entity_ref(self, ref: str) -> bool:
+        """Resolve a ref naming an entity already present in kernel state.
+
+        Strictly read-only: consults existing tasks/decisions/events and
+        mints no new records.
+        """
+
+        if ref.startswith("task:"):
+            return ref[len("task:") :] in self._state["tasks"]
+        if ref.startswith("decision:"):
+            return ref[len("decision:") :] in self._state["decisions"]
+        if ref.startswith("system-result:"):
+            return any(
+                event.command_id == ref
+                for event in self._events
+                if event.event_type == "task.result_recorded"
+            )
+        return False
 
     def _evaluate(
         self,
@@ -639,7 +801,11 @@ class ControllerKernel:
         self,
         command: CommandEnvelope,
     ) -> tuple[list[tuple[str, dict[str, Any]]], tuple[str, ...]]:
-        criterion = _criterion(command.payload)
+        # A coordinator-proposed criterion is always coordinator-claimable: the
+        # gate-backed adjudication is reserved for run-contract criteria (set
+        # at kernel construction), so a coordinator can never mint its own
+        # unfalsifiable-by-itself gate.
+        criterion = _criterion(command.payload, allow_gate=False)
         if criterion["id"] in self._state["criteria"]:
             raise ValueError(f"criterion already exists: {criterion['id']}")
         return [("criterion.registered", {"criterion": criterion})], (
@@ -676,6 +842,9 @@ class ControllerKernel:
             if not isinstance(item, Mapping):
                 raise ValueError("task.dispatch tasks must be objects")
             task = _task(item)
+            task["acceptance_criteria"] = _resolve_task_criteria(
+                task["acceptance_criteria"], self._state["criteria"]
+            )
             task_id = task["id"]
             if task_id in supplied_ids or task_id in self._state["tasks"]:
                 raise ValueError(f"duplicate task id: {task_id}")
@@ -694,7 +863,6 @@ class ControllerKernel:
                 frozen_fields = (
                     "role",
                     "details_schema",
-                    "required_capabilities",
                     "acceptance_criteria",
                     "dependencies",
                     "parent_task_id",
@@ -707,6 +875,13 @@ class ControllerKernel:
                             "superseding task changes frozen authority: "
                             f"{field}"
                         )
+                if not set(task["required_capabilities"]).issubset(
+                    set(superseded["required_capabilities"])
+                ):
+                    raise ValueError(
+                        "superseding task changes frozen authority: "
+                        "required_capabilities"
+                    )
             parent_id = task["parent_task_id"]
             depth = 1
             if parent_id is not None:
@@ -914,7 +1089,15 @@ class ControllerKernel:
         with self._mutex:
             failures = []
             for criterion in self._state["criteria"].values():
-                if criterion["status"] != "satisfied":
+                if criterion["status"] != "satisfied" and (
+                    criterion.get("adjudication") != "deterministic_verification"
+                ):
+                    # A gate-backed criterion is deliberately excluded here: it
+                    # can only ever become "satisfied" via record_gate_verification
+                    # from the verification owner's own passing command evidence
+                    # (see _validate_result_references), so leaving it pending
+                    # is never a stalled coordinator obligation and must not
+                    # block run.complete_request.
                     failures.append(f"criterion {criterion['id']} is not satisfied")
             artifact_kinds = {
                 artifact["kind"] for artifact in self._state["artifacts"].values()
@@ -987,6 +1170,14 @@ class ControllerKernel:
             if coverage["criterion_id"] not in task["acceptance_criteria"]:
                 raise KernelError(
                     f"task was not assigned criterion: {coverage['criterion_id']}"
+                )
+            if (
+                coverage["status"] == "satisfied"
+                and criterion.get("adjudication") == "deterministic_verification"
+            ):
+                raise KernelError(
+                    "criterion is gate-backed and cannot be claimed satisfied: "
+                    f"{coverage['criterion_id']}"
                 )
 
     def _semantic_promotions(self, task_id: str, semantic: Any) -> dict[str, Any]:
@@ -1095,6 +1286,12 @@ class ControllerKernel:
                     command.actor.parent_id,
                 ),
             )
+        if code == "invalid_command" and command.type == "task.dispatch":
+            self._state["rejected_task_dispatch_refs"].append(
+                f"command:{command.command_id}"
+            )
+            if self.audit is not None:
+                self.audit.merge_checkpoint(updates={"controller": self.snapshot()})
         return receipt
 
     def _new_event(
@@ -1122,6 +1319,14 @@ class ControllerKernel:
         if event_type == "criterion.registered":
             criterion = copy.deepcopy(payload["criterion"])
             self._state["criteria"][criterion["id"]] = criterion
+        elif event_type == "criterion.gate_verified":
+            criterion = self._state["criteria"][payload["criterion_id"]]
+            if "verification-owner" not in criterion["satisfied_by"]:
+                criterion["satisfied_by"].append("verification-owner")
+            criterion["evidence_refs"] = sorted(
+                set(criterion["evidence_refs"]).union({payload["evidence_ref"]})
+            )
+            criterion["status"] = "satisfied"
         elif event_type == "task.registered":
             task = copy.deepcopy(payload["task"])
             self._state["tasks"][task["id"]] = task
@@ -1148,6 +1353,13 @@ class ControllerKernel:
             self._state["status"] = "blocked"
         elif event_type == "run.completed":
             self._state["status"] = "succeeded"
+        elif event_type == "run.gate_verification_failed":
+            if self._state["status"] == "succeeded":
+                self._state["status"] = "blocked"
+                self._state["blocker"] = (
+                    "deterministic verification failed for gate-backed "
+                    "criteria: " + ", ".join(payload["criterion_ids"])
+                )
         elif event_type == "run.blocked":
             self._state["status"] = "blocked"
             self._state["blocker"] = payload["reason"]
@@ -1216,15 +1428,23 @@ class ControllerKernel:
         self.audit.merge_checkpoint(updates={"controller": self.snapshot()})
 
 
-def _criterion(item: Mapping[str, Any]) -> dict[str, Any]:
+def _criterion(item: Mapping[str, Any], *, allow_gate: bool = True) -> dict[str, Any]:
     criterion_id = _payload_text(item, "id", "criterion")
     statement = _payload_text(item, "statement", "criterion")
     source = _payload_text(item, "source", "criterion")
-    if source not in {"operator", "repository", "coordinator"}:
+    if source not in {"operator", "repository", "coordinator", "plan"}:
         raise ValueError("criterion source is invalid")
     minimum_satisfiers = item.get("minimum_satisfiers", 1)
     if not isinstance(minimum_satisfiers, int) or minimum_satisfiers < 1:
         raise ValueError("criterion minimum_satisfiers must be positive")
+    adjudication = item.get("adjudication", "claimed")
+    if adjudication not in CRITERION_ADJUDICATIONS:
+        raise ValueError("criterion adjudication is invalid")
+    if adjudication == "deterministic_verification" and not allow_gate:
+        raise ValueError(
+            "deterministic-verification adjudication may only be declared by "
+            "a run-contract criterion"
+        )
     return {
         "id": criterion_id,
         "statement": statement,
@@ -1234,6 +1454,7 @@ def _criterion(item: Mapping[str, Any]) -> dict[str, Any]:
         "evidence_refs": [],
         "satisfied_by": [],
         "minimum_satisfiers": minimum_satisfiers,
+        "adjudication": adjudication,
     }
 
 
@@ -1290,3 +1511,31 @@ def _string_list(item: Mapping[str, Any], name: str) -> list[str]:
     ):
         raise ValueError(f"{name} must be a string list")
     return list(values)
+
+
+def _resolve_task_criteria(
+    entries: Iterable[str],
+    known_criteria: Mapping[str, Any],
+) -> list[str]:
+    """Resolve "<id>" or "<id>: <statement>" entries to declared criterion ids.
+
+    A literal match against a declared criterion always wins over the
+    "<id>: <statement>" split, so a criterion id that itself contains ": "
+    is never mistaken for an annotated entry and truncated.
+    """
+
+    resolved: list[str] = []
+    for value in entries:
+        if value in known_criteria:
+            resolved.append(value)
+        else:
+            resolved.append(_parse_criterion_ref(value))
+    return resolved
+
+
+def _parse_criterion_ref(value: str) -> str:
+    prefix, separator, _ = value.partition(": ")
+    criterion_id = (prefix if separator else value).strip()
+    if not criterion_id:
+        raise ValueError("acceptance_criteria entry must declare a criterion id")
+    return criterion_id

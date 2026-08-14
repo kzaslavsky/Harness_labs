@@ -22,6 +22,7 @@ function Liveness({ value }) { if (!value || value.state === 'terminal' || value
 function FlowNode({ data, selected }) {
   return <div className={`flow-node ${selected ? 'is-selected' : ''}`}><Handle type="target" position={Position.Left} />
     <Status record={data.record} /><strong>{data.title}</strong>
+    {data.reused && data.runId && <em>Reused from {data.reused.origin_attempt_id}</em>}
     {!data.runId && <em>FeatureRun correlation unavailable</em>}<Handle type="source" position={Position.Right} />
   </div>;
 }
@@ -30,7 +31,8 @@ const nodeTypes = { featureRun: FlowNode };
 function NodeSummary({ node }) {
   if (!node) return null;
   const record = node.nodeRecord;
-  return <section><h3>PlanGraph node</h3><Definition values={{ Graph: node.graphId, Node: node.nodeId, 'Planned FeatureRun': node.plannedRunId, Status: stateLabel(record), Liveness: record.liveness?.state, Dependencies: record.depends_on }} /><Availability label="Node evidence:" value={record.evidence} /></section>;
+  const reused = record.correlation?.state === 'reused' ? record.correlation : null;
+  return <section><h3>PlanGraph node</h3><Definition values={{ Graph: node.graphId, Node: node.nodeId, 'Planned FeatureRun': node.plannedRunId, 'Reused from attempt': reused?.reused_from_attempt, 'Origin attempt': reused?.origin_attempt_id, 'Origin FeatureRun': reused?.origin_feature_run_id, Status: stateLabel(record), Liveness: record.liveness?.state, Dependencies: record.depends_on }} /><Availability label="Node evidence:" value={record.evidence} /></section>;
 }
 
 function GraphExecutionSummary({ graph }) {
@@ -100,15 +102,16 @@ function MetricCards({ metrics }) {
   return <div className="metric-cards">
     <div><span>{metrics.provenance.attempt_count > 1 ? 'Cumulative tokens' : 'Total tokens'}</span><strong>{tokens(total.total_tokens)}</strong><small>{metrics.provenance.attempt_count > 1 ? `${number.format(metrics.provenance.attempt_count)} node tries · ` : ''}{tokens(total.input_tokens)} in · {tokens(total.output_tokens)} out</small></div>
     <div><span>Peak observed input</span><strong>{tokens(total.peak_input_tokens)}</strong><small>single agent invocation</small></div>
-    <div><span>Agent time</span><strong>{duration(total.duration_ms)}</strong><small>{number.format(total.calls)} backend call{total.calls === 1 ? '' : 's'}</small></div>
-    <div><span>Wall time</span><strong>{duration(total.wall_clock_ms)}</strong><small>run elapsed time</small></div>
+    <div><span>Agent busy time</span><strong>{duration(total.busy_ms)}</strong><small>non-overlapping backend activity</small></div>
+    <div><span>Backend time (summed)</span><strong>{duration(total.duration_ms)}</strong><small>{number.format(total.calls)} backend call{total.calls === 1 ? '' : 's'} · overlaps under parallel dispatch</small></div>
+    <div><span>Wall time</span><strong>{duration(total.wall_clock_ms)}</strong><small>run elapsed time{total.wall_clock_ms === null && metrics.provenance.attempt_count > 1 ? ' · a try has not recorded its summary yet' : ''}</small></div>
     <div><span>{total.cost.state === 'available' ? 'Recorded API cost' : 'Estimated API cost'}</span><strong>{money(total.cost)}</strong><small>{total.cost.reason || 'audited usage pricing'}</small></div>
     <div><span>Quality</span><strong>{quality.criteria_satisfied}/{quality.criteria_total} criteria</strong><small>{quality.open_findings} open findings · {quality.review_cycles} review cycles · {quality.verification_repairs} repairs</small></div>
   </div>;
 }
 
 function MetricsTable({ heading, rows, agents = false }) {
-  return <section className="metric-section"><h3>{heading}</h3>{rows.length ? <div className="table-wrap"><table><thead><tr><th>{agents ? 'Agent' : heading.replace('By ', '')}</th>{agents && <><th>Phase</th><th>Model / effort</th><th>Backend</th></>}<th>Calls</th><th>Total tokens</th><th>Peak input</th><th>Agent time</th><th>Cost</th></tr></thead><tbody>{rows.map((row) => <tr key={row.label}><td title={row.label}>{agents ? compactId(row.label) : title(row.label)}</td>{agents && <><td>{title(row.phase)}</td><td>{row.model}<small>{row.effort}</small></td><td>{row.backend}</td></>}<td>{number.format(row.calls)}</td><td>{tokens(row.total_tokens)}<small>{tokens(row.input_tokens)} in · {tokens(row.output_tokens)} out</small></td><td>{tokens(row.peak_input_tokens)}</td><td>{duration(row.duration_ms)}</td><td title={row.cost.reason || ''}>{money(row.cost)}</td></tr>)}</tbody></table></div> : <p className="muted">No audited backend usage records were found.</p>}</section>;
+  return <section className="metric-section"><h3>{heading}</h3>{rows.length ? <div className="table-wrap"><table><thead><tr><th>{agents ? 'Agent' : heading.replace('By ', '')}</th>{agents && <><th>Phase</th><th>Model / effort</th><th>Backend</th></>}<th>Calls</th><th>Total tokens</th><th>Peak input</th><th>Backend time (summed)</th><th>Cost</th></tr></thead><tbody>{rows.map((row) => <tr key={row.label}><td title={row.label}>{agents ? compactId(row.label) : title(row.label)}</td>{agents && <><td>{title(row.phase)}</td><td>{row.model}<small>{row.effort}</small></td><td>{row.backend}</td></>}<td>{number.format(row.calls)}</td><td>{tokens(row.total_tokens)}<small>{tokens(row.input_tokens)} in · {tokens(row.output_tokens)} out</small></td><td>{tokens(row.peak_input_tokens)}</td><td>{duration(row.duration_ms)}</td><td title={row.cost.reason || ''}>{money(row.cost)}</td></tr>)}</tbody></table></div> : <p className="muted">No audited backend usage records were found.</p>}</section>;
 }
 
 function Metrics({ metrics }) {
@@ -174,7 +177,7 @@ function Dashboard() {
         {selectedGroup?.attempts.length > 1 && <label>Attempt<select value={selectedGraph?.run_id || ''} onChange={(event) => setSelectedGraphId(event.target.value)}>{selectedGroup.attempts.map((graph) => <option key={graph.run_id} value={graph.run_id}>{graph.created_at} · {graph.status}</option>)}</select></label>}
       </div><div className="legend">{['running', 'queued', 'blocked', 'stale', 'succeeded', 'unavailable'].map((state) => <span key={state} className={`status status--${state}`}><i />{state}</span>)}</div></div>
       {nodes.length ? <ReactFlow nodes={nodes} edges={edges} nodeTypes={nodeTypes} onNodeClick={onNodeClick} fitView nodesDraggable={false} nodesConnectable={false} deleteKeyCode={null} proOptions={{ hideAttribution: true }}><Background /><Controls showInteractive={false} /></ReactFlow> : <div className="empty-canvas"><h2>No PlanGraphs discovered</h2><p>The configured audit roots have no verified PlanGraph records.</p></div>}</section><GraphExecutionSummary graph={selectedGraph} />
-      <section className="runs"><h2>FeatureRuns</h2>{catalog.feature_runs.length ? catalog.feature_runs.map((run) => <button key={run.run_id} onClick={() => { setDetailTab('overview'); setSelectedNodeKey(null); setSelectedRunId(run.run_id); }}><code>{run.run_id}</code><Status record={run} /><span>{run.correlation ? `${run.correlation.plan_graph_id} / ${run.correlation.plan_node_id}` : 'Ungrouped or legacy'}</span></button>) : <p className="muted">No FeatureRuns discovered.</p>}</section>
+      <section className="runs"><h2>FeatureRuns</h2>{catalog.feature_runs.length ? catalog.feature_runs.map((run) => <button key={run.run_id} onClick={() => { setDetailTab('overview'); setSelectedNodeKey(null); setSelectedRunId(run.run_id); }}><code>{run.run_id}</code><Status record={run} /><span>{run.correlation ? `${run.correlation.plan_graph_id} / ${run.correlation.plan_node_id}${run.correlation.state === 'id_matched' ? ' · id match (unattested)' : ''}` : 'Ungrouped or legacy'}</span></button>) : <p className="muted">No FeatureRuns discovered.</p>}</section>
     </>}</main><Detail run={selectedRun} node={selectedNode} detail={visibleDetail} error={detailError} onClose={() => { setSelectedNodeKey(null); setSelectedRunId(null); }} tab={detailTab} onTabChange={setDetailTab} /></div>;
 }
 export default function App() { return <ReactFlowProvider><Dashboard /></ReactFlowProvider>; }

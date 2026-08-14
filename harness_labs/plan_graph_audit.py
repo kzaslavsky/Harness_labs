@@ -11,10 +11,12 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
+from uuid import uuid4
 
 from .audit import AuditActor, AuditConflictError, AuditError, AuditJournal
 
@@ -38,6 +40,11 @@ _ARTIFACT_REF = re.compile(r"^artifact:sha256:[a-f0-9]{64}$")
 _CHILD_LIVENESS_NAMES = ("plan-graph-liveness.json", "liveness.json")
 _CHILD_SEAL_NAMES = ("plan-graph-seal-receipt.json", "seal-receipt.json")
 _BLOCK_ESCALATION_MAX_BYTES = 4 * 1024 * 1024
+# Written at repair-successor creation so a crash-orphaned directory (one
+# that never reached its plan_graph_repair_successor_allocated event) can
+# later be told apart from one whose admission process is still live.
+_ADMISSION_LIVENESS_NAME = "plan-graph-admission-liveness.json"
+_SUCCESSOR_ALLOCATION_EVENT_TYPE = "plan_graph_repair_successor_allocated"
 
 
 def validate_plan_graph_id(value: str) -> None:
@@ -197,18 +204,36 @@ class PlanGraphAudit:
     @classmethod
     def open_repair_predecessor(
         cls, *, run_root: Path, graph_run_id: str, plan: str, plan_sha256: str, base_commit: str,
-        logical_graph_id: str, plan_graph_digest: str,
+        logical_graph_id: str | None, plan_graph_digest: str,
     ) -> "PlanGraphAudit":
-        """Open a finalized failed attempt read-only after full journal verification."""
+        """Open a finalized failed attempt read-only after full journal verification.
+
+        ``logical_graph_id`` may be omitted (``None``): it is then resolved
+        from this predecessor's own persisted registration binding
+        (``registration.logical_graph_id``, durable and identical across its
+        whole attempt lineage) rather than requiring an operator-supplied
+        value.  When supplied explicitly it must still match this
+        predecessor's own recorded identity exactly, as before.
+        """
         run_dir = (run_root / graph_run_id).resolve()
         journal = AuditJournal.open_existing(run_dir, actor=_ACTOR)
         AuditJournal.verify(run_dir)
         manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
         descriptor = json.loads((run_dir / "descriptor.json").read_text(encoding="utf-8"))
         state = journal.checkpoint_state()
+        if logical_graph_id is None:
+            binding = state.get("registration_binding")
+            resolved = binding.get("logical_graph_id") if isinstance(binding, Mapping) else None
+            if not isinstance(resolved, str) or not resolved:
+                raise AuditError(
+                    "predecessor attempt has no persisted registration-binding "
+                    "logical_graph_id"
+                )
+            logical_graph_id = resolved
+        elif descriptor.get("logical_graph_id", graph_run_id) != logical_graph_id:
+            raise AuditError("predecessor is not a matching failed or blocked attempt")
         if (manifest.get("status") not in {"failed", "blocked"}
                 or state.get("terminal_graph_status") not in {"failed", "blocked"}
-                or descriptor.get("logical_graph_id", graph_run_id) != logical_graph_id
                 or descriptor.get("graph_attempt_id", graph_run_id) != graph_run_id
                 or descriptor.get("approved_plan", {}).get("sha256") != plan_sha256
                 or descriptor.get("repository", {}).get("base_commit") != base_commit
@@ -225,6 +250,96 @@ class PlanGraphAudit:
         instance.descriptor = descriptor
         instance.journal = journal
         return instance
+
+    @staticmethod
+    def reclaim_orphaned_successor_attempt(
+        attempt_dir: Path, *, process_probe: Callable[[int], str | None]
+    ) -> bool:
+        """Reclaim one crash-orphaned repair-successor directory in place.
+
+        Reclaim proceeds only when every one of these holds: the directory's
+        own descriptor proves it is a repair successor in the first place
+        (an ordinary interrupted attempt never has a
+        ``predecessor_attempt_id``, so it is left alone rather than mistaken
+        for one), it carries no ``plan_graph_repair_successor_allocated``
+        event (the controller that was creating it crashed before recording
+        one), its own journal still verifies (a genuinely corrupt directory
+        is left alone for an operator), and its recorded admission process
+        is provably dead per ``process_probe`` — the caller is responsible
+        for holding the exclusive lineage flock for the whole
+        check-and-rename, since that is what makes "no live admission
+        process" a safe precondition to renaming a directory another attempt
+        could still be populating. On success the directory is finalized
+        ``interrupted`` (through the journal's own append-only
+        ``append``/``finalize``, never by deleting anything) and renamed
+        aside under a dot-prefixed name -- so its ordinal is free for reuse
+        and the reclaimed directory is excluded from the run catalog the
+        same way ``.plan-graph-locks``/``.plan-graph-budgets`` are, rather
+        than colliding on the successor's run_id; on any missing
+        precondition this is a no-op returning ``False``.
+        """
+        if not attempt_dir.is_dir() or (attempt_dir / "manifest.json").exists():
+            return False
+        try:
+            AuditJournal.verify(attempt_dir)
+            events = [
+                json.loads(line)
+                for line in (attempt_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()
+            ]
+            marker = json.loads(
+                (attempt_dir / _ADMISSION_LIVENESS_NAME).read_text(encoding="utf-8")
+            )
+            descriptor = json.loads(
+                (attempt_dir / "descriptor.json").read_text(encoding="utf-8")
+            )
+        except (AuditError, OSError, ValueError, json.JSONDecodeError):
+            return False
+        if not isinstance(descriptor.get("predecessor_attempt_id"), str) or not descriptor["predecessor_attempt_id"]:
+            # Only a repair successor ever carries a predecessor_attempt_id;
+            # an ordinary interrupted attempt that merely shares the
+            # "<logical>-attempt-N" name must not be reclaimed here.
+            return False
+        if any(
+            isinstance(event, dict) and event.get("event_type") == _SUCCESSOR_ALLOCATION_EVENT_TYPE
+            for event in events
+        ):
+            return False
+        pid = marker.get("pid")
+        if not isinstance(pid, int) or isinstance(pid, bool):
+            return False
+        token = marker.get("process_start_token")
+        if not isinstance(token, str) or not token:
+            # An unobservable process-start token proves nothing either way;
+            # treat it like any other ambiguous liveness result and decline.
+            return False
+        try:
+            observed = process_probe(pid)
+        except Exception:
+            return False
+        if observed == token:
+            return False
+        journal = AuditJournal.open_existing(attempt_dir, actor=_ACTOR)
+        journal.append(
+            "plan_graph_admission_orphan_reclaimed",
+            status="running",
+            payload={
+                "reason": "no successor-allocation event was recorded and the "
+                          "admission process is no longer live",
+                "admission_pid": pid,
+            },
+            actor=_ACTOR,
+        )
+        journal.finalize(
+            "interrupted",
+            result={"reason": "admission_orphan_reclaimed"},
+            state=journal.checkpoint_state(),
+        )
+        reclaimed_path = attempt_dir.with_name(
+            f".{attempt_dir.name}.orphan-reclaimed-{uuid4().hex}"
+        )
+        attempt_dir.rename(reclaimed_path)
+        AuditJournal.verify(reclaimed_path)
+        return True
 
     def repair_selection(self, *, retry_frontier: Sequence[str], blocker_evidence_ref: str) -> dict[str, object]:
         """Return the retry closure and only custody-proven reusable predecessors."""
@@ -254,29 +369,79 @@ class PlanGraphAudit:
         barriers = state.get("integration_barriers")
         if not isinstance(barriers, list) or not all(isinstance(item, dict) for item in barriers):
             raise AuditError("predecessor integration custody evidence is invalid")
+        inherited = self._reuse_receipt_custody()
         for node_id, node in nodes.items():
             if node_id in invalidated or node.get("status") != "succeeded":
                 continue
             candidate, dependencies = node.get("candidate_commit"), node.get("depends_on")
             # A successful node is reusable only when the predecessor's
             # controller-owned integration barrier binds that exact candidate
-            # to its recorded input.  Child status alone is never sufficient.
+            # to its recorded input, or the predecessor itself reused the
+            # node under a digest-verified reuse receipt (custody inherited
+            # along the successor chain). Child status alone is never
+            # sufficient.
             custody_matches = any(
                 barrier.get("node_id") == node_id
                 and barrier.get("integrated_commit") == candidate
                 and _is_git_commit(barrier.get("input_commit"))
                 for barrier in barriers
-            )
+            ) or inherited.get(node_id) == candidate
             if _is_git_commit(candidate) and custody_matches and isinstance(dependencies, list) and all(dependency in reusable for dependency in dependencies):
                 reusable[node_id] = candidate
         return {"retry_frontier": frontier, "invalidated_node_ids": tuple(node_id for node_id in nodes if node_id in invalidated), "reused_completed": reusable, "predecessor_checkpoint": json.loads(self.journal.checkpoint_path.read_text(encoding="utf-8"))}
 
+    def _reuse_receipt_custody(self) -> dict[str, str]:
+        """Return candidates this attempt reused under digest-verified receipts."""
+        custody: dict[str, str] = {}
+        try:
+            for line in self.journal.events_path.read_text(encoding="utf-8").splitlines():
+                event = json.loads(line)
+                if event.get("event_type") != "plan_graph_node_reused":
+                    continue
+                for artifact in event.get("artifacts", []):
+                    if not isinstance(artifact, dict):
+                        continue
+                    path = self.run_dir / str(artifact.get("path", ""))
+                    raw = path.read_bytes()
+                    if hashlib.sha256(raw).hexdigest() != artifact.get("sha256"):
+                        raise AuditError("reuse receipt does not match its recorded digest")
+                    receipt = json.loads(raw)
+                    node_id = receipt.get("node_id")
+                    candidate = receipt.get("candidate_commit")
+                    if isinstance(node_id, str) and _is_git_commit(candidate):
+                        custody[node_id] = candidate
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            raise AuditError("predecessor reuse custody is invalid") from exc
+        return custody
+
     def _has_recorded_artifact(self, reference: str) -> bool:
         digest = reference.removeprefix("artifact:sha256:")
         try:
-            return any(any(isinstance(artifact, dict) and artifact.get("sha256") == digest for artifact in event.get("artifacts", [])) for event in (json.loads(line) for line in self.journal.events_path.read_text(encoding="utf-8").splitlines()))
+            if any(any(isinstance(artifact, dict) and artifact.get("sha256") == digest for artifact in event.get("artifacts", [])) for event in (json.loads(line) for line in self.journal.events_path.read_text(encoding="utf-8").splitlines())):
+                return True
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             raise AuditError("predecessor artifact inventory is invalid") from exc
+        # A ref recorded only in a child run's own (richer) journal is
+        # reachable transitively through this graph journal's node run_dir
+        # bindings, using the same verified child-evidence indexing already
+        # trusted for seal-receipt adoption (_child_evidence).
+        nodes = self.state.get("nodes")
+        if not isinstance(nodes, dict):
+            return False
+        for node in nodes.values():
+            if not isinstance(node, dict):
+                continue
+            run_dir = self._child_run_dir(node)
+            if run_dir is None:
+                continue
+            try:
+                AuditJournal.verify(run_dir)
+            except (AuditError, OSError, ValueError):
+                continue
+            evidence = self._child_evidence(run_dir)
+            if evidence is not None and reference in evidence:
+                return True
+        return False
 
     @property
     def state(self) -> dict[str, Any]:
@@ -307,6 +472,77 @@ class PlanGraphAudit:
                 "input_commit": input_commit,
             },
         )
+
+    def gate_slot_acquired(self, node_id: str, admitted_concurrency: int) -> None:
+        """Journal one node's acquisition of the graph-owned gate slot.
+
+        Not a node-content checkpoint transition: the ready-set scheduler's
+        launchers run on worker threads and hold this slot only around
+        their own verification-command execution, concurrently with other
+        in-flight nodes' dispatch/review/fix work, so this must be safe to
+        call off the coordinating thread. It journals the event, then
+        re-stamps the checkpoint against that event with an empty update so
+        the durable checkpoint never lags the journal head for the
+        potentially long verification window this event opens.
+        ``AuditJournal.append``/``merge_checkpoint`` are internally
+        mutex-protected, so concurrent callers serialize safely without any
+        of them mutating per-node state.
+        """
+        self._gate_slot_event(node_id, "acquired", admitted_concurrency)
+
+    def gate_slot_released(self, node_id: str, admitted_concurrency: int) -> None:
+        """Journal one node's release of the graph-owned gate slot."""
+        self._gate_slot_event(node_id, "released", admitted_concurrency)
+
+    def gate_slot_bypassed(self, node_id: str) -> None:
+        """Journal that an admitted node completed verification unslotted.
+
+        Emitted from the coordinating thread when a node with
+        ``verification_argv`` succeeds without ever entering its minted
+        :class:`~harness_labs.plan_graph.GateSlotHold` — e.g. an
+        out-of-process launcher, which has no way to carry the in-process
+        hold across the subprocess boundary. Without this record the journal
+        would be indistinguishable from a run in which no node needed the
+        slot, silently losing the CB-06 mutual-exclusion guarantee.
+        """
+        if not isinstance(node_id, str) or not node_id:
+            raise AuditError("gate slot event requires a non-empty node id")
+        self.journal.append(
+            "plan_graph_gate_slot_bypassed",
+            status="failed",
+            payload={"plan_node_id": node_id},
+            actor=_ACTOR,
+        )
+
+    def _gate_slot_event(
+        self, node_id: str, action: str, admitted_concurrency: int
+    ) -> None:
+        if not isinstance(node_id, str) or not node_id:
+            raise AuditError("gate slot event requires a non-empty node id")
+        if (
+            not isinstance(admitted_concurrency, int)
+            or isinstance(admitted_concurrency, bool)
+            or admitted_concurrency < 1
+        ):
+            raise AuditError(
+                "gate slot admitted_concurrency must be a positive integer"
+            )
+        self.journal.append(
+            f"plan_graph_gate_slot_{action}",
+            status="running" if action == "acquired" else "succeeded",
+            payload={
+                "plan_node_id": node_id,
+                "admitted_concurrency": admitted_concurrency,
+            },
+            actor=_ACTOR,
+        )
+        # A plain append leaves the durable checkpoint's head_hash lagging
+        # the journal head until the coordinating thread's next per-node
+        # transition — during a slow verification stage that window can
+        # persist for the run's whole gate-holding duration. An empty-update
+        # merge changes no state field; it only re-checkpoints against the
+        # journal head this event just advanced, closing that window.
+        self.journal.merge_checkpoint(status="running", updates={})
 
     def node_completed(
         self,
@@ -1194,6 +1430,26 @@ class PlanGraphAudit:
         # AuditJournal creates its own directory; write the descriptor only after
         # that succeeds, then bind its digest in the first graph event.
         journal = AuditJournal(self.run_dir, self.graph_run_id, actor=_ACTOR)
+        # Recorded as early as possible so a crash anywhere after this point
+        # leaves a directory that reclaim_orphaned_successor_attempt can
+        # later prove has no live admission process, rather than one that
+        # must be treated as permanently ambiguous.
+        _atomic_write(
+            self.run_dir / _ADMISSION_LIVENESS_NAME,
+            (
+                json.dumps(
+                    {
+                        "protocol": "harness-plan-graph-admission-liveness/1",
+                        "pid": os.getpid(),
+                        "process_start_token": _process_start_token(os.getpid()),
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                + "\n"
+            ).encode("utf-8"),
+            0o600,
+        )
         descriptor_path = self.run_dir / "descriptor.json"
         descriptor_raw = (
             json.dumps(self.descriptor, sort_keys=True, separators=(",", ":")) + "\n"
@@ -1226,11 +1482,26 @@ class PlanGraphAudit:
             logical_artifact = journal.write_artifact("plan-graph-logical-attempt", logical_attempt)
             authority_artifact = journal.write_artifact("plan-graph-resume-authority", resume_authority)
             journal.append("plan_graph_repair_successor_allocated", status="running", payload={**resume, "logical_attempt_ref": f"artifact:sha256:{logical_artifact.sha256}", "resume_authority_ref": f"artifact:sha256:{authority_artifact.sha256}"}, actor=_ACTOR, artifacts=(checkpoint_artifact, logical_artifact, authority_artifact))
+            predecessor_barriers = [
+                barrier
+                for barrier in (checkpoint.get("state", {}).get("integration_barriers") or [])
+                if isinstance(barrier, dict)
+            ]
             for node_id, node in self._initial_state["nodes"].items():
                 if node.get("reused_from_attempt") is None:
                     continue
                 receipt = journal.write_artifact("plan-graph-node-reuse-receipt", {"logical_graph_id": self.logical_graph_id, "predecessor_attempt_id": self.predecessor_attempt_id, "node_id": node_id, "candidate_commit": node["candidate_commit"], "blocker_evidence_ref": resume["blocker_evidence_ref"]})
                 journal.append("plan_graph_node_reused", status="succeeded", payload={"plan_node_id": node_id, "reuse_receipt_ref": f"artifact:sha256:{receipt.sha256}"}, actor=_ACTOR, artifacts=(receipt,))
+                # Custody must survive successor chains: carry the
+                # predecessor's integration barrier for every reused node so
+                # a later repair_selection can still prove this candidate.
+                for barrier in predecessor_barriers:
+                    if (
+                        barrier.get("node_id") == node_id
+                        and barrier.get("integrated_commit") == node["candidate_commit"]
+                    ):
+                        self._initial_state["integration_barriers"].append(dict(barrier))
+                        break
             journal.checkpoint("running", self._initial_state)
         return journal
 
@@ -1323,6 +1594,30 @@ def _timestamp() -> str:
         .isoformat(timespec="microseconds")
         .replace("+00:00", "Z")
     )
+
+
+def _process_start_token(pid: int) -> str | None:
+    """Return an immutable process-start token when the host can observe one.
+
+    Deliberately mirrors :func:`harness_labs.plan_graph._local_process_start_token`
+    rather than importing it: this module sits below ``plan_graph`` in the
+    package's layering and must not import back up from it.
+    """
+    try:
+        return str(os.stat(f"/proc/{pid}").st_ctime_ns)
+    except OSError:
+        pass
+    try:
+        observed = subprocess.run(
+            ["ps", "-o", "lstart=", "-p", str(pid)],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=1,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return observed.stdout.strip() or None
 
 
 def _validate_repair_contracts(

@@ -21,9 +21,17 @@ _DESCRIPTOR_FIELDS = frozenset({"protocol", "run_kind", "run_id", "created_at", 
 _PLAN_GRAPH_LINEAGE_FIELDS = frozenset({"logical_graph_id", "graph_attempt_id", "predecessor_attempt_id"})
 _LEASE_FIELDS = frozenset({"protocol", "run_id", "controller_instance_id", "hostname", "pid", "process_start_token", "heartbeat_sequence", "heartbeat_at", "controller_kind"})
 _ESTIMATED_MODEL_PRICES = {
-    "gpt-5.6-sol": {"input": Decimal("5.00"), "cached_input": Decimal("0.50"), "output": Decimal("30.00"), "source": "https://developers.openai.com/api/docs/models/gpt-5.6-sol"},
-    "gpt-5.6-terra": {"input": Decimal("2.50"), "cached_input": Decimal("0.25"), "output": Decimal("15.00"), "source": "https://developers.openai.com/api/docs/models/gpt-5.6-terra"},
-    "gpt-5.6-luna": {"input": Decimal("1.00"), "cached_input": Decimal("0.10"), "output": Decimal("6.00"), "source": "https://developers.openai.com/api/docs/models/gpt-5.6-luna"},
+    "gpt-5.6-sol": {"input": Decimal("5.00"), "cached_input": Decimal("0.50"), "output": Decimal("30.00"), "long_context_premium": True, "source": "https://developers.openai.com/api/docs/models/gpt-5.6-sol"},
+    "gpt-5.6-terra": {"input": Decimal("2.50"), "cached_input": Decimal("0.25"), "output": Decimal("15.00"), "long_context_premium": True, "source": "https://developers.openai.com/api/docs/models/gpt-5.6-terra"},
+    "gpt-5.6-luna": {"input": Decimal("1.00"), "cached_input": Decimal("0.10"), "output": Decimal("6.00"), "long_context_premium": True, "source": "https://developers.openai.com/api/docs/models/gpt-5.6-luna"},
+    # Claude 4.6+ bills the full context window at standard per-token rates
+    # (no long-context premium).  cached_input is the cache-read rate (0.1x
+    # input); cache-write premiums are not derivable from the recorded usage
+    # and stay excluded, as the provenance reason states.
+    "claude-fable-5": {"input": Decimal("10.00"), "cached_input": Decimal("1.00"), "output": Decimal("50.00"), "long_context_premium": False, "source": "https://platform.claude.com/docs/en/about-claude/pricing"},
+    "claude-opus-5": {"input": Decimal("5.00"), "cached_input": Decimal("0.50"), "output": Decimal("25.00"), "long_context_premium": False, "source": "https://platform.claude.com/docs/en/about-claude/pricing"},
+    "claude-sonnet-5": {"input": Decimal("2.00"), "cached_input": Decimal("0.20"), "output": Decimal("10.00"), "long_context_premium": False, "source": "https://platform.claude.com/docs/en/about-claude/pricing"},
+    "claude-haiku-4-5": {"input": Decimal("1.00"), "cached_input": Decimal("0.10"), "output": Decimal("5.00"), "long_context_premium": False, "source": "https://platform.claude.com/docs/en/about-claude/pricing"},
 }
 _LONG_CONTEXT_THRESHOLD = 272_000
 
@@ -42,6 +50,11 @@ def build_run_catalog(source_root: Path, *, clock: Clock | None = None, process_
         return _snapshot(root, now, diagnostics, records, "source root is unavailable")
     for entry in sorted(root.iterdir(), key=lambda path: path.name):
         if entry.is_symlink() or not entry.is_dir():
+            continue
+        if entry.name.startswith("."):
+            # Ledger and lock bookkeeping (.plan-graph-budgets,
+            # .plan-graph-locks) live beside run directories; they are
+            # infrastructure, not runs, and must not poison catalog IDs.
             continue
         if entry.name in exclusions:
             reason = exclusions[entry.name]
@@ -153,13 +166,23 @@ def merge_run_catalogs(
                 (feature for feature in features if _node_matches_child(graph, node, feature)),
                 None,
             )
-            node["evidence"] = (
-                availability("available")
-                if child is not None
-                else availability("partial", "child correlation is not verified")
-            )
+            if child is None:
+                # A graph and a descriptor-less legacy child may also live in
+                # different roots; exact run-id equality still binds them.
+                child = _id_match_child(graph, node, features)
+            if child is None:
+                node["evidence"] = availability("partial", "child correlation is not verified")
+            elif _correlation_is_id_matched(child):
+                # Never let a merged view upgrade an id-matched correlation to
+                # the fully-available evidence reserved for attested children.
+                node["evidence"] = availability("partial", _ID_MATCH_REASON)
+            else:
+                node["evidence"] = availability("available")
             if child is not None:
                 node["liveness"] = dict(child["liveness"])
+    # A reused node's origin attempt may live in any configured root, so the
+    # reuse chain is re-resolved over the merged graph and feature records.
+    _resolve_reused_nodes(graphs, features)
 
     ungrouped = [
         feature for feature in features
@@ -269,6 +292,15 @@ def _snapshot(root: Path, now: datetime, diagnostics: list[dict[str, str | None]
                 # warning merely because a child catalog record is absent.
                 if node.get("evidence", {}).get("state") != "available":
                     continue
+                if node.get("reused_from_attempt"):
+                    # A recorded reuse governs; _resolve_reused_nodes follows
+                    # the chain instead of guessing by id or merge commit.
+                    continue
+                id_matched = _id_match_child(graph, node, features)
+                if id_matched is not None:
+                    node["liveness"] = dict(id_matched["liveness"])
+                    node["evidence"] = availability("partial", _ID_MATCH_REASON)
+                    continue
                 legacy_matches = [
                     record for record in features
                     if node.get("_candidate_commit") in record.get("_integration_merge_commits", ())
@@ -281,6 +313,7 @@ def _snapshot(root: Path, now: datetime, diagnostics: list[dict[str, str | None]
                     )
                 else:
                     node["evidence"] = availability("partial", "child correlation is not verified")
+    _resolve_reused_nodes(graphs, features)
     ungrouped = [
         record for record in features
         if not any(_node_matches_child(graph, node, record) for graph in graphs for node in graph["nodes"])
@@ -309,9 +342,19 @@ def _detail(metrics: Mapping[str, Any], descriptor: Mapping[str, Any] | None) ->
 def _detail_metrics(metrics: Mapping[str, Any]) -> dict[str, Any]:
     """Project verified transport records into reconciled operator metrics."""
     records: list[dict[str, Any]] = []
+    spans: list[tuple[int, int]] = []
+    unspanned_records = 0
+    transport_sessions: set[Any] = set()
     for event in metrics.get("events", []):
         if event.get("event_type") != "backend_transport":
             continue
+        if event.get("session_id") is not None:
+            transport_sessions.add(event.get("session_id"))
+        end_ns, span_ms = event.get("monotonic_ns"), event.get("duration_ms")
+        if type(end_ns) is int and type(span_ms) is int and span_ms >= 0:
+            spans.append((end_ns - span_ms * 1_000_000, end_ns))
+        else:
+            unspanned_records += 1
         payload = event.get("payload") if isinstance(event.get("payload"), Mapping) else {}
         usage = payload.get("usage") if isinstance(payload.get("usage"), Mapping) else {}
         actor = event.get("actor") if isinstance(event.get("actor"), Mapping) else {}
@@ -330,6 +373,11 @@ def _detail_metrics(metrics: Mapping[str, Any]) -> dict[str, Any]:
             "input_tokens": _nonnegative_int(usage.get("input_tokens")),
             "cached_input_tokens": _nonnegative_int(usage.get("cached_input_tokens")),
             "output_tokens": _nonnegative_int(usage.get("output_tokens")),
+            # claude-print result usage is CUMULATIVE across every API turn of
+            # the subprocess; a per-invocation context peak is not derivable
+            # from it, and reporting the cumulative sum as "peak" inflated the
+            # metric by the number of agentic turns.
+            "peak_input_tokens": None,
             "duration_ms": _nonnegative_int(event.get("duration_ms")),
             "cost_usd": recorded_cost if recorded_cost is not None else estimated_cost["usd"] if estimated_cost else None,
             "cost_kind": "authoritative" if recorded_cost is not None else "estimated" if estimated_cost else "unavailable",
@@ -342,6 +390,11 @@ def _detail_metrics(metrics: Mapping[str, Any]) -> dict[str, Any]:
         records.extend(_codex_token_usage_records(metrics, stages))
         if records:
             collection_method = "verified cumulative Codex token-usage notifications"
+    session_records, session_spans = _claude_session_records(metrics, transport_sessions)
+    if session_records:
+        collection_method = "verified claude session stream artifacts" if not records else collection_method + "; verified claude session stream artifacts"
+        records.extend(session_records)
+        spans.extend(session_spans)
     totals = _aggregate_metric_rows(records)
     summary = metrics.get("summary") if isinstance(metrics.get("summary"), Mapping) else {}
     summary_usage = summary.get("usage") if isinstance(summary.get("usage"), Mapping) else {}
@@ -349,6 +402,13 @@ def _detail_metrics(metrics: Mapping[str, Any]) -> dict[str, Any]:
         totals["wall_clock_ms"] = summary_usage["wall_clock_ms"]
     else:
         totals["wall_clock_ms"] = None
+    # duration_ms sums per-record backend durations, which overlap whenever a
+    # coordinator blocks on dispatched workers or workers run in parallel, so
+    # its sum may legitimately exceed wall time.  busy_ms is the union of the
+    # verified activity intervals — honest non-overlapping busy time — and is
+    # reported as unavailable rather than invented when any transport record
+    # lacks monotonic timing or when only cumulative session usage exists.
+    totals["busy_ms"] = _interval_union_ms(spans) if spans and not unspanned_records else None
     state = metrics.get("checkpoint", {}).get("state", {})
     state = state if isinstance(state, Mapping) else {}
     controller = state.get("controller") if isinstance(state.get("controller"), Mapping) else {}
@@ -381,7 +441,18 @@ def _detail_metrics(metrics: Mapping[str, Any]) -> dict[str, Any]:
         "provenance": {
             "usage_records": sum(record["calls"] for record in records),
             "collection_method": collection_method,
-            "peak_context_definition": "maximum observed input_tokens in one backend invocation",
+            "peak_context_definition": (
+                "maximum observed input_tokens in one backend invocation; "
+                "unavailable when every record reports only cumulative "
+                "session usage (claude-print results)"
+            ),
+            "busy_time_definition": (
+                "union of verified backend_transport activity intervals "
+                "(non-overlapping busy time); duration_ms sums per-record "
+                "durations and may exceed wall time when a coordinator "
+                "blocks on dispatched workers; unavailable when any record "
+                "lacks monotonic timing or usage is cumulative-only"
+            ),
         },
     }
 
@@ -460,6 +531,150 @@ def _codex_usage_values(value: Mapping[str, Any]) -> dict[str, int] | None:
         "output_tokens": value.get("outputTokens"),
     }
     return fields if all(type(item) is int and item >= 0 for item in fields.values()) else None
+
+
+def _read_stream_artifact_message(run_dir: Path, artifact: Any) -> Mapping[str, Any] | None:
+    if not isinstance(artifact, Mapping) or not isinstance(artifact.get("path"), str):
+        return None
+    target = run_dir.joinpath(*Path(artifact["path"]).parts)
+    try:
+        resolved = target.resolve(strict=True)
+        if resolved.is_symlink() or run_dir not in resolved.parents or resolved.stat().st_size > 4 * 1024 * 1024:
+            return None
+        text = resolved.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    for line in text.splitlines():
+        try:
+            message = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        return message if isinstance(message, Mapping) else None
+    return None
+
+
+def _claude_stream_usage_values(value: Any) -> dict[str, int] | None:
+    """Normalize per-request claude usage to harness semantics.
+
+    input_tokens covers everything the request carried into context
+    (uncached + cache reads + cache writes); cached_input_tokens is the
+    cache-read subset, matching parse_claude_result_usage.
+    """
+    if not isinstance(value, Mapping):
+        return None
+    uncached = value.get("input_tokens")
+    cache_read = value.get("cache_read_input_tokens")
+    cache_creation = value.get("cache_creation_input_tokens")
+    output = value.get("output_tokens")
+    if not all(type(item) is int and item >= 0 for item in (uncached, cache_read, cache_creation, output)):
+        return None
+    return {
+        "input_tokens": uncached + cache_read + cache_creation,
+        "cached_input_tokens": cache_read,
+        "output_tokens": output,
+    }
+
+
+def _claude_session_records(metrics: Mapping[str, Any], transport_sessions: set[Any]) -> tuple[list[dict[str, Any]], list[tuple[int, int]]]:
+    """Project journaled claude session streams into coordinator metric rows.
+
+    ClaudeAgentSession coordinators journal their full stream-json transcript
+    as transport_message artifacts but never emit a backend_transport usage
+    record, so without this projection their tokens, cost, and the only
+    derivable per-request context peak are absent from run metrics.  Stream
+    assistant events repeat once per content block with identical usage, so
+    turns are deduplicated by message id before any summation.
+    """
+    supplied = metrics.get("run_dir")
+    if not isinstance(supplied, str):
+        return [], []
+    run_dir = Path(supplied).resolve()
+    sessions: dict[str, dict[str, Any]] = {}
+    process_efforts: dict[str, str] = {}
+    for event in metrics.get("events", []):
+        if event.get("event_type") == "backend_process_started":
+            payload = event.get("payload") if isinstance(event.get("payload"), Mapping) else {}
+            effort = payload.get("effort") or payload.get("reasoning")
+            if isinstance(event.get("backend_id"), str) and isinstance(effort, str):
+                process_efforts[event["backend_id"]] = effort
+        if event.get("event_type") != "transport_message":
+            continue
+        payload = event.get("payload") if isinstance(event.get("payload"), Mapping) else {}
+        if payload.get("direction") != "inbound" or payload.get("type") not in {"system", "assistant", "result"}:
+            continue
+        actor = event.get("actor") if isinstance(event.get("actor"), Mapping) else {}
+        for artifact in event.get("artifacts", []):
+            message = _read_stream_artifact_message(run_dir, artifact)
+            if message is None:
+                continue
+            # Events journaled before backend_session_identified carry no
+            # event-level session id, so the stream message's own session_id
+            # is the only key that keeps one session in one bucket.
+            key = message.get("session_id") or event.get("session_id") or actor.get("id") or "claude-session"
+            if key in transport_sessions:
+                continue
+            session = sessions.setdefault(str(key), {
+                "model": None, "backend": str(actor.get("id") or "claude-session"),
+                "turns": {}, "peak": None, "result": None, "first_ns": None, "last_ns": None,
+            })
+            end_ns = event.get("monotonic_ns")
+            if type(end_ns) is int:
+                session["first_ns"] = end_ns if session["first_ns"] is None else min(session["first_ns"], end_ns)
+                session["last_ns"] = end_ns if session["last_ns"] is None else max(session["last_ns"], end_ns)
+            if message.get("type") == "system" and message.get("subtype") == "init" and isinstance(message.get("model"), str):
+                session["model"] = message["model"]
+            elif message.get("type") == "assistant":
+                body = message.get("message") if isinstance(message.get("message"), Mapping) else {}
+                usage = _claude_stream_usage_values(body.get("usage"))
+                if usage is not None:
+                    turn_id = str(body.get("id") or artifact.get("path"))
+                    session["turns"][turn_id] = usage
+                    peak = session["peak"]
+                    session["peak"] = usage["input_tokens"] if peak is None else max(peak, usage["input_tokens"])
+            elif message.get("type") == "result":
+                session["result"] = message
+    records: list[dict[str, Any]] = []
+    spans: list[tuple[int, int]] = []
+    multiple = len(sessions) > 1
+    for key, session in sessions.items():
+        result = session["result"] if isinstance(session["result"], Mapping) else {}
+        usage = _claude_stream_usage_values(result.get("usage"))
+        if usage is None and session["turns"]:
+            turns = list(session["turns"].values())
+            usage = {field: sum(turn[field] for turn in turns) for field in ("input_tokens", "cached_input_tokens", "output_tokens")}
+        if usage is None:
+            continue
+        model = session["model"] or "unavailable"
+        recorded_cost = _nonnegative_number(result.get("total_cost_usd"))
+        estimated_cost = _estimated_api_cost(model, usage) if recorded_cost is None else None
+        calls = result.get("num_turns") if type(result.get("num_turns")) is int and result.get("num_turns") > 0 else max(len(session["turns"]), 1)
+        if type(session["first_ns"]) is int and type(session["last_ns"]) is int and session["last_ns"] > session["first_ns"]:
+            spans.append((session["first_ns"], session["last_ns"]))
+            duration_ms = (session["last_ns"] - session["first_ns"]) // 1_000_000
+        else:
+            duration_ms = 0
+        records.append({
+            "agent": f"claude-session coordinator ({str(key)[:8]})" if multiple else "claude-session coordinator",
+            # Coordinator-session stages carry the controller phase they were
+            # overseeing (e.g. "implement"), which would mislabel the
+            # coordinator as an implementer; its own phase is coordination.
+            "phase": "coordinate",
+            "agent_type": "run_coordinator",
+            "model": model,
+            "effort": process_efforts.get(session["backend"], "unavailable"),
+            "backend": session["backend"],
+            "calls": calls,
+            "input_tokens": usage["input_tokens"],
+            "cached_input_tokens": usage["cached_input_tokens"],
+            "output_tokens": usage["output_tokens"],
+            "peak_input_tokens": session["peak"],
+            "duration_ms": duration_ms,
+            "cost_usd": recorded_cost if recorded_cost is not None else estimated_cost["usd"] if estimated_cost else None,
+            "cost_kind": "authoritative" if recorded_cost is not None else "estimated" if estimated_cost else "unavailable",
+            "cost_source": "claude stream result total_cost_usd" if recorded_cost is not None else estimated_cost["source"] if estimated_cost else None,
+            "long_context_priced": estimated_cost["long_context"] if estimated_cost else False,
+        })
+    return records, spans
 
 
 def _execution_stages(metrics: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -570,7 +785,7 @@ def _estimated_api_cost(model: str, usage: Mapping[str, Any]) -> dict[str, Any] 
     cached_tokens = min(input_tokens, _nonnegative_int(usage.get("cached_input_tokens")))
     output_tokens = _nonnegative_int(usage.get("output_tokens"))
     uncached_tokens = input_tokens - cached_tokens
-    long_context = input_tokens > _LONG_CONTEXT_THRESHOLD
+    long_context = price["long_context_premium"] and input_tokens > _LONG_CONTEXT_THRESHOLD
     input_multiplier = Decimal("2") if long_context else Decimal("1")
     output_multiplier = Decimal("1.5") if long_context else Decimal("1")
     million = Decimal("1000000")
@@ -602,7 +817,16 @@ def _aggregate_metric_rows(rows: list[Mapping[str, Any]]) -> dict[str, Any]:
         "cached_input_tokens": sum(row["cached_input_tokens"] for row in rows),
         "output_tokens": sum(row["output_tokens"] for row in rows),
         "duration_ms": sum(row["duration_ms"] for row in rows),
-        "peak_input_tokens": max((row.get("peak_input_tokens", row["input_tokens"]) for row in rows), default=0),
+        "peak_input_tokens": max(
+            (
+                peak
+                for peak in (
+                    row.get("peak_input_tokens", row["input_tokens"]) for row in rows
+                )
+                if isinstance(peak, int)
+            ),
+            default=None,
+        ),
         "cost": {
             "state": cost_state,
             "usd": round(sum(row["cost_usd"] or 0 for row in rows), 6) if rows and missing_cost == 0 else None,
@@ -614,6 +838,23 @@ def _aggregate_metric_rows(rows: list[Mapping[str, Any]]) -> dict[str, Any]:
     }
     result["total_tokens"] = result["input_tokens"] + result["output_tokens"]
     return result
+
+
+def _interval_union_ms(spans: list[tuple[int, int]]) -> int:
+    """Total covered length of monotonic activity intervals, overlap-free."""
+    total = 0
+    cursor: int | None = None
+    end_cursor = 0
+    for start, end in sorted(spans):
+        if cursor is None or start > end_cursor:
+            if cursor is not None:
+                total += end_cursor - cursor
+            cursor, end_cursor = start, end
+        else:
+            end_cursor = max(end_cursor, end)
+    if cursor is not None:
+        total += end_cursor - cursor
+    return total // 1_000_000
 
 
 def _breakdown(records: list[dict[str, Any]], key: str) -> list[dict[str, Any]]:
@@ -656,7 +897,9 @@ def _nodes(metrics: Mapping[str, Any]) -> list[dict[str, Any]]:
         evidence = data.get("evidence")
         evidence = evidence if isinstance(evidence, Mapping) else {}
         reason = evidence.get("reason")
-        result.append({"node_id": node_id, "status": status, "feature_run_id": data.get("feature_run_id") if isinstance(data.get("feature_run_id"), str) else None, "depends_on": [value for value in dependencies if isinstance(value, str)], "liveness": liveness, "evidence": availability("partial", reason) if isinstance(reason, str) and reason else availability("available"), "_candidate_commit": data.get("candidate_commit") if isinstance(data.get("candidate_commit"), str) else None})
+        candidate_commit = data.get("candidate_commit") if isinstance(data.get("candidate_commit"), str) else None
+        reused_from = data.get("reused_from_attempt")
+        result.append({"node_id": node_id, "status": status, "feature_run_id": data.get("feature_run_id") if isinstance(data.get("feature_run_id"), str) else None, "depends_on": [value for value in dependencies if isinstance(value, str)], "liveness": liveness, "evidence": availability("partial", reason) if isinstance(reason, str) and reason else availability("available"), "reused_from_attempt": reused_from if isinstance(reused_from, str) and reused_from else None, "candidate_commit": candidate_commit, "_candidate_commit": candidate_commit})
     return result
 
 
@@ -821,6 +1064,135 @@ def _graph_status(metrics: Mapping[str, Any], fallback: str) -> str:
     state = metrics["checkpoint"].get("state", {})
     value = state.get("terminal_graph_status") if isinstance(state, Mapping) else None
     return value if value in TERMINAL_STATUSES or value in {"queued", "running"} else fallback
+
+_ID_MATCH_REASON = "correlated by exact run id; descriptor attestation absent"
+_REUSE_UNRESOLVED_REASON = "reused node's origin run could not be resolved from the recorded reuse chain"
+
+
+def _resolve_reused_nodes(graphs: list[dict[str, Any]], features: list[dict[str, Any]]) -> None:
+    """Correlate reused nodes to the attempt where the node actually executed.
+
+    A successor attempt reuses a sealed node instead of re-running it, so the
+    node's planned feature_run_id names a run directory that never existed.
+    The checkpoint records ``reused_from_attempt`` per node; following that
+    recorded chain (verifying the sealed candidate commit at every hop) leads
+    to the origin attempt whose feature run holds the real evidence.  The
+    resulting correlation is explicitly state "reused" and the node evidence
+    stays partial: this is recorded-chain resolution, never attestation.
+    """
+    graphs_by_id = {graph["run_id"]: graph for graph in graphs if isinstance(graph.get("run_id"), str)}
+    features_by_id = {feature["run_id"]: feature for feature in features if isinstance(feature.get("run_id"), str)}
+    for graph in graphs:
+        for node in graph.get("nodes", []):
+            if not isinstance(node, dict):
+                continue
+            reused_from = node.get("reused_from_attempt")
+            if not isinstance(reused_from, str) or not reused_from:
+                continue
+            if node.get("feature_run_id") in features_by_id:
+                # The planned run actually exists; direct correlation governs.
+                continue
+            origin = _reuse_origin(node, reused_from, graphs_by_id, features_by_id)
+            if origin is None:
+                node["correlation"] = None
+                node["evidence"] = availability("partial", _REUSE_UNRESOLVED_REASON)
+                continue
+            origin_attempt_id, origin_run = origin
+            reason = (
+                f"node was reused from attempt {origin_attempt_id}; "
+                f"metrics come from origin run {origin_run['run_id']}"
+            )
+            node["correlation"] = {
+                "state": "reused",
+                "origin_attempt_id": origin_attempt_id,
+                "origin_feature_run_id": origin_run["run_id"],
+                "reused_from_attempt": reused_from,
+                "reason": reason,
+            }
+            node["evidence"] = availability("partial", reason)
+            node["liveness"] = dict(origin_run["liveness"])
+
+
+def _reuse_origin(
+    node: Mapping[str, Any],
+    reused_from: str,
+    graphs_by_id: Mapping[str, Mapping[str, Any]],
+    features_by_id: Mapping[str, Mapping[str, Any]],
+) -> tuple[str, Mapping[str, Any]] | None:
+    """Walk the recorded reuse chain to the attempt that executed the node."""
+    sealed_commit = node.get("candidate_commit")
+    if not isinstance(sealed_commit, str) or not sealed_commit:
+        return None
+    seen: set[str] = set()
+    predecessor_id: str | None = reused_from
+    while isinstance(predecessor_id, str) and predecessor_id:
+        if predecessor_id in seen:
+            return None
+        seen.add(predecessor_id)
+        predecessor = graphs_by_id.get(predecessor_id)
+        if predecessor is None:
+            return None
+        candidate = next(
+            (
+                item for item in predecessor.get("nodes", [])
+                if isinstance(item, Mapping) and item.get("node_id") == node.get("node_id")
+            ),
+            None,
+        )
+        # The reused seal must reference the same sealed candidate commit at
+        # every hop; a mismatch means the chain does not describe this seal.
+        if candidate is None or candidate.get("candidate_commit") != sealed_commit:
+            return None
+        next_predecessor = candidate.get("reused_from_attempt")
+        if isinstance(next_predecessor, str) and next_predecessor:
+            predecessor_id = next_predecessor
+            continue
+        run_id = candidate.get("feature_run_id")
+        origin_run = features_by_id.get(run_id) if isinstance(run_id, str) else None
+        if origin_run is None or origin_run.get("status") == "corrupt":
+            return None
+        return predecessor_id, origin_run
+    return None
+
+
+def _id_match_child(graph: Mapping[str, Any], node: Mapping[str, Any], features: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Bind a descriptor-less legacy run to a node by exact run-id equality.
+
+    This correlation is deliberately weaker than descriptor attestation: the
+    injected correlation is labeled state "id_matched" and callers must keep
+    the node evidence partial so it can never read as descriptor-attested.
+    Runs that carry a descriptor (even one with a null parent_correlation)
+    are excluded because their attestation already speaks for itself.
+    """
+    run_id = node.get("feature_run_id")
+    if not isinstance(run_id, str) or not run_id:
+        return None
+    child = next(
+        (
+            record for record in features
+            if record.get("run_id") == run_id
+            and record.get("kind") == "legacy_feature_run"
+            and record.get("status") != "corrupt"
+            and not record.get("correlation")
+        ),
+        None,
+    )
+    if child is None:
+        return None
+    child["correlation"] = {
+        "plan_graph_id": graph["run_id"],
+        "plan_node_id": node["node_id"],
+        "parent_run_id": graph["run_id"],
+        "state": "id_matched",
+        "reason": _ID_MATCH_REASON,
+    }
+    return child
+
+
+def _correlation_is_id_matched(child: Mapping[str, Any] | None) -> bool:
+    correlation = child.get("correlation") if child else None
+    return isinstance(correlation, Mapping) and correlation.get("state") == "id_matched"
+
 
 def _correlation(descriptor: Mapping[str, Any] | None) -> dict[str, str] | None:
     value = descriptor.get("parent_correlation") if descriptor else None
