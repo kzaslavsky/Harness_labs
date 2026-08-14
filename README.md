@@ -17,6 +17,34 @@ accountable owner, an explicit task tree, isolated Git worktree and branch,
 structured event and decision logs, and a guarded path to commit and merge into
 the recorded base branch.
 
+## Motivation
+
+The project aims to make reliable coding harnesses for autonomous
+implementation of large, complex tasks. Everything is a work in progress.
+The motivation is twofold:
+
+1. enable auditable cross-platform development;
+2. tame the overengineering tendency of frontier coding models.
+
+## Current paradigm — GraphRun
+
+`main` carries the integrated line (formerly `Impl-redo`): **GraphRun**, the
+composition of the two harness layers:
+
+1. **FeatureRun** — develops a single feature in an isolated worktree through
+   plan → implement → review → integrate phases. A FeatureRun consumes roughly
+   $3–5 in API costs in testing. FeatureRun functions as a standalone unit.
+2. **PlanGraph** — decomposes a large task into a dependency graph of
+   FeatureRuns (which inherit partial plans from the graph and skip their own
+   plan phase), with approval-receipt admission, red/green verification gates,
+   parallel dispatch, and resume-with-reuse recovery.
+
+The `featurerun` and `plangraph` branches are historical snapshots of the two
+layers from when they were maintained separately; they are not kept current.
+The contract-burden program series (CB-1, CB-2, CB-3 — see
+[docs/development/contract-burden-reduction.md](docs/development/contract-burden-reduction.md))
+was developed and verified with GraphRun operating on itself.
+
 ## Design objective
 
 The central optimization objective is **accuracy × efficiency**. Accuracy gates
