@@ -486,13 +486,6 @@ def _review_fix_factory(
             "acceptance_criteria": [],
             "required_capabilities": capabilities,
         }
-        claims_rule = """
-CLAIMS CONTRACT: this task has NO assigned acceptance criteria, so your
-structured result's claims array must be EMPTY. Never put criterion ids,
-prose statements, or audit notes in claims — the orchestrating harness
-treats every claims entry as a criterion reference and fails the whole node
-on any it cannot match. Put narrative in the report/summary fields only.
-"""
         instructions = {
             "review": f"""\
 Inspect the actual candidate for node {node.plan_node_id} as an adversarial
@@ -502,20 +495,17 @@ verification, hash-chained journals)? (2) do the finding tests fail on base
 for behavioral reasons rather than ImportError? (3) is the relaxation minimal
 — no new authority, no scope growth? Every finding needs file, stable subject,
 score, fix_cost, and the exact acceptance clause in protects. Empty findings
-means the candidate clears.
-{claims_rule}""",
+means the candidate clears.""",
             "fix": f"""\
 Inspect the supplied ledger and fix_finding_keys. Modify only
 {', '.join(writable)}, and only as needed to resolve those exact findings
 without feature growth. Run {' '.join(node.run.verification_argv)}. Return
-addressed_finding_keys as the exact subset actually fixed. Do not commit.
-{claims_rule}""",
+addressed_finding_keys as the exact subset actually fixed. Do not commit.""",
             "verify": f"""\
 Treat controller_verified_command as authoritative. Inspect the repaired
 candidate and check every supplied fix_finding_key. Return
 verified_finding_keys containing every key genuinely covered when the command
-passes. Do not edit files.
-{claims_rule}""",
+passes. Do not edit files.""",
         }[stage]
         return ClaudeSemanticTaskExecutor(
             task=task,
