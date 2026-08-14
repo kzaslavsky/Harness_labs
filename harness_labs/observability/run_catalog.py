@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import socket
 import subprocess
 from copy import deepcopy
@@ -43,6 +44,16 @@ _ESTIMATED_MODEL_PRICES = {
     "claude-haiku-4-5": {"input": Decimal("1.00"), "cached_input": Decimal("0.10"), "output": Decimal("5.00"), "long_context_premium": False, "source": "https://platform.claude.com/docs/en/about-claude/pricing"},
 }
 _LONG_CONTEXT_THRESHOLD = 272_000
+# Naming (DM-02): first-sentence truncation length for FeatureRun display
+# names; long enough to stay legible in a list row, short enough to bound
+# UI layout.
+_DISPLAY_NAME_MAX_LENGTH = 80
+# Naming (DM-02): cap on projected objective prose, matching the operator
+# text cap the dashboard server applies elsewhere (MAX_DIAGNOSTIC_TEXT).
+# Uncapped, one objective per node and per feature run could push the
+# catalog snapshot past the server's hard response-size cap and 503 the
+# whole endpoint.
+_OBJECTIVE_MAX_LENGTH = 512
 
 
 def build_run_catalog(source_root: Path, *, clock: Clock | None = None, process_probe: ProcessProbe | None = None, heartbeat_freshness_seconds: float = 30.0, excluded_runs: Mapping[str, str] | None = None) -> dict[str, Any]:
@@ -192,6 +203,16 @@ def merge_run_catalogs(
     # A reused node's origin attempt may live in any configured root, so the
     # reuse chain is re-resolved over the merged graph and feature records.
     _resolve_reused_nodes(graphs, features)
+    # Re-derive display names/objectives over the merged node set: a child's
+    # correlation may only resolve once its parent graph and its own record
+    # are merged from different roots.  PlanGraph display names were computed
+    # per source root, but the attempt ordinal specifically needs cross-root
+    # sibling visibility (two attempts of one logical graph in different
+    # roots each computed ordinal 1 locally), so it is recomputed here before
+    # the merged-wide uniqueness pass runs.
+    _assign_feature_display_names(graphs, features)
+    _recompute_merged_plan_graph_ordinals(graphs)
+    _deduplicate_plan_graph_display_names(graphs)
 
     ungrouped = [
         feature for feature in features
@@ -276,6 +297,12 @@ def _project_run(directory: Path, root: Path, now: datetime, probe: ProcessProbe
                 "unavailable",
                 "retention constraints were not recorded in the audited descriptor or checkpoint",
             ),
+            # Internal-only: whether the raw descriptor carried the lineage
+            # extension fields at all, vs. defaulting above.  Historical
+            # descriptors predate that extension and are unavailable, not
+            # simply single-attempt; _assign_plan_graph_display_names consumes
+            # and strips this before the record is returned to any caller.
+            "_lineage_present": "logical_graph_id" in descriptor and "graph_attempt_id" in descriptor,
         })
         record["nodes"] = _nodes(metrics)
         record["execution"] = _graph_execution(metrics)
@@ -283,7 +310,223 @@ def _project_run(directory: Path, root: Path, now: datetime, probe: ProcessProbe
     else:
         record["correlation"] = _correlation(descriptor)
         record["_integration_merge_commits"] = _integration_merge_commits(metrics["events"])
+        record["objective"] = _capped_objective(descriptor.get("objective") if descriptor else None)
+        record["display_name"] = _feature_run_display_name(record["objective"], None, metrics["run_id"])
     return record
+
+
+def _short_run_id(run_id: str) -> str:
+    return run_id[-8:] if len(run_id) > 8 else run_id
+
+
+def _plan_graph_disambiguator(created_at: Any, run_id: str) -> str:
+    date = created_at[:10] if isinstance(created_at, str) and len(created_at) >= 10 else "unknown-date"
+    return f"{date} #{_short_run_id(run_id)}"
+
+
+def _title_case_stem(plan_path: str | None) -> str:
+    """Human-case a plan file stem: basename without extension, split on -/_."""
+    if not isinstance(plan_path, str) or not plan_path:
+        return "Untitled Plan"
+    stem = Path(plan_path).stem
+    words = [word for word in re.split(r"[-_]+", stem) if word]
+    return " ".join(word.capitalize() for word in words) if words else stem
+
+
+def _plan_graph_attempt_ordinal(graph: Mapping[str, Any], siblings: list[Mapping[str, Any]]) -> int:
+    """Rank this graph among catalog records sharing its logical_graph_id.
+
+    This is this graph's position by (created_at, run_id) among sibling
+    attempts *present in this catalog* -- the true repair-lineage position
+    is not derivable when a predecessor attempt's own record lives outside
+    this catalog's scope.
+    """
+    ordered = sorted(siblings, key=lambda item: (item.get("created_at") or "", item["run_id"]))
+    run_ids = [item["run_id"] for item in ordered]
+    return run_ids.index(graph["run_id"]) + 1
+
+
+def _plan_graph_base_name(graph: Mapping[str, Any], lineage_present: bool, ordinal: int) -> str:
+    base = _title_case_stem(graph.get("plan_path"))
+    if not lineage_present:
+        # Historical descriptors predate the lineage extension and default
+        # logical_graph_id == graph_attempt_id == run_id, so the ordinal rule
+        # below never fires for them even though many independent graphs
+        # share one plan file stem.  Disambiguate unconditionally instead.
+        return f"{base} ({_plan_graph_disambiguator(graph.get('created_at'), graph['run_id'])})"
+    if graph.get("graph_attempt_id") != graph.get("logical_graph_id"):
+        return f"{base} (Attempt {ordinal})"
+    return base
+
+
+def _assign_plan_graph_display_names(graphs: list[dict[str, Any]]) -> None:
+    """Compute deterministic PlanGraph display names, unique within `graphs`.
+
+    Consumes and strips the internal `_lineage_present` marker `_project_run`
+    attaches to each record (defaulting true -- no disambiguator -- for
+    records built outside `_project_run`, e.g. tests exercising `_snapshot`
+    directly with minimal stub graphs that carry no lineage or plan data).
+    """
+    siblings_by_logical: dict[str, list[dict[str, Any]]] = {}
+    for graph in graphs:
+        siblings_by_logical.setdefault(graph.get("logical_graph_id", graph["run_id"]), []).append(graph)
+    base_names: dict[str, str] = {}
+    for graph in graphs:
+        lineage_present = bool(graph.pop("_lineage_present", True))
+        siblings = siblings_by_logical[graph.get("logical_graph_id", graph["run_id"])]
+        ordinal = _plan_graph_attempt_ordinal(graph, siblings)
+        base_names[graph["run_id"]] = _plan_graph_base_name(graph, lineage_present, ordinal)
+    _apply_unique_display_names(graphs, base_names)
+
+
+def _recompute_merged_plan_graph_ordinals(graphs: list[dict[str, Any]]) -> None:
+    """Re-derive attempt ordinals across the full merged sibling set.
+
+    Each source root computed its "(Attempt N)" ordinal only from the
+    siblings visible in that root, so two attempts of one logical_graph_id
+    living in different roots each computed ordinal 1.  Recompute the
+    ordinal -- and the display name it feeds -- now that every attempt is
+    visible.  The ranking must include every sibling sharing a
+    logical_graph_id, not just the ones that themselves carry an ordinal
+    suffix: the un-suffixed original attempt (graph_attempt_id ==
+    logical_graph_id) still occupies a position in the ordering, so omitting
+    it would shift every later attempt's ordinal down by one whenever the
+    original lives in a different root than its successors. Graphs with no
+    distinct attempt lineage keep their un-suffixed display name.
+    """
+    siblings_by_logical: dict[str, list[dict[str, Any]]] = {}
+    for graph in graphs:
+        logical_id = graph.get("logical_graph_id")
+        if logical_id is not None:
+            siblings_by_logical.setdefault(logical_id, []).append(graph)
+    for siblings in siblings_by_logical.values():
+        if not any(graph.get("graph_attempt_id") != graph.get("logical_graph_id") for graph in siblings):
+            continue
+        ordered = sorted(siblings, key=lambda item: (item.get("created_at") or "", item["run_id"]))
+        for ordinal, graph in enumerate(ordered, start=1):
+            if graph.get("graph_attempt_id") != graph.get("logical_graph_id"):
+                base = _title_case_stem(graph.get("plan_path"))
+                graph["display_name"] = f"{base} (Attempt {ordinal})"
+
+
+def _deduplicate_plan_graph_display_names(graphs: list[dict[str, Any]]) -> None:
+    """Re-enforce display-name uniqueness across a merged multi-root catalog.
+
+    Each source root already computed a fully-ruled `display_name` (ordinal,
+    lineage-absence disambiguation); merging can still collide two
+    independently-named single-attempt graphs, so this only re-runs the
+    collision-safety net over the already-computed names.
+    """
+    _apply_unique_display_names(graphs, {graph["run_id"]: graph.get("display_name", graph["run_id"]) for graph in graphs})
+
+
+def _apply_unique_display_names(graphs: list[dict[str, Any]], base_names: Mapping[str, str]) -> None:
+    """Assign a globally-unique display_name to every graph in `base_names`.
+
+    Resolving collisions per base-name group (as a naive pass would) is not
+    enough: a lineage-absent base name already embeds its own
+    date+run-id disambiguator (`_plan_graph_base_name`), so it can collide
+    with an unrelated base-name group's disambiguated output. Names are
+    therefore assigned in one deterministic pass against a single running
+    `used` set, so a collision against *any* already-assigned name -- not
+    just one within the same original base-name group -- is caught.
+    """
+    counts: dict[str, int] = {}
+    for name in base_names.values():
+        counts[name] = counts.get(name, 0) + 1
+    graphs_by_id = {graph["run_id"]: graph for graph in graphs}
+    used: set[str] = set()
+    for run_id in sorted(base_names, key=lambda candidate_id: (base_names[candidate_id], candidate_id)):
+        name = base_names[run_id]
+        graph = graphs_by_id[run_id]
+        candidate = name if counts[name] == 1 and name not in used else None
+        if candidate is None:
+            candidate = f"{name} ({_plan_graph_disambiguator(graph.get('created_at'), run_id)})"
+        if candidate in used:
+            # The date + last-8-run-id disambiguator can itself collide (two
+            # run IDs sharing a creation date and the same trailing 8
+            # characters), or the disambiguated candidate can coincide with a
+            # different base-name group's output; run_id is the catalog's
+            # only guaranteed-unique key, so it is the terminal,
+            # always-distinguishing tiebreak.
+            candidate = f"{candidate} [{run_id}]"
+        used.add(candidate)
+        graph["display_name"] = candidate
+
+
+def _capped_objective(value: Any) -> str | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    stripped = value.strip()
+    if len(stripped) <= _OBJECTIVE_MAX_LENGTH:
+        return stripped
+    return stripped[: _OBJECTIVE_MAX_LENGTH - 1].rstrip() + "…"
+
+
+def _truncate_first_sentence(text: str) -> str:
+    stripped = text.strip()
+    sentence = re.split(r"(?<=[.!?])\s+", stripped, maxsplit=1)[0].strip()
+    if len(sentence) > _DISPLAY_NAME_MAX_LENGTH:
+        return sentence[: _DISPLAY_NAME_MAX_LENGTH - 1].rstrip() + "…"
+    return sentence
+
+
+def _feature_run_display_name(objective: str | None, node_id: str | None, run_id: str) -> str:
+    """FeatureRun display name fallback chain: objective -> node_id -> run_id."""
+    if isinstance(objective, str) and objective.strip():
+        return _truncate_first_sentence(objective)
+    if isinstance(node_id, str) and node_id:
+        return node_id
+    return run_id
+
+
+def _assign_feature_display_names(graphs: list[Mapping[str, Any]], features: list[dict[str, Any]]) -> None:
+    """Project each verified-correlated node's objective onto its FeatureRun record.
+
+    A node's own objective (recorded against the approved, digest-checked
+    decomposition) takes priority over the FeatureRun's own descriptor
+    objective when both are known -- but only when `_node_matches_child`
+    confirms the node and this exact feature run mutually correlate (either
+    descriptor-attested or exact-id-matched). An unverified claim that only
+    happens to share a `feature_run_id` must never silently supply or
+    overwrite prose for a run it does not actually correlate to; node_id is
+    the last resort before run_id.
+    """
+    for feature in features:
+        node_id: str | None = None
+        node_objective: str | None = None
+        for graph in graphs:
+            match = next(
+                (
+                    node for node in graph.get("nodes", [])
+                    if isinstance(node, Mapping) and _node_matches_child(graph, node, feature)
+                ),
+                None,
+            )
+            if match is not None:
+                node_id, node_objective = match.get("node_id"), match.get("objective")
+                break
+        if isinstance(node_objective, str) and node_objective.strip():
+            feature["objective"] = node_objective
+        feature["display_name"] = _feature_run_display_name(feature.get("objective"), node_id, feature["run_id"])
+
+
+def _block_escalation(events: Any) -> dict[str, Any]:
+    """Project the block-escalation indicator from `plan_graph_block_escalated`."""
+    if isinstance(events, list):
+        for event in reversed(events):
+            if not isinstance(event, Mapping) or event.get("event_type") != "plan_graph_block_escalated":
+                continue
+            payload = event.get("payload")
+            payload = payload if isinstance(payload, Mapping) else {}
+            ref = payload.get("blocker_evidence_ref")
+            stable_path = payload.get("stable_path")
+            return {
+                "escalated": True,
+                "blocker_evidence_ref": ref if isinstance(ref, str) and ref else None,
+                "stable_path": stable_path if isinstance(stable_path, str) and stable_path else None,
+            }
+    return {"escalated": False, "blocker_evidence_ref": None, "stable_path": None}
 
 
 def _snapshot(root: Path, now: datetime, diagnostics: list[dict[str, str | None]], records: list[dict[str, Any]], reason: str | None = None) -> dict[str, Any]:
@@ -323,6 +566,8 @@ def _snapshot(root: Path, now: datetime, diagnostics: list[dict[str, str | None]
                 else:
                     node["evidence"] = availability("partial", "child correlation is not verified")
     _resolve_reused_nodes(graphs, features)
+    _assign_feature_display_names(graphs, features)
+    _assign_plan_graph_display_names(graphs)
     ungrouped = [
         record for record in features
         if not any(_node_matches_child(graph, node, record) for graph in graphs for node in graph["nodes"])
@@ -908,7 +1153,8 @@ def _nodes(metrics: Mapping[str, Any]) -> list[dict[str, Any]]:
         reason = evidence.get("reason")
         candidate_commit = data.get("candidate_commit") if isinstance(data.get("candidate_commit"), str) else None
         reused_from = data.get("reused_from_attempt")
-        result.append({"node_id": node_id, "status": status, "feature_run_id": data.get("feature_run_id") if isinstance(data.get("feature_run_id"), str) else None, "depends_on": [value for value in dependencies if isinstance(value, str)], "liveness": liveness, "evidence": availability("partial", reason) if isinstance(reason, str) and reason else availability("available"), "reused_from_attempt": reused_from if isinstance(reused_from, str) and reused_from else None, "candidate_commit": candidate_commit, "_candidate_commit": candidate_commit})
+        objective = data.get("objective")
+        result.append({"node_id": node_id, "status": status, "feature_run_id": data.get("feature_run_id") if isinstance(data.get("feature_run_id"), str) else None, "depends_on": [value for value in dependencies if isinstance(value, str)], "liveness": liveness, "evidence": availability("partial", reason) if isinstance(reason, str) and reason else availability("available"), "reused_from_attempt": reused_from if isinstance(reused_from, str) and reused_from else None, "candidate_commit": candidate_commit, "objective": _capped_objective(objective), "_candidate_commit": candidate_commit})
     return result
 
 
@@ -973,6 +1219,7 @@ def _graph_execution(metrics: Mapping[str, Any]) -> dict[str, Any]:
             "attempt_lineage": lineage,
             "retry_state": retry_state,
         },
+        "block_escalation": _block_escalation(metrics.get("events", ())),
     }
 
 
@@ -1230,7 +1477,7 @@ def _integration_merge_commits(events: list[Mapping[str, Any]]) -> tuple[str, ..
     return tuple(sorted(commits))
 
 def _corrupt_record(run_id: str, reason: str) -> dict[str, Any]:
-    return {"run_id": run_id, "kind": "legacy_feature_run", "status": "corrupt", "liveness": {"state": "liveness_unavailable", "reason": "run is corrupt"}, "evidence": availability("unavailable", reason), "correlation": None}
+    return {"run_id": run_id, "kind": "legacy_feature_run", "status": "corrupt", "liveness": {"state": "liveness_unavailable", "reason": "run is corrupt"}, "evidence": availability("unavailable", reason), "correlation": None, "objective": None, "display_name": run_id}
 
 def _liveness(directory: Path, run_id: str, kind: str | None, status: str, now: datetime, probe: ProcessProbe, freshness: float) -> dict[str, str | None]:
     if status in TERMINAL_STATUSES: return {"state": "terminal", "reason": None}
