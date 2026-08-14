@@ -39,7 +39,11 @@ _TERMINAL_STATUSES = frozenset({"succeeded", "failed", "blocked", "interrupted"}
 # Cumulative node-try merge (moved from dashboard_server; single shared impl)
 # ---------------------------------------------------------------------------
 
-def node_history_run_ids(catalog: Mapping[str, Any], target_run_id: str) -> list[str]:
+def node_history_run_ids(
+    catalog: Mapping[str, Any],
+    target_run_id: str,
+    known_run_ids: frozenset[str] | set[str] = frozenset(),
+) -> list[str]:
     """Return the ordered tries for the target's logical node through this try.
 
     Tries are grouped by ``(plan_digest, node_id)`` across every PlanGraph in
@@ -48,7 +52,23 @@ def node_history_run_ids(catalog: Mapping[str, Any], target_run_id: str) -> list
     attempts (a separate ``graph_attempt_id``). Callers that need
     attempt-scoped (this-attempt-only) history must use
     ``compute_graph_metrics``'s own scoping instead.
+
+    A checkpoint's ``feature_run_id`` names the *planned* run for the node;
+    for a node that never launched in that attempt (reused from a sealed
+    predecessor, or the attempt died before dispatch) no such run directory
+    exists. Those planned-but-never-executed ids are excluded: only runs
+    the catalog actually contains are tries. Requiring a detail document
+    for a phantom id would otherwise degrade every lineage merge to
+    ``unavailable`` even when every executed try is fully verified.
+    ``known_run_ids`` supplements the catalog's own feature-run listing as
+    evidence of existence (callers that already hold verified detail
+    documents pass their key set).
     """
+    existing = {
+        run.get("run_id")
+        for run in catalog.get("feature_runs", []) or []
+        if isinstance(run, Mapping) and isinstance(run.get("run_id"), str)
+    } | set(known_run_ids)
     histories: dict[tuple[str, str], list[str]] = {}
     graphs = sorted(catalog.get("plan_graphs", []), key=lambda graph: (str(graph.get("created_at", "")), str(graph.get("run_id", ""))))
     for graph in graphs:
@@ -63,11 +83,11 @@ def node_history_run_ids(catalog: Mapping[str, Any], target_run_id: str) -> list
             if not isinstance(node_id, str) or not isinstance(run_id, str):
                 continue
             history = histories.setdefault((plan_digest, node_id), [])
-            if run_id not in history:
+            if run_id in existing and run_id not in history:
                 history.append(run_id)
             if run_id == target_run_id:
                 return list(history)
-    return [target_run_id]
+    return [target_run_id] if target_run_id in existing else []
 
 
 def apply_cumulative_node_metrics(catalog: Mapping[str, Any], details: dict[str, dict[str, Any]]) -> None:
@@ -299,28 +319,25 @@ def compute_graph_metrics(
     node_rows: list[dict[str, Any]] = []
     attempt_merges: list[Mapping[str, Any]] = []
     lineage_merges: list[Mapping[str, Any]] = []
+    known_run_ids = frozenset(node_details.keys())
     for node in nodes:
         node_id = node.get("node_id") if isinstance(node.get("node_id"), str) else None
-        attempt_history = _attempt_scoped_history(graph, node, catalog)
+        attempt_history = _attempt_scoped_history(graph, node, catalog, known_run_ids)
         merged = _merge_if_available(attempt_history, node_details)
         if merged is not None:
             attempt_merges.append(merged)
+        correlation = node.get("correlation") if isinstance(node.get("correlation"), Mapping) else None
+        reused = isinstance(correlation, Mapping) and correlation.get("state") == "reused"
         reason = None
         if merged is None:
-            correlation = node.get("correlation") if isinstance(node.get("correlation"), Mapping) else None
-            if isinstance(correlation, Mapping) and correlation.get("state") == "reused":
+            if reused:
                 reason = "node was reused from a prior attempt's sealed candidate; it executed no FeatureRun in this attempt, so it contributes no usage to this attempt's totals"
             elif not attempt_history:
                 reason = "no FeatureRun is recorded for this node yet"
             else:
                 reason = "one or more attempt-scoped FeatureRun detail record(s) are unverified"
-        node_rows.append({
-            "node_id": node_id or "unavailable",
-            "status": node.get("status"),
-            "tries": len(attempt_history),
-            "merged": merged,
-            "reason": reason,
-        })
+        lineage_history: list[str] = []
+        lineage_merged: dict[str, Any] | None = None
         feature_run_id = node.get("feature_run_id")
         if isinstance(feature_run_id, str):
             # Lineage must span every try this logical node has ever had,
@@ -328,13 +345,23 @@ def compute_graph_metrics(
             # alone (node_history_run_ids) only names the current try per
             # graph attempt, so in-attempt retries are folded in too — a
             # lineage total can never be smaller than this attempt's own.
-            lineage_history = list(node_history_run_ids(catalog, feature_run_id))
+            lineage_history = list(node_history_run_ids(catalog, feature_run_id, known_run_ids))
             for run_id in attempt_history:
                 if run_id not in lineage_history:
                     lineage_history.append(run_id)
             lineage_merged = _merge_if_available(lineage_history, node_details)
             if lineage_merged is not None:
                 lineage_merges.append(lineage_merged)
+        node_rows.append({
+            "node_id": node_id or "unavailable",
+            "status": node.get("status"),
+            "tries": len(attempt_history),
+            "merged": merged,
+            "reason": reason,
+            "reused": reused,
+            "lineage_tries": len(lineage_history),
+            "lineage_merged": lineage_merged,
+        })
 
     totals = _aggregate_totals(attempt_merges, population)
     lineage = _aggregate_totals(lineage_merges, population)
@@ -403,7 +430,12 @@ def compute_graph_metrics(
     }
 
 
-def _attempt_scoped_history(graph: Mapping[str, Any], node: Mapping[str, Any], catalog: Mapping[str, Any]) -> list[str]:
+def _attempt_scoped_history(
+    graph: Mapping[str, Any],
+    node: Mapping[str, Any],
+    catalog: Mapping[str, Any],
+    known_run_ids: frozenset[str] | set[str] = frozenset(),
+) -> list[str]:
     """Feature-run tries correlated to this node within exactly this graph attempt.
 
     A node's ``feature_run_id`` in the graph's own checkpoint always names
@@ -432,7 +464,17 @@ def _attempt_scoped_history(graph: Mapping[str, Any], node: Mapping[str, Any], c
                 history.add(run_id)
     feature_run_id = node.get("feature_run_id")
     if isinstance(feature_run_id, str):
-        history.add(feature_run_id)
+        # The checkpoint names the *planned* run; a reused node (or an
+        # attempt that died before dispatch) has no such run directory, and
+        # counting a phantom id as a try would both inflate `tries` and
+        # force the merge to `unavailable` despite verified executed tries.
+        existing = {
+            run.get("run_id")
+            for run in catalog.get("feature_runs", []) or []
+            if isinstance(run, Mapping) and isinstance(run.get("run_id"), str)
+        } | set(known_run_ids)
+        if feature_run_id in existing:
+            history.add(feature_run_id)
     return sorted(history)
 
 
@@ -601,17 +643,38 @@ _WAIT_MS_UNAVAILABLE_REASON = "wait time requires per-node creation and dependen
 
 
 def _node_table(node_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    table = [
-        {
+    """Per-node display rows are lineage-cumulative, not attempt-scoped.
+
+    The per-node table answers "what has this logical node cost so far?",
+    matching the FeatureRun inspector's cumulative view — so a node reused
+    from a prior attempt still shows the usage of the tries that produced
+    its sealed candidate. Only the graph-level ``totals`` block remains
+    attempt-scoped (the no-double-counting rule); a reused node's row is
+    annotated with its provenance instead of being blanked.
+    """
+    table = []
+    for row in node_rows:
+        display = row.get("lineage_merged") or row["merged"]
+        if display is None:
+            detail = {"state": "unavailable", "reason": row["reason"]}
+        elif row.get("reused") and row["merged"] is None:
+            detail = {
+                "state": "available",
+                "reason": (
+                    "cumulative across tries executed in prior attempt(s); this "
+                    "attempt reused the node's sealed candidate and adds no usage"
+                ),
+            }
+        else:
+            detail = {"state": "available", "reason": None}
+        table.append({
             "node_id": row["node_id"],
             "status": row["status"],
-            "tries": row["tries"],
-            "detail": {"state": "available", "reason": None} if row["merged"] else {"state": "unavailable", "reason": row["reason"]},
-            "totals": row["merged"]["totals"] if row["merged"] else None,
+            "tries": max(row.get("lineage_tries", 0), row["tries"]) if display is not None else row["tries"],
+            "detail": detail,
+            "totals": display["totals"] if display else None,
             "wait_ms": _metric("unavailable", None, _WAIT_MS_UNAVAILABLE_REASON),
-        }
-        for row in node_rows
-    ]
+        })
     table.sort(key=lambda row: (row["totals"] is None or row["totals"]["cost"].get("usd") is None, -(row["totals"]["cost"].get("usd") or 0.0) if row["totals"] else 0.0, row["node_id"]))
     return table
 

@@ -444,6 +444,46 @@ class ReusedNodeReasonTests(unittest.TestCase):
         self.assertIn("reused", row["detail"]["reason"])
         self.assertNotIn("unverified", row["detail"]["reason"])
 
+    def test_reused_node_row_shows_lineage_cumulative_metrics_not_a_blank(self) -> None:
+        """A reused node's per-node row reports the producing tries' cumulative
+        metrics (tokens/cost/wall) with reuse provenance, while the graph's
+        attempt-scoped totals still exclude that usage; the planned-but-never-
+        executed feature_run_id of the reusing attempt must not poison the
+        lineage merge as a phantom try."""
+        predecessor = {
+            "run_id": "graph-0", "status": "blocked", "created_at": "2026-08-08T00:00:00Z",
+            "plan_digest": "p", "logical_graph_id": "graph-0",
+            "nodes": [_node("A", "graph-0-A", status="succeeded")],
+        }
+        successor = {
+            "run_id": "graph-1", "status": "succeeded", "created_at": "2026-08-09T00:00:00Z",
+            "plan_digest": "p", "logical_graph_id": "graph-0",
+            "nodes": [
+                _node(
+                    "A", "graph-1-A", status="succeeded",
+                    correlation={"state": "reused", "reused_from_attempt": "graph-0"},
+                ),
+            ],
+        }
+        catalog = {
+            "plan_graphs": [predecessor, successor],
+            "feature_runs": [_correlated("graph-0-A", "graph-0", "A")],
+        }
+        node_details = {
+            "graph-0-A": _metrics(input_tokens=10, output_tokens=5, calls=1, wall_ms=100, busy_ms=90, peak=15, cost_usd=0.10, usage_records=1),
+        }
+        result = graph_metrics.compute_graph_metrics(successor, catalog, node_details)
+        row = result["nodes"][0]
+        self.assertEqual(row["detail"]["state"], "available")
+        self.assertIn("reused", row["detail"]["reason"])
+        self.assertEqual(row["totals"]["total_tokens"], 15)
+        self.assertAlmostEqual(row["totals"]["cost"]["usd"], 0.10)
+        self.assertEqual(row["tries"], 1)
+        # The attempt-scoped graph totals still exclude the reused usage.
+        self.assertEqual(result["totals"]["tokens"]["state"], "unavailable")
+        # The lineage block carries it instead.
+        self.assertEqual(result["lineage_totals"]["tokens"]["total_tokens"], 15)
+
 
 class BlockersPopulationTests(unittest.TestCase):
     """AC-DM01-1: blockers include disposition-blocked nodes regardless of current checkpoint status."""
