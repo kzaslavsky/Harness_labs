@@ -517,12 +517,21 @@ class PlanGraphResult:
 
 @dataclass(frozen=True)
 class RepairResumeDirective:
-    """Controller-authorized retry frontier for an immutable successor attempt."""
+    """Controller-authorized retry frontier for an immutable successor attempt.
 
-    logical_graph_id: str
-    predecessor_attempt_id: str
-    retry_frontier: tuple[str, ...]
-    blocker_evidence_ref: str
+    ``logical_graph_id`` is optional: when omitted, :meth:`PlanGraph.resume`
+    resolves it from the predecessor attempt's persisted registration
+    binding (``registration.logical_graph_id``) instead of requiring an
+    operator-supplied value.  ``predecessor_attempt_id`` and
+    ``blocker_evidence_ref`` carry default values only so this field can
+    precede them without breaking positional construction; both remain
+    effectively required and are validated by :meth:`PlanGraph.resume`.
+    """
+
+    logical_graph_id: str | None = None
+    predecessor_attempt_id: str = ""
+    retry_frontier: tuple[str, ...] = ()
+    blocker_evidence_ref: str = ""
 
 
 FeatureRunLauncher = Callable[[FeatureRunRequest], FeatureRunOutcome]
@@ -1128,45 +1137,79 @@ class PlanGraph:
         directive: RepairResumeDirective,
         **kwargs: object,
     ) -> "PlanGraph":
-        """Create a new repair attempt without mutating its predecessor."""
+        """Create a new repair attempt without mutating its predecessor.
+
+        ``resume`` derives ``graph_run_id``, ``logical_graph_id``,
+        ``predecessor_attempt_id``, ``resume_directive``,
+        ``reused_completed``, and ``predecessor_checkpoint`` itself from
+        ``directive`` and the resolved predecessor; a caller supplying any
+        of those as a kwarg is a conflicting request, rejected up front
+        before any lock or directory is touched.
+        """
+        _RESUME_OWNED_KWARGS = (
+            "graph_run_id", "logical_graph_id", "predecessor_attempt_id",
+            "resume_directive", "reused_completed", "predecessor_checkpoint",
+        )
+        conflicting = [name for name in _RESUME_OWNED_KWARGS if name in kwargs]
+        if conflicting:
+            raise PlanGraphError(
+                "PlanGraph.resume derives "
+                + ", ".join(conflicting)
+                + " itself from directive and the resolved predecessor; an "
+                "explicit kwarg of that name conflicts with it"
+            )
         repository = repository.resolve()
         plan = verify_registration(repository, registration)
 
-        for value, label in (
-            (directive.logical_graph_id, "logical_graph_id"),
-            (directive.predecessor_attempt_id, "predecessor_attempt_id"),
+        if not isinstance(directive.predecessor_attempt_id, str) or not directive.predecessor_attempt_id or directive.predecessor_attempt_id in {".", ".."} or "/" in directive.predecessor_attempt_id or "\\" in directive.predecessor_attempt_id:
+            raise PlanGraphError("predecessor_attempt_id must be a non-empty path-safe name")
+        if directive.logical_graph_id is not None and (
+            not isinstance(directive.logical_graph_id, str)
+            or not directive.logical_graph_id
+            or directive.logical_graph_id in {".", ".."}
+            or "/" in directive.logical_graph_id
+            or "\\" in directive.logical_graph_id
         ):
-            if not isinstance(value, str) or not value or value in {".", ".."} or "/" in value or "\\" in value:
-                raise PlanGraphError(f"{label} must be a non-empty path-safe name")
+            raise PlanGraphError("logical_graph_id must be a non-empty path-safe name")
         if not isinstance(directive.blocker_evidence_ref, str) or not directive.blocker_evidence_ref.startswith("artifact:sha256:"):
             raise PlanGraphError("repair resume requires a blocker evidence reference")
         run_root = run_root.resolve()
+        supplied_tests = tuple(
+            _functionality_test_payload(command)
+            for command in plan.functionality_tests
+        )
+        contract_nodes = cls._contract_nodes(plan)
+        try:
+            # Reading a finalized (failed/blocked) predecessor is safe without
+            # the lineage flock: it is immutable from here on.  This also
+            # resolves an omitted logical_graph_id from the predecessor's
+            # persisted registration binding before the lock id (which is
+            # keyed by that same resolved value) is computed.
+            predecessor = PlanGraphAudit.open_repair_predecessor(
+                run_root=run_root,
+                graph_run_id=directive.predecessor_attempt_id,
+                plan=plan.plan,
+                plan_sha256=registration.plan_sha256,
+                base_commit=plan.base_commit,
+                logical_graph_id=directive.logical_graph_id,
+                plan_graph_digest=PlanGraphAudit.repair_contract_digest(
+                    plan=plan.plan, plan_sha256=registration.plan_sha256,
+                    base_commit=plan.base_commit,
+                    nodes=contract_nodes, functionality_tests=supplied_tests,
+                    plan_sections=plan.plan_sections,
+                    acceptance_criteria=plan.acceptance_criteria,
+                ),
+            )
+        except (AuditError, OSError, ValueError) as exc:
+            raise PlanGraphError(f"could not allocate repair successor: {exc}") from exc
+        logical_graph_id = predecessor.logical_graph_id
+        process_probe = kwargs.get("child_liveness_probe") or _local_process_start_token
         lock_dir = run_root / ".plan-graph-locks"
         lock_dir.mkdir(parents=True, exist_ok=True)
-        lock_id = hashlib.sha256(directive.logical_graph_id.encode("utf-8")).hexdigest()
+        lock_id = hashlib.sha256(logical_graph_id.encode("utf-8")).hexdigest()
         with (lock_dir / f"{lock_id}.lock").open("a+") as lock:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
             try:
-                supplied_tests = tuple(
-                    _functionality_test_payload(command)
-                    for command in plan.functionality_tests
-                )
-                contract_nodes = cls._contract_nodes(plan)
-                predecessor = PlanGraphAudit.open_repair_predecessor(
-                    run_root=run_root,
-                    graph_run_id=directive.predecessor_attempt_id,
-                    plan=plan.plan,
-                    plan_sha256=registration.plan_sha256,
-                    base_commit=plan.base_commit,
-                    logical_graph_id=directive.logical_graph_id,
-                    plan_graph_digest=PlanGraphAudit.repair_contract_digest(
-                        plan=plan.plan, plan_sha256=registration.plan_sha256,
-                        base_commit=plan.base_commit,
-                        nodes=contract_nodes, functionality_tests=supplied_tests,
-                        plan_sections=plan.plan_sections,
-                        acceptance_criteria=plan.acceptance_criteria,
-                    ),
-                )
                 selection = predecessor.repair_selection(
                     retry_frontier=directive.retry_frontier,
                     blocker_evidence_ref=directive.blocker_evidence_ref,
@@ -1188,11 +1231,11 @@ class PlanGraph:
                     if run.id not in invalidated:
                         continue
                     budget.verdict(node_id=run.id, gate=gate_digest(run.verification_argv))
-                attempt_id = f"{directive.logical_graph_id}-attempt-{cls._next_repair_ordinal(run_root, directive.logical_graph_id)}"
+                attempt_id = f"{logical_graph_id}-attempt-{cls._next_repair_ordinal(run_root, logical_graph_id, process_probe)}"
                 graph = cls(
                     repository, registration, launcher,
                     run_root=run_root, graph_run_id=attempt_id,
-                    logical_graph_id=directive.logical_graph_id,
+                    logical_graph_id=logical_graph_id,
                     predecessor_attempt_id=directive.predecessor_attempt_id,
                     resume_directive=directive,
                     reused_completed=selection["reused_completed"],
@@ -1213,10 +1256,37 @@ class PlanGraph:
         return {run.id: {"objective": run.objective, "plan_sections": list(run.plan_sections), "depends_on": list(run.depends_on), "criteria": list(run.criteria), "verification_argv": list(run.verification_argv)} for run in plan.runs}
 
     @staticmethod
-    def _next_repair_ordinal(run_root: Path, logical_graph_id: str) -> int:
+    def _next_repair_ordinal(
+        run_root: Path,
+        logical_graph_id: str,
+        process_probe: Callable[[int], str | None],
+    ) -> int:
+        """Return the next free repair ordinal, reclaiming a crash-orphaned top one.
+
+        A repair successor directory that carries no successor-allocation
+        event (the controller crashed during admission, before that event
+        was written) is reclaimed in place — renamed aside, never deleted —
+        so its ordinal is re-allocated here instead of being permanently
+        skipped.  Reclaim only fires for the highest existing ordinal, and
+        only when :meth:`PlanGraphAudit.reclaim_orphaned_successor_attempt`
+        confirms the allocation event is absent and the admission process is
+        dead; any other case declines and this simply returns the next one.
+        """
         prefix = f"{logical_graph_id}-attempt-"
-        ordinals = [int(path.name.removeprefix(prefix)) for path in run_root.glob(f"{prefix}*") if path.is_dir() and path.name.removeprefix(prefix).isdigit()]
-        return max(ordinals, default=0) + 1
+        ordinals = sorted(
+            int(path.name.removeprefix(prefix))
+            for path in run_root.glob(f"{prefix}*")
+            if path.is_dir() and path.name.removeprefix(prefix).isdigit()
+        )
+        if not ordinals:
+            return 1
+        highest = ordinals[-1]
+        candidate_dir = run_root / f"{prefix}{highest}"
+        if PlanGraphAudit.reclaim_orphaned_successor_attempt(
+            candidate_dir, process_probe=process_probe
+        ):
+            return highest
+        return highest + 1
 
     def validate(self) -> None:
         validate_plan_graph_plan(self.plan)
