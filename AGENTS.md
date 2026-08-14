@@ -4,8 +4,7 @@ Status: active
 
 ## Mission
 
-Harness Labs designs coding harnesses for autonomous feature development in
-Codex. A harness must combine static, repository-owned policy with dynamic,
+Harness Labs designs coding harnesses for autonomous feature development. A harness must combine static, repository-owned policy with dynamic,
 run-specific orchestration in a hierarchical agent architecture.
 
 The optimization target is accuracy multiplied by efficiency. Accuracy is a
