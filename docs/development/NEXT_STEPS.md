@@ -11,6 +11,46 @@ durable restart. Three materially different analysis/planning scenarios exercise
 the same controller without scenario-specific kernel branches. See
 [`hybrid-controller-coordinator.md`](hybrid-controller-coordinator.md).
 
+## Semantic-plane backlog
+
+The custody layer (receipts, CAS, journaled evidence) is ahead of the
+machinery that helps agents succeed. Open gaps, in rough priority order:
+
+1. **Worker→coordinator clarification channel.** A worker that discovers
+   task ambiguity mid-attempt can only fail; the whole attempt burns and the
+   coordinator re-dispatches with amended context. Design a bounded,
+   journaled channel: the worker emits a structured "blocked-on-question"
+   artifact, the attempt suspends, the coordinator's answer becomes part of
+   the audited context of a resumed or fresh attempt. The controller stays
+   the state authority; nothing free-form.
+2. **Richer parent→child context handoff.** Decision 0003 deliberately kept
+   `ChildRequest.context` a single frozen pass-through string and deferred
+   selection, resolution, and packet mechanics. The string can carry JSON
+   today, so this is workable — revisit once measured runs show what a
+   selector/materializer should actually optimize.
+3. **Cross-lane interface coordination in parallel PlanGraph.** Sibling
+   lanes only meet at the join; two lanes that make individually-correct,
+   jointly-incompatible interface decisions surface the conflict after both
+   have finished. Candidate design: advisory interface-note artifacts
+   published to the evidence catalog, readable by sibling lanes through the
+   existing bounded artifact query — no lane gains authority over another.
+   Instrument first: classify `integration_conflict` causes (textual merge
+   conflict vs joint-verification failure vs ref race) and aggregate the
+   rates in `run_metrics` before building the channel.
+4. **Fixer-model escalation in the review/fix gate.** When findings
+   repeatedly fail to close across review cycles (or a run blocks with
+   "required findings remain open"), the fixer backend may simply be weaker
+   than the reviewer that produced the findings. First measure: record the
+   fixer backend spec in each ledger cycle entry and compare finding close
+   rates by (reviewer backend, fixer backend) pair, separating fixer
+   weakness from invalid or underspecified findings. If the asymmetry is
+   real, add a deterministic, policy-owned escalation ladder for the fix
+   stage (e.g. escalate after a finding survives N fix attempts, and no
+   later than the penultimate cycle, since the last permitted cycle is
+   review-only). Recovery after a blocked exit can already escalate for
+   free: resume with a stronger fixer in the run's agent mixture, and
+   journal that the mixture changed.
+
 ## Milestone 1 — minimal conforming harness
 
 Build one end-to-end Codex feature harness that conforms to the architecture,
