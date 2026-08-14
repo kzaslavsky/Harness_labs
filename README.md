@@ -1,6 +1,6 @@
 # Harness Labs
 
-Harness Labs is a research and engineering repository for building Codex coding
+Harness Labs is a research and engineering repository for building platorm-agnostic coding
 harnesses that can autonomously deliver repository features with high accuracy
 and high operational efficiency.
 
@@ -43,7 +43,7 @@ The motivation is twofold:
 
 ## Current paradigm — GraphRun
 
-`main` carries the integrated line (formerly `Impl-redo`): **GraphRun**, the
+`main` carries the integrated **GraphRun**, the
 composition of the two harness layers:
 
 1. **FeatureRun** — develops a single feature in an isolated worktree through
@@ -65,8 +65,7 @@ was developed and verified with GraphRun operating on itself.
 The central optimization objective is **accuracy × efficiency**. Accuracy gates
 are constraints; efficiency improvements are accepted only when correctness and
 verification coverage remain equivalent or improve. Metrics exist to support
-experimentation, diagnosis, and iterative harness improvement—not surveillance
-or vanity reporting.
+experimentation, diagnosis, and iterative harness improvement.
 
 ## Contracts
 
