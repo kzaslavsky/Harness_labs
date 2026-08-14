@@ -19,6 +19,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from harness_labs.observability.plangraph_snapshot import emit_best_effort_snapshot
 from harness_labs.plangraph.plan_graph import (
     PlanGraphRegistration,
     load_registration,
@@ -301,6 +302,7 @@ def _parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     arguments = _parser().parse_args()
+    escalation: Mapping[str, object] | None = None
     try:
         escalation = dict(load_escalation(arguments.escalation))
         # The artifact reference is deliberately passed through to PlanGraph's
@@ -313,6 +315,12 @@ def main() -> int:
         result = coordinator.recover(escalation, launcher_argv=arguments.launcher_command, requested_action=arguments.requested_action)
     except (OSError, ValueError, RecoveryCoordinatorError) as exc:
         result = CoordinatorResult("externally_blocked", str(exc))
+    # Best-effort, after this recovery attempt concludes regardless of its
+    # outcome: the escalated graph is terminal (blocked) at this point, and
+    # may have been terminalized by a process that never emitted its own
+    # snapshot.  Never alters the result computed above.
+    if isinstance(escalation, Mapping) and isinstance(escalation.get("graph_run_id"), str):
+        emit_best_effort_snapshot(arguments.run_root, escalation["graph_run_id"], repository=arguments.repository)
     print(json.dumps(result.as_mapping(), sort_keys=True))
     return 0 if result.status == "resumed" else 1
 
