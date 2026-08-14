@@ -22,7 +22,10 @@ from .claude_agent_session import ClaudeAgentSession
 from .claude_task_executor import ClaudeSemanticTaskExecutor
 from .codex_agent_session import CodexAppServerSession
 from .controller_evidence import EvidenceCatalog
-from .controller_live import CodexSemanticTaskExecutor
+from .controller_live import (
+    CodexSemanticTaskExecutor,
+    select_dirty_baseline_receipt,
+)
 from .controller_scheduler import RoleProfile
 from .git_transaction import workspace_snapshot
 from .usage import ModelPrice
@@ -216,6 +219,7 @@ def build_role_profiles(
                 capabilities=role.capabilities,
                 details_schemas=role.details_schemas,
                 backend_id=spec.backend_id,
+                allow_dirty_baseline=role.allow_dirty_baseline,
                 executor_factory=_executor_factory(
                     spec=spec,
                     role=role,
@@ -266,7 +270,7 @@ def _executor_factory(
                 task=task_with_artifact_kind(task, role.artifact_kind),
                 effort=spec.effort,
                 dirty_baseline_grant=_controller_dirty_baseline_grant(
-                    role, repository, evidence
+                    role, repository, evidence, audit=audit, attempt_id=task["id"]
                 ),
                 **shared,
             )
@@ -276,7 +280,7 @@ def _executor_factory(
                 task=task_with_artifact_kind(task, role.artifact_kind),
                 reasoning=spec.effort,
                 dirty_baseline_grant=_controller_dirty_baseline_grant(
-                    role, repository, evidence
+                    role, repository, evidence, audit=audit, attempt_id=task["id"]
                 ),
                 **shared,
             )
@@ -284,7 +288,12 @@ def _executor_factory(
 
 
 def _controller_dirty_baseline_grant(
-    role: WorkerRole, repository: Path, evidence: EvidenceCatalog
+    role: WorkerRole,
+    repository: Path,
+    evidence: EvidenceCatalog,
+    *,
+    audit: AuditJournal | None = None,
+    attempt_id: str | None = None,
 ) -> Mapping[str, Any] | None:
     """Compute a controller-owned adoption grant for an eligible writable role.
 
@@ -294,52 +303,40 @@ def _controller_dirty_baseline_grant(
     from coordinator- or worker-authored task content, so a role frozen ahead
     of time can never itself bypass the executor's clean-baseline preflight,
     and no dispatched task can choose or influence which receipt is offered.
+    The candidate is checked with the same shared
+    :func:`~harness_labs.controller_live.select_dirty_baseline_receipt` (which
+    itself runs :func:`~harness_labs.controller_live.verify_dirty_baseline_grant`,
+    the same check the executor runs at preflight: path coverage *and*
+    content state), so a grant issued here is never journaled as granted
+    against a workspace state that would fail preflight. When no candidate
+    qualifies, the decline is journaled too (status ``"refused"``, naming the
+    uncovered and content-mismatched paths) so drift is diagnosable from the
+    journal.
     """
 
     if not role.allow_dirty_baseline:
         return None
-    dirty_paths = workspace_snapshot(repository)["changed_paths"]
+    snapshot = workspace_snapshot(repository)
+    dirty_paths = snapshot["changed_paths"]
     if not dirty_paths:
         return None
-    receipt_ref = _best_covering_receipt(evidence, dirty_paths)
+    receipt_ref, failure = select_dirty_baseline_receipt(
+        evidence=evidence, dirty_paths=dirty_paths, dirty_files=snapshot["files"]
+    )
     if receipt_ref is None:
+        if audit is not None and failure is not None:
+            audit.append(
+                "dirty_baseline_adoption_grant_supplied",
+                status="refused",
+                payload={
+                    "dirty_paths": sorted(dirty_paths),
+                    "uncovered_paths": list(failure.uncovered_paths),
+                    "mismatched_paths": list(failure.mismatched_paths),
+                },
+                attempt_id=attempt_id,
+            )
         return None
     return {"receipt_ref": receipt_ref}
-
-
-def _best_covering_receipt(
-    evidence: EvidenceCatalog, dirty_paths: list[str]
-) -> str | None:
-    """Return the tightest-covering ``workspace-change-receipt`` for dirty_paths.
-
-    Any receipt truthfully attests an adoptable baseline as long as its
-    recorded change set is a superset of what is currently dirty; the
-    tightest-covering receipt is preferred (fewest paths beyond what's dirty),
-    ties broken by evidence ref for determinism.
-    """
-
-    dirty = set(dirty_paths)
-    best_ref: str | None = None
-    best_extra: int | None = None
-    for record in evidence.list():
-        if record.kind != "workspace-change-receipt":
-            continue
-        try:
-            receipt = json.loads(evidence.open(record.ref))
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(receipt, Mapping):
-            continue
-        receipted = set(receipt.get("changed_paths", ()))
-        if not dirty <= receipted:
-            continue
-        extra = len(receipted - dirty)
-        if best_extra is None or extra < best_extra or (
-            extra == best_extra and (best_ref is None or record.ref < best_ref)
-        ):
-            best_ref = record.ref
-            best_extra = extra
-    return best_ref
 
 
 def build_coordinator_session(

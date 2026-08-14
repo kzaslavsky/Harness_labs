@@ -22,15 +22,22 @@ from typing import Any, Mapping
 
 from .attempts import TaskAttempt, TaskResult
 from .audit import AuditActor, AuditJournal
-from .controller_evidence import EvidenceCatalog, EvidenceError
+from .controller_evidence import EvidenceCatalog
 from .controller_live import (
+    ATTEMPT_START_BASELINE_RESTORATION_EVENT,
     _RAW_OUTPUT_SCHEMA,
     _WORKSPACE_CHANGE_RECEIPT_KIND,
     LiveExecutionError,
     _filter_satisfied_criteria,
+    _is_latest_writable_attempt,
     _parse_context,
+    _record_writable_attempt_started,
     _snapshot_delta_paths,
     _worker_prompt,
+    dirty_baseline_grant_refusal_detail,
+    restore_attempt_start_baseline,
+    select_dirty_baseline_receipt,
+    verify_dirty_baseline_grant,
 )
 from .controller_results import (
     DeliverableFloorViolation,
@@ -79,6 +86,19 @@ class ClaudeSemanticTaskExecutor:
     dirty_baseline_grant: Mapping[str, Any] | None = None
     audit: AuditJournal | None = field(default=None, repr=False)
     pricing: ModelPrice | None = None
+    # Per-execute() bookkeeping for CB3-04 restoration -- not a constructor
+    # input; set from the attempt-start and post-worker workspace snapshots
+    # already taken during ``_execute`` and consumed once by
+    # ``_maybe_restore_attempt_start_baseline``.
+    _attempt_start_baseline: Mapping[str, Any] | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
+    _attempt_end_workspace: Mapping[str, Any] | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
+    _attempt_sequence_token: int | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
 
     def __post_init__(self) -> None:
         if self.sandbox not in {"read-only", "workspace-write"}:
@@ -117,11 +137,16 @@ class ClaudeSemanticTaskExecutor:
             raise ValueError("require_preflight_success requires a preflight command")
 
     def execute(self, attempt: TaskAttempt) -> TaskResult:
+        self._attempt_start_baseline = None
+        self._attempt_end_workspace = None
+        self._attempt_sequence_token = None
+        result: TaskResult | None = None
         try:
-            return self._execute(attempt)
+            result = self._execute(attempt)
+            return result
         except DeliverableFloorViolation as exc:
             self._audit_deliverable_floor_violation(attempt, exc)
-            return TaskResult(
+            result = TaskResult(
                 attempt_id=attempt.attempt_id,
                 status="failed",
                 payload={
@@ -131,6 +156,7 @@ class ClaudeSemanticTaskExecutor:
                     "reason": exc.reason,
                 },
             )
+            return result
         except (
             GitTransactionError,
             LiveExecutionError,
@@ -138,11 +164,20 @@ class ClaudeSemanticTaskExecutor:
             ValueError,
             json.JSONDecodeError,
         ) as exc:
-            return TaskResult(
+            result = TaskResult(
                 attempt_id=attempt.attempt_id,
                 status="failed",
                 payload={"error": str(exc), "error_type": type(exc).__name__},
             )
+            return result
+        finally:
+            # A ``finally`` (not a plain trailer after the ``except``
+            # clauses) so restoration also runs for exception types outside
+            # the caught tuple above -- the attempt still terminated without
+            # succeeding, and any residue it left is still this attempt's
+            # own to restore or decline.
+            if result is None or result.status != "succeeded":
+                self._maybe_restore_attempt_start_baseline(attempt)
 
     def _execute(self, attempt: TaskAttempt) -> TaskResult:
         repository = self.repository.resolve(strict=True)
@@ -163,6 +198,11 @@ class ClaudeSemanticTaskExecutor:
         # Snapshot both sandboxes: Claude's read-only bound is permission-layer,
         # so the controller proves non-mutation rather than assuming it.
         initial_workspace = workspace_snapshot(repository)
+        self._attempt_start_baseline = initial_workspace
+        if self.sandbox == "workspace-write":
+            self._attempt_sequence_token = _record_writable_attempt_started(
+                repository
+            )
         adoption_grant = None
         if self.sandbox == "workspace-write" and initial_workspace["changed_paths"]:
             adoption_grant = self._resolve_dirty_baseline_grant(initial_workspace)
@@ -256,6 +296,7 @@ class ClaudeSemanticTaskExecutor:
         raw = _structured_output(result_payload)
 
         final_workspace = workspace_snapshot(repository)
+        self._attempt_end_workspace = final_workspace
         if final_workspace["head"] != initial_workspace["head"]:
             raise LiveExecutionError("worker changed repository HEAD")
         if final_workspace["branch"] != initial_workspace["branch"]:
@@ -469,46 +510,164 @@ class ClaudeSemanticTaskExecutor:
     ) -> Mapping[str, Any]:
         """Accept a dirty baseline only for a grant whose receipt covers it exactly.
 
-        The grant must name an existing ``workspace-change-receipt`` evidence
-        entry left by a prior attempt in this run whose recorded
-        ``changed_paths`` covers every currently dirty path *and* whose
-        recorded ``files`` content state matches what is on disk right now;
-        a missing, unresolvable, path-incomplete, or content-mismatched grant
-        refuses with the same clean-baseline message as no grant at all, so
-        neither a shared path name nor a forged path list can substitute for
-        the receipted change set's actual attested content.
+        Delegates to the shared :func:`verify_dirty_baseline_grant` -- the
+        same receipt-resolution, changed-path-coverage, and per-file
+        content-state check an issuer runs before journaling a grant as
+        granted, so a supplied grant can never pass at issue time and fail
+        here. No grant supplied refuses with the generic clean-baseline
+        message; a supplied-but-failing grant refuses with a typed message
+        naming the specific uncovered or content-mismatched paths.
         """
 
-        dirty_paths: list[str] = initial_workspace["changed_paths"]
-        dirty_files: Mapping[str, Any] = initial_workspace["files"]
         grant = self.dirty_baseline_grant
-        receipt_ref = grant.get("receipt_ref") if isinstance(grant, Mapping) else None
-        receipted_paths: set[str] = set()
-        receipted_files: Mapping[str, Any] = {}
-        if isinstance(receipt_ref, str) and receipt_ref.strip():
-            try:
-                record = self.evidence.metadata(receipt_ref)
-                if record.kind == _WORKSPACE_CHANGE_RECEIPT_KIND:
-                    receipt = json.loads(self.evidence.open(receipt_ref))
-                    if isinstance(receipt, Mapping):
-                        receipted_paths = set(receipt.get("changed_paths", ()))
-                        raw_files = receipt.get("files")
-                        if isinstance(raw_files, Mapping):
-                            receipted_files = raw_files
-            except (EvidenceError, json.JSONDecodeError):
-                receipted_paths = set()
-                receipted_files = {}
-        covered = bool(receipted_paths) and set(dirty_paths) <= receipted_paths
-        if covered:
-            covered = all(
-                dirty_files.get(path) == receipted_files.get(path)
-                for path in dirty_paths
-            )
-        if not covered:
+        verification = verify_dirty_baseline_grant(
+            evidence=self.evidence,
+            grant=grant,
+            dirty_paths=initial_workspace["changed_paths"],
+            dirty_files=initial_workspace["files"],
+        )
+        if not verification.ok:
+            if grant is None:
+                raise LiveExecutionError(
+                    "writable worker requires a clean repository baseline"
+                )
             raise LiveExecutionError(
-                "writable worker requires a clean repository baseline"
+                "dirty-baseline grant refused: "
+                + dirty_baseline_grant_refusal_detail(verification)
             )
-        return {"receipt_ref": receipt_ref, "receipted_paths": sorted(receipted_paths)}
+        return {
+            "receipt_ref": verification.receipt_ref,
+            "receipted_paths": list(verification.receipted_paths),
+        }
+
+    def _maybe_restore_attempt_start_baseline(self, attempt: TaskAttempt) -> None:
+        """Restore a failed writable attempt's own residue when nothing can adopt it.
+
+        Triggers only when the attempt started from a clean baseline (this
+        workspace's dirty state, if any, is entirely the attempt's own
+        making) and no workspace-change receipt covers the current dirty
+        state (a covering receipt means CB3-03's dispatch-chokepoint
+        adoption can recover the work instead, so this never fires there --
+        AC-CB304-1). A best-effort safety net: any anomaly while inspecting
+        or mutating the workspace here is swallowed rather than raised,
+        since restoration must never mask the attempt's own failure result
+        or crash the caller.
+
+        ``final`` -- the post-worker workspace snapshot -- may never have
+        been taken if the attempt failed before reaching it (a timeout, a
+        nonzero worker exit, a missing or unparsable result); in that case
+        it is taken here on demand so restoration is still reachable.
+        """
+
+        baseline = self._attempt_start_baseline
+        final = self._attempt_end_workspace
+        token = self._attempt_sequence_token
+        self._attempt_start_baseline = None
+        self._attempt_end_workspace = None
+        self._attempt_sequence_token = None
+        if self.sandbox != "workspace-write" or baseline is None:
+            return
+        try:
+            if final is None:
+                final = workspace_snapshot(self.repository.resolve(strict=True))
+            dirty_paths = list(final.get("changed_paths", ()))
+            if not dirty_paths:
+                return
+            self._evaluate_and_apply_baseline_restoration(
+                attempt, baseline, final, dirty_paths, token
+            )
+        except Exception:
+            return
+
+    def _evaluate_and_apply_baseline_restoration(
+        self,
+        attempt: TaskAttempt,
+        baseline: Mapping[str, Any],
+        final: Mapping[str, Any],
+        dirty_paths: list[str],
+        sequence_token: int | None,
+    ) -> None:
+        started_clean = not baseline.get("changed_paths")
+        head_unchanged = final.get("head") == baseline.get("head")
+        branch_unchanged = final.get("branch") == baseline.get("branch")
+        repository = self.repository.resolve(strict=True)
+        no_newer_attempt_started = sequence_token is not None and (
+            _is_latest_writable_attempt(repository, sequence_token)
+        )
+        receipt_ref: str | None = None
+        if started_clean:
+            receipt_ref, _ = select_dirty_baseline_receipt(
+                evidence=self.evidence,
+                dirty_paths=dirty_paths,
+                dirty_files=final.get("files", {}),
+            )
+        conditions = {
+            "attempt_terminated_failed": True,
+            "attempt_started_clean": started_clean,
+            "head_unchanged": head_unchanged,
+            "branch_unchanged": branch_unchanged,
+            "no_newer_attempt_started": no_newer_attempt_started,
+            "no_covering_receipt": receipt_ref is None,
+        }
+        baseline_commit = str(baseline["head"])
+        if all(conditions.values()):
+            actions = restore_attempt_start_baseline(
+                repository, baseline_commit, dirty_paths
+            )
+            self._journal_baseline_restoration(
+                attempt,
+                status="restored",
+                baseline_commit=baseline_commit,
+                dirty_paths=dirty_paths,
+                conditions=conditions,
+                receipt_ref=receipt_ref,
+                actions=actions,
+            )
+        else:
+            self._journal_baseline_restoration(
+                attempt,
+                status="declined",
+                baseline_commit=baseline_commit,
+                dirty_paths=dirty_paths,
+                conditions=conditions,
+                receipt_ref=receipt_ref,
+                actions=None,
+            )
+
+    def _journal_baseline_restoration(
+        self,
+        attempt: TaskAttempt,
+        *,
+        status: str,
+        baseline_commit: str,
+        dirty_paths: list[str],
+        conditions: Mapping[str, bool],
+        receipt_ref: str | None,
+        actions: Mapping[str, str] | None,
+    ) -> None:
+        if self.audit is None:
+            return
+        payload: dict[str, Any] = {
+            "baseline_commit": baseline_commit,
+            "dirty_paths": dirty_paths,
+            "conditions": dict(conditions),
+            "receipt_ref": receipt_ref,
+        }
+        if actions is not None:
+            payload["actions"] = dict(actions)
+        self.audit.append(
+            ATTEMPT_START_BASELINE_RESTORATION_EVENT,
+            status=status,
+            payload=payload,
+            actor=AuditActor(
+                attempt.attempt_id,
+                "capability_adapter",
+                parent_id=attempt.parent_attempt_id,
+            ),
+            attempt_id=attempt.attempt_id,
+            parent_attempt_id=attempt.parent_attempt_id,
+            backend_id="claude-print",
+        )
 
     def _audit_transport(
         self,

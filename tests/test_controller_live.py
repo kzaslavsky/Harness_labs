@@ -11,7 +11,10 @@ from unittest.mock import patch
 
 from harness_labs.attempts import TaskAttempt
 from harness_labs.controller_evidence import EvidenceCatalog
-from harness_labs.controller_live import CodexSemanticTaskExecutor
+from harness_labs.controller_live import (
+    CodexSemanticTaskExecutor,
+    select_dirty_baseline_receipt,
+)
 from harness_labs.controller_results import validate_semantic_result
 
 
@@ -278,6 +281,12 @@ class CodexSemanticTaskExecutorTests(unittest.TestCase):
         }
 
         def run(argv, **kwargs):
+            if argv[0] == "git":
+                # CB3-04 restoration probes/reverts with real git subprocess
+                # calls after the attempt fails; treat every one as a no-op
+                # success here so this test stays focused on the grant-escape
+                # refusal itself rather than restoration's own mechanics.
+                return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
             output = Path(argv[argv.index("-o") + 1])
             output.write_text(json.dumps(raw), encoding="utf-8")
             return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
@@ -343,6 +352,12 @@ class CodexSemanticTaskExecutorTests(unittest.TestCase):
         }
 
         def run(argv, **kwargs):
+            if argv[0] == "git":
+                # CB3-04 restoration probes/reverts with real git subprocess
+                # calls after the attempt fails; treat every one as a no-op
+                # success here so this test stays focused on the
+                # forbid-repository-change refusal itself.
+                return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
             output = Path(argv[argv.index("-o") + 1])
             output.write_text(json.dumps(raw), encoding="utf-8")
             return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
@@ -566,9 +581,9 @@ class CodexSemanticTaskExecutorTests(unittest.TestCase):
             "receipt attests must still be refused, even though its name "
             "matches a receipted path",
         )
-        self.assertIn(
-            "clean repository baseline", str(result.payload.get("error", ""))
-        )
+        error = str(result.payload.get("error", ""))
+        self.assertIn("dirty-baseline grant refused", error)
+        self.assertIn("feature.txt", error)
 
     def test_worker_cannot_mint_its_own_deliverable_as_a_workspace_change_receipt(
         self,
@@ -634,6 +649,139 @@ class CodexSemanticTaskExecutorTests(unittest.TestCase):
         kinds = {item["kind"] for item in semantic.artifacts}
         self.assertNotIn("workspace-change-receipt", kinds)
         self.assertIn("inspection/1-report", kinds)
+
+
+class SelectDirtyBaselineReceiptTests(unittest.TestCase):
+    """The shared receipt-selection helper CB3-03's dispatch chokepoint uses."""
+
+    def test_prefers_the_tightest_covering_receipt(self) -> None:
+        evidence = EvidenceCatalog()
+        wide = evidence.add(
+            kind="workspace-change-receipt",
+            content={
+                "changed_paths": ["feature.txt", "extra.txt"],
+                "files": {
+                    "feature.txt": {"kind": "file", "sha256": "same"},
+                    "extra.txt": {"kind": "file", "sha256": "same"},
+                },
+            },
+            media_type="application/json",
+            producer_task_id="prior",
+        )
+        tight = evidence.add(
+            kind="workspace-change-receipt",
+            content={
+                "changed_paths": ["feature.txt"],
+                "files": {"feature.txt": {"kind": "file", "sha256": "same"}},
+            },
+            media_type="application/json",
+            producer_task_id="prior",
+        )
+        receipt_ref, failure = select_dirty_baseline_receipt(
+            evidence=evidence,
+            dirty_paths=["feature.txt"],
+            dirty_files={"feature.txt": {"kind": "file", "sha256": "same"}},
+        )
+        self.assertIsNone(failure)
+        self.assertEqual(receipt_ref, tight.ref)
+        self.assertNotEqual(receipt_ref, wide.ref)
+
+    def test_never_unions_two_partially_covering_receipts(self) -> None:
+        evidence = EvidenceCatalog()
+        evidence.add(
+            kind="workspace-change-receipt",
+            content={
+                "changed_paths": ["a.txt"],
+                "files": {"a.txt": {"kind": "file", "sha256": "a"}},
+            },
+            media_type="application/json",
+            producer_task_id="prior",
+        )
+        evidence.add(
+            kind="workspace-change-receipt",
+            content={
+                "changed_paths": ["b.txt"],
+                "files": {"b.txt": {"kind": "file", "sha256": "b"}},
+            },
+            media_type="application/json",
+            producer_task_id="prior",
+        )
+        receipt_ref, failure = select_dirty_baseline_receipt(
+            evidence=evidence,
+            dirty_paths=["a.txt", "b.txt"],
+            dirty_files={
+                "a.txt": {"kind": "file", "sha256": "a"},
+                "b.txt": {"kind": "file", "sha256": "b"},
+            },
+        )
+        self.assertIsNone(receipt_ref)
+        self.assertIsNotNone(failure)
+        self.assertFalse(failure.ok)
+
+    def test_selection_is_independent_of_catalog_order(self) -> None:
+        forward = EvidenceCatalog()
+        backward = EvidenceCatalog()
+        tight_forward = forward.add(
+            kind="workspace-change-receipt",
+            content={
+                "changed_paths": ["feature.txt"],
+                "files": {"feature.txt": {"kind": "file", "sha256": "same"}},
+            },
+            media_type="application/json",
+            producer_task_id="prior",
+        )
+        wide_forward = forward.add(
+            kind="workspace-change-receipt",
+            content={
+                "changed_paths": ["feature.txt", "extra.txt"],
+                "files": {
+                    "feature.txt": {"kind": "file", "sha256": "same"},
+                    "extra.txt": {"kind": "file", "sha256": "same"},
+                },
+            },
+            media_type="application/json",
+            producer_task_id="prior",
+        )
+        wide_backward = backward.add(
+            kind="workspace-change-receipt",
+            content={
+                "changed_paths": ["feature.txt", "extra.txt"],
+                "files": {
+                    "feature.txt": {"kind": "file", "sha256": "same"},
+                    "extra.txt": {"kind": "file", "sha256": "same"},
+                },
+            },
+            media_type="application/json",
+            producer_task_id="prior",
+        )
+        tight_backward = backward.add(
+            kind="workspace-change-receipt",
+            content={
+                "changed_paths": ["feature.txt"],
+                "files": {"feature.txt": {"kind": "file", "sha256": "same"}},
+            },
+            media_type="application/json",
+            producer_task_id="prior",
+        )
+        dirty_files = {"feature.txt": {"kind": "file", "sha256": "same"}}
+        forward_ref, _ = select_dirty_baseline_receipt(
+            evidence=forward, dirty_paths=["feature.txt"], dirty_files=dirty_files
+        )
+        backward_ref, _ = select_dirty_baseline_receipt(
+            evidence=backward, dirty_paths=["feature.txt"], dirty_files=dirty_files
+        )
+        self.assertEqual(forward_ref, tight_forward.ref)
+        self.assertEqual(backward_ref, tight_backward.ref)
+        self.assertNotEqual(forward_ref, wide_forward.ref)
+        self.assertNotEqual(backward_ref, wide_backward.ref)
+
+    def test_no_dirty_paths_selects_nothing(self) -> None:
+        evidence = EvidenceCatalog()
+        receipt_ref, failure = select_dirty_baseline_receipt(
+            evidence=evidence, dirty_paths=[], dirty_files={}
+        )
+        self.assertIsNone(receipt_ref)
+        self.assertIsNone(failure)
 
 
 if __name__ == "__main__":
