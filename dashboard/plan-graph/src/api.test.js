@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { defaultGraphAttempt, displayState, elapsedMs, graphProjection, liveGraphs, planGraphGroups, selectedRunFor, stateLabel, validateCatalog, validateGraphMetrics, validateRunDetail } from './api.js';
+import { defaultGraphAttempt, displayState, elapsedMs, graphProjection, liveGraphs, planGraphGroups, selectedRunFor, stateLabel, validateCatalog, validateGraphMetrics, validateRunDetail, validateSnapshotDocument, validateSnapshotsListing } from './api.js';
 import { distributionSummary, metricValue, money } from './format.js';
 
 const availability = { state: 'available', reason: null };
@@ -200,6 +200,43 @@ test('PlanGraph metrics validation accepts a full tri-state document and rejects
   const broken = graphMetricsDoc();
   delete broken.counts;
   assert.throws(() => validateGraphMetrics(broken));
+});
+
+test('snapshots listing validation accepts populated and snapshot_missing entries and rejects a malformed one', () => {
+  const listing = {
+    protocol: 'harness-dashboard-snapshots-listing/1',
+    bounds: { max_snapshot_files_per_root: 512, max_file_bytes: 4194304 },
+    snapshots: [
+      { run_id: 'graph-1', logical_graph_id: 'graph-1', graph_attempt_id: 'graph-1', display_name: 'Graph One', status: 'succeeded', finished_at: '2026-08-09T00:00:00Z', wall_clock_ms: genericMetric('available', 1000), tokens: tokenBlock('available', { total_tokens: 150 }), cost: costBlock('available', 0.5), completeness: 'complete', snapshot_missing: false, reason: null, source_root: '/audit' },
+      { run_id: 'graph-2', logical_graph_id: 'graph-2', graph_attempt_id: 'graph-2', display_name: 'Graph Two', status: 'blocked', finished_at: null, wall_clock_ms: null, tokens: null, cost: null, completeness: null, snapshot_missing: true, reason: 'no metrics snapshot has been written for this terminal graph attempt', source_root: null },
+    ],
+    diagnostics: [],
+  };
+  assert.equal(validateSnapshotsListing(listing), listing);
+  const broken = { ...listing, snapshots: [{ ...listing.snapshots[0], completeness: 'invalid-grade' }] };
+  assert.throws(() => validateSnapshotsListing(broken));
+});
+
+test('snapshot document validation accepts a full plangraph-metrics-snapshot/1 document and rejects an incomplete one', () => {
+  const document = {
+    protocol: 'plangraph-metrics-snapshot/1',
+    identity: { logical_graph_id: 'graph-1', graph_attempt_id: 'graph-1', run_id: 'graph-1', plan_path: 'docs/plan.md', plan_digest: 'a'.repeat(64), base_commit: 'a'.repeat(40), repository_id: null },
+    display_name: 'Graph One', status: 'succeeded',
+    timing: { started_at: '2026-08-09T00:00:00Z', finished_at: '2026-08-09T01:00:00Z', wall_clock_ms: genericMetric('available', 3_600_000) },
+    graph_metrics: graphMetricsDoc(),
+    feature_runs: [{ node_id: 'done', objective: 'Ship the feature', display_name: 'Ship the feature', status: 'succeeded', feature_run_id: 'graph-1-done', tries: 1, detail: { state: 'available', reason: null }, metrics: null }],
+    outcome: {
+      nodes: [{ node_id: 'done', objective: 'Ship the feature', status: 'succeeded', criteria_satisfied: 1, criteria_total: 1, criteria_state: 'available', evidence_reason: null }],
+      nodes_total: 1, nodes_attempted: 1, nodes_succeeded: 1, nodes_blocked: 0, nodes_failed: 0,
+      delta: { state: 'available', reason: null, base_commit: 'a'.repeat(40), final_integrated_commit: 'b'.repeat(40), files_changed: 2, insertions: 10, deletions: 1, nodes: [{ node_id: 'done', candidate_commit: 'b'.repeat(40) }] },
+      plan_sections: null, acceptance_criteria: null, narrative: 'Graph One succeeded: 1 of 1 nodes succeeded.',
+    },
+    data_quality: { summary_missing: false, token_records_missing: false, cost_state: 'available', busy_unavailable_reason: null, criteria_text_unavailable: true, reconstructed: false, reconstruction_notes: [], completeness: 'complete' },
+    provenance: { generated_at: '2026-08-09T01:00:01Z', generator: 'harness_labs.observability.plangraph_snapshot/1', run_root: '/audit', reconstructed: false },
+  };
+  assert.equal(validateSnapshotDocument(document), document);
+  const broken = { ...document, outcome: { ...document.outcome, narrative: '' } };
+  assert.throws(() => validateSnapshotDocument(broken));
 });
 
 test('FeatureRun detail validation normalizes keyed controller families', () => {

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Background, Controls, Handle, Position, ReactFlow, ReactFlowProvider } from '@xyflow/react';
 import { defaultGraphAttempt, displayState, elapsedMs, fetchCatalog, fetchPlanGraphMetrics, fetchRunDetail, graphProjection, liveGraphs, planGraphGroups, selectedRunFor, stateLabel } from './api.js';
 import { compactId, duration, money, title, tokens } from './format.js';
+import CompletedView from './CompletedView.jsx';
 import GraphTotals from './components/GraphTotals.jsx';
 import InFlightStrip from './components/InFlightStrip.jsx';
 import NodeMetricsTable from './components/NodeMetricsTable.jsx';
@@ -120,6 +121,7 @@ function ExecutionStages({ rows }) {
 }
 
 function Dashboard() {
+  const [view, setView] = useState('live');
   const [catalog, setCatalog] = useState(null); const [error, setError] = useState(); const etag = useRef();
   const [selectedRunId, setSelectedRunId] = useState(null); const [detail, setDetail] = useState(null); const [detailRunId, setDetailRunId] = useState(null); const [detailError, setDetailError] = useState();
   const detailRef = useRef(null); const detailRunIdRef = useRef(null);
@@ -202,7 +204,9 @@ function Dashboard() {
   const graphCount = graphGroups.length;
   const attemptCount = catalog?.plan_graphs.length || 0;
   const rootCount = catalog?.source_roots?.length || (catalog?.source_root ? 1 : 0);
-  return <div className="app"><main><header className="top"><div><span className="eyebrow">READ-ONLY OPERATIONS DASHBOARD</span><h1>PlanGraphs</h1><p>{graphCount} logical PlanGraph{graphCount === 1 ? '' : 's'} · {attemptCount} execution attempt{attemptCount === 1 ? '' : 's'} across {rootCount} audit root{rootCount === 1 ? '' : 's'} · polling every 2 seconds</p></div><div><span className="readonly">Read-only</span><button onClick={() => refresh()} className="refresh">Refresh</button></div></header>
+  return <div className={`app${view === 'completed' ? ' app--completed' : ''}`}><main><header className="top"><div><span className="eyebrow">READ-ONLY OPERATIONS DASHBOARD</span><h1>PlanGraphs</h1><p>{graphCount} logical PlanGraph{graphCount === 1 ? '' : 's'} · {attemptCount} execution attempt{attemptCount === 1 ? '' : 's'} across {rootCount} audit root{rootCount === 1 ? '' : 's'} · polling every 2 seconds</p></div><div><span className="readonly">Read-only</span><nav className="view-toggle" aria-label="Dashboard view"><button className={view === 'live' ? 'active' : ''} onClick={() => setView('live')}>Live</button><button className={view === 'completed' ? 'active' : ''} onClick={() => setView('completed')}>Completed</button></nav>{view === 'live' && <button onClick={() => refresh()} className="refresh">Refresh</button>}</div></header>
+    {view === 'completed' && <CompletedView />}
+    {view === 'live' && <>
     {error && <p className="error" role="alert">{error}</p>}{!catalog && !error && <p className="loading">Loading catalog…</p>}
     {catalog && <><Availability label="Catalog:" value={catalog.availability} />
       <InFlightStrip graphs={inFlightGraphs} selectedRunId={selectedGraph?.run_id} onSelect={selectGraph} nowMs={nowMs} />
@@ -215,6 +219,6 @@ function Dashboard() {
       {selectedGraph && <NodeMetricsTable nodes={visibleGraphMetrics?.nodes} nodeObjectives={nodeObjectives} />}
       <GraphExecutionSummary graph={selectedGraph} />
       <section className="runs"><h2>FeatureRuns</h2>{catalog.feature_runs.length ? catalog.feature_runs.map((run) => <button key={run.run_id} onClick={() => { setDetailTab('overview'); setSelectedNodeKey(null); setSelectedRunId(run.run_id); }}><div><strong>{run.display_name || run.run_id}</strong><code>{run.run_id}</code></div><Status record={run} /><span>{run.correlation ? `${run.correlation.plan_graph_id} / ${run.correlation.plan_node_id}${run.correlation.state === 'id_matched' ? ' · id match (unattested)' : ''}` : 'Ungrouped or legacy'}</span></button>) : <p className="muted">No FeatureRuns discovered.</p>}</section>
-    </>}</main><Detail run={selectedRun} node={selectedNode} detail={visibleDetail} error={detailError} onClose={() => { setSelectedNodeKey(null); setSelectedRunId(null); }} tab={detailTab} onTabChange={setDetailTab} /></div>;
+    </>}</>}</main>{view === 'live' && <Detail run={selectedRun} node={selectedNode} detail={visibleDetail} error={detailError} onClose={() => { setSelectedNodeKey(null); setSelectedRunId(null); }} tab={detailTab} onTabChange={setDetailTab} />}</div>;
 }
 export default function App() { return <ReactFlowProvider><Dashboard /></ReactFlowProvider>; }

@@ -17,6 +17,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from harness_labs.observability.dashboard_server import DashboardApplication, _DashboardHandler, create_dashboard_server
+from harness_labs.observability.plangraph_snapshot import build_snapshot, write_snapshot
 from harness_labs.observability.run_catalog import RunCatalog
 from scripts.dashboard_fixture_run import _feature, _graph, _lease, advance_live_fixture, create_fixture
 
@@ -292,6 +293,191 @@ class DashboardEndToEndTests(unittest.TestCase):
                 page.evaluate("[...document.querySelectorAll('.react-flow__node')].find((node) => !node.innerText.includes('correlation unavailable')).click()")
                 page.wait_for("document.querySelector('.inspector').innerText.includes('Retries')")
                 self.assertNotIn("Cumulative retries", page.evaluate("document.querySelector('.inspector').innerText"))
+
+    def test_completed_viewer_and_comparison_table_are_certified(self) -> None:
+        """AC-DM06-1, AC-DM06-2: the completed viewer lists every snapshot
+        and snapshot_missing stub, renders a selected snapshot's graph
+        totals / per-node metrics / outcome summary through the same
+        components as the live view, and the comparison table groups by
+        logical graph with an expandable per-attempt toggle, a sortable
+        metric-complete filter with hidden-row count, and per-column sort
+        indicators defaulting to finished_at descending."""
+        chrome = _chrome_binary()
+        if chrome is None:
+            self.skipTest("set DASHBOARD_E2E_CHROME to a Chrome binary to run UI certification")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            create_fixture(root)
+            document = build_snapshot(root, "completed-graph")
+            write_snapshot(root, document)
+            # A second terminal graph with no snapshot file on disk: the
+            # listing must flag it `snapshot_missing` (AC-DM06-1) instead of
+            # silently omitting it, and the comparison table must still be
+            # able to represent it (as an entirely degraded row).
+            second_parent = {"plan_graph_id": "second-completed-graph", "plan_node_id": "done", "parent_run_id": "second-completed-graph"}
+            _feature(root, "second-completed-child", parent=second_parent, terminal=True)
+            _graph(root, "second-completed-graph", root / "approved-plan.md", {"done": {"status": "queued", "feature_run_id": "second-completed-child"}}, terminal=True)
+            assets = Path("dashboard/plan-graph/dist").resolve()
+            with patch("harness_labs.observability.dashboard_server.RunCatalog", side_effect=lambda source, **options: RunCatalog(source, process_probe=lambda pid: "fixture-process-token", **options)):
+                app = DashboardApplication(root, assets_root=assets, refresh_seconds=0.001)
+                server = create_dashboard_server(app, port=0)
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+                page = _ChromePage(chrome)
+                host, port = server.server_address[:2]
+                self.addCleanup(server.server_close)
+                self.addCleanup(lambda: thread.join(timeout=5))
+                self.addCleanup(server.shutdown)
+                self.addCleanup(page.close)
+                page.command("Page.navigate", url=f"http://{host}:{port}/")
+                page.wait_for("document.querySelectorAll('.runs button').length > 0")
+                # The Live/Completed toggle switches views without a reload.
+                page.evaluate("document.querySelector('.view-toggle button:nth-child(2)').click()")
+                page.wait_for("document.querySelectorAll('.snapshot-list button').length === 2")
+                names = page.evaluate("[...document.querySelectorAll('.snapshot-list button strong')].map((node) => node.innerText)")
+                self.assertEqual(len(names), 2)
+                missing_marker = page.evaluate("[...document.querySelectorAll('.snapshot-list button')].some((button) => button.classList.contains('snapshot-missing') && button.innerText.includes('Snapshot missing'))")
+                self.assertTrue(missing_marker, "a terminal graph with no snapshot file must be flagged snapshot_missing")
+
+                # The left rail itself carries the outcome narrative for each
+                # populated entry (plan:332-334), not only the detail pane
+                # for whichever snapshot happens to be selected.
+                page.wait_for(
+                    "[...document.querySelectorAll('.snapshot-list button')]"
+                    ".find((button) => !button.classList.contains('snapshot-missing'))"
+                    ".innerText.includes('" + document["outcome"]["narrative"][:30].replace("'", "\\'") + "')"
+                )
+
+                # Selecting the populated snapshot renders GraphTotals and
+                # NodeMetricsTable -- the exact same standalone components
+                # (`.graph-totals`, `.metric-section`) the live view uses --
+                # plus an outcome summary, all sourced from the snapshot
+                # document alone (AC-DM06-1).
+                page.evaluate("[...document.querySelectorAll('.snapshot-list button')].find((button) => !button.classList.contains('snapshot-missing')).click()")
+                page.wait_for("document.querySelector('.completed-detail-header h2') !== null")
+                self.assertEqual(page.evaluate("document.querySelector('.completed-detail-header h2').innerText"), document["display_name"])
+                page.wait_for("document.querySelector('.graph-totals') !== null")
+                page.wait_for("document.querySelector('.graph-totals').innerText.includes('Total tokens')")
+                page.wait_for("document.querySelector('.metric-section') !== null")
+                page.wait_for("document.querySelector('.outcome-summary') !== null")
+                self.assertIn(document["outcome"]["narrative"], page.evaluate("document.querySelector('.outcome-summary').innerText"))
+
+                # Selecting the snapshot_missing stub explains the gap
+                # instead of rendering an empty or broken detail pane.
+                page.evaluate("[...document.querySelectorAll('.snapshot-list button')].find((button) => button.classList.contains('snapshot-missing')).click()")
+                page.wait_for("document.querySelector('.completed-browse').innerText.includes('No metrics snapshot has been written')")
+
+                # Compare mode: the default-on metrics-complete filter hides
+                # both entries here (the fixture records no token usage, so
+                # `completed-graph`'s own completeness grade is "partial",
+                # and the stub has none at all) and reports the hidden
+                # count -- the table must say so rather than show 0 rows
+                # silently (AC-DM06-2).
+                page.evaluate("[...document.querySelectorAll('.completed-toolbar button')].find((button) => button.innerText === 'Compare').click()")
+                page.wait_for("document.querySelector('.comparison-table') !== null")
+                page.wait_for("document.querySelector('.hidden-count').innerText.includes('2 of 2 snapshot')")
+                self.assertEqual(page.evaluate("document.querySelectorAll('.comparison-group-row').length"), 0)
+
+                # Turning the filter off reveals both logical graphs as two
+                # distinct grouped rows (they have different topologies /
+                # logical_graph_id, so no merge is expected), and the sort
+                # indicator on the default column confirms finished_at
+                # descending is the initial sort.
+                page.evaluate("document.querySelector('.metrics-complete-toggle input').click()")
+                page.wait_for("document.querySelectorAll('.comparison-group-row').length === 2")
+                self.assertEqual(page.evaluate("document.querySelector('.hidden-count').innerText"), "0 of 2 snapshots hidden")
+                default_sort = page.evaluate("[...document.querySelectorAll('.sort-button')].find((button) => button.innerText.startsWith('Finished')).innerText")
+                self.assertIn("▼", default_sort, "the default comparison sort is finished_at descending")
+
+                # Every attempt's group has exactly one attempt in this
+                # fixture; expanding it reveals the attempt row nested
+                # beneath the group summary row (the expandable per-attempt
+                # child-row requirement).
+                page.evaluate("document.querySelector('.expand-toggle').click()")
+                page.wait_for("document.querySelectorAll('.comparison-attempt-row').length === 1")
+
+                # The per-attempt toggle switches to one row per attempt
+                # (still two rows total here, since each logical graph has
+                # exactly one attempt) without a page reload.
+                page.evaluate("[...document.querySelectorAll('.comparison-grouping button')].find((button) => button.innerText === 'Per attempt').click()")
+                page.wait_for("document.querySelectorAll('.comparison-table tbody tr').length === 2")
+                self.assertEqual(page.evaluate("document.querySelectorAll('.comparison-group-row').length"), 0)
+
+                # Clicking a metric column header sorts by it and flips
+                # direction on a second click, ascending and descending
+                # both remaining reachable (AC-DM06-2).
+                page.evaluate("[...document.querySelectorAll('.sort-button')].find((button) => button.innerText.startsWith('Wall time')).click()")
+                page.wait_for("[...document.querySelectorAll('.sort-button')].find((button) => button.innerText.startsWith('Wall time')).innerText.includes('▼')")
+                page.evaluate("[...document.querySelectorAll('.sort-button')].find((button) => button.innerText.startsWith('Wall time')).click()")
+                page.wait_for("[...document.querySelectorAll('.sort-button')].find((button) => button.innerText.startsWith('Wall time')).innerText.includes('▲')")
+
+    def test_comparison_table_expanded_attempt_rows_follow_active_sort(self) -> None:
+        """AC-DM06-2 / review-fix: a grouped comparison row's expanded
+        per-attempt child rows must re-sort with the table's active column
+        and direction, not stay pinned to the group's finished_at order
+        (dashboard/plan-graph/src/components/ComparisonTable.jsx:
+        expanded-attempt-row-sort)."""
+        chrome = _chrome_binary()
+        if chrome is None:
+            self.skipTest("set DASHBOARD_E2E_CHROME to a Chrome binary to run UI certification")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            create_fixture(root)
+            first = build_snapshot(root, "completed-graph")
+            first["data_quality"]["completeness"] = "complete"
+            first["timing"]["finished_at"] = "2026-08-10T00:00:00Z"
+            first["timing"]["wall_clock_ms"] = {"state": "available", "value": 10_000, "reason": None}
+            first["graph_metrics"]["timing"]["wall_clock_ms"] = {"state": "available", "value": 10_000, "reason": None}
+            write_snapshot(root, first)
+            # A second attempt of the *same* logical graph: an older finish
+            # time (so it sorts second under the default finished_at
+            # descending order) but a much longer wall time (so it must sort
+            # first once the active sort column is switched to Wall time).
+            second = json.loads(json.dumps(first))
+            second["identity"]["run_id"] = "completed-graph-2"
+            second["identity"]["graph_attempt_id"] = "completed-graph-2"
+            second["display_name"] = "Completed Graph (attempt 2)"
+            second["timing"]["finished_at"] = "2026-08-09T00:00:00Z"
+            second["timing"]["wall_clock_ms"] = {"state": "available", "value": 90_000, "reason": None}
+            second["graph_metrics"]["timing"]["wall_clock_ms"] = {"state": "available", "value": 90_000, "reason": None}
+            write_snapshot(root, second)
+            assets = Path("dashboard/plan-graph/dist").resolve()
+            with patch("harness_labs.observability.dashboard_server.RunCatalog", side_effect=lambda source, **options: RunCatalog(source, process_probe=lambda pid: "fixture-process-token", **options)):
+                app = DashboardApplication(root, assets_root=assets, refresh_seconds=0.001)
+                server = create_dashboard_server(app, port=0)
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+                page = _ChromePage(chrome)
+                host, port = server.server_address[:2]
+                self.addCleanup(server.server_close)
+                self.addCleanup(lambda: thread.join(timeout=5))
+                self.addCleanup(server.shutdown)
+                self.addCleanup(page.close)
+                page.command("Page.navigate", url=f"http://{host}:{port}/")
+                page.wait_for("document.querySelectorAll('.runs button').length > 0")
+                page.evaluate("document.querySelector('.view-toggle button:nth-child(2)').click()")
+                page.wait_for("document.querySelectorAll('.snapshot-list button').length === 2")
+                page.evaluate("[...document.querySelectorAll('.completed-toolbar button')].find((button) => button.innerText === 'Compare').click()")
+                page.wait_for("document.querySelector('.comparison-table') !== null")
+                # Both attempts share one logical_graph_id, so this is a
+                # single grouped row with two attempts underneath it.
+                page.wait_for("document.querySelectorAll('.comparison-group-row').length === 1")
+                page.evaluate("document.querySelector('.expand-toggle').click()")
+                page.wait_for("document.querySelectorAll('.comparison-attempt-row').length === 2")
+
+                default_order = page.evaluate("[...document.querySelectorAll('.comparison-attempt-row td:nth-child(2)')].map((cell) => cell.innerText)")
+                self.assertEqual(default_order, [first["display_name"], second["display_name"]], "default sort (finished_at descending) puts the newer attempt first")
+
+                # Sorting by Wall time must reorder the expanded child rows
+                # too: attempt 2 (90s) now outranks attempt 1 (10s), instead
+                # of staying pinned to finished_at order.
+                page.evaluate("[...document.querySelectorAll('.sort-button')].find((button) => button.innerText.startsWith('Wall time')).click()")
+                page.wait_for(
+                    "[...document.querySelectorAll('.comparison-attempt-row td:nth-child(2)')][0]?.innerText === "
+                    + json.dumps(second["display_name"])
+                )
+                reordered = page.evaluate("[...document.querySelectorAll('.comparison-attempt-row td:nth-child(2)')].map((cell) => cell.innerText)")
+                self.assertEqual(reordered, [second["display_name"], first["display_name"]], "expanded attempt rows must follow the active sort column, not a fixed finished_at order")
 
     def test_operator_legacy_graph_import_is_explicitly_retired(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
