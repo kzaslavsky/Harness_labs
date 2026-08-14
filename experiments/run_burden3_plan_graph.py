@@ -603,15 +603,33 @@ Run it yourself and confirm exit code zero. Do not commit.
     return factory
 
 
+# Criteria adjudicated by the controller-owned verification gate, not by
+# worker claim: the segment cannot truthfully satisfy them, so they carry
+# deterministic-verification adjudication and are promoted from the gate's
+# own passing evidence (_promote_gate_criteria). Keyed by plan node id;
+# consulted at launch so the digest-bound decomposition is untouched.
+GATE_ADJUDICATED_CRITERIA = {
+    "CB3-07": frozenset({"AC-CB307-3"}),
+}
+
+
 def _launch_node(
     request: FeatureRunRequest, acceptance_criteria: Mapping[str, str]
 ) -> FeatureRunOutcome:
     run = request.run
+    gate_adjudicated = GATE_ADJUDICATED_CRITERIA.get(
+        request.plan_node_id, frozenset()
+    )
     criteria = tuple(
         {
             "id": criterion,
             "statement": acceptance_criteria[criterion],
             "source": "plan",
+            **(
+                {"adjudication": "deterministic_verification"}
+                if criterion in gate_adjudicated
+                else {}
+            ),
         }
         for criterion in run.criteria
     )
