@@ -1,0 +1,445 @@
+{
+  "acceptance_criteria": {
+    "AC-CB301-1": "`_validate_envelope`'s provenance resolution accepts a ref naming an existing kernel entity \u2014 a dispatched task id, a recorded system result, a recorded decision \u2014 in addition to the already-landed `command:<id>` rejection refs; resolution is read-only against existing kernel state and mints no new records.",
+    "AC-CB301-2": "an unresolvable ref is still rejected, and the rejection detail now enumerates the accepted ref shapes with the syntax of each, so a coordinator's first wrong guess teaches the correct spelling instead of burning attempts blind.",
+    "AC-CB301-3": "accepted-ref semantics elsewhere are byte-for-byte unchanged: no change to retry/supersede admission rules, frozen-authority comparison, budget machinery (none exists in the kernel), or the existing `rejected_task_dispatch_refs` behavior and its tests.",
+    "AC-CB301-4": "tests/test_relax_ref_resolution.py fails behaviorally against the frozen base harness (a retry request citing `task:<failed-task-id>` \u2014 the exact CB2-08 live specimen shape \u2014 is rejected with \"unknown provenance reference\") and passes on the candidate together with the full suite.",
+    "AC-CB302-1": "grant verification (receipt resolution, changed-path coverage, per-file content-state comparison against the workspace state at time-of-check) is implemented exactly once; all four current sites \u2014 agent_mixture.py's issuer, feature_run.py's review-fix controller issuer, and the enforcer copies in claude_task_executor.py and controller_live.py \u2014 consume it; issuers run the full check (including content) at issue time so a grant that will fail preflight is never journaled as granted against the same workspace state.",
+    "AC-CB302-2": "when preflight verification fails for a supplied grant, the refusal is typed and journaled, naming the specific paths that are uncovered or content-mismatched (workspace drift between issue and preflight is thereby diagnosable from the journal); the generic \"writable worker requires a clean repository baseline\" message remains only for the no-grant-supplied case.",
+    "AC-CB302-3": "forged or stale grants still refuse: a receipt_ref that does not resolve, resolves to a non-receipt kind, under-covers the dirty set, or mismatches on-disk content is refused by the shared helper exactly as the strictest current layer refuses it \u2014 unification levels *up*; the clean-baseline precondition itself is intact.",
+    "AC-CB302-4": "tests/test_relax_grant_verification.py fails behaviorally against the frozen base harness (the feature_run review-fix grant path issues-and-journals a grant on path coverage alone that the executor preflight then refuses on content state \u2014 reproducing the CB2-03 attempt-1 `dirty_baseline_adoption_grant_supplied | granted` \u2192 preflight-refusal specimen) and passes on the candidate together with the full suite.",
+    "AC-CB303-1": "a writable dispatch scheduled while the workspace is dirty receives a dirty-baseline grant when some workspace-change receipt in the run's evidence catalog covers the dirty state exactly (every dirty path receipted with matching content, via CB3-02's shared verifier); selection is content-determined \u2014 a receipt qualifies by coverage, not recency, and the catalog needs no ordering \u2014 and grant issuance is journaled with the receipt ref.",
+    "AC-CB303-2": "when no single receipt covers the dirty state, no grant is minted and the dispatch refuses exactly as today (CB3-02's typed refusal); receipts are never unioned to synthesize coverage.",
+    "AC-CB303-3": "on dispatch paths where role profiles govern eligibility, a role without `allow_dirty_baseline` receives no grant regardless of receipts; grant flow is through CB3-02's shared verifier only \u2014 no second verification implementation appears.",
+    "AC-CB303-4": "tests/test_relax_followup_grants.py fails behaviorally against the frozen base harness (a coordinator follow-up writable dispatch through the scheduler chokepoint after a receipted successful attempt fails with the clean-baseline refusal \u2014 the CB2-02 root-attempt specimen) and passes on the candidate together with the full suite.",
+    "AC-CB304-1": "at writable-dispatch time the controller records the attempt-start baseline (the verified-clean tree and its commit) in its attempt bookkeeping; restoration triggers only when ALL hold: the attempt's terminal status is failed; the attempt started clean per that record; no newer attempt has started (controller-local bookkeeping, not catalog ordering); and no workspace-change receipt covers the current dirty state (a covering receipt means CB3-03 adoption is available and the work is preserved instead).",
+    "AC-CB304-2": "restoration reverts tracked modifications to the recorded baseline commit and removes untracked files created since the attempt started, journaling a typed restoration event carrying the baseline commit, the per-path actions taken, and the trigger conditions' evaluations; any condition unmet \u2192 no restoration, state untouched, and a journaled restoration-declined event naming the failed condition. Restoration never deletes journals, evidence artifacts, or paths outside the attempt's residue; a subsequent preflight sees either a clean tree or the unchanged dirty tree \u2014 never a partial revert.",
+    "AC-CB304-3": "successful attempts' residue is never restored (it is adoption material); the clean-baseline precondition is unchanged \u2014 restoration satisfies it, never bypasses it. The accepted residual cost: a failed-but-gate-passing attempt (e.g. a deliverable-floor refusal) is reverted when unreceipted \u2014 that work is equally lost today plus the node deadlocks; the no-covering-receipt gate minimizes the destructive case.",
+    "AC-CB304-4": "tests/test_relax_baseline_restoration.py fails behaviorally against the frozen base harness (after a writable attempt fails leaving unreceipted residue \u2014 the CB2-05 shape, where the out-of-grant refusal precedes any receipt write \u2014 the next dispatch preflight refuses with the clean-baseline message and no restoration or restoration-declined event exists in the journal) and passes on the candidate together with the full suite.",
+    "AC-CB306-1": "ingest screening evaluates the finding's `file` anchor in addition to `required_paths`; a finding anchored outside the writable paths is recorded through the existing screening outcome with its full payload journaled, and no `contract_violation`/`requires_disposition` flag on such a finding can route it into `open_required()` or cycle-limit blocking arithmetic.",
+    "AC-CB306-2": "screened out-of-grant findings remain visible in cycle reports and remain eligible for the landed item-9 cross-node transfer exactly as today's transferable findings are \u2014 the transfer mechanism's existing behavior and its assertions (including those in tests/test_feature_run.py) are preserved or extended, never reduced.",
+    "AC-CB306-3": "in-grant findings flow exactly as today: discovery freeze after cycle 1, deferred handling, fix/verify semantics, and the cycle ceiling are unchanged for tree-bound obligations.",
+    "AC-CB306-4": "tests/test_relax_review_discharge.py fails behaviorally against the frozen base harness (a finding whose `file` is outside the writable paths, with `required_paths` empty or in-grant \u2014 the CB2-02 attempt-1 shape \u2014 enters the ledger as an open obligation and recurs to the cycle ceiling) and passes on the candidate together with the full suite.",
+    "AC-CB307-1": "items 17, 19, 20 carry struck-through prior status and a landed (or, for 19's escalation half, withdrawn-with-evidence) status naming the closing node and its full 40-hex candidate commit; items 6 and 18 record their landed halves with the deferred remainders (general provenance ledger; discharge-by-receipt verb) explicitly tracked as open threads, not silently closed.",
+    "AC-CB307-2": "the change-log entry records the program id, final candidate, and which CB-2 operational failure modes are now mechanically impossible (grant-issue/preflight divergence, follow-up-dispatch stranding, unreceipted-residue deadlock, out-of-grant review deadlock, unresolvable recovery refs); the CB-3 runner pin-retirement operator step is tracked in the operator-follow-up section.",
+    "AC-CB307-3": "the full suite passes on the joined candidate (verification gate for this node is `python3 -m pytest tests/ -q` \u2014 the sink join is verified in a repairable node)."
+  },
+  "functionality_tests": [
+    {
+      "argv": [
+        "python3",
+        "-m",
+        "pytest",
+        "tests/",
+        "-q"
+      ],
+      "required_paths": [
+        {
+          "availability": "base",
+          "path": "tests/__init__.py"
+        }
+      ],
+      "timeout_seconds": 3600
+    }
+  ],
+  "plan": "docs/development/CONTRACT_BURDEN_RELAXATION_3_PLAN.md",
+  "plan_sections": {
+    "CB3-01": "## CB3-01 \u2014 Provenance resolution reaches existing kernel entities\n\nObjective: Extend kernel provenance-reference resolution so refs naming entities that already exist in kernel state \u2014 a task (`task:<id>`), a system result (`system-result:<id>:<n>`), a decision (`decision:<id>`) \u2014 resolve wherever a provenance reference is accepted, and the unknown-reference rejection message enumerates the valid ref shapes, so a coordinator recovering a failed task can cite the task itself instead of dying on \"unknown provenance reference\" or guessing undiscoverable ref spellings. (Item 6, residual half \u2014 the landed `command:<id>` rejection refs stay as-is; all 9 live CB-2 provenance failures cited these unresolvable shapes.)\n\nOwned paths: `harness_labs/controller_kernel.py`, `tests/test_controller_kernel.py`, `tests/test_relax_kernel.py`, `tests/test_relax_ref_resolution.py`.\n\n- AC-CB301-1: `_validate_envelope`'s provenance resolution accepts a ref naming an existing kernel entity \u2014 a dispatched task id, a recorded system result, a recorded decision \u2014 in addition to the already-landed `command:<id>` rejection refs; resolution is read-only against existing kernel state and mints no new records.\n- AC-CB301-2: an unresolvable ref is still rejected, and the rejection detail now enumerates the accepted ref shapes with the syntax of each, so a coordinator's first wrong guess teaches the correct spelling instead of burning attempts blind.\n- AC-CB301-3: accepted-ref semantics elsewhere are byte-for-byte unchanged: no change to retry/supersede admission rules, frozen-authority comparison, budget machinery (none exists in the kernel), or the existing `rejected_task_dispatch_refs` behavior and its tests.\n- AC-CB301-4: tests/test_relax_ref_resolution.py fails behaviorally against the frozen base harness (a retry request citing `task:<failed-task-id>` \u2014 the exact CB2-08 live specimen shape \u2014 is rejected with \"unknown provenance reference\") and passes on the candidate together with the full suite.",
+    "CB3-02": "## CB3-02 \u2014 One verifier for the dirty-baseline grant\n\nObjective: Unify dirty-baseline grant verification \u2014 issuer sites (agent_mixture's `_controller_dirty_baseline_grant`, feature_run's review-fix controller grant path) and enforcer sites (the byte-identical `_resolve_dirty_baseline_grant` copies in claude_task_executor and controller_live) all consume one shared helper that checks receipt resolution, changed-path coverage, AND per-file content state \u2014 so a grant journaled as granted is the same decision enforced at preflight, and a genuine divergence (workspace drifted between issue and preflight) journals a typed refusal naming the offending paths instead of the generic clean-baseline message. (Item 20: the issuer checks paths only while the enforcer also checks content \u2014 four divergent copies.)\n\nOwned paths: `harness_labs/agent_mixture.py`, `harness_labs/claude_task_executor.py`, `harness_labs/controller_live.py`, `harness_labs/feature_run.py`, `tests/test_agent_mixture.py`, `tests/test_claude_task_executor.py`, `tests/test_controller_live.py`, `tests/test_feature_run.py`, `tests/test_relax_adoption.py`, `tests/test_relax_grant_verification.py`.\n\n- AC-CB302-1: grant verification (receipt resolution, changed-path coverage, per-file content-state comparison against the workspace state at time-of-check) is implemented exactly once; all four current sites \u2014 agent_mixture.py's issuer, feature_run.py's review-fix controller issuer, and the enforcer copies in claude_task_executor.py and controller_live.py \u2014 consume it; issuers run the full check (including content) at issue time so a grant that will fail preflight is never journaled as granted against the same workspace state.\n- AC-CB302-2: when preflight verification fails for a supplied grant, the refusal is typed and journaled, naming the specific paths that are uncovered or content-mismatched (workspace drift between issue and preflight is thereby diagnosable from the journal); the generic \"writable worker requires a clean repository baseline\" message remains only for the no-grant-supplied case.\n- AC-CB302-3: forged or stale grants still refuse: a receipt_ref that does not resolve, resolves to a non-receipt kind, under-covers the dirty set, or mismatches on-disk content is refused by the shared helper exactly as the strictest current layer refuses it \u2014 unification levels *up*; the clean-baseline precondition itself is intact.\n- AC-CB302-4: tests/test_relax_grant_verification.py fails behaviorally against the frozen base harness (the feature_run review-fix grant path issues-and-journals a grant on path coverage alone that the executor preflight then refuses on content state \u2014 reproducing the CB2-03 attempt-1 `dirty_baseline_adoption_grant_supplied | granted` \u2192 preflight-refusal specimen) and passes on the candidate together with the full suite.",
+    "CB3-03": "## CB3-03 \u2014 Dispatch-chokepoint adoption grants\n\nObjective: Mint dirty-baseline adoption grants at the controller's dispatch chokepoint \u2014 when any writable dispatch (fresh, retry, or superseding) is scheduled in a workspace whose dirty state is exactly covered by an existing workspace-change receipt in the run's evidence, the scheduler resolves that receipt through CB3-02's shared verifier and attaches the grant \u2014 so a successful attempt's uncommitted receipted work no longer strands the node behind a clean-baseline refusal, in every program using the controller path rather than only launchers that hand-wire executors. (Item 17; the per-role mechanism exists in agent_mixture but the dispatch chokepoint never invokes it.)\n\nOwned paths: `harness_labs/controller_scheduler.py`, `harness_labs/controller_live.py`, `harness_labs/agent_mixture.py`, `tests/test_controller_scheduler.py`, `tests/test_controller_live.py`, `tests/test_agent_mixture.py`, `tests/test_relax_followup_grants.py`.\n\n- AC-CB303-1: a writable dispatch scheduled while the workspace is dirty receives a dirty-baseline grant when some workspace-change receipt in the run's evidence catalog covers the dirty state exactly (every dirty path receipted with matching content, via CB3-02's shared verifier); selection is content-determined \u2014 a receipt qualifies by coverage, not recency, and the catalog needs no ordering \u2014 and grant issuance is journaled with the receipt ref.\n- AC-CB303-2: when no single receipt covers the dirty state, no grant is minted and the dispatch refuses exactly as today (CB3-02's typed refusal); receipts are never unioned to synthesize coverage.\n- AC-CB303-3: on dispatch paths where role profiles govern eligibility, a role without `allow_dirty_baseline` receives no grant regardless of receipts; grant flow is through CB3-02's shared verifier only \u2014 no second verification implementation appears.\n- AC-CB303-4: tests/test_relax_followup_grants.py fails behaviorally against the frozen base harness (a coordinator follow-up writable dispatch through the scheduler chokepoint after a receipted successful attempt fails with the clean-baseline refusal \u2014 the CB2-02 root-attempt specimen) and passes on the candidate together with the full suite.",
+    "CB3-04": "## CB3-04 \u2014 Journaled baseline restoration after failed writable attempts\n\nObjective: When a writable attempt terminates failed in a workspace the attempt itself dirtied, and no receipt covers the residue for adoption, the controller restores the attempt-start baseline via git \u2014 reverting tracked modifications and removing attempt-created untracked files, journaled per-path \u2014 so a single failed task no longer deadlocks the node behind a dirty tree no in-system actor may clean. Restoration works from the controller's recorded attempt-start baseline (a clean tree at a known commit), not receipt pre-images, which do not exist; it therefore also covers attempts that failed before writing any receipt \u2014 the live CB2-05 shape. (Item 19, restoration half; the dominant amplifier.)\n\nOwned paths: `harness_labs/controller_live.py`, `harness_labs/claude_task_executor.py`, `tests/test_controller_live.py`, `tests/test_claude_task_executor.py`, `tests/test_relax_baseline_restoration.py`.\n\n- AC-CB304-1: at writable-dispatch time the controller records the attempt-start baseline (the verified-clean tree and its commit) in its attempt bookkeeping; restoration triggers only when ALL hold: the attempt's terminal status is failed; the attempt started clean per that record; no newer attempt has started (controller-local bookkeeping, not catalog ordering); and no workspace-change receipt covers the current dirty state (a covering receipt means CB3-03 adoption is available and the work is preserved instead).\n- AC-CB304-2: restoration reverts tracked modifications to the recorded baseline commit and removes untracked files created since the attempt started, journaling a typed restoration event carrying the baseline commit, the per-path actions taken, and the trigger conditions' evaluations; any condition unmet \u2192 no restoration, state untouched, and a journaled restoration-declined event naming the failed condition. Restoration never deletes journals, evidence artifacts, or paths outside the attempt's residue; a subsequent preflight sees either a clean tree or the unchanged dirty tree \u2014 never a partial revert.\n- AC-CB304-3: successful attempts' residue is never restored (it is adoption material); the clean-baseline precondition is unchanged \u2014 restoration satisfies it, never bypasses it. The accepted residual cost: a failed-but-gate-passing attempt (e.g. a deliverable-floor refusal) is reverted when unreceipted \u2014 that work is equally lost today plus the node deadlocks; the no-covering-receipt gate minimizes the destructive case.\n- AC-CB304-4: tests/test_relax_baseline_restoration.py fails behaviorally against the frozen base harness (after a writable attempt fails leaving unreceipted residue \u2014 the CB2-05 shape, where the out-of-grant refusal precedes any receipt write \u2014 the next dispatch preflight refuses with the clean-baseline message and no restoration or restoration-declined event exists in the journal) and passes on the candidate together with the full suite.",
+    "CB3-05": "## CB3-05 \u2014 (deleted)\n\nWithdrawn after adjudication: the claimed defect does not exist at RED_BASE.\nThe kernel already resolves `operator_input.requested` to `status = \"blocked\"`\n(controller_kernel.py:1320-1322); the dispatcher then terminates the session\nand the run reaches an orderly terminal `blocked` with the question journaled\n\u2014 the CB2-08 attempt-3 journal shows this end state verbatim. The\n`error_during_execution` transport line is SIGTERM noise after the block, not\na session death awaiting input; no operator-channel code exists, so the\nattended/headless distinction was vacuous. Item 19's escalation half is\nwithdrawn in the living doc at closure. See `plan-review-cb3/adjudication.md`\n\u00a71. (Precedent: CB2-04, CB2-07.)",
+    "CB3-06": "## CB3-06 \u2014 Out-of-grant findings screened at ingest, transfer preserved\n\nObjective: Close the review-deadlock gap: extend the existing ingest screening so a finding whose `file` anchor (not only `required_paths`) falls outside the node's writable paths is screened rather than entered as an open obligation \u2014 excluded from fix_keys and cycle-limit arithmetic, exempt from the `contract_violation`/`requires_disposition` escape into `open_required()`, journaled with its full payload, and still eligible for the landed item-9 cross-node transfer \u2014 so review cycles can no longer deadlock on obligations unfixable by contract, without losing the finding. (Item 18, screening half; the discharge-by-receipt verb is deferred \u2014 see program rule 8.)\n\nOwned paths: `harness_labs/review_fix.py`, `tests/test_review_fix.py`, `tests/test_feature_run.py`, `tests/test_relax_review_discharge.py`.\n\n- AC-CB306-1: ingest screening evaluates the finding's `file` anchor in addition to `required_paths`; a finding anchored outside the writable paths is recorded through the existing screening outcome with its full payload journaled, and no `contract_violation`/`requires_disposition` flag on such a finding can route it into `open_required()` or cycle-limit blocking arithmetic.\n- AC-CB306-2: screened out-of-grant findings remain visible in cycle reports and remain eligible for the landed item-9 cross-node transfer exactly as today's transferable findings are \u2014 the transfer mechanism's existing behavior and its assertions (including those in tests/test_feature_run.py) are preserved or extended, never reduced.\n- AC-CB306-3: in-grant findings flow exactly as today: discovery freeze after cycle 1, deferred handling, fix/verify semantics, and the cycle ceiling are unchanged for tree-bound obligations.\n- AC-CB306-4: tests/test_relax_review_discharge.py fails behaviorally against the frozen base harness (a finding whose `file` is outside the writable paths, with `required_paths` empty or in-grant \u2014 the CB2-02 attempt-1 shape \u2014 enters the ledger as an open obligation and recurs to the cycle ceiling) and passes on the candidate together with the full suite.",
+    "CB3-07": "## CB3-07 \u2014 Closure sink\n\nObjective: Close the diagnosis: update `docs/development/contract-burden-reduction.md` \u2014 items 17, 19 (restoration half landed, escalation half withdrawn with the adjudication evidence), 20 to landed with node ids and 40-hex commit shas; item 6's residual and item 18's screening half recorded as landed with their deferred remainders explicit; append the CB-3 change-log entry; record the CB-3 runner pin-retirement operator step; verify the joined candidate with the full suite. (Closure for items 6-residual, 17, 18-screening, 19-restoration, 20.)\n\nOwned paths: `docs/development/contract-burden-reduction.md`.\n\n- AC-CB307-1: items 17, 19, 20 carry struck-through prior status and a landed (or, for 19's escalation half, withdrawn-with-evidence) status naming the closing node and its full 40-hex candidate commit; items 6 and 18 record their landed halves with the deferred remainders (general provenance ledger; discharge-by-receipt verb) explicitly tracked as open threads, not silently closed.\n- AC-CB307-2: the change-log entry records the program id, final candidate, and which CB-2 operational failure modes are now mechanically impossible (grant-issue/preflight divergence, follow-up-dispatch stranding, unreceipted-residue deadlock, out-of-grant review deadlock, unresolvable recovery refs); the CB-3 runner pin-retirement operator step is tracked in the operator-follow-up section.\n- AC-CB307-3: the full suite passes on the joined candidate (verification gate for this node is `python3 -m pytest tests/ -q` \u2014 the sink join is verified in a repairable node)."
+  },
+  "protocol": "plan-graph-plan/1",
+  "referenced_artifacts": [
+    "docs/development/contract-burden-reduction.md",
+    "scripts/dev/red_green_check.py",
+    "docs/development/CONTRACT_BURDEN_RELAXATION_2_PLAN.md",
+    "docs/development/contract-burden-2-decomposition.json"
+  ],
+  "runs": [
+    {
+      "allowed_paths": [
+        "harness_labs/controller_kernel.py",
+        "tests/test_controller_kernel.py",
+        "tests/test_relax_kernel.py",
+        "tests/test_relax_ref_resolution.py"
+      ],
+      "criteria": [
+        "AC-CB301-1",
+        "AC-CB301-2",
+        "AC-CB301-3",
+        "AC-CB301-4"
+      ],
+      "depends_on": [],
+      "id": "CB3-01",
+      "objective": "Extend kernel provenance-reference resolution so refs naming entities that already exist in kernel state \u2014 a task (`task:<id>`), a system result (`system-result:<id>:<n>`), a decision (`decision:<id>`) \u2014 resolve wherever a provenance reference is accepted, and the unknown-reference rejection message enumerates the valid ref shapes, so a coordinator recovering a failed task can cite the task itself instead of dying on \"unknown provenance reference\" or guessing undiscoverable ref spellings. (Item 6, residual half \u2014 the landed `command:<id>` rejection refs stay as-is; all 9 live CB-2 provenance failures cited these unresolvable shapes.)",
+      "path_intents": [
+        {
+          "action": "modify",
+          "path": "harness_labs/controller_kernel.py"
+        },
+        {
+          "action": "modify",
+          "path": "tests/test_controller_kernel.py"
+        },
+        {
+          "action": "modify",
+          "path": "tests/test_relax_kernel.py"
+        },
+        {
+          "action": "create",
+          "path": "tests/test_relax_ref_resolution.py"
+        }
+      ],
+      "plan_sections": [
+        "CB3-01"
+      ],
+      "verification_argv": [
+        "python3",
+        "scripts/dev/red_green_check.py",
+        "--base",
+        "b49c194e1df1a895eba5d10548dcab27a4a9e772",
+        "--finding-tests",
+        "tests/test_relax_ref_resolution.py",
+        "--regression",
+        "tests/",
+        "--timeout",
+        "1400"
+      ],
+      "verification_required_paths": [
+        {
+          "availability": "base",
+          "path": "scripts/dev/red_green_check.py"
+        }
+      ],
+      "verification_timeout_seconds": 3600
+    },
+    {
+      "allowed_paths": [
+        "harness_labs/agent_mixture.py",
+        "harness_labs/claude_task_executor.py",
+        "harness_labs/controller_live.py",
+        "harness_labs/feature_run.py",
+        "tests/test_agent_mixture.py",
+        "tests/test_claude_task_executor.py",
+        "tests/test_controller_live.py",
+        "tests/test_feature_run.py",
+        "tests/test_relax_adoption.py",
+        "tests/test_relax_grant_verification.py"
+      ],
+      "criteria": [
+        "AC-CB302-1",
+        "AC-CB302-2",
+        "AC-CB302-3",
+        "AC-CB302-4"
+      ],
+      "depends_on": [],
+      "id": "CB3-02",
+      "objective": "Unify dirty-baseline grant verification \u2014 issuer sites (agent_mixture's `_controller_dirty_baseline_grant`, feature_run's review-fix controller grant path) and enforcer sites (the byte-identical `_resolve_dirty_baseline_grant` copies in claude_task_executor and controller_live) all consume one shared helper that checks receipt resolution, changed-path coverage, AND per-file content state \u2014 so a grant journaled as granted is the same decision enforced at preflight, and a genuine divergence (workspace drifted between issue and preflight) journals a typed refusal naming the offending paths instead of the generic clean-baseline message. (Item 20: the issuer checks paths only while the enforcer also checks content \u2014 four divergent copies.)",
+      "path_intents": [
+        {
+          "action": "modify",
+          "path": "harness_labs/agent_mixture.py"
+        },
+        {
+          "action": "modify",
+          "path": "harness_labs/claude_task_executor.py"
+        },
+        {
+          "action": "modify",
+          "path": "harness_labs/controller_live.py"
+        },
+        {
+          "action": "modify",
+          "path": "harness_labs/feature_run.py"
+        },
+        {
+          "action": "modify",
+          "path": "tests/test_agent_mixture.py"
+        },
+        {
+          "action": "modify",
+          "path": "tests/test_claude_task_executor.py"
+        },
+        {
+          "action": "modify",
+          "path": "tests/test_controller_live.py"
+        },
+        {
+          "action": "modify",
+          "path": "tests/test_feature_run.py"
+        },
+        {
+          "action": "modify",
+          "path": "tests/test_relax_adoption.py"
+        },
+        {
+          "action": "create",
+          "path": "tests/test_relax_grant_verification.py"
+        }
+      ],
+      "plan_sections": [
+        "CB3-02"
+      ],
+      "verification_argv": [
+        "python3",
+        "scripts/dev/red_green_check.py",
+        "--base",
+        "b49c194e1df1a895eba5d10548dcab27a4a9e772",
+        "--finding-tests",
+        "tests/test_relax_grant_verification.py",
+        "--regression",
+        "tests/",
+        "--timeout",
+        "1400"
+      ],
+      "verification_required_paths": [
+        {
+          "availability": "base",
+          "path": "scripts/dev/red_green_check.py"
+        }
+      ],
+      "verification_timeout_seconds": 3600
+    },
+    {
+      "allowed_paths": [
+        "harness_labs/controller_scheduler.py",
+        "harness_labs/controller_live.py",
+        "harness_labs/agent_mixture.py",
+        "tests/test_controller_scheduler.py",
+        "tests/test_controller_live.py",
+        "tests/test_agent_mixture.py",
+        "tests/test_relax_followup_grants.py"
+      ],
+      "criteria": [
+        "AC-CB303-1",
+        "AC-CB303-2",
+        "AC-CB303-3",
+        "AC-CB303-4"
+      ],
+      "depends_on": [
+        "CB3-02"
+      ],
+      "id": "CB3-03",
+      "objective": "Mint dirty-baseline adoption grants at the controller's dispatch chokepoint \u2014 when any writable dispatch (fresh, retry, or superseding) is scheduled in a workspace whose dirty state is exactly covered by an existing workspace-change receipt in the run's evidence, the scheduler resolves that receipt through CB3-02's shared verifier and attaches the grant \u2014 so a successful attempt's uncommitted receipted work no longer strands the node behind a clean-baseline refusal, in every program using the controller path rather than only launchers that hand-wire executors. (Item 17; the per-role mechanism exists in agent_mixture but the dispatch chokepoint never invokes it.)",
+      "path_intents": [
+        {
+          "action": "modify",
+          "path": "harness_labs/controller_scheduler.py"
+        },
+        {
+          "action": "modify",
+          "path": "harness_labs/controller_live.py"
+        },
+        {
+          "action": "modify",
+          "path": "harness_labs/agent_mixture.py"
+        },
+        {
+          "action": "modify",
+          "path": "tests/test_controller_scheduler.py"
+        },
+        {
+          "action": "modify",
+          "path": "tests/test_controller_live.py"
+        },
+        {
+          "action": "modify",
+          "path": "tests/test_agent_mixture.py"
+        },
+        {
+          "action": "create",
+          "path": "tests/test_relax_followup_grants.py"
+        }
+      ],
+      "plan_sections": [
+        "CB3-03"
+      ],
+      "verification_argv": [
+        "python3",
+        "scripts/dev/red_green_check.py",
+        "--base",
+        "b49c194e1df1a895eba5d10548dcab27a4a9e772",
+        "--finding-tests",
+        "tests/test_relax_followup_grants.py",
+        "--regression",
+        "tests/",
+        "--timeout",
+        "1400"
+      ],
+      "verification_required_paths": [
+        {
+          "availability": "base",
+          "path": "scripts/dev/red_green_check.py"
+        }
+      ],
+      "verification_timeout_seconds": 3600
+    },
+    {
+      "allowed_paths": [
+        "harness_labs/controller_live.py",
+        "harness_labs/claude_task_executor.py",
+        "tests/test_controller_live.py",
+        "tests/test_claude_task_executor.py",
+        "tests/test_relax_baseline_restoration.py"
+      ],
+      "criteria": [
+        "AC-CB304-1",
+        "AC-CB304-2",
+        "AC-CB304-3",
+        "AC-CB304-4"
+      ],
+      "depends_on": [
+        "CB3-03"
+      ],
+      "id": "CB3-04",
+      "objective": "When a writable attempt terminates failed in a workspace the attempt itself dirtied, and no receipt covers the residue for adoption, the controller restores the attempt-start baseline via git \u2014 reverting tracked modifications and removing attempt-created untracked files, journaled per-path \u2014 so a single failed task no longer deadlocks the node behind a dirty tree no in-system actor may clean. Restoration works from the controller's recorded attempt-start baseline (a clean tree at a known commit), not receipt pre-images, which do not exist; it therefore also covers attempts that failed before writing any receipt \u2014 the live CB2-05 shape. (Item 19, restoration half; the dominant amplifier.)",
+      "path_intents": [
+        {
+          "action": "modify",
+          "path": "harness_labs/controller_live.py"
+        },
+        {
+          "action": "modify",
+          "path": "harness_labs/claude_task_executor.py"
+        },
+        {
+          "action": "modify",
+          "path": "tests/test_controller_live.py"
+        },
+        {
+          "action": "modify",
+          "path": "tests/test_claude_task_executor.py"
+        },
+        {
+          "action": "create",
+          "path": "tests/test_relax_baseline_restoration.py"
+        }
+      ],
+      "plan_sections": [
+        "CB3-04"
+      ],
+      "verification_argv": [
+        "python3",
+        "scripts/dev/red_green_check.py",
+        "--base",
+        "b49c194e1df1a895eba5d10548dcab27a4a9e772",
+        "--finding-tests",
+        "tests/test_relax_baseline_restoration.py",
+        "--regression",
+        "tests/",
+        "--timeout",
+        "1400"
+      ],
+      "verification_required_paths": [
+        {
+          "availability": "base",
+          "path": "scripts/dev/red_green_check.py"
+        }
+      ],
+      "verification_timeout_seconds": 3600
+    },
+    {
+      "allowed_paths": [
+        "harness_labs/review_fix.py",
+        "tests/test_review_fix.py",
+        "tests/test_feature_run.py",
+        "tests/test_relax_review_discharge.py"
+      ],
+      "criteria": [
+        "AC-CB306-1",
+        "AC-CB306-2",
+        "AC-CB306-3",
+        "AC-CB306-4"
+      ],
+      "depends_on": [
+        "CB3-02"
+      ],
+      "id": "CB3-06",
+      "objective": "Close the review-deadlock gap: extend the existing ingest screening so a finding whose `file` anchor (not only `required_paths`) falls outside the node's writable paths is screened rather than entered as an open obligation \u2014 excluded from fix_keys and cycle-limit arithmetic, exempt from the `contract_violation`/`requires_disposition` escape into `open_required()`, journaled with its full payload, and still eligible for the landed item-9 cross-node transfer \u2014 so review cycles can no longer deadlock on obligations unfixable by contract, without losing the finding. (Item 18, screening half; the discharge-by-receipt verb is deferred \u2014 see program rule 8.)",
+      "path_intents": [
+        {
+          "action": "modify",
+          "path": "harness_labs/review_fix.py"
+        },
+        {
+          "action": "modify",
+          "path": "tests/test_review_fix.py"
+        },
+        {
+          "action": "modify",
+          "path": "tests/test_feature_run.py"
+        },
+        {
+          "action": "create",
+          "path": "tests/test_relax_review_discharge.py"
+        }
+      ],
+      "plan_sections": [
+        "CB3-06"
+      ],
+      "verification_argv": [
+        "python3",
+        "scripts/dev/red_green_check.py",
+        "--base",
+        "b49c194e1df1a895eba5d10548dcab27a4a9e772",
+        "--finding-tests",
+        "tests/test_relax_review_discharge.py",
+        "--regression",
+        "tests/",
+        "--timeout",
+        "1400"
+      ],
+      "verification_required_paths": [
+        {
+          "availability": "base",
+          "path": "scripts/dev/red_green_check.py"
+        }
+      ],
+      "verification_timeout_seconds": 3600
+    },
+    {
+      "allowed_paths": [
+        "docs/development/contract-burden-reduction.md"
+      ],
+      "criteria": [
+        "AC-CB307-1",
+        "AC-CB307-2",
+        "AC-CB307-3"
+      ],
+      "depends_on": [
+        "CB3-01",
+        "CB3-04",
+        "CB3-06"
+      ],
+      "id": "CB3-07",
+      "objective": "Close the diagnosis: update `docs/development/contract-burden-reduction.md` \u2014 items 17, 19 (restoration half landed, escalation half withdrawn with the adjudication evidence), 20 to landed with node ids and 40-hex commit shas; item 6's residual and item 18's screening half recorded as landed with their deferred remainders explicit; append the CB-3 change-log entry; record the CB-3 runner pin-retirement operator step; verify the joined candidate with the full suite. (Closure for items 6-residual, 17, 18-screening, 19-restoration, 20.)",
+      "path_intents": [
+        {
+          "action": "modify",
+          "path": "docs/development/contract-burden-reduction.md"
+        }
+      ],
+      "plan_sections": [
+        "CB3-07"
+      ],
+      "verification_argv": [
+        "python3",
+        "-m",
+        "pytest",
+        "tests/",
+        "-q"
+      ],
+      "verification_required_paths": [
+        {
+          "availability": "base",
+          "path": "tests/__init__.py"
+        }
+      ],
+      "verification_timeout_seconds": 3600
+    }
+  ]
+}
