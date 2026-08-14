@@ -404,26 +404,6 @@ and finish or replace it rather than starting blind. Your structured result is
 part of the deliverable: summary and deliverable_markdown must substantively
 describe what you changed and how the red/green gate proves it — placeholder
 text fails the run.
-RED-PHASE EVIDENCE OBLIGATION: after your gate run passes, paste into the
-implementation summary, under a heading "Red-phase evidence", the gate
-verdict's red.tail excerpt and each FAILED test node id exactly as the gate
-JSON reports them. Reviewers are contractually required to reject summaries
-without this section; producing it costs one gate run you must do anyway.
-PATH-GRANT OBLIGATION: the writable-path grant is enforced mechanically — a
-final diff touching ANY file outside your allowed paths fails the task and
-leaves a dirty tree that deadlocks the whole node (no actor can clean it).
-Existing tests outside your grant (for example
-tests/test_plan_graph_observability.py) must be kept passing by making your
-event and API changes additive; you may NOT edit those files, and any coverage
-you want there goes into your granted test files instead. Before finishing,
-run `git status --porcelain` and `git diff --name-only` and confirm every
-changed file is inside the grant; revert any stray edit before you stop.
-SUMMARY FLOOR: the summary and deliverable_markdown fields are validated by a
-deterministic placeholder detector — a summary that is (or normalizes to) a
-stub token like "WIP", "TODO", "placeholder", or a single repeated word is
-mechanically refused, the task fails, and the failed attempt's uncommitted
-edits deadlock the node. Write the real multi-sentence summary of what you
-changed BEFORE you finish; never emit a stub intending to revise it.
 """
     return (
         RoleProfile(
@@ -496,13 +476,6 @@ def _review_fix_factory(
             "acceptance_criteria": [],
             "required_capabilities": capabilities,
         }
-        claims_rule = """
-CLAIMS CONTRACT: this task has NO assigned acceptance criteria, so your
-structured result's claims array must be EMPTY. Never put criterion ids,
-prose statements, or audit notes in claims — the orchestrating harness
-treats every claims entry as a criterion reference and fails the whole node
-on any it cannot match. Put narrative in the report/summary fields only.
-"""
         instructions = {
             "review": f"""\
 Inspect the actual candidate for node {node.plan_node_id} as an adversarial
@@ -513,27 +486,19 @@ for behavioral reasons rather than ImportError? (3) is the relaxation minimal
 — no new authority, no scope growth? Every finding needs file, stable subject,
 score, fix_cost, and the exact acceptance clause in protects. Empty findings
 means the candidate clears.
-EVIDENCE-OBLIGATION FINDINGS: the red-phase evidence obligation is satisfied
-by a "Red-phase evidence" section in the implementation summary whose FAILED
-node ids match the gate verdict, or by the controller-owned gate receipt in
-the journal — accept either. Anchor every finding's file and required_paths
-INSIDE this node's writable paths ({', '.join(writable)}); a finding anchored
-to any other file (including plan or program documents) is unfixable by
-contract, will deadlock the node, and must instead be recorded in your
-report narrative, not as a finding.
-{claims_rule}""",
+""",
             "fix": f"""\
 Inspect the supplied ledger and fix_finding_keys. Modify only
 {', '.join(writable)}, and only as needed to resolve those exact findings
 without feature growth. Run {' '.join(node.run.verification_argv)}. Return
 addressed_finding_keys as the exact subset actually fixed. Do not commit.
-{claims_rule}""",
+""",
             "verify": f"""\
 Treat controller_verified_command as authoritative. Inspect the repaired
 candidate and check every supplied fix_finding_key. Return
 verified_finding_keys containing every key genuinely covered when the command
 passes. Do not edit files.
-{claims_rule}""",
+""",
         }[stage]
         return ClaudeSemanticTaskExecutor(
             task=task,
