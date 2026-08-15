@@ -54,9 +54,9 @@ export default function GraphTotals({ metrics, elapsedMs = null }) {
         <Metric label="Retry invalidations" value={tokens(recovery.invalidations_count)} />
       </div>
       <div className="metric-cards">
-        <Metric label="Wall time per FeatureRun" value={distributionSummary(perFeatureRun.wall_ms, duration)} reason={perFeatureRun.wall_ms.reason} hint="divided by logical nodes" />
-        <Metric label="Tokens per FeatureRun" value={distributionSummary(perFeatureRun.tokens, tokens)} reason={perFeatureRun.tokens.reason} hint="divided by logical nodes" />
-        <Metric label="Cost per FeatureRun" value={distributionSummary(perFeatureRun.cost_usd, usd)} reason={perFeatureRun.cost_usd.reason} hint="divided by logical nodes" />
+        <Metric label="Wall time per FeatureRun" value={distributionSummary(perFeatureRun.wall_ms, duration)} reason={perFeatureRun.wall_ms.reason} hint="per logical node, cumulative across tries" />
+        <Metric label="Tokens per FeatureRun" value={distributionSummary(perFeatureRun.tokens, tokens)} reason={perFeatureRun.tokens.reason} hint="per logical node, cumulative across tries" />
+        <Metric label="Cost per FeatureRun" value={distributionSummary(perFeatureRun.cost_usd, usd)} reason={perFeatureRun.cost_usd.reason} hint="per logical node, cumulative across tries" />
       </div>
       <p className="metric-note">Lineage totals (cross-attempt, {lineage.reason}): {tokenBlockValue(lineage.tokens, 'total_tokens')} tokens · {money(lineage.cost)}.</p>
     </section>

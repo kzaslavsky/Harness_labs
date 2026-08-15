@@ -609,16 +609,27 @@ def _distribution(values: list[float], population: int) -> dict[str, Any]:
     if not values:
         return {"state": "unavailable", "reason": "no FeatureRun in this graph reports this metric", "mean": None, "median": None, "max": None, "sample_size": 0, "population": population}
     state = "available" if len(values) == population else "partial"
-    reason = None if state == "available" else f"lower bound: {len(values)} of {population} FeatureRun(s) report this metric"
+    reason = None if state == "available" else f"{len(values)} of {population} logical node(s) report this metric; mean and median describe the reporting subset, max is a lower bound"
     return {"state": state, "reason": reason, "mean": round(sum(values) / len(values), 3), "median": median(values), "max": max(values), "sample_size": len(values), "population": population}
 
 
+def _display_merged(row: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    """The merged document a node's display row is built from: lineage-
+    cumulative when available, else this attempt's own merge — the same
+    preference `_node_table` uses, so the per-FeatureRun distributions
+    describe exactly the per-node values the table shows (a distribution
+    over the 2-of-7 attempt-executed subset while the table lists all 7
+    cumulative rows reads as nonsense)."""
+    return row.get("lineage_merged") or row["merged"]
+
+
 def _per_feature_run(node_rows: list[dict[str, Any]], population: int) -> dict[str, Any]:
-    wall_values = [row["merged"]["totals"]["wall_clock_ms"] for row in node_rows if row["merged"] and isinstance(row["merged"]["totals"].get("wall_clock_ms"), int)]
+    displays = [(_display_merged(row)) for row in node_rows]
+    wall_values = [merged["totals"]["wall_clock_ms"] for merged in displays if merged and isinstance(merged["totals"].get("wall_clock_ms"), int)]
     token_values = [
-        row["merged"]["totals"]["total_tokens"]
-        for row in node_rows
-        if row["merged"] and int(row["merged"].get("provenance", {}).get("usage_records", 0)) > 0
+        merged["totals"]["total_tokens"]
+        for merged in displays
+        if merged and int(merged.get("provenance", {}).get("usage_records", 0)) > 0
     ]
     return {
         "wall_ms": _distribution(wall_values, population),
@@ -633,7 +644,7 @@ def _cost_distribution(node_rows: list[dict[str, Any]], population: int) -> dict
     values: list[float] = []
     estimated = False
     for row in node_rows:
-        merged = row["merged"]
+        merged = _display_merged(row)
         if not merged:
             continue
         cost = merged["totals"].get("cost", {})
@@ -646,7 +657,7 @@ def _cost_distribution(node_rows: list[dict[str, Any]], population: int) -> dict
         return {"state": "unavailable", "reason": "no FeatureRun in this graph reports this metric", "mean": None, "median": None, "max": None, "sample_size": 0, "population": population}
     covered = len(values) == population
     if not covered:
-        state, reason = "partial", f"lower bound: {len(values)} of {population} FeatureRun(s) report this metric"
+        state, reason = "partial", f"{len(values)} of {population} logical node(s) report this metric; mean and median describe the reporting subset, max is a lower bound"
     elif estimated:
         state, reason = "estimated", "one or more FeatureRun cost records are estimated, not recorded"
     else:
