@@ -391,5 +391,105 @@ class PlanApprovalTests(unittest.TestCase):
         path.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
 
 
+class SiblingOverlapWarningTests(unittest.TestCase):
+    """Admission-time static prediction of controller-join conflicts."""
+
+    @staticmethod
+    def _plan(runs):
+        from harness_labs.plangraph.plan_graph import PlanGraphPlan, PlanRun
+
+        return PlanGraphPlan(
+            plan="PLAN.md",
+            base_commit="0" * 40,
+            runs=tuple(
+                PlanRun(
+                    id=run_id,
+                    objective=f"objective {run_id}",
+                    plan_sections=(run_id,),
+                    criteria=(),
+                    depends_on=tuple(depends_on),
+                    allowed_paths=tuple(allowed_paths),
+                )
+                for run_id, depends_on, allowed_paths in runs
+            ),
+            plan_sections={},
+            acceptance_criteria={},
+        )
+
+    def test_unordered_siblings_with_shared_paths_warn(self) -> None:
+        from harness_labs.plangraph.plan_approval import _sibling_overlap_warnings
+
+        plan = self._plan(
+            [
+                ("WP-A", (), ("src/palette.py", "tests")),
+                ("WP-B", (), ("src/palette.py", "tests")),
+            ]
+        )
+        warnings = _sibling_overlap_warnings(plan)
+        self.assertEqual(len(warnings), 1)
+        record = warnings[0]
+        self.assertEqual(record["kind"], "sibling-allowed-path-overlap")
+        self.assertEqual(record["runs"], ["WP-A", "WP-B"])
+        self.assertEqual(record["paths"], ["src/palette.py", "tests"])
+
+    def test_dependency_ordered_runs_do_not_warn(self) -> None:
+        from harness_labs.plangraph.plan_approval import _sibling_overlap_warnings
+
+        plan = self._plan(
+            [
+                ("WP-A", (), ("src/palette.py",)),
+                ("WP-B", ("WP-A",), ("src/palette.py",)),
+                ("WP-C", ("WP-B",), ("src/palette.py",)),
+            ]
+        )
+        self.assertEqual(_sibling_overlap_warnings(plan), [])
+
+    def test_directory_prefix_counts_as_overlap(self) -> None:
+        from harness_labs.plangraph.plan_approval import _sibling_overlap_warnings
+
+        plan = self._plan(
+            [
+                ("WP-A", (), ("tests",)),
+                ("WP-B", (), ("tests/test_palette.py",)),
+                ("WP-C", (), ("docs",)),
+            ]
+        )
+        warnings = _sibling_overlap_warnings(plan)
+        self.assertEqual(len(warnings), 1)
+        self.assertEqual(warnings[0]["runs"], ["WP-A", "WP-B"])
+        self.assertEqual(warnings[0]["paths"], ["tests/test_palette.py"])
+
+    def test_gate_evidence_accepts_optional_warnings_and_rejects_bad_shape(
+        self,
+    ) -> None:
+        from harness_labs.plangraph.plan_approval import (
+            PlanApprovalError,
+            _validate_gate_evidence,
+        )
+
+        base = {
+            "protocol": "plan-approval-gates/1",
+            "status": "passed",
+            "subject_sha256": "a" * 64,
+            "plan_graph_digest": "b" * 64,
+            "host_path": "/usr/bin",
+            "host_executables": [],
+            "checked_at": "2026-08-15T00:00:00+00:00",
+        }
+        _validate_gate_evidence(base)
+        _validate_gate_evidence(
+            {
+                **base,
+                "warnings": [
+                    {"kind": "sibling-allowed-path-overlap", "runs": ["A", "B"]}
+                ],
+            }
+        )
+        with self.assertRaises(PlanApprovalError):
+            _validate_gate_evidence({**base, "warnings": [{"runs": ["A", "B"]}]})
+        with self.assertRaises(PlanApprovalError):
+            _validate_gate_evidence({**base, "warnings": "not-a-list"})
+
+
 if __name__ == "__main__":
     unittest.main()

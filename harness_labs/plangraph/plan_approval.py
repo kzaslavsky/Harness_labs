@@ -13,7 +13,12 @@ import subprocess
 import tempfile
 from typing import Mapping, Sequence
 
-from harness_labs.plangraph.plan_graph import ApprovalEvidence, plan_from_mapping, validate_plan_graph_plan
+from harness_labs.plangraph.plan_graph import (
+    ApprovalEvidence,
+    PlanGraphPlan,
+    plan_from_mapping,
+    validate_plan_graph_plan,
+)
 from harness_labs.plangraph.plan_graph_contract import (
     PlanGraphContractError,
     canonical_json,
@@ -44,6 +49,7 @@ class PreparedApproval:
     gate_evidence_path: Path
     subject_sha256: str
     plan_graph_digest: str
+    warnings: tuple[Mapping[str, object], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -159,7 +165,13 @@ def prepare_approval(
     gate_path = output_directory / "gate-evidence.json"
     _write_json(subject_path, subject)
     _write_json(gate_path, gates)
-    return PreparedApproval(subject_path, gate_path, subject_sha, graph_digest)
+    return PreparedApproval(
+        subject_path,
+        gate_path,
+        subject_sha,
+        graph_digest,
+        tuple(gates.get("warnings") or ()),
+    )
 
 
 def issue_receipt(
@@ -418,7 +430,7 @@ def _run_static_gates(
         )
         if evidence is not None:
             host_executables.append({"consumer": f"functionality:{index}", **evidence})
-    return {
+    gates: dict[str, object] = {
         "protocol": GATE_PROTOCOL,
         "status": "passed",
         "subject_sha256": subject_sha256,
@@ -427,6 +439,74 @@ def _run_static_gates(
         "host_executables": host_executables,
         "checked_at": _timestamp(),
     }
+    overlap_warnings = _sibling_overlap_warnings(plan)
+    if overlap_warnings:
+        gates["warnings"] = overlap_warnings
+    return gates
+
+
+def _paths_overlap(first: str, second: str) -> bool:
+    first = first.rstrip("/")
+    second = second.rstrip("/")
+    return (
+        first == second
+        or second.startswith(first + "/")
+        or first.startswith(second + "/")
+    )
+
+
+def _sibling_overlap_warnings(plan: PlanGraphPlan) -> list[dict[str, object]]:
+    """Warn on writable-path overlap between dependency-unordered runs.
+
+    Controller joins require sibling edits to be disjoint IN EFFECT — a
+    conflicting join is a plan defect discovered only after the work is done.
+    Overlapping ``allowed_paths`` between two runs with no dependency ordering
+    is the earliest static predictor of that defect, so it is surfaced at
+    admission. It stays a warning rather than a rejection: a shared broad
+    path (such as ``tests``) is often intentional and safe when the runs
+    touch disjoint files within it.
+    """
+
+    runs = {run.id: run for run in plan.runs}
+    ancestors: dict[str, frozenset[str]] = {}
+
+    def ancestry(run_id: str) -> frozenset[str]:
+        known = ancestors.get(run_id)
+        if known is not None:
+            return known
+        found: set[str] = set()
+        for dependency in runs[run_id].depends_on:
+            found.add(dependency)
+            found |= ancestry(dependency)
+        ancestors[run_id] = frozenset(found)
+        return ancestors[run_id]
+
+    warnings: list[dict[str, object]] = []
+    ordered = [run.id for run in plan.runs]
+    for index, first_id in enumerate(ordered):
+        for second_id in ordered[index + 1 :]:
+            if first_id in ancestry(second_id) or second_id in ancestry(first_id):
+                continue
+            shared = {
+                max(path_a, path_b, key=len)
+                for path_a in runs[first_id].allowed_paths
+                for path_b in runs[second_id].allowed_paths
+                if _paths_overlap(path_a, path_b)
+            }
+            if shared:
+                warnings.append(
+                    {
+                        "kind": "sibling-allowed-path-overlap",
+                        "runs": [first_id, second_id],
+                        "paths": sorted(shared),
+                        "note": (
+                            "dependency-unordered runs share writable paths; "
+                            "their edits must stay disjoint in effect or the "
+                            "controller join will conflict (a plan defect)"
+                        ),
+                    }
+                )
+    return warnings
 
 
 def _validate_intents(
@@ -758,19 +838,29 @@ def _validate_receipt_shape(receipt: Mapping[str, object]) -> None:
 
 
 def _validate_gate_evidence(gates: Mapping[str, object]) -> None:
+    required_keys = {
+        "protocol",
+        "status",
+        "subject_sha256",
+        "plan_graph_digest",
+        "host_path",
+        "host_executables",
+        "checked_at",
+    }
+    # "warnings" is optional: advisory admission findings (such as
+    # sibling-allowed-path-overlap) that inform the operator without
+    # blocking approval. Absent in evidence produced before the field existed.
     _require_exact_keys(
         gates,
-        {
-            "protocol",
-            "status",
-            "subject_sha256",
-            "plan_graph_digest",
-            "host_path",
-            "host_executables",
-            "checked_at",
-        },
+        required_keys | ({"warnings"} if "warnings" in gates else set()),
         "gate evidence",
     )
+    if "warnings" in gates:
+        if not isinstance(gates["warnings"], list) or not all(
+            isinstance(item, Mapping) and isinstance(item.get("kind"), str)
+            for item in gates["warnings"]
+        ):
+            raise PlanApprovalError("gate warnings must be an array of kinded records")
     if gates.get("protocol") != GATE_PROTOCOL or gates.get("status") != "passed":
         raise PlanApprovalError("gate evidence is not a passed approval gate result")
     _require_hex(gates.get("subject_sha256"), 64, "gate subject digest")
