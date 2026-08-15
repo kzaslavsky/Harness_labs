@@ -494,9 +494,24 @@ def _sibling_overlap_warnings(plan: PlanGraphPlan) -> list[dict[str, object]]:
                 if _paths_overlap(path_a, path_b)
             }
             if shared:
+                # Both runs naming the same file-looking path is the
+                # high-signal case (they will edit the same file and must
+                # keep their hunks disjoint); a shared directory such as
+                # ``tests`` is routine and stays advisory.
+                severity = (
+                    "high"
+                    if any(
+                        "." in path.rsplit("/", 1)[-1]
+                        and path in runs[first_id].allowed_paths
+                        and path in runs[second_id].allowed_paths
+                        for path in shared
+                    )
+                    else "info"
+                )
                 warnings.append(
                     {
                         "kind": "sibling-allowed-path-overlap",
+                        "severity": severity,
                         "runs": [first_id, second_id],
                         "paths": sorted(shared),
                         "note": (
@@ -506,6 +521,7 @@ def _sibling_overlap_warnings(plan: PlanGraphPlan) -> list[dict[str, object]]:
                         ),
                     }
                 )
+    warnings.sort(key=lambda record: (record["severity"] != "high", record["runs"]))
     return warnings
 
 
