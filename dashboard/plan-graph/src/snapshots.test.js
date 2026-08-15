@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildComparisonRow, filterMetricsComplete, groupComparisonRows, isMetricDegraded, isMetricMissing, sortComparisonRows } from './snapshots.js';
+import { buildComparisonRow, filterMetricsComplete, groupComparisonRows, isMetricDegraded, isMetricMissing, metricPrefix, sortComparisonRows } from './snapshots.js';
 
 const genericMetric = (state, value, reason = null) => ({ state, value, reason });
 const tokenBlock = (state, overrides = {}) => ({ state, reason: null, input_tokens: null, cached_input_tokens: null, output_tokens: null, total_tokens: null, ...overrides });
@@ -107,21 +107,27 @@ test('groupComparisonRows groups by logical graph id and picks the most recently
   assert.equal(groupOne.representative.runId, 'attempt-2');
 });
 
-test('isMetricDegraded treats partial and estimated values as degraded even though they carry a real value', () => {
+test('isMetricDegraded blanks only genuinely missing values; partial and estimated render with prefixes', () => {
   assert.equal(isMetricDegraded({ state: 'available', value: 10, reason: null }), false);
-  assert.equal(isMetricDegraded({ state: 'partial', value: 10, reason: 'lower bound: 2 of 3 report' }), true);
-  assert.equal(isMetricDegraded({ state: 'estimated', value: 10, reason: 'derived from unit-cost heuristic' }), true);
+  assert.equal(isMetricDegraded({ state: 'partial', value: 10, reason: 'lower bound: 2 of 3 report' }), false, 'a verified lower bound renders (≥) instead of an em-dash');
+  assert.equal(isMetricDegraded({ state: 'estimated', value: 10, reason: 'derived from unit-cost heuristic' }), false, 'an estimate renders (≈) instead of an em-dash');
   assert.equal(isMetricDegraded({ state: 'unavailable', value: null, reason: null }), true);
-  assert.equal(isMetricMissing({ state: 'partial', value: 10, reason: null }), false, 'isMetricMissing must stay narrower than isMetricDegraded');
+  assert.equal(isMetricDegraded({ state: 'partial', value: null, reason: null }), true, 'a stateful block with no value is still missing');
+  assert.equal(metricPrefix({ state: 'partial', value: 10, reason: null }), '≥');
+  assert.equal(metricPrefix({ state: 'estimated', value: 10, reason: null }), '≈');
+  assert.equal(metricPrefix({ state: 'available', value: 10, reason: null }), '');
+  assert.equal(isMetricMissing({ state: 'partial', value: 10, reason: null }), false);
 });
 
-test('sortComparisonRows places partial and estimated values last, behind every fully available value', () => {
+test('sortComparisonRows sorts partial and estimated values by value; only missing values sort last', () => {
   const available = buildComparisonRow(listingEntry({ run_id: 'available', tokens: tokenBlock('available', { total_tokens: 10 }) }), undefined);
   const partial = buildComparisonRow(listingEntry({ run_id: 'partial', tokens: tokenBlock('available', { total_tokens: 999 }) }), undefined);
   partial.total_tokens = { state: 'partial', value: 999, reason: 'lower bound: 1 of 2 report' };
-  const rows = [partial, available];
-  assert.deepEqual(sortComparisonRows(rows, 'total_tokens', 'desc').map((row) => row.runId), ['available', 'partial'], 'a partial value must not outrank an available one even though its raw number is larger');
-  assert.deepEqual(sortComparisonRows(rows, 'total_tokens', 'asc').map((row) => row.runId), ['available', 'partial']);
+  const missing = buildComparisonRow(listingEntry({ run_id: 'missing', tokens: tokenBlock('unavailable', { total_tokens: null }) }), undefined);
+  missing.total_tokens = { state: 'unavailable', value: null, reason: 'no usage records' };
+  const rows = [missing, partial, available];
+  assert.deepEqual(sortComparisonRows(rows, 'total_tokens', 'desc').map((row) => row.runId), ['partial', 'available', 'missing'], 'a lower bound sorts by its value; only missing sorts last');
+  assert.deepEqual(sortComparisonRows(rows, 'total_tokens', 'asc').map((row) => row.runId), ['available', 'partial', 'missing']);
 });
 
 test('filterMetricsComplete hides every row whose completeness grade is not exactly "complete" and counts them', () => {

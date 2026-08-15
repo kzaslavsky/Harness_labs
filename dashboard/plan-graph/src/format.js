@@ -17,7 +17,12 @@ export const duration = (milliseconds) => {
   return hours ? `${hours}h ${minutes}m` : `${minutes}m ${seconds}s`;
 };
 
-export const money = (cost) => (cost?.state === 'available' ? `$${Number(cost.usd).toFixed(4)}` : cost?.state === 'estimated' ? `≈$${Number(cost.usd).toFixed(4)}` : 'Unavailable');
+export const money = (cost) => (
+  cost?.state === 'available' ? `$${Number(cost.usd).toFixed(4)}`
+    : cost?.state === 'estimated' ? `≈$${Number(cost.usd).toFixed(4)}`
+      : cost?.state === 'partial' && cost.usd !== null && cost.usd !== undefined ? `≥$${Number(cost.usd).toFixed(4)}`
+        : 'Unavailable'
+);
 
 export const usd = (value) => (value === null || value === undefined ? 'Unavailable' : `$${Number(value).toFixed(4)}`);
 

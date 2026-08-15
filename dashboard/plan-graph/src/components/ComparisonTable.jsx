@@ -1,10 +1,11 @@
 import { useMemo, useState } from 'react';
-import { COMPARISON_COLUMNS, groupComparisonRows, isMetricDegraded, sortComparisonRows } from '../snapshots.js';
+import { COMPARISON_COLUMNS, groupComparisonRows, isMetricDegraded, metricPrefix, sortComparisonRows } from '../snapshots.js';
 
 function Cell({ column, row }) {
   const metric = row[column.key];
   if (isMetricDegraded(metric)) return <td title={metric?.reason || 'unavailable'} className="cell-missing">—</td>;
-  return <td>{column.display(row)}</td>;
+  const prefix = metricPrefix(metric);
+  return <td title={metric?.reason || ''}>{prefix}{column.display(row)}</td>;
 }
 
 function SortableHeader({ column, sortColumn, sortDirection, onSort }) {

@@ -515,15 +515,21 @@ def _aggregate_totals(rows: list[Mapping[str, Any]], population: int) -> dict[st
         cost = {"state": "unavailable", "usd": None, "reason": "no logical nodes in this graph"}
     else:
         costs = [row["totals"]["cost"] for row in rows if isinstance(row.get("totals", {}).get("cost"), Mapping)]
-        unavailable_costs = [cost for cost in costs if cost.get("state") == "unavailable"]
-        estimated_costs = [cost for cost in costs if cost.get("state") == "estimated"]
-        missing = population - len(costs)
-        if missing or unavailable_costs:
-            cost = {"state": "unavailable", "usd": None, "reason": f"{missing + len(unavailable_costs)} of {population} node cost record(s) are unavailable"}
+        reporting = [cost for cost in costs if cost.get("state") in ("available", "estimated") and cost.get("usd") is not None]
+        estimated_costs = [cost for cost in reporting if cost.get("state") == "estimated"]
+        uncovered = population - len(reporting)
+        if not reporting:
+            cost = {"state": "unavailable", "usd": None, "reason": f"{population} of {population} node cost record(s) are unavailable"}
+        elif uncovered:
+            # Partial coverage sums the reporting subset as a verified lower
+            # bound (matching the tokens/calls policy) rather than discarding
+            # it: a node with no cost record cannot subtract from a sum.
+            qualifier = "; includes estimated pricing" if estimated_costs else ""
+            cost = {"state": "partial", "usd": round(sum(float(item.get("usd") or 0) for item in reporting), 6), "reason": f"lower bound: {len(reporting)} of {population} node cost record(s) report a cost{qualifier}"}
         elif estimated_costs:
-            cost = {"state": "estimated", "usd": round(sum(float(item.get("usd") or 0) for item in costs), 6), "reason": f"{len(estimated_costs)} of {population} node cost record(s) are estimated"}
+            cost = {"state": "estimated", "usd": round(sum(float(item.get("usd") or 0) for item in reporting), 6), "reason": f"{len(estimated_costs)} of {population} node cost record(s) are estimated"}
         else:
-            cost = {"state": "available", "usd": round(sum(float(item.get("usd") or 0) for item in costs), 6), "reason": None}
+            cost = {"state": "available", "usd": round(sum(float(item.get("usd") or 0) for item in reporting), 6), "reason": None}
 
     busy_values = [row["totals"].get("busy_ms") for row in rows]
     if rows and len(rows) == population and all(isinstance(value, int) for value in busy_values):

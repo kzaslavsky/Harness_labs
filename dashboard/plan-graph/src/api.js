@@ -117,7 +117,7 @@ export function validateCatalog(value) {
 const graphMetricsProtocol = 'harness-plan-graph-metrics/1';
 const genericMetricStates = new Set(['available', 'partial', 'unavailable']);
 const tokenBlockStates = new Set(['available', 'partial', 'unavailable']);
-const costBlockStates = new Set(['available', 'estimated', 'unavailable']);
+const costBlockStates = new Set(['available', 'estimated', 'partial', 'unavailable']);
 const ledgerBlockStates = new Set(['available', 'unavailable']);
 const distributionStates = new Set(['available', 'partial', 'unavailable', 'estimated']);
 
@@ -368,7 +368,7 @@ function validOutcome(value) {
 function validDataQuality(value) {
   return isObject(value) && hasOnly(value, ['summary_missing', 'token_records_missing', 'cost_state', 'busy_unavailable_reason', 'criteria_text_unavailable', 'reconstructed', 'reconstruction_notes', 'completeness'])
     && typeof value.summary_missing === 'boolean' && typeof value.token_records_missing === 'boolean'
-    && ['available', 'estimated', 'unavailable'].includes(value.cost_state) && nullableText(value.busy_unavailable_reason)
+    && ['available', 'estimated', 'partial', 'unavailable'].includes(value.cost_state) && nullableText(value.busy_unavailable_reason)
     && typeof value.criteria_text_unavailable === 'boolean' && typeof value.reconstructed === 'boolean'
     && Array.isArray(value.reconstruction_notes) && value.reconstruction_notes.every(isText)
     && completenessGrades.has(value.completeness);

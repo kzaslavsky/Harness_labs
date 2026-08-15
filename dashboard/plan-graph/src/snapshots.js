@@ -36,13 +36,23 @@ export function isMetricMissing(metric) {
 }
 
 /** True when a comparison-table metric must render as an em-dash with its
- * hover reason and sort last (plan:344): unavailable, plus `partial`
- * (verified lower bound) and `estimated` values -- a cross-graph comparison
- * must not present either as if it were the recorded true value
- * (plan:163-168 "rendered with a ≥ prefix ... Never approximated" describes
- * the *detail* view's treatment; the comparison table's is stricter). */
+ * hover reason and sort last (plan:344): the value is genuinely absent.
+ * `partial` (verified lower bound) and `estimated` values DO render and
+ * sort by value — prefixed `≥` / `≈` exactly like the detail views
+ * (plan:163-168) — because hiding them blanks nearly every cost cell in a
+ * corpus where no recorded pricing exists and most token totals are
+ * verified lower bounds; a labelled bound beats an em-dash. */
 export function isMetricDegraded(metric) {
-  return isMetricMissing(metric) || metric.state === 'partial' || metric.state === 'estimated';
+  return isMetricMissing(metric);
+}
+
+/** Rendering prefix for a normalized metric: `≥` for a verified lower
+ * bound, `≈` for an estimate (the reason says when both apply). */
+export function metricPrefix(metric) {
+  if (!metric || isMetricMissing(metric)) return '';
+  if (metric.state === 'partial') return '≥';
+  if (metric.state === 'estimated') return '≈';
+  return '';
 }
 
 /** Build one normalized comparison row from a `/api/snapshots` listing entry

@@ -288,10 +288,14 @@ class ComputeGraphMetricsDegradeTests(unittest.TestCase):
         self.assertIn("3 of 4", totals["tokens"]["reason"])
         self.assertEqual(totals["tokens"]["total_tokens"], 10 + 5 + 8 + 2 + 6 + 1)
 
-        # Any unavailable (or missing) child cost degrades the whole aggregate to unavailable, never partial.
-        self.assertEqual(totals["cost"]["state"], "unavailable")
-        self.assertIsNone(totals["cost"]["usd"])
+        # Partial cost coverage sums the reporting subset as a labelled lower
+        # bound (matching the tokens/calls policy) — a node with no cost
+        # record cannot subtract from a sum, and hiding the subset entirely
+        # blanked the comparison surface for every mixed-coverage graph.
+        self.assertEqual(totals["cost"]["state"], "partial")
+        self.assertAlmostEqual(totals["cost"]["usd"], 0.15)
         self.assertIn("2 of 4", totals["cost"]["reason"])
+        self.assertIn("lower bound", totals["cost"]["reason"])
 
         # Calls share tokens' coverage set: the zero-record child cannot be summed as a verified zero.
         self.assertEqual(totals["calls"]["state"], "partial")
