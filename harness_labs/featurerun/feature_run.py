@@ -443,6 +443,13 @@ TRANSIENT_RECOVERY_SIGNATURES: tuple[str, ...] = (
     "overloaded_error",
     "rate_limit",
     "timed out reading",
+    # A coordinator/backend process that dies without recording a blocker
+    # surfaces only the dispatcher's generic terminal line (observed live:
+    # codex backend_process_terminated -> "dispatcher ended with status
+    # blocked"). A genuine content block records an explicit blocker and
+    # takes the specific-reason path instead, so this generic form is
+    # treated as transient; recovery_limit still bounds the retries.
+    "dispatcher ended with status",
 )
 
 
