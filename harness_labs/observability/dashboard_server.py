@@ -510,6 +510,29 @@ def _collect_node_details(catalog: Mapping[str, Any], graph: Mapping[str, Any]) 
         feature_run_id = node.get("feature_run_id")
         if isinstance(feature_run_id, str):
             needed.update(graph_metrics.node_history_run_ids(catalog, feature_run_id))
+    # The campaign union also counts runs of nodes retired from this
+    # attempt's checkpoint: every run belonging to a graph on the recorded
+    # predecessor chain is needed, whether or not its node id survives here.
+    graph_run_id = graph.get("run_id")
+    if isinstance(graph_run_id, str):
+        chain = {*graph_metrics.attempt_ancestors(catalog, graph_run_id), graph_run_id}
+        graphs_by_id = {
+            record.get("run_id"): record
+            for record in catalog.get("plan_graphs", []) or []
+            if isinstance(record, Mapping) and isinstance(record.get("run_id"), str)
+        }
+        for run in catalog.get("feature_runs", []) or []:
+            if not isinstance(run, Mapping) or not isinstance(run.get("run_id"), str):
+                continue
+            correlation = run.get("correlation")
+            if isinstance(correlation, Mapping) and correlation.get("plan_graph_id") in chain:
+                needed.add(run["run_id"])
+        for chain_graph_id in chain:
+            record = graphs_by_id.get(chain_graph_id)
+            for chain_node in (record.get("nodes", []) if isinstance(record, Mapping) else []):
+                planned = chain_node.get("feature_run_id") if isinstance(chain_node, Mapping) else None
+                if isinstance(planned, str):
+                    needed.add(planned)
     runs = {
         run["run_id"]: run
         for run in catalog.get("feature_runs", []) or []

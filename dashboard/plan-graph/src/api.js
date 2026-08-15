@@ -128,10 +128,13 @@ function validCostBlock(value) { return isObject(value) && hasOnly(value, ['stat
 function validLedgerBlock(value) { return isObject(value) && hasOnly(value, ['state', 'reason', 'graph_launches', 'gate_invocations', 'repair_dispatches', 'structural_decisions']) && ledgerBlockStates.has(value.state) && nullableText(value.reason) && nullableInteger(value.graph_launches) && nullableInteger(value.gate_invocations) && nullableInteger(value.repair_dispatches) && nullableInteger(value.structural_decisions); }
 function validDistribution(value) { return isObject(value) && hasOnly(value, ['state', 'reason', 'mean', 'median', 'max', 'sample_size', 'population']) && distributionStates.has(value.state) && nullableText(value.reason) && nullableNumber(value.mean) && nullableNumber(value.median) && nullableNumber(value.max) && Number.isInteger(value.sample_size) && Number.isInteger(value.population); }
 function validNodeTableRow(value) {
-  return isObject(value) && hasOnly(value, ['node_id', 'status', 'tries', 'detail', 'totals', 'wait_ms'])
+  return isObject(value) && hasOnly(value, ['node_id', 'status', 'tries', 'detail', 'totals', 'cumulative', 'wait_ms'])
     && isText(value.node_id) && nullableText(value.status) && Number.isInteger(value.tries)
     && isObject(value.detail) && hasOnly(value.detail, ['state', 'reason']) && ['available', 'unavailable'].includes(value.detail.state) && nullableText(value.detail.reason)
     && (value.totals === null || isObject(value.totals))
+    && isObject(value.cumulative) && hasOnly(value.cumulative, ['tries', 'attempts', 'totals', 'reason'])
+    && Number.isInteger(value.cumulative.tries) && Number.isInteger(value.cumulative.attempts)
+    && (value.cumulative.totals === null || isObject(value.cumulative.totals)) && nullableText(value.cumulative.reason)
     && validGenericMetric(value.wait_ms);
 }
 

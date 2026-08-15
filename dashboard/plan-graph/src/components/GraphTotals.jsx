@@ -58,7 +58,7 @@ export default function GraphTotals({ metrics, elapsedMs = null }) {
         <Metric label="Tokens per FeatureRun" value={distributionSummary(perFeatureRun.tokens, tokens)} reason={perFeatureRun.tokens.reason} hint="per logical node, cumulative across tries" />
         <Metric label="Cost per FeatureRun" value={distributionSummary(perFeatureRun.cost_usd, usd)} reason={perFeatureRun.cost_usd.reason} hint="per logical node, cumulative across tries" />
       </div>
-      <p className="metric-note">Lineage totals (cross-attempt, {lineage.reason}): {tokenBlockValue(lineage.tokens, 'total_tokens')} tokens · {money(lineage.cost)}.</p>
+      <p className="metric-note">Campaign totals ({lineage.reason}): {tokenBlockValue(lineage.tokens, 'total_tokens')} tokens · {money(lineage.cost)}.</p>
     </section>
   );
 }

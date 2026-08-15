@@ -39,88 +39,167 @@ _TERMINAL_STATUSES = frozenset({"succeeded", "failed", "blocked", "interrupted"}
 # Cumulative node-try merge (moved from dashboard_server; single shared impl)
 # ---------------------------------------------------------------------------
 
+_MAX_ANCESTOR_DEPTH = 64
+
+
+def attempt_ancestors(catalog: Mapping[str, Any], graph_run_id: str) -> list[str]:
+    """Oldest→newest ancestor graph run ids via the recorded predecessor chain.
+
+    Ancestry is the ``predecessor_attempt_id`` recorded on each graph's
+    catalog record (descriptor field, or the colocated
+    ``predecessor-link.json`` projected by ``run_catalog``). Plan-digest
+    equality is deliberately NOT ancestry: independently registered graphs
+    that share a plan are siblings, and folding a sibling's usage into a
+    graph's view double-counts it. The walk is cycle-guarded and stops at
+    a predecessor absent from the catalog.
+    """
+    graphs = {
+        graph.get("run_id"): graph
+        for graph in catalog.get("plan_graphs", []) or []
+        if isinstance(graph, Mapping) and isinstance(graph.get("run_id"), str)
+    }
+    chain: list[str] = []
+    seen = {graph_run_id}
+    current = graphs.get(graph_run_id)
+    for _ in range(_MAX_ANCESTOR_DEPTH):
+        predecessor = current.get("predecessor_attempt_id") if isinstance(current, Mapping) else None
+        if not isinstance(predecessor, str) or predecessor in seen or predecessor not in graphs:
+            break
+        chain.append(predecessor)
+        seen.add(predecessor)
+        current = graphs[predecessor]
+    chain.reverse()
+    return chain
+
+
+def _graph_node_runs(catalog: Mapping[str, Any], graph_run_id: str, node_id: str) -> list[str]:
+    """This graph's own executed tries of one node, by verified correlation."""
+    return sorted(
+        run["run_id"]
+        for run in catalog.get("feature_runs", []) or []
+        if isinstance(run, Mapping)
+        and isinstance(run.get("run_id"), str)
+        and isinstance(run.get("correlation"), Mapping)
+        and run["correlation"].get("plan_graph_id") == graph_run_id
+        and run["correlation"].get("plan_node_id") == node_id
+    )
+
+
+def _run_node_identity(catalog: Mapping[str, Any], run_id: str) -> tuple[str | None, str | None]:
+    """(owning graph run_id, node_id) for one feature run, via correlation."""
+    for run in catalog.get("feature_runs", []) or []:
+        if isinstance(run, Mapping) and run.get("run_id") == run_id:
+            correlation = run.get("correlation")
+            if isinstance(correlation, Mapping):
+                graph_id = correlation.get("plan_graph_id")
+                node_id = correlation.get("plan_node_id")
+                return (
+                    graph_id if isinstance(graph_id, str) else None,
+                    node_id if isinstance(node_id, str) else None,
+                )
+            return (None, None)
+    return (None, None)
+
+
 def node_history_run_ids(
     catalog: Mapping[str, Any],
     target_run_id: str,
     known_run_ids: frozenset[str] | set[str] = frozenset(),
 ) -> list[str]:
-    """Return the ordered tries for the target's logical node through this try.
+    """Ordered tries of the target run's logical node across its TRUE lineage.
 
-    Tries are grouped by ``(plan_digest, node_id)`` across every PlanGraph in
-    the catalog that shares the plan digest, chronologically by graph
-    ``created_at`` — this spans a node's *entire* history, including repair
-    attempts (a separate ``graph_attempt_id``). Callers that need
-    attempt-scoped (this-attempt-only) history must use
-    ``compute_graph_metrics``'s own scoping instead.
-
-    A checkpoint's ``feature_run_id`` names the *planned* run for the node;
-    for a node that never launched in that attempt (reused from a sealed
-    predecessor, or the attempt died before dispatch) no such run directory
-    exists. Those planned-but-never-executed ids are excluded: only runs
-    the catalog actually contains are tries. Requiring a detail document
-    for a phantom id would otherwise degrade every lineage merge to
-    ``unavailable`` even when every executed try is fully verified.
-    ``known_run_ids`` supplements the catalog's own feature-run listing as
-    evidence of existence (callers that already hold verified detail
-    documents pass their key set).
+    The history spans only the owning graph's recorded predecessor chain
+    (``attempt_ancestors``) plus the owning graph itself — never same-digest
+    sibling registrations. Runs are located by verified correlation, with a
+    fallback to each chain graph's checkpoint-planned ``feature_run_id``
+    when that run verifiably exists (catalog listing or ``known_run_ids``) —
+    a planned id whose run never existed can still never appear.
     """
     existing = {
         run.get("run_id")
         for run in catalog.get("feature_runs", []) or []
         if isinstance(run, Mapping) and isinstance(run.get("run_id"), str)
     } | set(known_run_ids)
-    histories: dict[tuple[str, str], list[str]] = {}
-    graphs = sorted(catalog.get("plan_graphs", []), key=lambda graph: (str(graph.get("created_at", "")), str(graph.get("run_id", ""))))
-    for graph in graphs:
-        plan_digest = graph.get("plan_digest")
-        if not isinstance(plan_digest, str):
-            continue
-        for node in graph.get("nodes", []):
-            if not isinstance(node, Mapping):
+    graph_run_id, node_id = _run_node_identity(catalog, target_run_id)
+    if graph_run_id is None or node_id is None:
+        # No correlation record: locate the owning graph by its checkpoint's
+        # planned feature_run_id (legacy runs and fixtures).
+        for graph in catalog.get("plan_graphs", []) or []:
+            if not isinstance(graph, Mapping):
                 continue
-            node_id = node.get("node_id")
-            run_id = node.get("feature_run_id")
-            if not isinstance(node_id, str) or not isinstance(run_id, str):
-                continue
-            history = histories.setdefault((plan_digest, node_id), [])
-            if run_id in existing and run_id not in history:
+            for node in graph.get("nodes", []) or []:
+                if isinstance(node, Mapping) and node.get("feature_run_id") == target_run_id:
+                    graph_run_id = graph.get("run_id") if isinstance(graph.get("run_id"), str) else None
+                    node_id = node.get("node_id") if isinstance(node.get("node_id"), str) else None
+                    break
+            if graph_run_id is not None:
+                break
+    if graph_run_id is None or node_id is None:
+        return [target_run_id] if target_run_id in existing else []
+    graphs_by_id = {
+        graph.get("run_id"): graph
+        for graph in catalog.get("plan_graphs", []) or []
+        if isinstance(graph, Mapping) and isinstance(graph.get("run_id"), str)
+    }
+    history: list[str] = []
+    for chain_graph_id in [*attempt_ancestors(catalog, graph_run_id), graph_run_id]:
+        runs = set(_graph_node_runs(catalog, chain_graph_id, node_id))
+        record = graphs_by_id.get(chain_graph_id)
+        for chain_node in (record.get("nodes", []) if isinstance(record, Mapping) else []):
+            if (
+                isinstance(chain_node, Mapping)
+                and chain_node.get("node_id") == node_id
+                and isinstance(chain_node.get("feature_run_id"), str)
+                and chain_node["feature_run_id"] in existing
+            ):
+                runs.add(chain_node["feature_run_id"])
+        for run_id in sorted(runs):
+            if run_id not in history:
                 history.append(run_id)
-            if run_id == target_run_id:
-                return list(history)
-    return [target_run_id] if target_run_id in existing else []
+    if target_run_id not in history:
+        history.append(target_run_id)
+    return history
 
 
 def apply_cumulative_node_metrics(catalog: Mapping[str, Any], details: dict[str, dict[str, Any]]) -> None:
-    """Accumulate verified metrics across tries of one logical PlanGraph node, in place."""
+    """Accumulate verified metrics across a node's true-lineage tries, in place.
+
+    Each run's cumulative view spans only the tries reachable through its
+    owning graph's recorded predecessor chain (never same-digest siblings),
+    and cross-attempt merges declare wall/busy non-additive.
+    """
     base_metrics = {
         run_id: detail.get("metrics")
         for run_id, detail in details.items()
         if isinstance(detail.get("metrics"), Mapping)
     }
-    histories: dict[tuple[str, str], list[str]] = {}
-    graphs = sorted(catalog.get("plan_graphs", []), key=lambda graph: (str(graph.get("created_at", "")), str(graph.get("run_id", ""))))
-    for graph in graphs:
-        plan_digest = graph.get("plan_digest")
-        if not isinstance(plan_digest, str):
+    for run_id in list(details):
+        history = node_history_run_ids(catalog, run_id, frozenset(details))
+        if not history or history[-1] != run_id:
+            # Only accumulate up to and including this try, never beyond it.
+            history = history[: history.index(run_id) + 1] if run_id in history else []
+        if not history:
             continue
-        for node in graph.get("nodes", []):
-            if not isinstance(node, Mapping):
-                continue
-            node_id = node.get("node_id")
-            run_id = node.get("feature_run_id")
-            if not isinstance(node_id, str) or not isinstance(run_id, str) or run_id not in details:
-                continue
-            history = histories.setdefault((plan_digest, node_id), [])
-            if run_id in history:
-                continue
-            history.append(run_id)
-            metrics = [base_metrics.get(item) for item in history]
-            if all(isinstance(item, Mapping) for item in metrics):
-                details[run_id]["metrics"] = merge_detail_metrics(metrics, history)
+        metrics = [base_metrics.get(item) for item in history]
+        if all(isinstance(item, Mapping) for item in metrics):
+            owners = {_run_node_identity(catalog, item)[0] for item in history}
+            details[run_id]["metrics"] = merge_detail_metrics(
+                metrics, history, additive_wall=len(owners) <= 1
+            )
 
 
-def merge_detail_metrics(metrics: list[Mapping[str, Any]], run_ids: list[str]) -> dict[str, Any]:
+def merge_detail_metrics(
+    metrics: list[Mapping[str, Any]],
+    run_ids: list[str],
+    *,
+    additive_wall: bool = True,
+) -> dict[str, Any]:
     """Merge one logical node's per-try detail-metrics documents into one cumulative view.
+
+    ``additive_wall`` must be False when the tries span more than one graph
+    attempt: wall/busy sums are only meaningful for sequential tries inside
+    one attempt, and a cross-attempt sum renders a node "longer" than its
+    own graph's wall clock. Per-try walls stay visible in ``by_try``.
 
     Tokens/cost/duration/wall/busy/peak accumulate across every try (the
     pre-existing behaviour). ``quality`` (criteria, open findings) is
@@ -134,7 +213,7 @@ def merge_detail_metrics(metrics: list[Mapping[str, Any]], run_ids: list[str]) -
     """
     latest = metrics[-1]
     merged = dict(latest)
-    merged["totals"] = _merge_metric_totals([item["totals"] for item in metrics])
+    merged["totals"] = _merge_metric_totals([item["totals"] for item in metrics], additive_wall=additive_wall)
     for key in ("by_phase", "by_agent", "by_agent_type", "by_model", "by_effort", "by_backend"):
         merged[key] = _merge_metric_breakdown([row for item in metrics for row in item.get(key, [])])
     merged["by_try"] = [
@@ -153,7 +232,7 @@ def merge_detail_metrics(metrics: list[Mapping[str, Any]], run_ids: list[str]) -
         "collection_method": "verified usage accumulated across logical PlanGraph node tries",
         "attempt_count": len(run_ids),
         "current_run_id": run_ids[-1],
-        "scope": "cumulative_plan_graph_node",
+        "scope": "cumulative_plan_graph_node" if additive_wall else "cumulative_predecessor_chain",
     })
     merged["provenance"] = provenance
     return merged
@@ -194,7 +273,7 @@ def _merge_metric_breakdown(rows: list[Mapping[str, Any]]) -> list[dict[str, Any
     return sorted(result, key=lambda row: (-row["total_tokens"], row["label"]))
 
 
-def _merge_metric_totals(rows: list[Mapping[str, Any]]) -> dict[str, Any]:
+def _merge_metric_totals(rows: list[Mapping[str, Any]], *, additive_wall: bool = True) -> dict[str, Any]:
     result = {
         key: sum(int(row.get(key, 0)) for row in rows)
         for key in ("calls", "input_tokens", "cached_input_tokens", "output_tokens", "duration_ms")
@@ -215,12 +294,15 @@ def _merge_metric_totals(rows: list[Mapping[str, Any]]) -> dict[str, Any]:
     # time exceeding wall time.  Tries execute sequentially, so summing
     # per-try values never double-counts overlapping intervals.
     wall = [row.get("wall_clock_ms") for row in rows]
-    if rows and all(type(value) is int for value in wall):
+    if additive_wall and rows and all(type(value) is int for value in wall):
         result["wall_clock_ms"] = sum(wall)
     else:
+        # Cross-attempt merges never sum wall/busy: attempts are separate
+        # executions and a summed figure can exceed any one graph's wall
+        # clock. Per-try values remain in by_try.
         result["wall_clock_ms"] = None
     busy = [row.get("busy_ms") for row in rows]
-    if rows and all(type(value) is int for value in busy):
+    if additive_wall and rows and all(type(value) is int for value in busy):
         result["busy_ms"] = sum(busy)
     else:
         result["busy_ms"] = None
@@ -311,15 +393,44 @@ def compute_graph_metrics(
     of ``read_budget_ledger`` (or ``None`` when not supplied / unavailable).
 
     Totals are **attempt-scoped**: only tries correlated to this graph's own
-    ``run_id`` are summed into ``totals``. Cross-attempt (repair) history is
-    reported separately, and only, under ``lineage_totals``.
+    ``run_id`` are summed into ``totals``. Cross-attempt history follows the
+    graph's RECORDED predecessor chain only (never same-digest sibling
+    registrations) and is reported separately under ``lineage_totals`` as a
+    deduplicated union of the chain's runs.
     """
     nodes = [node for node in graph.get("nodes", []) if isinstance(node, Mapping)]
     population = len(nodes)
     node_rows: list[dict[str, Any]] = []
     attempt_merges: list[Mapping[str, Any]] = []
-    lineage_merges: list[Mapping[str, Any]] = []
     known_run_ids = frozenset(node_details.keys())
+    graph_run_id = graph.get("run_id") if isinstance(graph.get("run_id"), str) else None
+    ancestors = attempt_ancestors(catalog, graph_run_id) if graph_run_id else []
+    graphs_by_id = {
+        record.get("run_id"): record
+        for record in catalog.get("plan_graphs", []) or []
+        if isinstance(record, Mapping) and isinstance(record.get("run_id"), str)
+    }
+    existing_run_ids = {
+        run.get("run_id")
+        for run in catalog.get("feature_runs", []) or []
+        if isinstance(run, Mapping) and isinstance(run.get("run_id"), str)
+    } | set(known_run_ids)
+
+    def ancestor_node_runs(chain_graph_id: str, wanted_node_id: str) -> list[str]:
+        """An ancestor attempt's executed tries of one node: correlated runs
+        plus its checkpoint's planned feature_run_id when that run exists
+        (fixtures and checkpoint-only catalogs carry no correlations)."""
+        runs = set(_graph_node_runs(catalog, chain_graph_id, wanted_node_id))
+        record = graphs_by_id.get(chain_graph_id)
+        for ancestor_node in (record.get("nodes", []) if isinstance(record, Mapping) else []):
+            if (
+                isinstance(ancestor_node, Mapping)
+                and ancestor_node.get("node_id") == wanted_node_id
+                and isinstance(ancestor_node.get("feature_run_id"), str)
+                and ancestor_node["feature_run_id"] in existing_run_ids
+            ):
+                runs.add(ancestor_node["feature_run_id"])
+        return sorted(runs)
     for node in nodes:
         node_id = node.get("node_id") if isinstance(node.get("node_id"), str) else None
         attempt_history = _attempt_scoped_history(graph, node, catalog, known_run_ids)
@@ -336,22 +447,32 @@ def compute_graph_metrics(
                 reason = "no FeatureRun is recorded for this node yet"
             else:
                 reason = "one or more attempt-scoped FeatureRun detail record(s) are unverified"
-        lineage_history: list[str] = []
-        lineage_merged: dict[str, Any] | None = None
-        feature_run_id = node.get("feature_run_id")
-        if isinstance(feature_run_id, str):
-            # Lineage must span every try this logical node has ever had,
-            # including this-attempt retries: checkpoint-recorded history
-            # alone (node_history_run_ids) only names the current try per
-            # graph attempt, so in-attempt retries are folded in too — a
-            # lineage total can never be smaller than this attempt's own.
-            lineage_history = list(node_history_run_ids(catalog, feature_run_id, known_run_ids))
-            for run_id in attempt_history:
-                if run_id not in lineage_history:
-                    lineage_history.append(run_id)
-            lineage_merged = _merge_if_available(lineage_history, node_details)
-            if lineage_merged is not None:
-                lineage_merges.append(lineage_merged)
+        # Chain history: this node's tries in each RECORDED ancestor attempt
+        # (oldest first) plus this attempt's own — never same-digest sibling
+        # registrations, which are not ancestry.
+        chain_history: list[str] = []
+        chain_graph_count = 0
+        if node_id is not None:
+            for chain_graph_id in [*ancestors, *( [graph_run_id] if graph_run_id else [] )]:
+                graph_runs = (
+                    list(attempt_history)
+                    if chain_graph_id == graph_run_id
+                    else ancestor_node_runs(chain_graph_id, node_id)
+                )
+                added = False
+                for run_id in graph_runs:
+                    if run_id not in chain_history:
+                        chain_history.append(run_id)
+                        added = True
+                if added:
+                    chain_graph_count += 1
+        chain_merged: dict[str, Any] | None = None
+        if len(chain_history) > len(attempt_history):
+            chain_merged = _merge_if_available_cross(
+                chain_history, node_details, additive_wall=chain_graph_count <= 1
+            )
+        elif merged is not None:
+            chain_merged = merged
         node_rows.append({
             "node_id": node_id or "unavailable",
             "status": node.get("status"),
@@ -359,12 +480,52 @@ def compute_graph_metrics(
             "merged": merged,
             "reason": reason,
             "reused": reused,
-            "lineage_tries": len(lineage_history),
-            "lineage_merged": lineage_merged,
+            "chain_tries": len(chain_history),
+            "chain_attempts": chain_graph_count,
+            "chain_merged": chain_merged,
+            "chain_history": chain_history,
         })
 
     totals = _aggregate_totals(attempt_merges, population)
-    lineage = _aggregate_totals(lineage_merges, population)
+    if ancestors:
+        # Campaign union: every run belonging to any graph on the recorded
+        # predecessor chain (self included), each counted exactly once — not
+        # a per-node roll-up, so runs of nodes absent from this attempt's
+        # checkpoint (e.g. nodes retired by a replan) still count. Runs are
+        # discovered by verified correlation, supplemented by the per-node
+        # chain histories already resolved above.
+        chain_graph_ids = [*ancestors, graph_run_id]
+        chain_run_ids: list[str] = []
+        for run in catalog.get("feature_runs", []) or []:
+            if not isinstance(run, Mapping) or not isinstance(run.get("run_id"), str):
+                continue
+            run_correlation = run.get("correlation")
+            if isinstance(run_correlation, Mapping) and run_correlation.get("plan_graph_id") in chain_graph_ids:
+                if run["run_id"] not in chain_run_ids:
+                    chain_run_ids.append(run["run_id"])
+        for row in node_rows:
+            for run_id in row.get("chain_history", []):
+                if run_id not in chain_run_ids:
+                    chain_run_ids.append(run_id)
+        # Chain checkpoints also name runs of nodes retired from THIS
+        # attempt's checkpoint (a replan can drop a node id); without this,
+        # a retired node's verified spend silently vanishes from the
+        # campaign figure. Planned ids still require existence evidence.
+        for chain_graph_id in chain_graph_ids:
+            record = graphs_by_id.get(chain_graph_id)
+            for chain_node in (record.get("nodes", []) if isinstance(record, Mapping) else []):
+                planned = chain_node.get("feature_run_id") if isinstance(chain_node, Mapping) else None
+                if isinstance(planned, str) and planned in existing_run_ids and planned not in chain_run_ids:
+                    chain_run_ids.append(planned)
+        chain_docs = [node_details[run_id] for run_id in chain_run_ids if isinstance(node_details.get(run_id), Mapping)]
+        lineage = _aggregate_totals(chain_docs, len(chain_run_ids))
+        lineage_reason = (
+            f"campaign union across the recorded predecessor chain ({len(chain_graph_ids)} attempt(s), "
+            f"{len(chain_run_ids)} FeatureRun(s), each counted once)"
+        )
+    else:
+        lineage = totals
+        lineage_reason = "no predecessor is recorded for this attempt; campaign totals equal this attempt's own"
 
     status = graph.get("status")
     wall_block = _graph_wall_clock(status, own_summary)
@@ -410,7 +571,10 @@ def compute_graph_metrics(
         "retries": {
             "budget_ledger": ledger_block,
             "node_retries": sum(max(0, row["tries"] - 1) for row in node_rows),
-            "graph_attempts": _graph_attempt_count(graph, catalog),
+            # The larger of the logical-id count and the recorded predecessor
+            # chain: historical descriptors carry no logical_graph_id, but a
+            # predecessor-link chain still proves their attempts.
+            "graph_attempts": max(_graph_attempt_count(graph, catalog), len(ancestors) + 1),
         },
         "recovery": {
             "dispositions": dispositions,
@@ -429,7 +593,7 @@ def compute_graph_metrics(
             "calls": lineage["calls"],
             "agent_busy_ms": lineage["agent_busy_ms"],
             "peak_input_tokens": lineage["peak_input_tokens"],
-            "reason": "cross-attempt lineage: spans every graph attempt that shares this node's plan digest, not just this attempt",
+            "reason": lineage_reason,
         },
     }
 
@@ -480,6 +644,20 @@ def _attempt_scoped_history(
         if feature_run_id in existing:
             history.add(feature_run_id)
     return sorted(history)
+
+
+def _merge_if_available_cross(
+    history: list[str],
+    node_details: Mapping[str, Mapping[str, Any]],
+    *,
+    additive_wall: bool,
+) -> dict[str, Any] | None:
+    if not history:
+        return None
+    metrics = [node_details.get(run_id) for run_id in history]
+    if not all(isinstance(item, Mapping) for item in metrics):
+        return None
+    return merge_detail_metrics(metrics, history, additive_wall=additive_wall)
 
 
 def _merge_if_available(history: list[str], node_details: Mapping[str, Mapping[str, Any]]) -> dict[str, Any] | None:
@@ -613,22 +791,19 @@ def _distribution(values: list[float], population: int) -> dict[str, Any]:
     return {"state": state, "reason": reason, "mean": round(sum(values) / len(values), 3), "median": median(values), "max": max(values), "sample_size": len(values), "population": population}
 
 
-def _display_merged(row: Mapping[str, Any]) -> Mapping[str, Any] | None:
-    """The merged document a node's display row is built from: lineage-
-    cumulative when available, else this attempt's own merge — the same
-    preference `_node_table` uses, so the per-FeatureRun distributions
-    describe exactly the per-node values the table shows (a distribution
-    over the 2-of-7 attempt-executed subset while the table lists all 7
-    cumulative rows reads as nonsense)."""
-    return row.get("lineage_merged") or row["merged"]
-
-
 def _per_feature_run(node_rows: list[dict[str, Any]], population: int) -> dict[str, Any]:
-    displays = [(_display_merged(row)) for row in node_rows]
-    wall_values = [merged["totals"]["wall_clock_ms"] for merged in displays if merged and isinstance(merged["totals"].get("wall_clock_ms"), int)]
+    """Distributions over THIS ATTEMPT's own per-node values only.
+
+    Cross-attempt (chain) values live in each row's ``cumulative`` block and
+    in ``lineage_totals``; mixing them in here made mean × logical_nodes
+    exceed the attempt's own total — the "impossible average". A reused or
+    not-yet-run node is simply absent from the sample (state degrades to
+    partial with the subset language, never fabricated coverage)."""
+    merges = [row["merged"] for row in node_rows]
+    wall_values = [merged["totals"]["wall_clock_ms"] for merged in merges if merged and isinstance(merged["totals"].get("wall_clock_ms"), int)]
     token_values = [
         merged["totals"]["total_tokens"]
-        for merged in displays
+        for merged in merges
         if merged and int(merged.get("provenance", {}).get("usage_records", 0)) > 0
     ]
     return {
@@ -644,7 +819,7 @@ def _cost_distribution(node_rows: list[dict[str, Any]], population: int) -> dict
     values: list[float] = []
     estimated = False
     for row in node_rows:
-        merged = _display_merged(row)
+        merged = row["merged"]
         if not merged:
             continue
         cost = merged["totals"].get("cost", {})
@@ -669,39 +844,57 @@ _WAIT_MS_UNAVAILABLE_REASON = "wait time requires per-node creation and dependen
 
 
 def _node_table(node_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Per-node display rows are lineage-cumulative, not attempt-scoped.
+    """Per-node display rows carry BOTH scopes, never mixed:
 
-    The per-node table answers "what has this logical node cost so far?",
-    matching the FeatureRun inspector's cumulative view — so a node reused
-    from a prior attempt still shows the usage of the tries that produced
-    its sealed candidate. Only the graph-level ``totals`` block remains
-    attempt-scoped (the no-double-counting rule); a reused node's row is
-    annotated with its provenance instead of being blanked.
+    - ``totals``: this attempt's own usage (sums to the graph totals; null
+      with a reason for reused / never-dispatched nodes);
+    - ``cumulative``: the node's usage across its RECORDED predecessor chain
+      (attempt tries plus true-ancestor tries, each run once) — the number
+      the FeatureRun inspector shows. Wall/busy inside ``cumulative`` are
+      null when tries span more than one attempt (non-additive).
+
+    Same-digest sibling registrations are never folded in, so a node that
+    never ran anywhere on the chain shows Unavailable rather than another
+    graph's usage.
     """
     table = []
     for row in node_rows:
-        display = row.get("lineage_merged") or row["merged"]
-        if display is None:
-            detail = {"state": "unavailable", "reason": row["reason"]}
-        elif row.get("reused") and row["merged"] is None:
-            detail = {
-                "state": "available",
-                "reason": (
-                    "cumulative across tries executed in prior attempt(s); this "
-                    "attempt reused the node's sealed candidate and adds no usage"
-                ),
-            }
+        merged = row["merged"]
+        chain = row.get("chain_merged")
+        detail = {"state": "available", "reason": None} if merged else {"state": "unavailable", "reason": row["reason"]}
+        if chain is None:
+            cumulative_reason = row["reason"] if merged is None else "no prior-attempt tries are recorded on this node's predecessor chain"
+        elif row.get("reused") and merged is None:
+            cumulative_reason = (
+                "usage of the true-ancestor tries that produced the sealed candidate this attempt reused"
+            )
+        elif row.get("chain_attempts", 0) > 1:
+            cumulative_reason = f"cumulative across {row['chain_tries']} tries in {row['chain_attempts']} attempts on the recorded predecessor chain"
         else:
-            detail = {"state": "available", "reason": None}
+            cumulative_reason = None
         table.append({
             "node_id": row["node_id"],
             "status": row["status"],
-            "tries": max(row.get("lineage_tries", 0), row["tries"]) if display is not None else row["tries"],
+            "tries": row["tries"],
             "detail": detail,
-            "totals": display["totals"] if display else None,
+            "totals": merged["totals"] if merged else None,
+            "cumulative": {
+                "tries": row.get("chain_tries", row["tries"]),
+                "attempts": row.get("chain_attempts", 1 if merged else 0),
+                "totals": chain["totals"] if chain else None,
+                "reason": cumulative_reason,
+            },
             "wait_ms": _metric("unavailable", None, _WAIT_MS_UNAVAILABLE_REASON),
         })
-    table.sort(key=lambda row: (row["totals"] is None or row["totals"]["cost"].get("usd") is None, -(row["totals"]["cost"].get("usd") or 0.0) if row["totals"] else 0.0, row["node_id"]))
+
+    def _sort_cost(entry: dict[str, Any]) -> tuple:
+        own = entry["totals"]["cost"].get("usd") if entry["totals"] else None
+        chain_totals = entry["cumulative"]["totals"]
+        chain_cost = chain_totals["cost"].get("usd") if chain_totals else None
+        best = own if own is not None else chain_cost
+        return (best is None, -(best or 0.0), entry["node_id"])
+
+    table.sort(key=_sort_cost)
     return table
 
 

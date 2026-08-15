@@ -289,7 +289,11 @@ def _project_run(directory: Path, root: Path, now: datetime, probe: ProcessProbe
             # that compatibility without inferring a predecessor.
             "logical_graph_id": descriptor.get("logical_graph_id", metrics["run_id"]),
             "graph_attempt_id": descriptor.get("graph_attempt_id", metrics["run_id"]),
-            "predecessor_attempt_id": descriptor.get("predecessor_attempt_id"),
+            "predecessor_attempt_id": (
+                descriptor.get("predecessor_attempt_id")
+                if descriptor.get("predecessor_attempt_id") is not None
+                else _predecessor_link_run_id(directory)
+            ),
             # PG-06 does not yet receive a retention policy from an audited
             # descriptor or checkpoint.  Make that boundary observable rather
             # than treating references as retained by implication.
@@ -313,6 +317,44 @@ def _project_run(directory: Path, root: Path, now: datetime, probe: ProcessProbe
         record["objective"] = _capped_objective(descriptor.get("objective") if descriptor else None)
         record["display_name"] = _feature_run_display_name(record["objective"], None, metrics["run_id"])
     return record
+
+
+_MAX_PREDECESSOR_LINK_BYTES = 65_536
+
+
+def _predecessor_link_run_id(directory: Path) -> str | None:
+    """Ancestor graph named by a colocated ``predecessor-link.json``.
+
+    Repair successors minted before the descriptor carried
+    ``predecessor_attempt_id`` (the parallelization corpus) record their
+    predecessor only in this sidecar (protocol
+    ``plan-graph-predecessor-link/1``). Reading it is the only way to
+    recover true ancestry for those graphs; plan-digest equality is not
+    ancestry. Absent, oversize, malformed, or symlinked files degrade to
+    ``None`` (no predecessor recorded) instead of raising.
+    """
+    path = directory / "predecessor-link.json"
+    if path.is_symlink() or not path.is_file():
+        return None
+    try:
+        if path.stat().st_size > _MAX_PREDECESSOR_LINK_BYTES:
+            return None
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, Mapping):
+        return None
+    protocol = payload.get("protocol")
+    # Two sidecar generations exist: the current predecessor-link protocol
+    # and the earlier bootstrap-repair link; the oldest links carry no
+    # protocol field at all but do carry the manifest binding.
+    recognized = protocol in ("plan-graph-predecessor-link/1", "plan-graph-bootstrap-repair-link/1") or (
+        protocol is None and isinstance(payload.get("predecessor_manifest_sha256"), str)
+    )
+    if not recognized:
+        return None
+    predecessor = payload.get("predecessor_graph_run_id")
+    return predecessor if isinstance(predecessor, str) and predecessor else None
 
 
 def _short_run_id(run_id: str) -> str:

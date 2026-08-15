@@ -82,8 +82,8 @@ class DashboardApiTests(unittest.TestCase):
 
         catalog = {"plan_graphs": [
             {"run_id": "graph-1", "created_at": "2026-08-09T00:00:00Z", "plan_digest": "plan", "nodes": [{"node_id": "FR-1", "feature_run_id": "try-1"}]},
-            {"run_id": "graph-2", "created_at": "2026-08-09T01:00:00Z", "plan_digest": "plan", "nodes": [{"node_id": "FR-1", "feature_run_id": "try-2"}]},
-            {"run_id": "graph-3", "created_at": "2026-08-09T02:00:00Z", "plan_digest": "plan", "nodes": [{"node_id": "FR-1", "feature_run_id": "try-3"}]},
+            {"run_id": "graph-2", "created_at": "2026-08-09T01:00:00Z", "plan_digest": "plan", "predecessor_attempt_id": "graph-1", "nodes": [{"node_id": "FR-1", "feature_run_id": "try-2"}]},
+            {"run_id": "graph-3", "created_at": "2026-08-09T02:00:00Z", "plan_digest": "plan", "predecessor_attempt_id": "graph-2", "nodes": [{"node_id": "FR-1", "feature_run_id": "try-3"}]},
         ]}
         details = {"try-1": {"metrics": metrics(100, 60, "first")}, "try-2": {"metrics": metrics(40, 25, "second")}, "try-3": {"metrics": metrics(10, 8, "third")}}
         _apply_cumulative_node_metrics(catalog, details)
@@ -132,6 +132,17 @@ class DashboardApiTests(unittest.TestCase):
                 nodes={"FR-1": {"status": "running", "feature_run_id": "try-2", "depends_on": []}},
                 functionality_tests=(),
             )
+            # Accumulation follows recorded ancestry, not plan-digest
+            # chronology: graph-2 names graph-1 via the predecessor-link
+            # sidecar (the mechanism repair successors actually use), which
+            # run_catalog projects into predecessor_attempt_id.
+            (root / "graph-2" / "predecessor-link.json").write_text(
+                json.dumps({
+                    "protocol": "plan-graph-predecessor-link/1",
+                    "predecessor_graph_run_id": "graph-1",
+                }),
+                encoding="utf-8",
+            )
             app = DashboardApplication(root, refresh_seconds=60)
             status, body, _ = self._request(app, "GET", "/api/feature-runs/try-2")
 
@@ -151,10 +162,10 @@ class DashboardApiTests(unittest.TestCase):
 
         catalog = {"plan_graphs": [
             {"run_id": "graph-1", "created_at": "2026-08-09T00:00:00Z", "plan_digest": "plan", "nodes": [{"node_id": "FR-1", "feature_run_id": "try-1"}]},
-            {"run_id": "graph-2", "created_at": "2026-08-09T01:00:00Z", "plan_digest": "plan", "nodes": [{"node_id": "FR-1", "feature_run_id": "try-2"}]},
+            {"run_id": "graph-2", "created_at": "2026-08-09T01:00:00Z", "plan_digest": "plan", "predecessor_attempt_id": "graph-1", "nodes": [{"node_id": "FR-1", "feature_run_id": "try-2"}]},
             # The newest attempt REUSES the sealed node: its planned run
             # directory never existed, so a reuse contributes no new spend.
-            {"run_id": "graph-3", "created_at": "2026-08-09T02:00:00Z", "plan_digest": "plan", "nodes": [{"node_id": "FR-1", "feature_run_id": "graph-3-FR-1", "reused_from_attempt": "graph-2"}]},
+            {"run_id": "graph-3", "created_at": "2026-08-09T02:00:00Z", "plan_digest": "plan", "predecessor_attempt_id": "graph-2", "nodes": [{"node_id": "FR-1", "feature_run_id": "graph-3-FR-1", "reused_from_attempt": "graph-2"}]},
         ]}
         details = {"try-1": {"metrics": metrics(100, wall=20, busy=8)}, "try-2": {"metrics": metrics(40, wall=None, busy=9)}}
 

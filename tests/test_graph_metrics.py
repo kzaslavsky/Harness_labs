@@ -450,12 +450,11 @@ class ReusedNodeReasonTests(unittest.TestCase):
         self.assertIn("reused", row["detail"]["reason"])
         self.assertNotIn("unverified", row["detail"]["reason"])
 
-    def test_reused_node_row_shows_lineage_cumulative_metrics_not_a_blank(self) -> None:
-        """A reused node's per-node row reports the producing tries' cumulative
-        metrics (tokens/cost/wall) with reuse provenance, while the graph's
-        attempt-scoped totals still exclude that usage; the planned-but-never-
-        executed feature_run_id of the reusing attempt must not poison the
-        lineage merge as a phantom try."""
+    def test_reused_node_row_shows_ancestor_cumulative_metrics_not_a_blank(self) -> None:
+        """A reused node's row keeps this-attempt totals honestly null (with
+        the reuse reason) while its ``cumulative`` block reports the true
+        ancestor tries that produced the sealed candidate; the graph totals
+        still exclude that usage and the campaign union carries it."""
         predecessor = {
             "run_id": "graph-0", "status": "blocked", "created_at": "2026-08-08T00:00:00Z",
             "plan_digest": "p", "logical_graph_id": "graph-0",
@@ -464,6 +463,7 @@ class ReusedNodeReasonTests(unittest.TestCase):
         successor = {
             "run_id": "graph-1", "status": "succeeded", "created_at": "2026-08-09T00:00:00Z",
             "plan_digest": "p", "logical_graph_id": "graph-0",
+            "predecessor_attempt_id": "graph-0",
             "nodes": [
                 _node(
                     "A", "graph-1-A", status="succeeded",
@@ -480,15 +480,84 @@ class ReusedNodeReasonTests(unittest.TestCase):
         }
         result = graph_metrics.compute_graph_metrics(successor, catalog, node_details)
         row = result["nodes"][0]
-        self.assertEqual(row["detail"]["state"], "available")
+        # This attempt executed nothing for the node: attempt cells are null with the reuse reason.
+        self.assertEqual(row["detail"]["state"], "unavailable")
         self.assertIn("reused", row["detail"]["reason"])
-        self.assertEqual(row["totals"]["total_tokens"], 15)
-        self.assertAlmostEqual(row["totals"]["cost"]["usd"], 0.10)
-        self.assertEqual(row["tries"], 1)
+        self.assertIsNone(row["totals"])
+        self.assertEqual(row["tries"], 0)
+        # The cumulative block carries the true-ancestor usage with provenance.
+        self.assertEqual(row["cumulative"]["totals"]["total_tokens"], 15)
+        self.assertAlmostEqual(row["cumulative"]["totals"]["cost"]["usd"], 0.10)
+        self.assertEqual(row["cumulative"]["tries"], 1)
+        self.assertIn("ancestor", row["cumulative"]["reason"])
         # The attempt-scoped graph totals still exclude the reused usage.
         self.assertEqual(result["totals"]["tokens"]["state"], "unavailable")
-        # The lineage block carries it instead.
+        # The campaign union (recorded chain) carries it exactly once.
         self.assertEqual(result["lineage_totals"]["tokens"]["total_tokens"], 15)
+
+    def test_same_digest_sibling_registration_is_never_folded_in(self) -> None:
+        """Two independently registered graphs sharing a plan digest must not
+        see each other's usage anywhere: not in node rows, not in cumulative
+        blocks, not in the campaign union (the attempt-3 +58.9% over-count)."""
+        sibling = {
+            "run_id": "graph-a", "status": "blocked", "created_at": "2026-08-08T00:00:00Z",
+            "plan_digest": "p", "logical_graph_id": "graph-a",
+            "nodes": [_node("A", "graph-a-A", status="blocked")],
+        }
+        independent = {
+            "run_id": "graph-b", "status": "succeeded", "created_at": "2026-08-09T00:00:00Z",
+            "plan_digest": "p", "logical_graph_id": "graph-b",
+            "nodes": [_node("A", "graph-b-A", status="succeeded")],
+        }
+        catalog = {
+            "plan_graphs": [sibling, independent],
+            "feature_runs": [_correlated("graph-a-A", "graph-a", "A"), _correlated("graph-b-A", "graph-b", "A")],
+        }
+        node_details = {
+            "graph-a-A": _metrics(input_tokens=1000, output_tokens=100, calls=5, wall_ms=900, busy_ms=800, peak=100, cost_usd=9.0, usage_records=5),
+            "graph-b-A": _metrics(input_tokens=10, output_tokens=5, calls=1, wall_ms=100, busy_ms=90, peak=15, cost_usd=0.10, usage_records=1),
+        }
+        result = graph_metrics.compute_graph_metrics(independent, catalog, node_details)
+        row = result["nodes"][0]
+        self.assertEqual(row["totals"]["total_tokens"], 15)
+        self.assertEqual(row["cumulative"]["totals"]["total_tokens"], 15)
+        self.assertEqual(row["cumulative"]["tries"], 1)
+        self.assertEqual(result["totals"]["tokens"]["total_tokens"], 15)
+        self.assertEqual(result["lineage_totals"]["tokens"]["total_tokens"], 15)
+        self.assertEqual(result["retries"]["graph_attempts"], 1)
+
+    def test_cross_attempt_cumulative_never_sums_wall_clock(self) -> None:
+        """A node retried across two chained attempts reports cumulative
+        tokens/cost but a null wall (non-additive across attempts), so a
+        node row can never exceed its own graph's wall clock."""
+        first = {
+            "run_id": "graph-1", "status": "failed", "created_at": "2026-08-08T00:00:00Z",
+            "plan_digest": "p", "logical_graph_id": "graph-1",
+            "nodes": [_node("A", "graph-1-A", status="failed")],
+        }
+        second = {
+            "run_id": "graph-2", "status": "succeeded", "created_at": "2026-08-09T00:00:00Z",
+            "plan_digest": "p", "logical_graph_id": "graph-1",
+            "predecessor_attempt_id": "graph-1",
+            "nodes": [_node("A", "graph-2-A", status="succeeded")],
+        }
+        catalog = {
+            "plan_graphs": [first, second],
+            "feature_runs": [_correlated("graph-1-A", "graph-1", "A"), _correlated("graph-2-A", "graph-2", "A")],
+        }
+        node_details = {
+            "graph-1-A": _metrics(input_tokens=100, output_tokens=10, calls=2, wall_ms=5000, busy_ms=4000, peak=50, cost_usd=1.0, usage_records=2),
+            "graph-2-A": _metrics(input_tokens=10, output_tokens=5, calls=1, wall_ms=100, busy_ms=90, peak=15, cost_usd=0.10, usage_records=1),
+        }
+        result = graph_metrics.compute_graph_metrics(second, catalog, node_details)
+        row = result["nodes"][0]
+        # Attempt cells: this attempt's own run only.
+        self.assertEqual(row["totals"]["total_tokens"], 15)
+        self.assertEqual(row["totals"]["wall_clock_ms"], 100)
+        # Cumulative cells: tokens/cost sum across the chain; wall does not.
+        self.assertEqual(row["cumulative"]["totals"]["total_tokens"], 125)
+        self.assertIsNone(row["cumulative"]["totals"]["wall_clock_ms"])
+        self.assertEqual(row["cumulative"]["attempts"], 2)
 
 
 class BlockersPopulationTests(unittest.TestCase):
