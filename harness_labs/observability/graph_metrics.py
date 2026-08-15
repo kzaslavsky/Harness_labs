@@ -370,10 +370,14 @@ def compute_graph_metrics(
     wall_block = _graph_wall_clock(status, own_summary)
     started_at = graph.get("created_at") if isinstance(graph.get("created_at"), str) else None
 
-    if totals["agent_busy_ms"]["state"] == "available" and wall_block["state"] == "available" and wall_block["value"]:
-        parallelism = _metric("available", round(totals["agent_busy_ms"]["value"] / wall_block["value"], 3))
+    if totals["agent_busy_ms"]["state"] in ("available", "partial") and wall_block["state"] == "available" and wall_block["value"]:
+        ratio = round(totals["agent_busy_ms"]["value"] / wall_block["value"], 3)
+        if totals["agent_busy_ms"]["state"] == "partial":
+            parallelism = _metric("partial", ratio, "lower bound: derived from a lower-bound agent-busy time")
+        else:
+            parallelism = _metric("available", ratio)
     else:
-        missing = [name for name, block in (("agent-busy time", totals["agent_busy_ms"]), ("graph wall time", wall_block)) if block["state"] != "available"]
+        missing = [name for name, block in (("agent-busy time", totals["agent_busy_ms"]), ("graph wall time", wall_block)) if block["state"] not in ("available", "partial")]
         parallelism = _metric("unavailable", None, f"parallelism requires {' and '.join(missing)}")
 
     execution = graph.get("execution") if isinstance(graph.get("execution"), Mapping) else {}
@@ -531,11 +535,16 @@ def _aggregate_totals(rows: list[Mapping[str, Any]], population: int) -> dict[st
         else:
             cost = {"state": "available", "usd": round(sum(float(item.get("usd") or 0) for item in reporting), 6), "reason": None}
 
-    busy_values = [row["totals"].get("busy_ms") for row in rows]
-    if rows and len(rows) == population and all(isinstance(value, int) for value in busy_values):
+    busy_values = [value for value in (row["totals"].get("busy_ms") for row in rows) if isinstance(value, int)]
+    if busy_values and len(busy_values) == population:
         busy = _metric("available", sum(busy_values))
+    elif busy_values:
+        # Same lower-bound policy as tokens/calls/cost: the reporting subset
+        # sums to a verified minimum; a node with no busy timing cannot
+        # subtract from a sum.
+        busy = _metric("partial", sum(busy_values), f"lower bound: {len(busy_values)} of {population} FeatureRun(s) report verified busy timing")
     else:
-        busy = _metric("unavailable", None, "agent-busy time is unavailable: one or more FeatureRuns lack verified busy timing")
+        busy = _metric("unavailable", None, "agent-busy time is unavailable: no FeatureRun reports verified busy timing")
 
     peaks = [row["totals"].get("peak_input_tokens") for row in rows if isinstance(row.get("totals", {}).get("peak_input_tokens"), int)]
     if rows and len(peaks) == population:

@@ -525,7 +525,7 @@ def _data_quality(own_summary: Mapping[str, Any] | None, metrics: Mapping[str, A
 
 
 def _completeness_grade(summary_missing: bool, token_state: str, cost_state: str, busy_state: str) -> str:
-    signals = (not summary_missing, token_state in ("available", "partial"), cost_state in ("available", "estimated", "partial"), busy_state == "available")
+    signals = (not summary_missing, token_state in ("available", "partial"), cost_state in ("available", "estimated", "partial"), busy_state in ("available", "partial"))
     covered = sum(1 for signal in signals if signal)
     if covered == len(signals):
         return "complete"

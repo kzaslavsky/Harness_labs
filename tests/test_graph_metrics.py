@@ -303,7 +303,9 @@ class ComputeGraphMetricsDegradeTests(unittest.TestCase):
         self.assertEqual(totals["calls"]["value"], 3)
 
         # Any missing busy degrades agent-busy to unavailable (no partial state for busy).
-        self.assertEqual(totals["agent_busy_ms"], {"state": "unavailable", "value": None, "reason": "agent-busy time is unavailable: one or more FeatureRuns lack verified busy timing"})
+        # Busy shares the lower-bound policy: the reporting subset sums to a
+        # verified minimum instead of blanking the aggregate.
+        self.assertEqual(totals["agent_busy_ms"], {"state": "partial", "value": 90 + 70, "reason": "lower bound: 2 of 4 FeatureRun(s) report verified busy timing"})
 
         # A mixed peak population yields the partial lower-bound state.
         self.assertEqual(totals["peak_input_tokens"]["state"], "partial")
