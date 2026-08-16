@@ -450,6 +450,13 @@ TRANSIENT_RECOVERY_SIGNATURES: tuple[str, ...] = (
     # takes the specific-reason path instead, so this generic form is
     # treated as transient; recovery_limit still bounds the retries.
     "dispatcher ended with status",
+    # Local DNS/network resolution failure reaching the backend API
+    # (observed live: codex websocket connect to chatgpt.com failing with
+    # "failed to lookup address information: nodename nor servname
+    # provided, or not known") -- a transient host/network condition
+    # unrelated to the worker's actual task, not a content-level failure.
+    "failed to lookup address information",
+    "failed to connect to websocket",
 )
 
 
