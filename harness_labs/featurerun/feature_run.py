@@ -36,6 +36,11 @@ from harness_labs.core.git_transaction import (
     workspace_snapshot,
 )
 from harness_labs.core.test_output import failing_identifiers
+from harness_labs.core.verification_images import (
+    FAILURE_IMAGE_CONTEXT_KEY,
+    capture_failure_images,
+    pytest_basetemp_argv,
+)
 from harness_labs.featurerun.review_fix import (
     ReviewFixExecutorFactory,
     ReviewFixLoop,
@@ -2096,6 +2101,7 @@ def _verify_with_recovery(
     awaiting_repair_delta = False
     runner = AttemptRunner()
     actor = AuditActor("verification-owner", "verification_owner")
+    basetemp = _verification_basetemp(audit, stage)
 
     # Two environment-only retries are separate from the bounded repair budget.
     for ordinal in range(1, repair_limit + 4):
@@ -2105,6 +2111,7 @@ def _verify_with_recovery(
             timeout_seconds,
             ordinal,
             stage,
+            basetemp=basetemp,
         )
         artifact = evidence.add(
             kind="deterministic-verification-output",
@@ -2119,6 +2126,12 @@ def _verify_with_recovery(
         }
         if command["exit_code"] != 0:
             recorded["failure"] = classify_verification_failure(command)
+            _attach_failure_images(
+                recorded,
+                command=command,
+                basetemp=basetemp,
+                evidence=evidence,
+            )
         command_attempts.append(recorded)
         audit.append(
             "deterministic_verification_completed",
@@ -2442,6 +2455,7 @@ def _verify_gates_with_recovery(
     awaiting_repair_delta: dict[str, bool] = {}
     runner = AttemptRunner()
     actor = AuditActor("verification-owner", "verification_owner")
+    basetemp = _verification_basetemp(audit, stage)
 
     gate_index = 0
     for full_attempt in range(1, repair_limit + 4):
@@ -2454,6 +2468,7 @@ def _verify_gates_with_recovery(
                 gate.timeout_seconds,
                 ordinal,
                 stage,
+                basetemp=basetemp,
             )
             artifact = evidence.add(
                 kind="deterministic-verification-output",
@@ -2469,6 +2484,12 @@ def _verify_gates_with_recovery(
             }
             if command["exit_code"] != 0:
                 recorded["failure"] = classify_verification_failure(command)
+                _attach_failure_images(
+                    recorded,
+                    command=command,
+                    basetemp=basetemp,
+                    evidence=evidence,
+                )
             command_attempts.append(recorded)
             audit.append(
                 "deterministic_verification_completed",
@@ -2768,11 +2789,16 @@ def _run_verification_command(
     timeout_seconds: float | None,
     ordinal: int,
     stage: str,
+    basetemp: Path | None = None,
 ) -> dict[str, object]:
+    # ``executed_argv`` may carry a controller-owned ``--basetemp`` so a pytest
+    # run's images survive the process; ``argv`` below stays the declared
+    # command verbatim, because that is what a worker is told to re-run.
+    executed_argv = pytest_basetemp_argv(argv, basetemp)
     started = monotonic_ns()
     try:
         completed = subprocess.run(
-            argv,
+            executed_argv,
             cwd=worktree_path,
             text=True,
             capture_output=True,
@@ -2793,7 +2819,7 @@ def _run_verification_command(
         stdout = ""
         stderr = str(exc)
         timed_out = False
-    return {
+    command: dict[str, object] = {
         "stage": stage,
         "attempt": ordinal,
         "argv": list(argv),
@@ -2805,6 +2831,54 @@ def _run_verification_command(
         "duration_ms": (monotonic_ns() - started) // 1_000_000,
         "workspace": workspace_snapshot(worktree_path),
     }
+    if executed_argv != tuple(argv):
+        command["executed_argv"] = list(executed_argv)
+    return command
+
+
+def _verification_basetemp(audit: AuditJournal, stage: str) -> Path | None:
+    """Return the controller-owned temporary root for one verification stage.
+
+    Deliberately a sibling of the audit run's ``artifacts`` directory, never
+    inside it: the artifact inventory requires that directory to hold files
+    only. pytest clears this path at the start of each run, so it holds one
+    round's images at a time rather than accumulating.
+    """
+
+    run_dir = getattr(audit, "run_dir", None)
+    if run_dir is None:
+        return None
+    safe_stage = re.sub(r"[^A-Za-z0-9._-]", "-", stage).strip("-") or "stage"
+    basetemp = Path(run_dir) / "verification-tmp" / safe_stage
+    try:
+        basetemp.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return None
+    return basetemp
+
+
+def _attach_failure_images(
+    recorded: dict[str, object],
+    *,
+    command: Mapping[str, object],
+    basetemp: Path | None,
+    evidence: EvidenceCatalog,
+) -> None:
+    """Persist a failing run's images onto the recorded command, if any exist.
+
+    ``recorded`` is what every repair context embeds as
+    ``failed_verification``, so writing the descriptors here is the single
+    point that reaches all four repair-dispatch sites.
+    """
+
+    descriptors = capture_failure_images(
+        command=command,
+        basetemp=basetemp,
+        evidence=evidence,
+        producer_task_id="verification-owner",
+    )
+    if descriptors:
+        recorded[FAILURE_IMAGE_CONTEXT_KEY] = [dict(item) for item in descriptors]
 
 
 def _combine_verification_results(

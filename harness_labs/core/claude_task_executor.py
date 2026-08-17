@@ -52,6 +52,7 @@ from harness_labs.core.git_transaction import (
     workspace_snapshot,
 )
 from harness_labs.core.usage import ModelPrice, parse_claude_result_usage, usage_payload
+from harness_labs.core.verification_images import attached_image_paths
 
 
 _READ_ONLY_TOOLS = "Read,Glob,Grep"
@@ -234,7 +235,19 @@ class ClaudeSemanticTaskExecutor:
                 media_type="application/json",
                 producer_task_id=str(self.task["id"]),
             )
-        prompt = _worker_prompt(self.task, context, self.role_instructions)
+        # The Claude CLI is driven here with a plain-text prompt on stdin, so
+        # the images reach the model through its own file-reading tool (which
+        # renders an image into context) rather than as inline content blocks;
+        # switching stdin to the stream-json content-block protocol would
+        # change the transport for every task, not just repair rounds.
+        image_paths = attached_image_paths(context)
+        prompt = _worker_prompt(
+            self.task,
+            context,
+            self.role_instructions,
+            image_paths,
+            images_attached=False,
+        )
 
         argv = [
             claude,
