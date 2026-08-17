@@ -5,6 +5,8 @@ Status: active
 ## Current direction
 
 - Contract-burden reduction (living): [`contract-burden-reduction.md`](contract-burden-reduction.md)
+- Self-improvement agent (draft plan):
+  [`self-improvement-agent-plan.md`](self-improvement-agent-plan.md)
 
 - Next milestone: [`NEXT_STEPS.md`](NEXT_STEPS.md)
 - Harness contract: [`../architecture/harness-contract.md`](../architecture/harness-contract.md)
