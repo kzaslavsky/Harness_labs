@@ -24,7 +24,8 @@ but even a perfectly per-node-aware driver is refused by the library today.
 The driver this was diagnosed against is the Retinology Flow-Editor
 campaign's autoresume loop, which is campaign-specific and deliberately not
 merged here (patch P7 of `HARNESS_LABS_PATCH_AUDIT_20260818.md`; a
-parameterized `scripts/plan_graph_autoresume.py` is the named follow-up). Its
+parameterized `scripts/plan_graph_autoresume.py` has since been written and is
+the merged replacement). Its
 shape is what matters: it blocks on a quiescence wait (no campaign-runner
 process alive) and then picks a predecessor from the latest *finalized*
 attempt, which requires `manifest.json`'s `status` to be `failed`/`blocked`.
@@ -235,6 +236,14 @@ it always has. That is a pre-existing gap in the artifact contract, and fixing
 it is a decision about the contract rather than a side effect of shipping this
 feature. `test_escalation_retry_frontier_is_unchanged_by_default` pins the
 current behaviour so the gap is recorded rather than merely tolerated.
+
+`scripts/plan_graph_autoresume.py` closes the gap on the consumer side without
+touching the contract: it reconciles the template against the attempt's own
+`plan_node_failed` events, filtered by each node's final status in the
+escalation, and retries the union. The template still supplies the order, so
+the primary blocker stays first; a node the template omitted is appended and
+the discrepancy is logged and counted, so an operator sees that the published
+frontier and the audit trail disagreed rather than only seeing the repair.
 
 ### Correctness risks of Phase 1
 
