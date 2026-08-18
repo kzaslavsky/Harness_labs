@@ -383,6 +383,10 @@ class RecoveryContext:
     workspace: Mapping[str, object]
     prior_decisions: tuple[Mapping[str, object], ...]
     plan_adjustments: tuple[Mapping[str, object], ...]
+    # Stage-local evidence the agent needs to judge whether continuing is
+    # worth its cost -- e.g. for "review": cycles spent, the cycle limit, the
+    # still-open finding keys, and the per-cycle yields already observed.
+    stage_detail: Mapping[str, object] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -618,6 +622,29 @@ class FeatureRunResult:
                 candidate = receipt.get("candidate_commit")
                 return candidate if isinstance(candidate, str) else None
         return None
+
+    def outcome_evidence(self) -> dict[str, object]:
+        """Build the canonical PlanGraph outcome evidence for this run.
+
+        One source of truth for what a launcher must hand back to the graph:
+        the verification facts the retry-budget ledger accounts against, and
+        the review-fix record the graph reads transferred findings and — for a
+        blocked node — still-open findings out of.  A launcher that omits the
+        review-fix half silently drops both.
+        """
+
+        evidence: dict[str, object] = {}
+        if self.verification is not None:
+            evidence["verification"] = {
+                "command_attempts": list(self.verification.command_attempts),
+                "repair_invocation_ids": list(
+                    self.verification.repair_invocation_ids
+                ),
+                "repair_invocations": list(self.verification.repair_invocations),
+            }
+        if self.review_fix is not None:
+            evidence["review_fix"] = self.review_fix.as_dict()
+        return evidence
 
     @property
     def canonical_manifest_ref(self) -> str:
@@ -947,7 +974,7 @@ def run_feature_worktree(
             assert review_fix_executor_factory is not None
             snapshot = workspace_snapshot(transaction.worktree_path)
             pre_review_workspace = snapshot
-            review_fix_result = ReviewFixLoop(
+            review_loop = ReviewFixLoop(
                 run_id=contract.run_id,
                 objective=contract.objective,
                 acceptance_criteria=contract.criteria,
@@ -962,7 +989,8 @@ def run_feature_worktree(
                 finding_transfer_targets=review_finding_transfer_targets or {},
                 origin_node_id=review_origin_node_id,
                 inherited_ledger_frozen=review_inherited_ledger_frozen,
-            ).run()
+            )
+            review_fix_result = review_loop.run()
             _remember_review_transfers(
                 review_transfers, review_fix_result.transferred_findings
             )
@@ -978,9 +1006,19 @@ def run_feature_worktree(
                     stage="review",
                     condition=status,
                     reason=review_fix_result.reason,
+                    detail=_review_stage_detail(review_loop, review_fix_result),
                 ):
                     break
-                review_fix_result = ReviewFixLoop(
+                # Continue the same ledger rather than restarting discovery:
+                # the recovered loop resumes after the cycle that stopped and
+                # spends an explicit additional cycle grant on findings whose
+                # identity, fix attempts, and dispositions all carry over.
+                # Only a ledger the loop never produced (a loop that raised
+                # before its first checkpoint) forces a cold restart.
+                resumed = (
+                    review_loop.ledger if review_fix_result.cycles >= 1 else None
+                )
+                review_loop = ReviewFixLoop(
                     run_id=contract.run_id,
                     objective=contract.objective,
                     acceptance_criteria=contract.criteria,
@@ -992,14 +1030,30 @@ def run_feature_worktree(
                     evidence=evidence,
                     audit=audit,
                     policy=review_fix_policy,
-                    inherited_findings=review_finding_obligations,
-                    retained_transfers=tuple(
-                        review_transfers[key] for key in sorted(review_transfers)
+                    inherited_findings=(
+                        () if resumed is not None else review_finding_obligations
+                    ),
+                    retained_transfers=(
+                        ()
+                        if resumed is not None
+                        else tuple(
+                            review_transfers[key] for key in sorted(review_transfers)
+                        )
                     ),
                     finding_transfer_targets=review_finding_transfer_targets or {},
                     origin_node_id=review_origin_node_id,
                     inherited_ledger_frozen=review_inherited_ledger_frozen,
-                ).run()
+                    resumed_ledger=resumed,
+                    resume_from_cycle=(
+                        review_fix_result.cycles if resumed is not None else 0
+                    ),
+                    additional_cycles=(
+                        review_fix_policy.continuation_cycles
+                        if resumed is not None
+                        else 0
+                    ),
+                )
+                review_fix_result = review_loop.run()
                 _remember_review_transfers(
                     review_transfers, review_fix_result.transferred_findings
                 )
@@ -1190,6 +1244,51 @@ def run_feature_worktree(
     )
 
 
+def _review_stage_detail(
+    loop: ReviewFixLoop,
+    result: ReviewFixResult,
+) -> Mapping[str, object]:
+    """Summarize a stopped review loop for the recovery agent.
+
+    Carries the loop's own ``stop_reason`` verdict -- the field the default
+    policy decides on -- plus the cycle history and open findings an agent
+    with a different policy would need to decide for itself.
+    """
+
+    ledger = loop.ledger
+    cycles = list(ledger.cycles) if ledger is not None else []
+    return {
+        "protocol": "review-stage-detail/1",
+        "status": result.status,
+        "reason": result.reason,
+        "stop_reason": result.stop_reason,
+        "risk_tier": result.risk_tier,
+        "cycles_spent": result.cycles,
+        "cycle_limit": loop.cycle_budget(result.risk_tier),
+        "continuation_cycles_granted": loop.additional_cycles,
+        "resumed_from_cycle": loop.resume_from_cycle,
+        "open_finding_keys": list(result.open_finding_keys),
+        "open_required_finding_keys": (
+            list(ledger.open_required()) if ledger is not None else []
+        ),
+        "technical_debt_keys": list(result.technical_debt_keys),
+        "cycle_history": [
+            {
+                "cycle": entry.get("cycle"),
+                "yield": entry.get("yield"),
+                "addressed_finding_keys": list(
+                    entry.get("addressed_finding_keys", ())
+                ),
+                "verified_finding_keys": list(entry.get("verified_finding_keys", ())),
+            }
+            for entry in cycles
+        ],
+        "findings_discharged": sum(
+            len(entry.get("verified_finding_keys", ())) for entry in cycles
+        ),
+    }
+
+
 def _remember_review_transfers(
     retained: dict[str, Mapping[str, object]],
     transfers: tuple[Mapping[str, object], ...],
@@ -1287,6 +1386,26 @@ def run_plan_graph_feature_worktree(
         raise ValueError(
             "PlanGraph-bound FeatureRun requires normal verification recovery"
         )
+    if "recovery_agent" not in feature_run_options:
+        # Without an agent every `_recover_abnormal` call site is inert, so a
+        # review loop that exhausts its cycles blocks the node and the next
+        # graph attempt re-runs implementation and verification from scratch.
+        # Bind the composed default; a launcher may pass its own agent, or
+        # `recovery_agent=None` to keep the old block-immediately behaviour.
+        #
+        # It must be the *composed* agent, not the continuation policy alone.
+        # `run_feature_worktree`'s own default is deterministic_recovery_agent
+        # (transient retry), and binding the continuation policy here would
+        # silently take that away from every PlanGraph campaign that does not
+        # pass an agent explicitly -- an infrastructure blip that costs a
+        # bounded retry today would instead block the node and burn a whole
+        # graph attempt. The two policies cover disjoint conditions; the
+        # PlanGraph path needs both.
+        from harness_labs.featurerun.feature_run_policy import (
+            standard_composed_recovery_agent,
+        )
+
+        feature_run_options["recovery_agent"] = standard_composed_recovery_agent()
     if binding.is_child_lane:
         supplied_branch = feature_run_options.get("feature_branch")
         if supplied_branch != binding.lane_branch:
@@ -1444,11 +1563,13 @@ def _recover_abnormal(
     stage: str,
     condition: RecoveryCondition,
     reason: str,
+    detail: Mapping[str, object] | None = None,
 ) -> bool:
     """Ask for one bounded recovery decision and record the disposition."""
 
     if agent is None:
         return False
+    stage_detail = dict(detail or {})
     attempt = len(recovery.decisions) + 1
     workspace = _safe_workspace_snapshot(worktree_path)
     checkpoint = audit.merge_checkpoint(
@@ -1461,6 +1582,7 @@ def _recover_abnormal(
                 "attempt": attempt,
                 "decisions": list(recovery.decisions),
                 "workspace": workspace,
+                "stage_detail": stage_detail,
             }
         },
     )
@@ -1510,6 +1632,7 @@ def _recover_abnormal(
         allowed_paths=allowed_paths,
         workspace=workspace,
         prior_decisions=tuple(recovery.decisions),
+        stage_detail=stage_detail,
         plan_adjustments=tuple(
             item["plan_adjustment"]
             for item in recovery.decisions

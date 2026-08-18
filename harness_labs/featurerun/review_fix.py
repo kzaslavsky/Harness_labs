@@ -60,6 +60,7 @@ class ReviewFixPolicy:
     sensitive_cycle_limit: int = 5
     minimum_yield: float = 0.10
     low_yield_cycles: int = 2
+    continuation_cycles: int = 2
 
     def __post_init__(self) -> None:
         if not 0 <= self.note_score_threshold <= self.fix_score_threshold <= 100:
@@ -72,6 +73,8 @@ class ReviewFixPolicy:
             raise ValueError("minimum_yield must be between zero and one")
         if self.low_yield_cycles < 1:
             raise ValueError("low_yield_cycles must be positive")
+        if self.continuation_cycles < 1:
+            raise ValueError("continuation_cycles must be positive")
 
 
 @dataclass(frozen=True)
@@ -84,6 +87,13 @@ class ReviewFixResult:
     open_finding_keys: tuple[str, ...]
     technical_debt_keys: tuple[str, ...]
     transferred_findings: tuple[Mapping[str, Any], ...] = ()
+    open_findings: tuple[Mapping[str, Any], ...] = ()
+    # Stable code for *why* the loop stopped, so a caller deciding whether to
+    # grant a continuation reads the loop's own verdict instead of re-deriving
+    # futility from the free-text reason.  "cycle_limit" is budget exhaustion
+    # and is the only continuable stop; "no_progress" and "marginal_yield" are
+    # the loop's own futility detectors firing.
+    stop_reason: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -98,6 +108,8 @@ class ReviewFixResult:
             "transferred_findings": [
                 dict(item) for item in self.transferred_findings
             ],
+            "open_findings": [dict(item) for item in self.open_findings],
+            "stop_reason": self.stop_reason,
         }
 
 
@@ -384,6 +396,15 @@ class ReviewLedger:
             if item["outcome"] in {"open", "pending_review"}
         )
 
+    def open_records(self) -> tuple[Mapping[str, Any], ...]:
+        """Return full records for still-open findings with identity intact.
+
+        A blocked review exports these so a successor launch inherits the
+        findings it must discharge instead of rediscovering them from zero.
+        """
+
+        return tuple(dict(self.findings[key]) for key in self.open_all())
+
     def apply_debt_sink(self) -> None:
         for item in self.findings.values():
             if item["outcome"] not in {"open", "pending_review"}:
@@ -491,6 +512,9 @@ class ReviewFixLoop:
         finding_transfer_targets: Mapping[str, str] | None = None,
         origin_node_id: str = "",
         inherited_ledger_frozen: bool = False,
+        resumed_ledger: "ReviewLedger | None" = None,
+        resume_from_cycle: int = 0,
+        additional_cycles: int = 0,
     ) -> None:
         self.run_id = run_id
         self.objective = objective
@@ -506,24 +530,84 @@ class ReviewFixLoop:
         self.finding_transfer_targets = dict(finding_transfer_targets or {})
         self.origin_node_id = origin_node_id or run_id
         self.inherited_ledger_frozen = inherited_ledger_frozen
+        if resumed_ledger is None:
+            if resume_from_cycle or additional_cycles:
+                raise ValueError(
+                    "review continuation requires the predecessor ledger"
+                )
+        elif resume_from_cycle < 1:
+            raise ValueError(
+                "review continuation must resume after a completed cycle"
+            )
+        elif additional_cycles < 1:
+            raise ValueError("review continuation must grant a positive cycle budget")
+        elif inherited_findings or retained_transfers:
+            # The resumed ledger already carries both, and re-seeding would
+            # collide on their keys.
+            raise ValueError(
+                "review continuation cannot re-seed a ledger it inherits whole"
+            )
+        self.resumed_ledger = resumed_ledger
+        self.resume_from_cycle = resume_from_cycle
+        self.additional_cycles = additional_cycles
+        # The live ledger, published so a caller that recovers this loop can
+        # continue it rather than restart discovery.
+        self.ledger: ReviewLedger | None = resumed_ledger
         self.runner = AttemptRunner()
 
-    def run(self) -> ReviewFixResult:
-        risk_tier = _risk_tier(self.changed_paths, self.policy)
-        ledger = ReviewLedger(self.policy, risk_tier, allowed_paths=self.allowed_paths)
-        ledger.seed_transferred(self.inherited_findings)
-        ledger.seed_retained_transfers(self.retained_transfers)
-        if self.inherited_ledger_frozen:
-            ledger.freeze_discovery()
-        if not self.policy.enabled:
-            return self._finish(ledger, "succeeded", "review-fix loop disabled", 0)
-        cycle_limit = (
+    def cycle_budget(self, risk_tier: str) -> int:
+        """Highest cycle ordinal this loop may reach, continuations included.
+
+        ``cycle`` counts *cumulatively* across a continuation chain: a
+        continuation starts at its predecessor's total (``resume_from_cycle``)
+        rather than at zero, so the ceiling has to be relative to where it
+        resumes.  Computing it as ``base + additional_cycles`` was correct only
+        for the first continuation, where ``resume_from_cycle`` happens to
+        equal ``base`` -- a continuation triggers on ``stop_reason ==
+        "cycle_limit"``, so its predecessor stopped exactly at its own ceiling.
+        A *second* consecutive continuation resumed at ``base + granted`` and
+        was handed the same ``base + granted`` as its limit, so it burned one
+        review call and stopped immediately on ``cycle_limit``.
+
+        Anchoring on ``max(base, resume_from_cycle)`` grants each continuation
+        its full ``continuation_cycles`` wherever it resumes, and leaves the
+        non-continuation case (``resume_from_cycle`` and ``additional_cycles``
+        both zero) at exactly ``base``.  How many continuations may be granted
+        at all is bounded separately, by ``recovery_limit``.
+        """
+
+        base = (
             self.policy.sensitive_cycle_limit
             if risk_tier == "sensitive"
             else self.policy.mechanical_cycle_limit
         )
+        return max(base, self.resume_from_cycle) + self.additional_cycles
+
+    def run(self) -> ReviewFixResult:
+        if self.resumed_ledger is not None:
+            # Continue the predecessor's ledger: finding identity, cycle
+            # history, fix attempts, and dispositions all survive, so this
+            # continuation buys additional cycles against known findings
+            # instead of re-reviewing the same worktree from cycle one.
+            ledger = self.resumed_ledger
+            risk_tier = ledger.risk_tier
+        else:
+            risk_tier = _risk_tier(self.changed_paths, self.policy)
+            ledger = ReviewLedger(
+                self.policy, risk_tier, allowed_paths=self.allowed_paths
+            )
+            ledger.seed_transferred(self.inherited_findings)
+            ledger.seed_retained_transfers(self.retained_transfers)
+            if self.inherited_ledger_frozen:
+                ledger.freeze_discovery()
+        self.ledger = ledger
+        if not self.policy.enabled:
+            return self._finish(
+                ledger, "succeeded", "review-fix loop disabled", 0, "disabled"
+            )
+        cycle_limit = self.cycle_budget(risk_tier)
         low_yield_streak = 0
-        cycle = 0
+        cycle = self.resume_from_cycle
         try:
             while True:
                 cycle += 1
@@ -570,11 +654,16 @@ class ReviewFixLoop:
                             "blocked",
                             "required findings remain open",
                             cycle,
+                            "required_findings_open",
                         )
-                    return self._finish(ledger, "succeeded", "review cleared", cycle)
+                    return self._finish(
+                        ledger, "succeeded", "review cleared", cycle, "cleared"
+                    )
 
                 if self.policy.cycle_limit_enabled and cycle >= cycle_limit:
-                    return self._limit_exit(ledger, cycle, "cycle limit reached")
+                    return self._limit_exit(
+                        ledger, cycle, "cycle limit reached", "cycle_limit"
+                    )
 
                 try:
                     fix = self._execute("fix", cycle, ledger, fix_keys=fix_keys)
@@ -610,7 +699,9 @@ class ReviewFixLoop:
                         "review_fix_no_progress",
                         {"cycle": cycle, "fix_keys": fix_keys},
                     )
-                    return self._limit_exit(ledger, cycle, "fixer made no progress")
+                    return self._limit_exit(
+                        ledger, cycle, "fixer made no progress", "no_progress"
+                    )
 
                 verified = addressed
                 verify_attempt_id = None
@@ -650,12 +741,14 @@ class ReviewFixLoop:
                             "blocked",
                             "required findings remain open",
                             cycle,
+                            "required_findings_open",
                         )
                     return self._finish(
                         ledger,
                         "succeeded",
                         "verified fixes accepted without regression re-review",
                         cycle,
+                        "cleared",
                     )
                 low_yield_streak = (
                     low_yield_streak + 1
@@ -670,6 +763,7 @@ class ReviewFixLoop:
                         ledger,
                         cycle,
                         "marginal yield stop",
+                        "marginal_yield",
                     )
         except InterruptedError as exc:
             self.audit.append(
@@ -683,6 +777,7 @@ class ReviewFixLoop:
                 "interrupted",
                 str(exc) or "review-fix interrupted",
                 cycle,
+                "interrupted",
             )
         except Exception as exc:
             self.audit.append(
@@ -691,7 +786,7 @@ class ReviewFixLoop:
                 payload={"error": str(exc), "cycle": cycle},
                 actor=AuditActor("review-fix-controller", "controller"),
             )
-            return self._finish(ledger, "failed", str(exc), cycle)
+            return self._finish(ledger, "failed", str(exc), cycle, "failed")
 
     def _execute(
         self,
@@ -802,13 +897,18 @@ class ReviewFixLoop:
         ledger: ReviewLedger,
         cycle: int,
         reason: str,
+        stop_reason: str,
     ) -> ReviewFixResult:
         if self.policy.technical_debt_sink_enabled:
             ledger.apply_debt_sink()
         if ledger.open_all():
-            return self._finish(ledger, "blocked", reason, cycle)
+            return self._finish(ledger, "blocked", reason, cycle, stop_reason)
         return self._finish(
-            ledger, "succeeded", f"{reason}; remaining items recorded as debt", cycle
+            ledger,
+            "succeeded",
+            f"{reason}; remaining items recorded as debt",
+            cycle,
+            stop_reason,
         )
 
     def _persist(
@@ -847,11 +947,17 @@ class ReviewFixLoop:
         status: str,
         reason: str,
         cycles: int,
+        stop_reason: str = "",
     ) -> ReviewFixResult:
         ledger_ref = self._persist(
             ledger,
             "review_fix_completed",
-            {"status": status, "reason": reason, "cycles": cycles},
+            {
+                "status": status,
+                "reason": reason,
+                "cycles": cycles,
+                "stop_reason": stop_reason,
+            },
         )
         debt = tuple(
             sorted(
@@ -869,6 +975,8 @@ class ReviewFixLoop:
             tuple(ledger.open_all()),
             debt,
             ledger.transferred(),
+            ledger.open_records(),
+            stop_reason,
         )
 
 

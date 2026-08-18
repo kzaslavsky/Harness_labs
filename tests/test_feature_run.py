@@ -22,6 +22,7 @@ from harness_labs.featurerun.feature_run import (
     FeatureRunHandoffArtifact,
     FeatureRunResult,
     PlanGraphFeatureRunBinding,
+    RecoveryContext,
     RecoveryDecision,
     ReviewFixPolicy,
     ReviewFixResult,
@@ -29,7 +30,12 @@ from harness_labs.featurerun.feature_run import (
     run_plan_graph_feature_worktree,
     classify_verification_failure,
 )
-from harness_labs.featurerun.feature_run_policy import standard_feature_run_dispatch_schema
+from harness_labs.featurerun.review_fix import ReviewFixLoop, ReviewLedger
+from harness_labs.featurerun.feature_run_policy import (
+    standard_feature_run_dispatch_schema,
+    standard_composed_recovery_agent,
+    standard_review_continuation_recovery_agent,
+)
 from harness_labs.core.coordinator_schema import (
     CoordinatorDispatchSchema,
     CoordinatorSegment,
@@ -213,6 +219,74 @@ class _FailOnceReviewFactory:
         return Executor()
 
 
+class _ContinuationReviewFactory:
+    """Review that exhausts a one-cycle limit, then clears once continued.
+
+    Stages are keyed off the cycle ordinal in the attempt id, so a loop that
+    restarted at cycle one instead of continuing would ask for a script that
+    was already consumed.
+    """
+
+    _FINDING = {
+        "id": "guard",
+        "statement": "The guard is missing.",
+        "category": "correctness",
+        "severity": "major",
+        "requires_disposition": True,
+        "file": "feature.txt",
+        "subject": "missing guard",
+        "score": 90,
+        "fix_cost": "local",
+        "protects": "acceptance criterion built",
+    }
+    KEY = "feature.txt:missing-guard"
+
+    def __init__(self) -> None:
+        self.attempt_ids: list[str] = []
+
+    def __call__(self, stage, attempt):
+        factory = self
+
+        class Executor:
+            def execute(self, current_attempt):
+                factory.attempt_ids.append(current_attempt.attempt_id)
+                cycle = int(
+                    current_attempt.attempt_id.split("/review-fix/c")[1].split("/")[0]
+                )
+                if stage == "review":
+                    findings = (
+                        (factory._FINDING,) if cycle in {1, 2} else ()
+                    )
+                    return TaskResult(
+                        current_attempt.attempt_id,
+                        "succeeded",
+                        semantic_payload(
+                            summary="Review complete.",
+                            details_schema="review-fix-review/1",
+                            details={},
+                            findings=findings,
+                        ),
+                    )
+                schema = f"review-fix-{stage}/1"
+                key = (
+                    "addressed_finding_keys"
+                    if stage == "fix"
+                    else "verified_finding_keys"
+                )
+                return TaskResult(
+                    current_attempt.attempt_id,
+                    "succeeded",
+                    semantic_payload(
+                        summary=f"{stage} complete.",
+                        details_schema=schema,
+                        details={key: [factory.KEY]},
+                        findings=(),
+                    ),
+                )
+
+        return Executor()
+
+
 _PLAN_SHA = hashlib.sha256(b"plan\n").hexdigest()
 
 
@@ -313,6 +387,34 @@ class FeatureRunTests(unittest.TestCase):
         self.assertIsNone(options["review_finding_transfer_targets"])
         self.assertEqual(options["review_origin_node_id"], "FR-01")
         self.assertFalse(options["review_inherited_ledger_frozen"])
+        # Every PlanGraph-bound run gets the default recovery agent; without
+        # one each `_recover_abnormal` call site is inert and an exhausted
+        # review loop blocks the node instead of continuing its ledger.
+        #
+        # It must be the *composed* agent. Binding the continuation policy
+        # alone here would silently drop transient retry -- which is
+        # run_feature_worktree's own default -- for every campaign that does
+        # not pass an agent explicitly, so an infrastructure blip would block
+        # the node instead of costing a bounded retry. Asserted by behaviour
+        # rather than identity, because the composition is what matters.
+        bound_agent = options["recovery_agent"]
+        self.assertIsNotNone(bound_agent)
+        self.assertEqual(
+            bound_agent(
+                _recovery_context(
+                    stage="implement",
+                    condition="failed",
+                    reason="terminal_reason aborted_streaming",
+                )
+            ).action,
+            "retry",
+            "the PlanGraph default must keep P1's transient retry",
+        )
+        self.assertEqual(
+            bound_agent(_recovery_context()).action,
+            "retry",
+            "the PlanGraph default must keep the review continuation",
+        )
         bound_instructions = options["schema"].segments[0].instructions
         self.assertIn(
             "Dispatch only implementation or implementation-repair tasks",
@@ -1198,6 +1300,67 @@ class FeatureRunTests(unittest.TestCase):
             self.assertEqual(recovery_events[0]["status"], "succeeded")
             AuditJournal.verify(root / "run")
 
+    def test_blocked_review_continues_its_ledger_without_reimplementing(self) -> None:
+        """The whole point of steps 1-2: an exhausted review continues.
+
+        The implementation and the ledger it was reviewed against are both
+        already paid for, so the continuation spends its grant on the open
+        finding rather than re-running implementation and rediscovering it.
+        """
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            review_factory = _ContinuationReviewFactory()
+            contexts = []
+
+            def recovery_agent(context):
+                contexts.append(context)
+                return standard_review_continuation_recovery_agent()(context)
+
+            result = self._run_verification_recovery_case(
+                root,
+                lambda worktree, attempt: _VerificationRepairExecutor(worktree, []),
+                recovery_agent=recovery_agent,
+                recovery_limit=2,
+                review_fix_executor_factory=review_factory,
+                review_fix_policy=ReviewFixPolicy(
+                    mechanical_cycle_limit=1, continuation_cycles=2
+                ),
+            )
+
+            self.assertEqual(result.status, "succeeded")
+            # One continuation was granted, on the review stage, after the
+            # cycle limit blocked a loop that had found real work.
+            self.assertEqual(len(contexts), 1)
+            self.assertEqual(contexts[0].stage, "review")
+            self.assertEqual(contexts[0].condition, "blocked")
+            self.assertEqual(
+                contexts[0].stage_detail["open_finding_keys"],
+                [_ContinuationReviewFactory.KEY],
+            )
+            self.assertEqual(contexts[0].stage_detail["cycles_spent"], 1)
+            # Cycle numbering continues across the grant -- a restart would
+            # have replayed c1 and collided on its attempt ids.
+            self.assertEqual(
+                review_factory.attempt_ids,
+                [
+                    "feature-verification-run/review-fix/c1/review",
+                    "feature-verification-run/review-fix/c2/review",
+                    "feature-verification-run/review-fix/c2/fix",
+                    "feature-verification-run/review-fix/c2/verify",
+                    "feature-verification-run/review-fix/c3/review",
+                ],
+            )
+            self.assertEqual(result.review_fix.cycles, 3)
+            self.assertEqual(result.review_fix.open_finding_keys, ())
+            # The candidate was committed, so the node seals instead of
+            # blocking and no successor attempt re-implements it.
+            self.assertEqual(
+                [receipt["operation"] for receipt in result.git_receipts],
+                ["create", "commit", "integrate"],
+            )
+            AuditJournal.verify(root / "run")
+
     def test_recovery_limit_stops_repeated_abnormal_outcomes(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -1279,9 +1442,21 @@ class FeatureRunTests(unittest.TestCase):
                 (), (), (transferred,),
             ),
             ReviewFixResult(
-                "succeeded", "review cleared", 1, "mechanical", "second-ledger",
+                "succeeded", "review cleared", 3, "mechanical", "second-ledger",
                 (), (), (),
             ),
+        )
+        # The controller reads these off the stopped loop to build the recovery
+        # agent's stage detail and to resume the ledger.
+        stopped_ledger = ReviewLedger(ReviewFixPolicy(), "mechanical")
+        review_loop.return_value.ledger = stopped_ledger
+        review_loop.return_value.policy = ReviewFixPolicy()
+        review_loop.return_value.additional_cycles = 0
+        review_loop.return_value.resume_from_cycle = 0
+        review_loop.return_value.cycle_budget = (
+            lambda risk_tier: ReviewFixLoop.cycle_budget(
+                review_loop.return_value, risk_tier
+            )
         )
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -1303,10 +1478,16 @@ class FeatureRunTests(unittest.TestCase):
             self.assertIsNotNone(result.review_fix)
             self.assertEqual(result.review_fix.transferred_findings, (transferred,))
             self.assertEqual(review_loop.call_count, 2)
+            # The replacement loop continues the stopped ledger, which already
+            # holds the transfer, instead of re-seeding it into a cold ledger.
+            recovered = review_loop.call_args_list[1].kwargs
+            self.assertIs(recovered["resumed_ledger"], stopped_ledger)
+            self.assertEqual(recovered["resume_from_cycle"], 1)
             self.assertEqual(
-                review_loop.call_args_list[1].kwargs["retained_transfers"],
-                (transferred,),
+                recovered["additional_cycles"], ReviewFixPolicy().continuation_cycles
             )
+            self.assertEqual(recovered["retained_transfers"], ())
+            self.assertEqual(recovered["inherited_findings"], ())
             AuditJournal.verify(root / "run")
 
     def test_interrupted_repair_raises_recovery_agent(self) -> None:
@@ -1590,6 +1771,132 @@ class DeterministicRecoveryAgentTests(unittest.TestCase):
             signature.parameters["recovery_agent"].default,
             deterministic_recovery_agent,
         )
+
+
+def _recovery_context(**overrides):
+    """A review-blocked-on-cycle-limit RecoveryContext, overridable."""
+
+    detail = {
+        "stop_reason": "cycle_limit",
+        "open_finding_keys": ["a.py:thing"],
+        "findings_discharged": 2,
+        "cycle_history": [{"cycle": 1, "addressed_finding_keys": ["a.py:thing"]}],
+    }
+    detail.update(overrides.pop("stage_detail", {}))
+    values = {
+        "run_id": "run",
+        "stage": "review",
+        "condition": "blocked",
+        "reason": "cycle limit reached",
+        "attempt": 1,
+        "checkpoint": {},
+        "objective": "Build it.",
+        "acceptance_criteria": (),
+        "worktree_path": "/tmp/worktree",
+        "allowed_paths": ("a.py",),
+        "workspace": {},
+        "prior_decisions": (),
+        "plan_adjustments": (),
+        "stage_detail": detail,
+    }
+    values.update(overrides)
+    return RecoveryContext(**values)
+
+
+class ComposedRecoveryAgentTests(unittest.TestCase):
+    """The platform default: continuation first, transient retry second.
+
+    The two policies cover disjoint conditions, so binding either one alone
+    silently gives up what the other handles. These pin both halves of the
+    composition and the order between them.
+    """
+
+    def setUp(self) -> None:
+        self.agent = standard_composed_recovery_agent()
+
+    def test_keeps_transient_retry_from_the_deterministic_policy(self) -> None:
+        for reason in (
+            "terminal_reason aborted_streaming",
+            "failed to lookup address information",
+            "backend process terminated",
+        ):
+            with self.subTest(reason=reason):
+                decision = self.agent(
+                    _recovery_context(
+                        stage="implement", condition="failed", reason=reason
+                    )
+                )
+                self.assertEqual(decision.action, "retry")
+
+    def test_continues_a_review_that_ran_out_of_cycles(self) -> None:
+        decision = self.agent(_recovery_context())
+        self.assertEqual(decision.action, "retry")
+        self.assertIn("exhausted its cycle budget", decision.reason)
+
+    def test_continuation_is_consulted_before_the_deterministic_stop(self) -> None:
+        """Order is the whole design: the deterministic agent classifies a
+        review block as a non-transient stop, so consulting it first would
+        make the continuation unreachable."""
+        from harness_labs.featurerun.feature_run import deterministic_recovery_agent
+
+        context = _recovery_context()
+        self.assertEqual(deterministic_recovery_agent(context).action, "stop")
+        self.assertEqual(self.agent(context).action, "retry")
+
+    def test_falls_through_to_deterministic_for_the_loops_own_futility(self) -> None:
+        for stop_reason in ("no_progress", "marginal_yield", "required_findings_open"):
+            with self.subTest(stop_reason=stop_reason):
+                decision = self.agent(
+                    _recovery_context(stage_detail={"stop_reason": stop_reason})
+                )
+                self.assertEqual(decision.action, "stop")
+
+    def test_stops_on_a_classified_non_transient_failure(self) -> None:
+        decision = self.agent(
+            _recovery_context(
+                stage="verification", condition="failed", reason="tests failed"
+            )
+        )
+        self.assertEqual(decision.action, "stop")
+
+
+class ReviewContinuationPolicyTests(unittest.TestCase):
+    """The default agent bound to every PlanGraph-bound FeatureRun."""
+
+    context = staticmethod(_recovery_context)
+
+    def setUp(self) -> None:
+        self.agent = standard_review_continuation_recovery_agent()
+
+    def test_continues_a_review_that_exhausted_its_cycle_budget(self) -> None:
+        decision = self.agent(self.context())
+        self.assertEqual(decision.action, "retry")
+        self.assertIn("exhausted its cycle budget", decision.reason)
+
+    def test_defers_to_the_loops_own_futility_verdict(self) -> None:
+        # The loop already measured that fixing was not paying off; buying it
+        # more cycles would repeat a strategy it rejected.
+        for stop_reason in ("no_progress", "marginal_yield", "required_findings_open"):
+            with self.subTest(stop_reason=stop_reason):
+                decision = self.agent(
+                    self.context(stage_detail={"stop_reason": stop_reason})
+                )
+                self.assertEqual(decision.action, "stop")
+                self.assertIn(stop_reason, decision.reason)
+
+    def test_stops_when_no_findings_remain_open(self) -> None:
+        decision = self.agent(self.context(stage_detail={"open_finding_keys": []}))
+        self.assertEqual(decision.action, "stop")
+
+    def test_stops_for_every_stage_other_than_review(self) -> None:
+        for stage in ("dispatch", "verification", "integration", "post_review_verification"):
+            with self.subTest(stage=stage):
+                self.assertEqual(self.agent(self.context(stage=stage)).action, "stop")
+
+    def test_stops_a_review_that_failed_rather_than_exhausted_its_cycles(self) -> None:
+        # A crashed reviewer is not evidence that more cycles would help.
+        decision = self.agent(self.context(condition="failed"))
+        self.assertEqual(decision.action, "stop")
 
 
 if __name__ == "__main__":

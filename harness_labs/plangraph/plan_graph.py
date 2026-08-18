@@ -1572,7 +1572,19 @@ class PlanGraph:
                 completed=dict(completed),
                 failed_run_id=run.id,
             ))
-            audit.node_failed(run.id, result.status, outcome.evidence)
+            carried = self._carried_finding_obligations(run, outcome, finding_obligations)
+            if carried is not None:
+                # A ready-set peer that seals after this failure rewrites the
+                # whole obligations state from its in-memory copy, so adopt
+                # the carry-forward here or the next sibling erases it.
+                finding_obligations.clear()
+                finding_obligations.update(carried)
+            audit.node_failed(
+                run.id,
+                result.status,
+                outcome.evidence,
+                finding_obligations=carried,
+            )
             if result.status == "blocked":
                 return _SealDecision(
                     "blocked", result=result,
@@ -2159,7 +2171,15 @@ class PlanGraph:
             run_dir=(self.run_root / feature_run_id).resolve(),
             finding_obligations=finding_obligations,
             finding_transfer_targets=self._transfer_targets_for(run),
-            inherited_ledger_frozen=bool(finding_obligations),
+            # Discovery freezes only for work inherited from *another* node:
+            # that node already reviewed the code, so this launch owes the
+            # transferred findings and nothing else.  A node's own carried
+            # findings ride a launch that re-implements the work, and freezing
+            # discovery there would ship freshly written code unreviewed.
+            inherited_ledger_frozen=any(
+                str(item.get("origin_node", "")) != run.id
+                for item in finding_obligations
+            ),
             verification_gate_slot=verification_gate_slot,
         )
 
@@ -2271,6 +2291,79 @@ class PlanGraph:
                 )
             destination.append(dict(finding))
         return pending
+
+    def _carried_finding_obligations(
+        self,
+        run: PlanRun,
+        outcome: FeatureRunOutcome,
+        current: Mapping[str, list[Mapping[str, object]]],
+    ) -> dict[str, list[Mapping[str, object]]] | None:
+        """Carry a stopped node's still-open findings into graph state.
+
+        Without this, a node that blocks on unresolved review findings leaves
+        them only in its own FeatureRun ledger, and the successor attempt
+        rediscovers them from zero after re-running implementation.  Recording
+        them as this node's own obligations lets the retry inherit the exact
+        findings it must discharge.
+
+        These are self-carried, not transferred: they keep ``origin_node``
+        pointing at this node so :meth:`_request_for_run` knows not to freeze
+        discovery on a launch that will re-implement the work.
+
+        This is best-effort by design.  The node is already terminal, and a
+        child that reports malformed open findings must not cost the graph its
+        failure record -- so a bad payload degrades to no carry-forward (the
+        retry rediscovers, as it did before) rather than raising.  The raw
+        evidence still lands verbatim in the node's failure artifact, so the
+        malformed payload stays inspectable.
+        """
+
+        openings = self._open_findings(outcome)
+        if not openings:
+            return None
+        carried: list[Mapping[str, object]] = []
+        seen: set[str] = set()
+        for finding in openings:
+            key = finding.get("key")
+            if not isinstance(key, str) or not key or key in seen:
+                return None
+            seen.add(key)
+            record = dict(finding)
+            record["origin_node"] = run.id
+            record["transferred_to"] = ""
+            carried.append(record)
+        pending = {
+            node_id: [dict(item) for item in findings]
+            for node_id, findings in current.items()
+            if node_id != run.id
+        }
+        # An obligation this node already owed and still has not discharged
+        # comes back in the open records, so keep only prior obligations the
+        # ledger did not report -- each key appears exactly once.
+        pending[run.id] = carried + [
+            dict(item)
+            for item in current.get(run.id, ())
+            if str(item.get("key")) not in seen
+        ]
+        return pending
+
+    @staticmethod
+    def _open_findings(
+        outcome: FeatureRunOutcome,
+    ) -> tuple[Mapping[str, object], ...]:
+        """Read the still-open review findings a stopped child reported."""
+
+        if not isinstance(outcome.evidence, Mapping):
+            return ()
+        review_fix = outcome.evidence.get("review_fix")
+        if not isinstance(review_fix, Mapping):
+            return ()
+        raw = review_fix.get("open_findings", ())
+        if not isinstance(raw, (list, tuple)) or not all(
+            isinstance(item, Mapping) for item in raw
+        ):
+            return ()
+        return tuple(dict(item) for item in raw)
 
     @staticmethod
     def _transferred_findings(

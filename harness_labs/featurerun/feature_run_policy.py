@@ -3,6 +3,12 @@
 from __future__ import annotations
 
 from harness_labs.core.development_policy import DevelopmentPolicy
+from harness_labs.featurerun.feature_run import (
+    RecoveryAgent,
+    RecoveryContext,
+    RecoveryDecision,
+    deterministic_recovery_agent,
+)
 
 
 def standard_feature_run_policy() -> DevelopmentPolicy:
@@ -267,7 +273,104 @@ def standard_feature_run_dispatch_schema():
     )
 
 
+# The review loop reports why it stopped.  Only budget exhaustion is worth
+# continuing: "no_progress" and "marginal_yield" are the loop's own futility
+# detectors, and buying more cycles after either one repeats a strategy the
+# loop already measured as not working.
+_CONTINUABLE_STOP_REASONS = frozenset({"cycle_limit"})
+
+
+def standard_review_continuation_recovery_agent() -> RecoveryAgent:
+    """Return the conservative default FeatureRun recovery policy.
+
+    It grants continuations for exactly one condition: a review loop that
+    exhausted its cycles while still discharging findings.  Continuing there
+    reuses the implementation and the review ledger already paid for, whereas
+    letting the node block re-runs implementation, verification, and review
+    from scratch on the next graph attempt.
+
+    Every other abnormal stage stops, deliberately.  Dispatch, verification,
+    and Git-integration failures are not cheaper to retry blind, and silently
+    retrying them would hide real defects behind spend.  ``recovery_limit``
+    bounds how many continuations a single FeatureRun can be granted.
+    """
+
+    def agent(context: RecoveryContext) -> RecoveryDecision:
+        if context.stage != "review":
+            return RecoveryDecision(
+                "stop",
+                f"no automatic recovery policy for stage {context.stage!r}",
+            )
+        if context.condition != "blocked":
+            return RecoveryDecision(
+                "stop",
+                f"review ended {context.condition!r}; only an exhausted-cycle "
+                "block is safe to continue",
+            )
+        detail = context.stage_detail
+        stop_reason = str(detail.get("stop_reason", ""))
+        if stop_reason not in _CONTINUABLE_STOP_REASONS:
+            return RecoveryDecision(
+                "stop",
+                f"review stopped as {stop_reason or 'unclassified'!s}, which is "
+                "the loop's own verdict that more cycles will not help",
+            )
+        open_keys = detail.get("open_finding_keys") or ()
+        if not open_keys:
+            return RecoveryDecision(
+                "stop",
+                "review blocked with no open findings to continue against",
+            )
+        return RecoveryDecision(
+            "retry",
+            "review exhausted its cycle budget with "
+            f"{len(open_keys)} finding(s) still open; continuing the ledger "
+            "instead of re-running implementation",
+        )
+
+    return agent
+
+
+def standard_composed_recovery_agent() -> RecoveryAgent:
+    """Return the platform default: continuation first, transient retry second.
+
+    The two policies are complementary, not alternatives, and binding either
+    one alone silently gives up what the other covers:
+
+    * ``standard_review_continuation_recovery_agent`` handles exactly one
+      content condition -- a review loop that ran out of cycle budget while
+      still discharging findings -- and stops on everything else, including
+      every infrastructure failure.
+    * ``deterministic_recovery_agent`` retries infrastructure transients (a
+      dropped stream, a DNS blip, a dead backend process) and classifies a
+      review block as a non-transient stop.
+
+    Order matters.  The deterministic agent would stop on a review block
+    before the continuation policy was ever consulted, so the continuation is
+    tried first and only for its own trigger; anything it declines falls
+    through to the transient policy unchanged.  ``recovery_limit`` bounds the
+    combined budget, which the two policies share.
+    """
+
+    continuation = standard_review_continuation_recovery_agent()
+
+    def agent(context: RecoveryContext) -> RecoveryDecision:
+        if (
+            context.stage == "review"
+            and context.condition == "blocked"
+            and str(context.stage_detail.get("stop_reason", "")) == "cycle_limit"
+        ):
+            decision = continuation(context)
+            if decision.action != "stop":
+                return decision
+        return deterministic_recovery_agent(context)
+
+    return agent
+
+
 __all__ = [
+    "standard_composed_recovery_agent",
     "standard_feature_run_dispatch_schema",
     "standard_feature_run_policy",
+    "standard_review_continuation_recovery_agent",
 ]

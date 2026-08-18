@@ -196,6 +196,7 @@ from harness_labs.core.development_policy import (
 from harness_labs.featurerun.feature_run_policy import (
     standard_feature_run_dispatch_schema,
     standard_feature_run_policy,
+    standard_review_continuation_recovery_agent,
 )
 from harness_labs.core.usage import ModelPrice, build_run_summary, usage_payload
 
@@ -359,6 +360,7 @@ __all__ = [
     "build_run_summary",
     "standard_feature_run_dispatch_schema",
     "standard_feature_run_policy",
+    "standard_review_continuation_recovery_agent",
     "usage_payload",
     "WorkerRole",
     "build_coordinator_session",
