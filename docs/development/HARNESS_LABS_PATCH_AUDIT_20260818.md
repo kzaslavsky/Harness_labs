@@ -242,6 +242,14 @@ quiescence-wait before relaunch; frontier derived from `plan_node_failed` events
 guard that stops after three identical escalations. Note P11 changes the contents of the
 frontier this driver consumes (see Interactions).
 
+**Follow-up delivered.** `scripts/plan_graph_autoresume.py` now carries all three ideas in
+parameterized form, covered by `tests/test_plan_graph_autoresume.py`. The `pgrep` pattern is
+gone: quiescence is decided from the lineage's own `plan-graph-admission-liveness.json` and
+child `plan-graph-liveness.json` markers, probed for a matching process-start token, which is
+the rule `reclaim_orphaned_successor_attempt` already applies. The frontier is reconciled —
+the escalation template supplies the declared intent, `plan_node_failed` events supply the
+evidence, and every disagreement is logged and counted rather than resolved silently.
+
 ---
 
 ## P8 — Campaign-runner configuration changes
