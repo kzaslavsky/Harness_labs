@@ -38,6 +38,7 @@ from harness_labs.core.git_transaction import (
 from harness_labs.core.test_output import failing_identifiers
 from harness_labs.core.verification_images import (
     FAILURE_IMAGE_CONTEXT_KEY,
+    SCOPE_FAILING_TESTS,
     capture_failure_images,
     pytest_basetemp_argv,
 )
@@ -2131,6 +2132,9 @@ def _verify_with_recovery(
                 command=command,
                 basetemp=basetemp,
                 evidence=evidence,
+                audit=audit,
+                stage=stage,
+                ordinal=ordinal,
             )
         command_attempts.append(recorded)
         audit.append(
@@ -2489,6 +2493,9 @@ def _verify_gates_with_recovery(
                     command=command,
                     basetemp=basetemp,
                     evidence=evidence,
+                    audit=audit,
+                    stage=stage,
+                    ordinal=ordinal,
                 )
             command_attempts.append(recorded)
             audit.append(
@@ -2863,22 +2870,61 @@ def _attach_failure_images(
     command: Mapping[str, object],
     basetemp: Path | None,
     evidence: EvidenceCatalog,
+    audit: AuditJournal,
+    stage: str,
+    ordinal: int,
 ) -> None:
     """Persist a failing run's images onto the recorded command, if any exist.
 
     ``recorded`` is what every repair context embeds as
     ``failed_verification``, so writing the descriptors here is the single
     point that reaches all four repair-dispatch sites.
+
+    Capture is on by default and costs worker context on every repair round it
+    fires, so each attachment is audited with what it spent and how it chose
+    the files. ``scope`` is the load-bearing field: anything other than
+    ``failing-tests`` means the selection fell through to the whole temporary
+    tree and the worker may be looking at a passing test's pixels.
     """
 
-    descriptors = capture_failure_images(
+    captured = capture_failure_images(
         command=command,
         basetemp=basetemp,
         evidence=evidence,
         producer_task_id="verification-owner",
     )
-    if descriptors:
-        recorded[FAILURE_IMAGE_CONTEXT_KEY] = [dict(item) for item in descriptors]
+    if not captured:
+        return
+    recorded[FAILURE_IMAGE_CONTEXT_KEY] = [
+        dict(item) for item in captured.descriptors
+    ]
+    audit.append(
+        "verification_failure_images_attached",
+        status=(
+            "succeeded"
+            if captured.scope == SCOPE_FAILING_TESTS
+            else "degraded"
+        ),
+        payload={
+            "stage": stage,
+            "attempt": ordinal,
+            "scope": captured.scope,
+            "image_count": len(captured.descriptors),
+            "total_bytes": captured.total_bytes,
+            "considered": captured.considered,
+            "budget": {
+                "image_limit": captured.limit,
+                "total_bytes_limit": captured.total_bytes_limit,
+            },
+            "evidence_refs": [
+                item["evidence_ref"] for item in captured.descriptors
+            ],
+            "relative_paths": [
+                item["relative_path"] for item in captured.descriptors
+            ],
+        },
+        actor=AuditActor("verification-owner", "verification_owner"),
+    )
 
 
 def _combine_verification_results(

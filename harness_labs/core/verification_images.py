@@ -28,12 +28,18 @@ from __future__ import annotations
 import os
 import re
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 __all__ = [
     "CAPTURE_ENV_VAR",
     "FAILURE_IMAGE_CONTEXT_KEY",
+    "SCOPE_EMPTY",
+    "SCOPE_FAILING_TESTS",
+    "SCOPE_WHOLE_TREE_NO_IDENTIFIERS",
+    "SCOPE_WHOLE_TREE_NO_MATCH",
+    "CapturedImages",
     "attached_image_paths",
     "capture_failure_images",
     "image_capture_enabled",
@@ -74,6 +80,38 @@ _ROLE_ORDER = {
 }
 
 _FALSE_VALUES = {"0", "false", "no", "off"}
+
+# How a capture arrived at the files it kept. Only the first is the intended
+# path; the other two mean the selection fell through to the whole temporary
+# tree and may therefore carry a passing test's images.
+SCOPE_FAILING_TESTS = "failing-tests"
+SCOPE_WHOLE_TREE_NO_IDENTIFIERS = "whole-tree-no-failing-identifiers"
+SCOPE_WHOLE_TREE_NO_MATCH = "whole-tree-no-directory-match"
+SCOPE_EMPTY = "empty"
+
+
+@dataclass(frozen=True)
+class CapturedImages:
+    """One capture's persisted images, how they were chosen, and what they cost.
+
+    ``scope`` is carried out of the selection rather than discarded because the
+    fallback below is silent by construction: a scoping rule that matches
+    nothing still yields a full-looking result set. The caller records it so a
+    broken rule shows up in the audit trail instead of only in the pixels.
+    """
+
+    descriptors: tuple[dict[str, Any], ...] = ()
+    scope: str = SCOPE_EMPTY
+    total_bytes: int = 0
+    limit: int = 0
+    total_bytes_limit: int = 0
+    considered: int = 0
+
+    def __bool__(self) -> bool:
+        return bool(self.descriptors)
+
+    def __len__(self) -> int:
+        return len(self.descriptors)
 
 
 def image_capture_enabled(environ: Mapping[str, str] | None = None) -> bool:
@@ -129,13 +167,19 @@ def pytest_basetemp_argv(
 
 
 def _failing_test_dir_prefixes(command: Mapping[str, Any]) -> frozenset[str]:
-    """Return the ``tmp_path`` directory-name prefixes of the failing tests.
+    """Return the ``tmp_path`` directory-name stems of the failing tests.
 
-    pytest names a test's ``tmp_path`` directory by replacing every non-word
-    character in the test's node name with ``_`` and truncating to 30
-    characters, then appending a per-invocation ordinal. Reconstructing that
-    prefix from the reported failing node ids lets a capture keep the images
-    the *failures* wrote and drop every passing test's.
+    pytest's ``tmp_path`` fixture builds its directory name in ``_pytest``'s
+    ``_mk_tmp``: it replaces every non-word character in the test's node name
+    with ``_``, truncates to 30 characters, and hands that to
+    ``mktemp(..., numbered=True)``, which appends a decimal ordinal. So
+    ``test_import_region_matches[desktop]`` becomes
+    ``test_import_region_matches_des0`` -- note that the truncation lands mid
+    word, and that a parametrized test's variants can only be told apart by
+    the ordinal once the stem is truncated.
+
+    Reconstructing the stem from the reported failing node ids lets a capture
+    keep the images the *failures* wrote and drop every passing test's.
     """
 
     # Imported lazily so this module stays importable in isolation.
@@ -151,11 +195,22 @@ def _failing_test_dir_prefixes(command: Mapping[str, Any]) -> frozenset[str]:
     return frozenset(prefixes)
 
 
-def _matches_failing_test(relative: Path, prefixes: frozenset[str]) -> bool:
-    if not prefixes:
+def _matches_failing_test(relative: Path, stems: frozenset[str]) -> bool:
+    """Return whether ``relative`` sits under a failing test's ``tmp_path``.
+
+    The directory must be exactly one of the stems followed by pytest's
+    ordinal digits. A prefix test would be wrong in both directions: it lets
+    ``test_short0``'s stem claim ``test_short_but_longer_name0``, and it lets
+    every stem claim pytest's ``<stem>current`` convenience symlink, which
+    would then double-count the same pixels.
+    """
+
+    if not stems:
         return False
     top = relative.parts[0] if relative.parts else ""
-    return any(top.startswith(prefix) for prefix in prefixes)
+    return any(
+        top.startswith(stem) and top[len(stem) :].isdigit() for stem in stems
+    )
 
 
 def _group_key(path: Path) -> str:
@@ -172,8 +227,12 @@ def _select_images(
     command: Mapping[str, Any],
     *,
     limit: int,
-) -> list[Path]:
-    """Return the most explanatory images the failing run left in ``basetemp``."""
+) -> tuple[list[Path], str, int]:
+    """Return the most explanatory images the failing run left in ``basetemp``.
+
+    Also returns how the pool was chosen and how many image files were
+    considered, so the caller can record a fallback rather than absorb it.
+    """
 
     candidates: list[Path] = []
     for path in sorted(basetemp.rglob("*")):
@@ -188,17 +247,29 @@ def _select_images(
             continue
         candidates.append(path)
     if not candidates:
-        return []
+        return [], SCOPE_EMPTY, 0
 
-    prefixes = _failing_test_dir_prefixes(command)
+    stems = _failing_test_dir_prefixes(command)
     scoped = [
         path
         for path in candidates
-        if _matches_failing_test(path.relative_to(basetemp), prefixes)
+        if _matches_failing_test(path.relative_to(basetemp), stems)
     ]
-    # Fall back to the whole tree only when the failing node ids could not be
-    # mapped onto any directory -- a partial mapping is still the better set.
-    pool = scoped or candidates
+    # The fallback is deliberately kept: dropping every image when the scoping
+    # rule matches nothing would silently discard the only pixels the round
+    # produced, and a test may legitimately write outside its own tmp_path.
+    # But the fallback is exactly what made a broken scoping rule invisible, so
+    # the reason is returned and audited rather than swallowed. A partial
+    # mapping is still the better set.
+    if scoped:
+        pool, scope = scoped, SCOPE_FAILING_TESTS
+    else:
+        pool = candidates
+        scope = (
+            SCOPE_WHOLE_TREE_NO_IDENTIFIERS
+            if not stems
+            else SCOPE_WHOLE_TREE_NO_MATCH
+        )
 
     groups: dict[str, list[Path]] = {}
     for path in pool:
@@ -231,9 +302,9 @@ def _select_images(
                 continue
             for member in queue.pop(0):
                 if len(selected) >= limit:
-                    return selected
+                    return selected, scope, len(pool)
                 selected.append(member)
-    return selected
+    return selected, scope, len(pool)
 
 
 def capture_failure_images(
@@ -244,26 +315,28 @@ def capture_failure_images(
     producer_task_id: str,
     limit: int = _DEFAULT_IMAGE_LIMIT,
     total_bytes: int = _DEFAULT_TOTAL_BYTES,
-) -> tuple[dict[str, Any], ...]:
+) -> CapturedImages:
     """Copy a failing run's image artifacts into the evidence catalog.
 
-    Returns one descriptor per persisted image (``relative_path``,
-    ``evidence_ref``, ``path``, ``sha256``, ``size_bytes``, ``media_type``), or
-    an empty tuple when there is nothing to persist. Never raises: an
+    Returns a :class:`CapturedImages` carrying one descriptor per persisted
+    image (``relative_path``, ``evidence_ref``, ``path``, ``sha256``,
+    ``size_bytes``, ``media_type``), the scope the selection actually used, and
+    the bytes spent -- falsy when there is nothing to persist. Never raises: an
     unreadable temporary tree degrades to the prior text-only behaviour rather
     than failing an otherwise well-formed verification round.
     """
 
+    empty = CapturedImages(limit=limit, total_bytes_limit=total_bytes)
     if basetemp is None or not image_capture_enabled():
-        return ()
+        return empty
     if command.get("exit_code") == 0:
-        return ()
+        return empty
     try:
         if not basetemp.is_dir():
-            return ()
-        chosen = _select_images(basetemp, command, limit=limit)
+            return empty
+        chosen, scope, considered = _select_images(basetemp, command, limit=limit)
     except OSError:
-        return ()
+        return empty
 
     # ``EvidenceRecord.audit_path`` is relative to the audit run directory;
     # the executors need an absolute path they can hand to a subprocess.
@@ -306,7 +379,14 @@ def capture_failure_images(
                 "media_type": media_type,
             }
         )
-    return tuple(descriptors)
+    return CapturedImages(
+        descriptors=tuple(descriptors),
+        scope=scope if descriptors else SCOPE_EMPTY,
+        total_bytes=total_bytes - budget,
+        limit=limit,
+        total_bytes_limit=total_bytes,
+        considered=considered,
+    )
 
 
 def attached_image_paths(context: Mapping[str, Any]) -> tuple[Path, ...]:
