@@ -6,11 +6,16 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
 
-from harness_labs.plangraph.plan_graph import PlanGraph, PlanGraphError
+from harness_labs.plangraph.plan_graph import (
+    PlanGraph,
+    PlanGraphError,
+    register_plan_graph,
+)
 from harness_labs.plangraph.plan_graph_join import (
     JoinConflictResolutionStore,
     JoinResolutionError,
@@ -381,6 +386,112 @@ class JoinCandidatesResolutionTest(unittest.TestCase):
                 graph._join_candidates("wp", [side_a, side_b])
 
 
+class JoinResolutionStoreWiringTest(unittest.TestCase):
+    """The ``__init__`` wiring for ``self.join_resolutions``.
+
+    Every other test in this file reaches ``_join_candidates`` through
+    ``minimal_plan_graph``, which builds the graph with ``PlanGraph.__new__``
+    and constructs the store by hand.  That keeps those tests on the
+    production join path but leaves the three constructor arguments at
+    ``PlanGraph.__init__`` uncovered, so this builds a real registered graph
+    and pins them.
+    """
+
+    def _registered_graph(self, root: Path) -> PlanGraph:
+        repository = root / "repository"
+        repository.mkdir()
+        git(repository, "init")
+        git(repository, "config", "user.email", "tests@example.com")
+        git(repository, "config", "user.name", "Tests")
+        plan = repository / "docs" / "approved-plan.md"
+        plan.parent.mkdir()
+        plan.write_text("Approved PlanGraph plan\n", encoding="utf-8")
+        git(repository, "add", "docs/approved-plan.md")
+        git(repository, "commit", "-m", "approved plan")
+        base_commit = git(repository, "rev-parse", "HEAD")
+        registration = register_plan_graph(
+            repository=repository,
+            logical_graph_id="join-wiring-graph",
+            decomposition={
+                "plan": "docs/approved-plan.md",
+                "base_commit": base_commit,
+                "runs": [
+                    {
+                        "id": "a",
+                        "objective": "Build A",
+                        "plan_sections": ["1"],
+                        "criteria": ["AC-1"],
+                        "depends_on": [],
+                        "verification_argv": ["python3", "-m", "unittest"],
+                    },
+                ],
+                "plan_sections": {"1": "Build A. AC-1: A works."},
+                "acceptance_criteria": {"AC-1": "A works."},
+                "functionality_tests": [],
+            },
+        )
+        return PlanGraph(
+            repository,
+            registration,
+            lambda request: None,
+            run_root=root / "runs",
+            graph_run_id="join-wiring-attempt",
+        )
+
+    def test_init_binds_store_to_run_root_lineage_and_repository(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            graph = self._registered_graph(root)
+            store = graph.join_resolutions
+            self.assertIsInstance(store, JoinConflictResolutionStore)
+            lineage = graph.registration.plan_lineage_id
+            self.assertEqual(store.lineage_id, lineage)
+            self.assertEqual(
+                store.path,
+                (root / "runs").resolve()
+                / ".plan-graph-join-resolutions"
+                / f"{lineage}.jsonl",
+            )
+            self.assertEqual(store.repository, (root / "repository").resolve())
+
+    def test_store_from_init_is_the_one_the_join_consults(self) -> None:
+        """A registration made through the constructed graph's own store is
+        the one ``_join_candidates`` finds -- i.e. the wiring is live, not
+        merely well-shaped."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            graph = self._registered_graph(root)
+            conflicting_root = root / "conflicting"
+            conflicting_root.mkdir()
+            conflicting, _, side_a, side_b = build_conflicting_repository(
+                conflicting_root
+            )
+            # Point the graph at the conflicting repository while keeping the
+            # store its ``__init__`` built, so the join reads through it.
+            graph.repository = conflicting.resolve()
+            graph.join_resolutions.repository = conflicting.resolve()
+
+            with self.assertRaises(PlanGraphError):
+                graph._join_candidates("wp", [side_a, side_b])
+
+            description = describe_join_conflict(conflicting, "wp", side_a, side_b)
+            resolved_tree = replace_blobs_in_tree(
+                conflicting, description["automerge_tree"],
+                {"shared.txt": "alpha-resolved\ncommon\nomega\n"},
+            )
+            record = graph.join_resolutions.register(
+                label="wp", parent_a=side_a, parent_b=side_b,
+                resolved_tree=resolved_tree, reason="wiring test resolution",
+            )
+            self.assertTrue(graph.join_resolutions.path.exists())
+
+            merged = graph._join_candidates("wp", [side_a, side_b])
+            self.assertEqual(
+                git(conflicting, "rev-parse", f"{merged}^{{tree}}"),
+                record["resolved_tree"],
+            )
+
+
 def _resolve_marker_blocks(content: str, choose) -> str:
     """Resolve conflict-marker blocks with a per-block strategy callback.
 
@@ -436,9 +547,35 @@ def _retinology_fixture_available() -> bool:
     return True
 
 
+REQUIRE_RETINOLOGY_FIXTURE = bool(
+    os.environ.get("HARNESS_LABS_REQUIRE_RETINOLOGY_FIXTURE")
+)
+_RETINOLOGY_FIXTURE_AVAILABLE = _retinology_fixture_available()
+
+# This class is the only coverage anywhere of a join resolution against real
+# conflicting content; the rest of the file is synthetic.  Skipping it is
+# legitimate off the machine that holds the fixture, but doing so silently
+# would let a run report green while the strongest test in the file never
+# executed -- so announce it, and let CI demand it with
+# HARNESS_LABS_REQUIRE_RETINOLOGY_FIXTURE=1.
+_RETINOLOGY_FIXTURE_MISSING = (
+    f"Retinology fixture repository not available at {RETINOLOGY_REPO} "
+    f"(set RETINOLOGY_REPO to a clone containing {WP25_PARENT_A[:12]} and "
+    f"{WP25_PARENT_B[:12]}); the real WP-25 join-conflict regression test is "
+    "NOT running."
+)
+_RETINOLOGY_SKIP_REASON = (
+    f"{_RETINOLOGY_FIXTURE_MISSING} Set "
+    "HARNESS_LABS_REQUIRE_RETINOLOGY_FIXTURE=1 to make this a failure "
+    "instead of a skip."
+)
+if not _RETINOLOGY_FIXTURE_AVAILABLE and not REQUIRE_RETINOLOGY_FIXTURE:
+    print(f"WARNING: {_RETINOLOGY_SKIP_REASON}", file=sys.stderr)
+
+
 @unittest.skipUnless(
-    _retinology_fixture_available(),
-    "Retinology fixture repository (RETINOLOGY_REPO) not available",
+    _RETINOLOGY_FIXTURE_AVAILABLE or REQUIRE_RETINOLOGY_FIXTURE,
+    _RETINOLOGY_SKIP_REASON,
 )
 class RetinologyWp25EndToEndTest(unittest.TestCase):
     """The real WP-25 join conflict (sealed WP-21 x WP-22), end to end.
@@ -449,6 +586,13 @@ class RetinologyWp25EndToEndTest(unittest.TestCase):
     WP-21 import-list superset in the JS, and union the two coverage
     obligations in the parity oracle.
     """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        if not _RETINOLOGY_FIXTURE_AVAILABLE:
+            # Only reachable with HARNESS_LABS_REQUIRE_RETINOLOGY_FIXTURE set,
+            # which asks for a failure rather than a skip.
+            raise AssertionError(_RETINOLOGY_FIXTURE_MISSING)
 
     def test_wp25_conflict_resolves_through_registered_resolution(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
