@@ -20,7 +20,11 @@ from harness_labs.observability.run_catalog import RunCatalog, build_run_detail,
 MAX_RUN_DIRECTORIES = 512
 MAX_FILES_PER_RUN = 4096
 MAX_FILE_BYTES = 4 * 1024 * 1024
-MAX_RESPONSE_BYTES = 1024 * 1024
+# The /api/catalog body grows with every graph attempt across all audit
+# roots; at 1 MiB the cap was crossed after ~25 attempts of one campaign,
+# after which refresh() failed on every cycle and the dashboard silently
+# served its last sub-cap snapshot forever (health still "ok").
+MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 MAX_DIAGNOSTICS = 100
 MAX_DIAGNOSTIC_TEXT = 512
 MAX_AUDIT_ROOTS = 16

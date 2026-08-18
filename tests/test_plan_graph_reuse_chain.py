@@ -229,5 +229,74 @@ class ParallelSiblingResumeTests(ReuseChainTests):
         self.assertEqual(set(repaired.completed), {"a", "b", "c"})
 
 
+class LaterOrderedDependencyReuseTests(ReuseChainTests):
+    """Reuse selection must not depend on the plan's declaration order.
+
+    Node "mid" depends on "late", which is DECLARED AFTER it in the plan
+    (checkpoint node mappings preserve plan order, not dependency order).
+    A single-pass selection would process "mid" before "late" qualifies as
+    reusable and silently re-run "mid" — and everything sealed downstream
+    of it — on every resume. Observed live as WP-05/WP-07 churning on the
+    flow-editor-uistreamline campaign.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.registration = register_plan_graph(
+            repository=self.repository,
+            logical_graph_id="later-ordered-dependency",
+            decomposition={
+                "plan": "docs/approved-plan.md",
+                "base_commit": self.base_commit,
+                "runs": [
+                    {"id": "mid", "objective": "Build MID", "plan_sections": ["1"],
+                     "criteria": ["AC-1"], "depends_on": ["late"],
+                     "verification_argv": ["true"]},
+                    {"id": "late", "objective": "Build LATE", "plan_sections": ["2"],
+                     "criteria": ["AC-2"], "depends_on": [],
+                     "verification_argv": ["true"]},
+                    {"id": "b", "objective": "Build B", "plan_sections": ["3"],
+                     "criteria": ["AC-3"], "depends_on": ["mid"],
+                     "verification_argv": ["true"]},
+                ],
+                "plan_sections": {
+                    "1": "Build MID. AC-1: MID works.",
+                    "2": "Build LATE. AC-2: LATE works.",
+                    "3": "Build B. AC-3: B works.",
+                },
+                "acceptance_criteria": {
+                    "AC-1": "MID works.",
+                    "AC-2": "LATE works.",
+                    "AC-3": "B works.",
+                },
+                "functionality_tests": [],
+            },
+        )
+
+    def test_reuse_survives_two_successor_hops(self) -> None:  # noqa: D102
+        self.skipTest("inherited serial scenario; covered by ReuseChainTests")
+
+    def test_sealed_node_with_later_declared_dependency_is_reused(self) -> None:
+        root = PlanGraph(
+            self.repository, self.registration, self.launcher(fail_b=True),
+            run_root=self.run_root, graph_run_id="root-attempt",
+        )
+        result = root.run()
+        self.assertEqual(result.status, "failed")
+        self.assertIn("late", result.completed)
+        self.assertIn("mid", result.completed)
+
+        self.launched.clear()
+        successor = self.resume("root-attempt", fail_b=False)
+        repaired = successor.run()
+        self.assertEqual(repaired.status, "succeeded")
+        self.assertEqual(
+            self.launched, ["b"],
+            "successor must reuse late AND mid despite declaration order, "
+            "re-running only the failed frontier",
+        )
+        self.assertEqual(set(repaired.completed), {"late", "mid", "b"})
+
+
 if __name__ == "__main__":
     unittest.main()

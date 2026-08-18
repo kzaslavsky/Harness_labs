@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 from harness_labs.core.audit import AuditActor, AuditJournal
 from harness_labs.observability.dashboard_server import (
+    MAX_RESPONSE_BYTES,
     DashboardApplication,
     DashboardError,
     _DashboardHandler,
@@ -378,7 +379,7 @@ class DashboardApiTests(unittest.TestCase):
             self._run(root)
             with patch(
                 "harness_labs.observability.dashboard_server.build_run_detail",
-                return_value={"blob": "x" * (1024 * 1024)},
+                return_value={"blob": "x" * MAX_RESPONSE_BYTES},
             ):
                 app = DashboardApplication(root, refresh_seconds=60)
                 self.assertEqual(self._request(app, "GET", "/api/catalog")[0], 200)

@@ -1520,5 +1520,77 @@ class FeatureRunTests(unittest.TestCase):
         )
 
 
+class DeterministicRecoveryAgentTests(unittest.TestCase):
+    """Rule-based default recovery: retry transients, stop classified."""
+
+    @staticmethod
+    def _context(condition="failed", reason="", stage="implement", attempt=1):
+        from harness_labs.featurerun.feature_run import RecoveryContext
+
+        return RecoveryContext(
+            run_id="run-1",
+            stage=stage,
+            condition=condition,
+            reason=reason,
+            attempt=attempt,
+            checkpoint={},
+            objective="objective",
+            acceptance_criteria=(),
+            worktree_path="/tmp/worktree",
+            allowed_paths=("src",),
+            workspace={},
+            prior_decisions=(),
+            plan_adjustments=(),
+        )
+
+    def test_interrupted_condition_retries(self) -> None:
+        from harness_labs.featurerun.feature_run import deterministic_recovery_agent
+
+        decision = deterministic_recovery_agent(
+            self._context(condition="interrupted", reason="dispatcher died")
+        )
+        self.assertEqual(decision.action, "retry")
+
+    def test_transient_signature_retries_with_distinct_reasons(self) -> None:
+        from harness_labs.featurerun.feature_run import deterministic_recovery_agent
+
+        first = deterministic_recovery_agent(
+            self._context(reason="terminal_reason aborted_streaming", attempt=1)
+        )
+        second = deterministic_recovery_agent(
+            self._context(reason="terminal_reason aborted_streaming", attempt=2)
+        )
+        self.assertEqual((first.action, second.action), ("retry", "retry"))
+        self.assertNotEqual(first.reason, second.reason)
+
+    def test_review_cycle_limit_stops_with_classification(self) -> None:
+        from harness_labs.featurerun.feature_run import deterministic_recovery_agent
+
+        decision = deterministic_recovery_agent(
+            self._context(
+                condition="blocked",
+                stage="review_fix",
+                reason="cycle limit reached",
+            )
+        )
+        self.assertEqual(decision.action, "stop")
+        self.assertIn("non-transient", decision.reason)
+        self.assertIn("cycle limit reached", decision.reason)
+
+    def test_default_is_wired_into_run_feature_worktree(self) -> None:
+        import inspect
+
+        from harness_labs.featurerun.feature_run import (
+            deterministic_recovery_agent,
+            run_feature_worktree,
+        )
+
+        signature = inspect.signature(run_feature_worktree)
+        self.assertIs(
+            signature.parameters["recovery_agent"].default,
+            deterministic_recovery_agent,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -423,6 +423,71 @@ class RecoveryAgent(Protocol):
         """Perform any authorized recovery work and select the next action."""
 
 
+# Reason substrings that identify infrastructure-transient abnormal outcomes:
+# backend/coordinator stream deaths and connection failures that a bounded
+# in-run retry absorbs without any change of strategy. Deliberately narrow —
+# review/verification outcomes ("cycle limit reached", test failures) must
+# escalate, not retry.
+TRANSIENT_RECOVERY_SIGNATURES: tuple[str, ...] = (
+    "aborted_streaming",
+    "request interrupted",
+    "broken pipe",
+    "connection reset",
+    "connection aborted",
+    "connection refused",
+    "backend process terminated",
+    "backend_process_terminated",
+    "stream disconnected",
+    "server disconnected",
+    "socket hang up",
+    "overloaded_error",
+    "rate_limit",
+    "timed out reading",
+    # A coordinator/backend process that dies without recording a blocker
+    # surfaces only the dispatcher's generic terminal line (observed live:
+    # codex backend_process_terminated -> "dispatcher ended with status
+    # blocked"). A genuine content block records an explicit blocker and
+    # takes the specific-reason path instead, so this generic form is
+    # treated as transient; recovery_limit still bounds the retries.
+    "dispatcher ended with status",
+    # Local DNS/network resolution failure reaching the backend API
+    # (observed live: codex websocket connect to chatgpt.com failing with
+    # "failed to lookup address information: nodename nor servname
+    # provided, or not known") -- a transient host/network condition
+    # unrelated to the worker's actual task, not a content-level failure.
+    "failed to lookup address information",
+    "failed to connect to websocket",
+)
+
+
+def deterministic_recovery_agent(context: RecoveryContext) -> RecoveryDecision:
+    """Rule-based default RecoveryAgent: retry transients, stop classified.
+
+    Retries (bounded by ``recovery_limit`` and the unchanged-strategy guard)
+    when the abnormal outcome is an interruption or matches a transient
+    infrastructure signature; otherwise stops immediately with a classified
+    reason so the block escalates with evidence instead of grinding. The
+    recovery attempt ordinal is part of the retry reason so consecutive
+    retries of a recurring transient remain distinct decisions.
+    """
+
+    reason = context.reason.lower()
+    transient = context.condition == "interrupted" or any(
+        signature in reason for signature in TRANSIENT_RECOVERY_SIGNATURES
+    )
+    if transient:
+        return RecoveryDecision(
+            "retry",
+            f"transient backend interruption (recovery attempt {context.attempt}): "
+            + context.reason[:160],
+        )
+    return RecoveryDecision(
+        "stop",
+        f"non-transient {context.condition} at stage {context.stage!r}; "
+        "escalating with classified evidence: " + context.reason[:200],
+    )
+
+
 @dataclass
 class _RecoveryState:
     limit: int
@@ -594,7 +659,7 @@ def run_feature_worktree(
     verification_repair_limit: int = 1,
     verification_timeout_seconds: float | None = 1200,
     verification_gate_slot: AbstractContextManager[None] | None = None,
-    recovery_agent: RecoveryAgent | None = None,
+    recovery_agent: RecoveryAgent | None = deterministic_recovery_agent,
     recovery_limit: int = 3,
     evidence_classification: str = "production_lifecycle",
     initial_evidence: tuple[FeatureRunHandoffArtifact, ...] = (),

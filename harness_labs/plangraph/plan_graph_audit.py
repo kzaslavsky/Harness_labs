@@ -370,24 +370,33 @@ class PlanGraphAudit:
         if not isinstance(barriers, list) or not all(isinstance(item, dict) for item in barriers):
             raise AuditError("predecessor integration custody evidence is invalid")
         inherited = self._reuse_receipt_custody()
-        for node_id, node in nodes.items():
-            if node_id in invalidated or node.get("status") != "succeeded":
-                continue
-            candidate, dependencies = node.get("candidate_commit"), node.get("depends_on")
-            # A successful node is reusable only when the predecessor's
-            # controller-owned integration barrier binds that exact candidate
-            # to its recorded input, or the predecessor itself reused the
-            # node under a digest-verified reuse receipt (custody inherited
-            # along the successor chain). Child status alone is never
-            # sufficient.
-            custody_matches = any(
-                barrier.get("node_id") == node_id
-                and barrier.get("integrated_commit") == candidate
-                and _is_git_commit(barrier.get("input_commit"))
-                for barrier in barriers
-            ) or inherited.get(node_id) == candidate
-            if _is_git_commit(candidate) and custody_matches and isinstance(dependencies, list) and all(dependency in reusable for dependency in dependencies):
-                reusable[node_id] = candidate
+        # Iterated to a fixpoint like the invalidation closure above: the
+        # checkpoint's node mapping is in plan order, not dependency order,
+        # so a single pass would drop any custody-proven node whose
+        # dependency appears later in the mapping (and, transitively, every
+        # sealed node downstream of it) — forcing needless re-runs on resume.
+        changed = True
+        while changed:
+            changed = False
+            for node_id, node in nodes.items():
+                if node_id in reusable or node_id in invalidated or node.get("status") != "succeeded":
+                    continue
+                candidate, dependencies = node.get("candidate_commit"), node.get("depends_on")
+                # A successful node is reusable only when the predecessor's
+                # controller-owned integration barrier binds that exact candidate
+                # to its recorded input, or the predecessor itself reused the
+                # node under a digest-verified reuse receipt (custody inherited
+                # along the successor chain). Child status alone is never
+                # sufficient.
+                custody_matches = any(
+                    barrier.get("node_id") == node_id
+                    and barrier.get("integrated_commit") == candidate
+                    and _is_git_commit(barrier.get("input_commit"))
+                    for barrier in barriers
+                ) or inherited.get(node_id) == candidate
+                if _is_git_commit(candidate) and custody_matches and isinstance(dependencies, list) and all(dependency in reusable for dependency in dependencies):
+                    reusable[node_id] = candidate
+                    changed = True
         return {"retry_frontier": frontier, "invalidated_node_ids": tuple(node_id for node_id in nodes if node_id in invalidated), "reused_completed": reusable, "predecessor_checkpoint": json.loads(self.journal.checkpoint_path.read_text(encoding="utf-8"))}
 
     def _reuse_receipt_custody(self) -> dict[str, str]:
