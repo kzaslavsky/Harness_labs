@@ -45,6 +45,8 @@ Status: active
   [`plan-projection-design.md`](plan-projection-design.md)
 - Repository-bound PlanGraph approval design:
   [`plan-approval-design.md`](plan-approval-design.md)
+- Platform-patch merge audit for the Retinology Flow-Editor campaign (P1-P12):
+  [`HARNESS_LABS_PATCH_AUDIT_20260818.md`](HARNESS_LABS_PATCH_AUDIT_20260818.md)
 
 ## Seed implementation records
 
