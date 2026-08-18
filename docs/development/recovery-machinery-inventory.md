@@ -25,7 +25,7 @@ not an authority grant.
 | 16 | Integration barriers | Serial completion records retain parent input and integrated candidate context. | No change. |
 | 17 | FeatureRun verification repair | Controller-owned verification has its own bounded repair loop. | RB-03 classifies its failures. |
 | 18 | Review mechanical limits | Review/fix cycles use mechanical and sensitive limits. | Remains node-local. |
-| 19 | FeatureRun recovery limit | Abnormal FeatureRun-stage recovery is locally bounded. | Lineage accounting arrives in RB-02. |
+| 19 | FeatureRun recovery limit | Abnormal FeatureRun-stage recovery is locally bounded, separately for general recoveries and review continuations. | Lineage accounting arrives in RB-02. |
 | 20 | Graph retry behavior | Successor graph attempts currently receive fresh local allowances. | RB-02 lineage ledger closes this gap. |
 | 21 | No-change recovery checks | Verification and review each independently detect no-progress/no-change states. | Consolidation is deferred; do not generalize in this program. |
 | 22 | Budget views | Verification, review, and graph retries are three mutually blind budgets. | RB-02 introduces a ledger; unification remains deferred. |

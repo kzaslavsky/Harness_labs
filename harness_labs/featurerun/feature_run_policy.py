@@ -291,8 +291,9 @@ def standard_review_continuation_recovery_agent() -> RecoveryAgent:
 
     Every other abnormal stage stops, deliberately.  Dispatch, verification,
     and Git-integration failures are not cheaper to retry blind, and silently
-    retrying them would hide real defects behind spend.  ``recovery_limit``
-    bounds how many continuations a single FeatureRun can be granted.
+    retrying them would hide real defects behind spend.
+    ``continuation_recovery_limit`` bounds how many continuations a single
+    FeatureRun can be granted.
     """
 
     def agent(context: RecoveryContext) -> RecoveryDecision:
@@ -348,8 +349,11 @@ def standard_composed_recovery_agent() -> RecoveryAgent:
     Order matters.  The deterministic agent would stop on a review block
     before the continuation policy was ever consulted, so the continuation is
     tried first and only for its own trigger; anything it declines falls
-    through to the transient policy unchanged.  ``recovery_limit`` bounds the
-    combined budget, which the two policies share.
+    through to the transient policy unchanged.  The two budgets are separate
+    -- ``recovery_limit`` for transients, ``continuation_recovery_limit`` for
+    continuations -- because a run's stream deaths say nothing about whether
+    its review deserves another cycle, and one shared counter let the former
+    deny the latter on budget rather than on policy.
     """
 
     continuation = standard_review_continuation_recovery_agent()

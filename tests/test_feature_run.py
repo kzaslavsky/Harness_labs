@@ -295,6 +295,39 @@ class _InterruptedRepairExecutor:
         raise InterruptedError("repair worker connection dropped")
 
 
+class _FlakyRepairFactory:
+    """Repair worker whose stream dies a fixed number of times, then repairs.
+
+    Each dropped stream is an infrastructure transient: the deterministic half
+    of the composed policy retries it, and each retry spends general recovery
+    budget without saying anything about the candidate under review.
+    """
+
+    def __init__(self, worktree: Path, failures: int) -> None:
+        self.worktree = worktree
+        self.failures = failures
+        self.calls = 0
+
+    def __call__(self, worktree, attempt):
+        factory = self
+
+        class Executor:
+            def execute(self, current_attempt):
+                factory.calls += 1
+                if factory.calls <= factory.failures:
+                    raise InterruptedError("repair worker connection dropped")
+                (factory.worktree / "verified.txt").write_text(
+                    "repaired\n", encoding="utf-8"
+                )
+                return TaskResult(
+                    current_attempt.attempt_id,
+                    "succeeded",
+                    {"summary": "Applied bounded verification repair."},
+                )
+
+        return Executor()
+
+
 class FeatureRunTests(unittest.TestCase):
     def test_verification_failure_classifier_is_conservative_and_rule_bound(self) -> None:
         transient = classify_verification_failure(
@@ -1359,6 +1392,158 @@ class FeatureRunTests(unittest.TestCase):
                 [receipt["operation"] for receipt in result.git_receipts],
                 ["create", "commit", "integrate"],
             )
+            AuditJournal.verify(root / "run")
+
+    def _recovery_decisions(self, root):
+        checkpoint = json.loads(
+            (root / "run" / "checkpoint.json").read_text(encoding="utf-8")
+        )
+        return checkpoint["state"]["recovery"]["decisions"]
+
+    def test_transient_retries_do_not_starve_a_later_review_continuation(
+        self,
+    ) -> None:
+        """Stream deaths must not spend the review continuation's budget.
+
+        With one shared counter, a run that burned its whole recovery limit on
+        infrastructure transients reached its first continuation opportunity
+        with nothing left, and the continuation was denied on budget before
+        the policy was ever asked. Three dropped repair streams exhaust the
+        general budget here; the continuation must still be granted, and the
+        run must seal instead of blocking.
+        """
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            review_factory = _ContinuationReviewFactory()
+            result = self._run_verification_recovery_case(
+                root,
+                _FlakyRepairFactory(root / "feature", failures=3),
+                recovery_agent=standard_composed_recovery_agent(),
+                review_fix_executor_factory=review_factory,
+                review_fix_policy=ReviewFixPolicy(
+                    mechanical_cycle_limit=1, continuation_cycles=2
+                ),
+            )
+
+            self.assertEqual(result.status, "succeeded")
+            decisions = self._recovery_decisions(root)
+            self.assertEqual(
+                [item["recovery_class"] for item in decisions],
+                ["general", "general", "general", "review_continuation"],
+            )
+            # The general budget is spent to its limit and the continuation is
+            # still granted, on its own allowance.
+            self.assertEqual(
+                [item["action"] for item in decisions],
+                ["retry", "retry", "retry", "retry"],
+            )
+            self.assertEqual(
+                decisions[-1]["budget"],
+                {
+                    "class": "review_continuation",
+                    "class_attempt": 1,
+                    "class_limit": 2,
+                    "total_attempt": 4,
+                    "total_limit": 5,
+                },
+            )
+            self.assertEqual(decisions[2]["budget"]["class_attempt"], 3)
+            # The continuation actually continued the ledger: cycle numbering
+            # carried on past the exhausted limit and cleared the finding.
+            self.assertEqual(result.review_fix.cycles, 3)
+            self.assertEqual(result.review_fix.open_finding_keys, ())
+            self.assertIn(
+                "feature-verification-run/review-fix/c3/review",
+                review_factory.attempt_ids,
+            )
+            AuditJournal.verify(root / "run")
+
+    def test_budget_exhaustion_is_recorded_apart_from_a_policy_stop(self) -> None:
+        """Evidence must say which of the two denied the recovery.
+
+        A continuation refused because no budget remained and a continuation
+        refused because the policy judged it pointless are different events
+        with different fixes, and before this they were distinguishable only by
+        reading a free-text reason.
+        """
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            result = self._run_verification_recovery_case(
+                root,
+                lambda worktree, attempt: _VerificationRepairExecutor(worktree, []),
+                recovery_agent=standard_composed_recovery_agent(),
+                continuation_recovery_limit=0,
+                review_fix_executor_factory=_ContinuationReviewFactory(),
+                review_fix_policy=ReviewFixPolicy(
+                    mechanical_cycle_limit=1, continuation_cycles=2
+                ),
+            )
+
+            self.assertEqual(result.status, "blocked")
+            denial = self._recovery_decisions(root)[-1]
+            self.assertEqual(denial["action"], "stop")
+            self.assertEqual(denial["stop_cause"], "budget_exhausted")
+            self.assertEqual(denial["recovery_class"], "review_continuation")
+            self.assertEqual(denial["budget"]["class_limit"], 0)
+            self.assertIn(
+                "review-continuation recovery limit of 0 exhausted",
+                denial["reason"],
+            )
+            AuditJournal.verify(root / "run")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            result = self._run_verification_recovery_case(
+                root,
+                lambda worktree, attempt: _VerificationRepairExecutor(
+                    worktree,
+                    [],
+                    repair=False,
+                ),
+                recovery_agent=lambda context: RecoveryDecision(
+                    "stop", "The verification failure is a real defect."
+                ),
+            )
+
+            self.assertEqual(result.status, "blocked")
+            stopped = self._recovery_decisions(root)[-1]
+            self.assertEqual(stopped["action"], "stop")
+            self.assertEqual(stopped["stop_cause"], "policy")
+            self.assertEqual(stopped["recovery_class"], "general")
+            self.assertLess(
+                stopped["budget"]["class_attempt"], stopped["budget"]["class_limit"] + 1
+            )
+            AuditJournal.verify(root / "run")
+
+    def test_explicit_recovery_limit_still_bounds_general_recoveries(self) -> None:
+        """An explicit ``recovery_limit`` keeps meaning what it meant.
+
+        The separate continuation allowance must not leak into the general
+        class: a caller that asked for one recovery still gets exactly one.
+        """
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            result = self._run_verification_recovery_case(
+                root,
+                _FlakyRepairFactory(root / "feature", failures=5),
+                recovery_agent=standard_composed_recovery_agent(),
+                recovery_limit=1,
+            )
+
+            # The unrecovered interruption ends the run; what matters is that
+            # it ended after exactly one general recovery.
+            self.assertEqual(result.status, "failed")
+            decisions = self._recovery_decisions(root)
+            self.assertEqual(
+                [item["recovery_class"] for item in decisions],
+                ["general", "general"],
+            )
+            self.assertEqual([item["action"] for item in decisions], ["retry", "stop"])
+            self.assertIn("recovery limit of 1 exhausted", decisions[-1]["reason"])
+            self.assertEqual(decisions[-1]["stop_cause"], "budget_exhausted")
             AuditJournal.verify(root / "run")
 
     def test_recovery_limit_stops_repeated_abnormal_outcomes(self) -> None:

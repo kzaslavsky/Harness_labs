@@ -492,10 +492,66 @@ def deterministic_recovery_agent(context: RecoveryContext) -> RecoveryDecision:
     )
 
 
+# Recovery classes.  A FeatureRun recovers from two unrelated kinds of
+# abnormal ending, and they must not compete for one counter: infrastructure
+# transients are noise whose frequency says nothing about the work, while a
+# review continuation is a content decision that happens at most once or twice
+# per run and only after the whole implement/verify/review chain has been paid
+# for.  Sharing a budget lets a run's stream deaths silently deny its one
+# continuation, which then reads as "the continuation policy never fired".
+RECOVERY_CLASS_GENERAL = "general"
+RECOVERY_CLASS_REVIEW_CONTINUATION = "review_continuation"
+
+
+def _recovery_class(
+    stage: str,
+    condition: RecoveryCondition,
+    detail: Mapping[str, object],
+) -> str:
+    """Classify an abnormal ending by *opportunity*, not by agent verdict.
+
+    The budget is checked before the agent is consulted, so the class has to
+    come from the situation itself.  ``review``/``blocked``/``cycle_limit`` is
+    exactly the shape a review continuation is offered for; every other
+    ending -- including a review that stopped on its own futility detectors --
+    is charged to the general budget, because no continuation was on offer.
+    """
+
+    if (
+        stage == "review"
+        and condition == "blocked"
+        and str(detail.get("stop_reason", "")) == "cycle_limit"
+    ):
+        return RECOVERY_CLASS_REVIEW_CONTINUATION
+    return RECOVERY_CLASS_GENERAL
+
+
 @dataclass
 class _RecoveryState:
+    """Per-class recovery budgets plus a total ceiling for the whole run."""
+
     limit: int
+    continuation_limit: int = 0
     decisions: list[Mapping[str, object]] = field(default_factory=list)
+
+    def class_limit(self, recovery_class: str) -> int:
+        if recovery_class == RECOVERY_CLASS_REVIEW_CONTINUATION:
+            return self.continuation_limit
+        return self.limit
+
+    def class_used(self, recovery_class: str) -> int:
+        return sum(
+            1
+            for item in self.decisions
+            if item.get("recovery_class") == recovery_class
+        )
+
+    @property
+    def total_limit(self) -> int:
+        # Kept as an explicit ceiling rather than left implicit in the sum of
+        # the class limits, so a future class cannot widen the total by
+        # accident and a pathological run stays bounded.
+        return self.limit + self.continuation_limit
 
 
 @dataclass(frozen=True)
@@ -688,12 +744,21 @@ def run_feature_worktree(
     verification_gate_slot: AbstractContextManager[None] | None = None,
     recovery_agent: RecoveryAgent | None = deterministic_recovery_agent,
     recovery_limit: int = 3,
+    continuation_recovery_limit: int = 2,
     evidence_classification: str = "production_lifecycle",
     initial_evidence: tuple[FeatureRunHandoffArtifact, ...] = (),
     descriptor_correlation: Mapping[str, str] | None = None,
     descriptor_plan: Mapping[str, str] | None = None,
 ) -> FeatureRunResult:
-    """Create, execute, commit, and optionally merge one isolated FeatureRun."""
+    """Create, execute, commit, and optionally merge one isolated FeatureRun.
+
+    ``recovery_limit`` bounds general recoveries -- infrastructure transients
+    and every other abnormal stage ending.  ``continuation_recovery_limit``
+    bounds review continuations separately, so a run whose backend dropped
+    three streams still reaches its first continuation with budget to spend;
+    set it to 0 to refuse continuations outright.  The two together are the
+    run's total ceiling.
+    """
 
     if review_fix_policy.enabled and review_fix_executor_factory is None:
         raise ValueError("enabled review_fix_policy requires an executor factory")
@@ -736,6 +801,8 @@ def run_feature_worktree(
         )
     if recovery_limit < 1:
         raise ValueError("recovery_limit must be positive")
+    if continuation_recovery_limit < 0:
+        raise ValueError("continuation_recovery_limit must not be negative")
     handoff_kinds = [artifact.kind for artifact in initial_evidence]
     if len(set(handoff_kinds)) != len(handoff_kinds):
         raise ValueError("handoff artifact kinds must be unique")
@@ -818,7 +885,7 @@ def run_feature_worktree(
             worktree_path=transaction.worktree_path,
             audit=audit,
         )
-    recovery = _RecoveryState(recovery_limit)
+    recovery = _RecoveryState(recovery_limit, continuation_recovery_limit)
     handoff_records = []
     for handoff in initial_evidence:
         record = evidence.add(
@@ -1565,12 +1632,28 @@ def _recover_abnormal(
     reason: str,
     detail: Mapping[str, object] | None = None,
 ) -> bool:
-    """Ask for one bounded recovery decision and record the disposition."""
+    """Ask for one bounded recovery decision and record the disposition.
+
+    Every recorded decision carries the budget it was charged against and,
+    when it stops, *why* it stopped: a stop the agent chose is not the same
+    event as a stop the controller imposed because the budget ran out, and
+    reading the two apart from a reason string alone is guesswork.
+    """
 
     if agent is None:
         return False
     stage_detail = dict(detail or {})
     attempt = len(recovery.decisions) + 1
+    recovery_class = _recovery_class(stage, condition, stage_detail)
+    class_limit = recovery.class_limit(recovery_class)
+    class_attempt = recovery.class_used(recovery_class) + 1
+    budget = {
+        "class": recovery_class,
+        "class_attempt": class_attempt,
+        "class_limit": class_limit,
+        "total_attempt": attempt,
+        "total_limit": recovery.total_limit,
+    }
     workspace = _safe_workspace_snapshot(worktree_path)
     checkpoint = audit.merge_checkpoint(
         status="recovering",
@@ -1580,6 +1663,7 @@ def _recover_abnormal(
                 "condition": condition,
                 "reason": reason,
                 "attempt": attempt,
+                "budget": budget,
                 "decisions": list(recovery.decisions),
                 "workspace": workspace,
                 "stage_detail": stage_detail,
@@ -1591,6 +1675,8 @@ def _recover_abnormal(
         "stage": stage,
         "condition": condition,
         "blocked_reason": reason,
+        "recovery_class": recovery_class,
+        "budget": budget,
         "checkpoint_revision": checkpoint["revision"],
         "checkpoint_head_hash": checkpoint["head_hash"],
     }
@@ -1600,8 +1686,13 @@ def _recover_abnormal(
         decision: RecoveryDecision,
         *,
         status: str | None = None,
+        stop_cause: str | None = None,
     ) -> bool:
-        value = {**base_record, **decision.as_dict()}
+        value = {
+            **base_record,
+            **decision.as_dict(),
+            "stop_cause": stop_cause if decision.action == "stop" else None,
+        }
         recovery.decisions.append(value)
         audit.append(
             "recovery_decision",
@@ -1611,12 +1702,25 @@ def _recover_abnormal(
         )
         return decision.action != "stop"
 
-    if len(recovery.decisions) >= recovery.limit:
+    if class_attempt > class_limit:
+        # Named per class so the evidence says which allowance ran out; a
+        # continuation denied here was never shown to the policy at all.
+        label = (
+            "review-continuation recovery limit"
+            if recovery_class == RECOVERY_CLASS_REVIEW_CONTINUATION
+            else "recovery limit"
+        )
+        return record(
+            RecoveryDecision("stop", f"{label} of {class_limit} exhausted"),
+            stop_cause="budget_exhausted",
+        )
+    if attempt > recovery.total_limit:
         return record(
             RecoveryDecision(
                 "stop",
-                f"recovery limit of {recovery.limit} exhausted",
-            )
+                f"total recovery limit of {recovery.total_limit} exhausted",
+            ),
+            stop_cause="budget_exhausted",
         )
 
     context = RecoveryContext(
@@ -1650,6 +1754,7 @@ def _recover_abnormal(
                 f"recovery agent failed: {type(exc).__name__}: {exc}",
             ),
             status="failed",
+            stop_cause="agent_error",
         )
 
     proposal = decision.as_dict()
@@ -1661,9 +1766,10 @@ def _recover_abnormal(
             RecoveryDecision(
                 "stop",
                 "recovery proposal repeated an unchanged strategy",
-            )
+            ),
+            stop_cause="repeated_strategy",
         )
-    return record(decision)
+    return record(decision, stop_cause="policy")
 
 
 def _safe_workspace_snapshot(worktree_path: Path) -> Mapping[str, object]:
