@@ -25,6 +25,14 @@ MAX_FILE_BYTES = 4 * 1024 * 1024
 # after which refresh() failed on every cycle and the dashboard silently
 # served its last sub-cap snapshot forever (health still "ok").
 MAX_RESPONSE_BYTES = 8 * 1024 * 1024
+# A snapshot is served until a *successful* refresh replaces it, so a refresh
+# that keeps failing leaves the dashboard serving frozen data indefinitely.
+# Failures are reported immediately; the age threshold is the secondary net for
+# a refresh that stops running without raising (a dead scheduler thread), and
+# is deliberately generous because refresh is asynchronous and lazy -- an idle
+# dashboard legitimately holds an old snapshot until the next request.
+STALE_SNAPSHOT_REFRESH_MULTIPLIER = 30
+MIN_STALE_SNAPSHOT_SECONDS = 60.0
 MAX_DIAGNOSTICS = 100
 MAX_DIAGNOSTIC_TEXT = 512
 MAX_AUDIT_ROOTS = 16
@@ -69,6 +77,7 @@ class DashboardApplication:
         self._refresh_thread: threading.Thread | None = None
         self._snapshot: _Snapshot | None = None
         self._last_error: str | None = None
+        self._consecutive_refresh_failures = 0
 
     def snapshot(self) -> _Snapshot:
         current = self._snapshot
@@ -90,9 +99,11 @@ class DashboardApplication:
                 candidate = self._build_snapshot()
             except (AuditError, DashboardError, OSError, ValueError, json.JSONDecodeError) as exc:
                 self._last_error = _bounded_text(str(exc))
+                self._consecutive_refresh_failures += 1
                 return
             self._snapshot = candidate
             self._last_error = None
+            self._consecutive_refresh_failures = 0
 
     def _schedule_refresh(self) -> None:
         with self._refresh_guard:
@@ -109,12 +120,59 @@ class DashboardApplication:
                 if self._refresh_thread is threading.current_thread():
                     self._refresh_thread = None
 
-    def health(self) -> bytes:
+    @property
+    def stale_after_seconds(self) -> float:
+        """Age past which a served snapshot is reported as frozen."""
+
+        return max(
+            self.refresh_seconds * STALE_SNAPSHOT_REFRESH_MULTIPLIER,
+            MIN_STALE_SNAPSHOT_SECONDS,
+        )
+
+    def health_report(self) -> dict[str, Any]:
+        """Report whether the served snapshot is current, frozen, or absent.
+
+        A snapshot is only replaced by a *successful* refresh, so reporting
+        merely that one exists says nothing about whether it is current: the
+        /api/catalog size-cap incident kept a snapshot in place while every
+        refresh failed, and health reported "ok" throughout. Health therefore
+        answers the question that matters -- is the data being served still
+        being updated -- and reports "degraded" when it is not.
+        """
+
         try:
             snapshot = self.snapshot()
         except DashboardError as exc:
-            return _json_bytes({"status": "unavailable", "reason": _bounded_text(str(exc))})
-        return _json_bytes({"status": "ok", "catalog_revision": snapshot.revision})
+            return {"status": "unavailable", "reason": _bounded_text(str(exc))}
+        age = max(0.0, time.monotonic() - snapshot.created_at)
+        failures = self._consecutive_refresh_failures
+        error = self._last_error
+        report: dict[str, Any] = {
+            "status": "ok",
+            "catalog_revision": snapshot.revision,
+            "snapshot_age_seconds": round(age, 3),
+            "stale_after_seconds": round(self.stale_after_seconds, 3),
+            "consecutive_refresh_failures": failures,
+        }
+        if error is not None:
+            # Refresh is failing while a previously built snapshot is still
+            # being served -- the frozen-but-serving case exactly.
+            report["status"] = "degraded"
+            report["reason"] = (
+                f"serving a snapshot {age:.1f}s old; "
+                f"{failures} consecutive refresh failure(s), last: {error}"
+            )
+            report["refresh_error"] = error
+        elif age >= self.stale_after_seconds:
+            report["status"] = "degraded"
+            report["reason"] = (
+                f"serving a snapshot {age:.1f}s old with no refresh recorded "
+                f"in the last {self.stale_after_seconds:.0f}s"
+            )
+        return report
+
+    def health(self) -> bytes:
+        return _json_bytes(self.health_report())
 
     def asset(self, request_path: str) -> tuple[bytes, str] | None:
         if self.assets_root is None:

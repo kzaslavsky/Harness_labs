@@ -39,6 +39,10 @@ REGISTRATION_PROTOCOL = "plan-graph-registration/2"
 RECOVERY_REGISTRATION_PROTOCOL = "plan-graph-registration/3"
 LEGACY_PLAN_PROTOCOL = "component-plan/0"
 FEATURE_RUN_REQUEST_PROTOCOL = "plan-graph-feature-run-request/1"
+# Opt-in switch for continuing to admit independent ready nodes after one
+# node reaches a terminal outcome.  Set to exactly "1" to enable without
+# threading the constructor flag through a runner script.
+CONTINUE_AFTER_BLOCK_ENV_VAR = "HARNESS_LABS_PLAN_GRAPH_CONTINUE_AFTER_BLOCK"
 _REGISTRATION_FIELDS_V2 = frozenset(
     {
         "protocol",
@@ -203,10 +207,34 @@ class ReadySetScheduler:
         *,
         active: Sequence[ReadySetDispatch] = (),
         verified_barriers: Sequence[str] = (),
+        withheld: Sequence[str] = (),
     ) -> tuple[ReadySetDispatch, ...]:
-        """Return a stable admission set after validating checkpoint identity."""
+        """Return a stable admission set after validating checkpoint identity.
+
+        ``withheld`` names nodes this graph attempt will not dispatch again —
+        today only nodes that already reached a terminal (failed/blocked)
+        outcome in this attempt.  They are removed from selection without
+        consuming a slot, so an unrelated ready node can take the freed
+        capacity.  Their dependents are already excluded by the unsealed
+        dependency rule below, so no additional closure is needed here.  The
+        default empty sequence leaves selection byte-identical.
+        """
 
         sealed_ids = set(sealed)
+        withheld_ids = set(withheld)
+        if any(not isinstance(node_id, str) for node_id in withheld_ids):
+            raise PlanGraphError("withheld nodes must be strings")
+        unknown_withheld = withheld_ids - set(self._by_id)
+        if unknown_withheld:
+            raise PlanGraphError(
+                "withheld nodes contain unknown ids: "
+                + ", ".join(sorted(unknown_withheld))
+            )
+        if withheld_ids & sealed_ids:
+            raise PlanGraphError(
+                "withheld nodes cannot be sealed: "
+                + ", ".join(sorted(withheld_ids & sealed_ids))
+            )
         verified = set(verified_barriers)
         if any(not isinstance(node_id, str) for node_id in sealed_ids):
             raise PlanGraphError("sealed nodes must be strings")
@@ -315,6 +343,8 @@ class ReadySetScheduler:
             if not available:
                 break
             if run.id in sealed_ids or run.id in active_nodes:
+                continue
+            if run.id in withheld_ids:
                 continue
             if not all(dependency in sealed_ids for dependency in run.depends_on):
                 continue
@@ -1128,6 +1158,7 @@ class PlanGraph:
         predecessor_checkpoint: Mapping[str, object] | None = None,
         on_block_argv: Sequence[str] | None = None,
         max_parallelism: int = 1,
+        continue_independent_after_block: bool = False,
     ) -> None:
         if run_root is None:
             raise PlanGraphError("run_root is required for audited PlanGraph execution")
@@ -1177,6 +1208,25 @@ class PlanGraph:
             or any(not isinstance(value, str) or not value for value in on_block_argv)
         ):
             raise PlanGraphError("on-block argv must be a non-empty string array")
+        if not isinstance(continue_independent_after_block, bool):
+            raise PlanGraphError(
+                "continue_independent_after_block must be a boolean"
+            )
+        # Strictly opt-in.  False (the default, and the only behavior before
+        # this flag existed) means a node's terminal outcome stops every
+        # further admission in this attempt, so the ready-set path only
+        # drains its already-reserved siblings.  True keeps admitting nodes
+        # whose dependencies are all sealed — never a dependent of the
+        # blocked node, which ADR 0006 forbids and which the unsealed
+        # dependency rule already excludes — so the tail of a blocked attempt
+        # does useful work instead of idling behind a long-running sibling.
+        # This does not relaunch the blocked node: a repair successor for it
+        # still requires the attempt to finalize (see
+        # PlanGraphAudit.open_repair_predecessor).
+        self.continue_independent_after_block = (
+            continue_independent_after_block
+            or os.environ.get(CONTINUE_AFTER_BLOCK_ENV_VAR) == "1"
+        )
         self.on_block_argv = tuple(on_block_argv or ())
         self.on_block_hook: dict[str, object] | None = None
         self.join_resolutions = JoinConflictResolutionStore(
@@ -1638,16 +1688,33 @@ class PlanGraph:
         in_flight: dict[str, tuple[Future, FeatureRunRequest, str]] = {}
         terminal: _SealDecision | None = None
         deferred_error: PlanGraphError | None = None
+        # Nodes this attempt has already terminalized and must never dispatch
+        # again.  Only consulted when continue_independent_after_block is on;
+        # without it the first terminal stops admission outright and this set
+        # is never read.
+        withheld: set[str] = set()
+        # An admission-stage failure (join construction, retry budget) is a
+        # graph-level problem, not one node's product failure, so it stops
+        # admission even under continue_independent_after_block.
+        admitting = True
         with ThreadPoolExecutor(
             max_workers=self.max_parallelism, thread_name_prefix="plan-graph-node"
         ) as pool:
             while True:
-                if terminal is None and deferred_error is None:
+                if (
+                    admitting
+                    and deferred_error is None
+                    and (terminal is None or self.continue_independent_after_block)
+                ):
                     active = tuple(
                         ReadySetDispatch(node_id, "feature_run")
                         for node_id in sorted(in_flight)
                     )
-                    for unit in scheduler.select(set(completed), active=active):
+                    for unit in scheduler.select(
+                        set(completed),
+                        active=active,
+                        withheld=tuple(sorted(withheld)),
+                    ):
                         run = by_id[unit.node_id]
                         try:
                             base = self._base_commit_for_run(run, completed)
@@ -1656,11 +1723,14 @@ class PlanGraph:
                                 run.id, "blocked",
                                 {"error": str(exc), "classification": "harness_or_configuration"},
                             )
-                            terminal = _SealDecision(
-                                "blocked",
-                                result=PlanGraphResult("blocked", None, dict(completed), run.id),
-                                reason=str(exc),
-                            )
+                            if terminal is None:
+                                terminal = _SealDecision(
+                                    "blocked",
+                                    result=PlanGraphResult("blocked", None, dict(completed), run.id),
+                                    reason=str(exc),
+                                )
+                            withheld.add(run.id)
+                            admitting = False
                             break
                         request = self._request_for_run(
                             run, base, tuple(finding_obligations.get(run.id, ())),
@@ -1681,11 +1751,14 @@ class PlanGraph:
                                 run.id, "blocked",
                                 {"error": str(exc), "classification": "harness_or_configuration"},
                             )
-                            terminal = _SealDecision(
-                                "blocked",
-                                result=PlanGraphResult("blocked", None, dict(completed), run.id),
-                                reason=str(exc),
-                            )
+                            if terminal is None:
+                                terminal = _SealDecision(
+                                    "blocked",
+                                    result=PlanGraphResult("blocked", None, dict(completed), run.id),
+                                    reason=str(exc),
+                                )
+                            withheld.add(run.id)
+                            admitting = False
                             break
                         audit.node_started(run.id)
                         in_flight[run.id] = (
@@ -1741,10 +1814,16 @@ class PlanGraph:
                     except PlanGraphError as exc:
                         if deferred_error is None:
                             deferred_error = exc
+                        withheld.add(node_id)
                         continue
                     if decision.kind == "sealed":
                         finding_obligations = decision.finding_obligations
                         continue
+                    # This node is terminal for this attempt.  It never
+                    # re-enters selection: only a repair successor may
+                    # relaunch it, and that still requires this attempt to
+                    # finalize first.
+                    withheld.add(node_id)
                     if terminal is None:
                         terminal = decision
         if deferred_error is not None and terminal is None:
@@ -2394,6 +2473,34 @@ class PlanGraph:
                         "evidence_ref": evidence_ref,
                         "open_obligations": node.get("finding_obligations", []),
                     })
+        # The resume template names every node this attempt terminalized, not
+        # only the first one recorded.  A successor that retries only the
+        # first leaves the rest unrepaired and blocks again on them
+        # immediately.
+        #
+        # Gated on the same flag that produces multi-terminal attempts.  This
+        # field is a published contract: every consumer of escalation.json
+        # reads it, so widening it unconditionally would change what an
+        # existing operator loop retries whether or not that operator opted
+        # into anything.  With the flag off the frontier is byte-identical to
+        # its long-standing single-element form.
+        #
+        # Known residual, left deliberately: a drained attempt can already end
+        # with more than one failed/blocked node without this flag (the
+        # survivor of a drain can fail too), and in that case the frontier
+        # still under-reports, as it always has.  Fixing that is a separate
+        # decision about the artifact contract, not a side effect of this
+        # feature; see docs/development/plan-graph-sibling-independent-node-relaunch.md.
+        retry_frontier = [result.failed_run_id] if result.failed_run_id else []
+        if self.continue_independent_after_block:
+            # The primary blocker stays first, the remainder are sorted for a
+            # stable artifact digest.
+            retry_frontier += sorted(
+                node["node_id"] for node in node_detail
+                if isinstance(node.get("node_id"), str)
+                and node.get("status") in {"failed", "blocked"}
+                and node["node_id"] not in retry_frontier
+            )
         escalation = {
             "protocol": "plan-graph-block-escalation/1",
             "graph_run_id": self.graph_run_id,
@@ -2424,7 +2531,7 @@ class PlanGraph:
             "resume_directive_template": {
                 "logical_graph_id": self.logical_graph_id,
                 "predecessor_attempt_id": self.graph_run_id,
-                "retry_frontier": [result.failed_run_id] if result.failed_run_id else [],
+                "retry_frontier": retry_frontier,
                 "blocker_evidence_ref": "$this_escalation_artifact",
             },
         }

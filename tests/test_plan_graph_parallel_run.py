@@ -18,8 +18,21 @@ from pathlib import Path
 from harness_labs.plangraph.plan_graph import (
     FeatureRunOutcome,
     PlanGraph,
+    PlanGraphError,
+    PlanRun,
+    ReadySetScheduler,
     register_plan_graph,
 )
+
+
+def _run(node_id: str, depends_on: list[str]) -> PlanRun:
+    return PlanRun(
+        id=node_id,
+        objective=f"Build {node_id}",
+        plan_sections=(node_id,),
+        criteria=(f"AC-{node_id}",),
+        depends_on=tuple(depends_on),
+    )
 
 
 def git(repository: Path, *arguments: str) -> str:
@@ -261,6 +274,118 @@ class ParallelPlanGraphTests(unittest.TestCase):
         self.assertIn("good", result.completed)
         self.assertNotIn("tail", result.completed)
 
+    def _blocked_beside_a_slow_sibling(self, **options):
+        """Run bad+slow concurrently; bad fails first, slow finishes later.
+
+        ``extra`` is an unrelated node with no dependency on either, ready
+        the whole time but held out of the first ready set by
+        ``max_parallelism=2``.  ``tail`` depends on the failing node.
+        """
+        release = threading.Event()
+        launched: list[str] = []
+        launch_lock = threading.Lock()
+
+        def launcher(request):
+            with launch_lock:
+                launched.append(request.plan_node_id)
+            if request.plan_node_id == "bad":
+                return FeatureRunOutcome(
+                    "failed", evidence={"error": "worker exploded"}
+                )
+            if request.plan_node_id == "slow":
+                release.wait(timeout=20)
+            candidate = self.commit_file(
+                request.base_commit, f"{request.plan_node_id}.txt",
+                request.plan_node_id,
+            )
+            return FeatureRunOutcome("succeeded", candidate_commit=candidate)
+
+        graph = self.graph(
+            {"bad": [], "slow": [], "extra": [], "tail": ["bad"]},
+            launcher, max_parallelism=2, **options,
+        )
+        # Let the failure land and any follow-on admission happen, then
+        # release the long-running sibling.
+        timer = threading.Timer(1.0, release.set)
+        timer.start()
+        try:
+            result = graph.run()
+        finally:
+            timer.cancel()
+        return graph, result, launched
+
+    def test_block_stops_all_admission_by_default(self) -> None:
+        _, result, launched = self._blocked_beside_a_slow_sibling()
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(result.failed_run_id, "bad")
+        # The in-flight sibling drains and seals; nothing new is admitted.
+        self.assertIn("slow", result.completed)
+        self.assertNotIn("extra", launched)
+        self.assertNotIn("tail", launched)
+
+    def test_independent_node_is_admitted_after_a_block_when_opted_in(self) -> None:
+        _, result, launched = self._blocked_beside_a_slow_sibling(
+            continue_independent_after_block=True,
+        )
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(result.failed_run_id, "bad")
+        self.assertIn("slow", result.completed)
+        # The unrelated node took the freed slot and sealed.
+        self.assertIn("extra", launched)
+        self.assertIn("extra", result.completed)
+        # The blocked node is never relaunched inside its own attempt, and a
+        # dependent of it is still never launched.
+        self.assertEqual(launched.count("bad"), 1)
+        self.assertNotIn("tail", launched)
+        self.assertNotIn("tail", result.completed)
+
+    def _two_blocked_frontier(self, **options) -> tuple[list, str]:
+        """Run a graph where two independent nodes block; return the frontier."""
+        def launcher(request):
+            if request.plan_node_id in {"bad", "worse"}:
+                return FeatureRunOutcome(
+                    "blocked", evidence={"error": f"{request.plan_node_id} blocked"}
+                )
+            candidate = self.commit_file(
+                request.base_commit, f"{request.plan_node_id}.txt",
+                request.plan_node_id,
+            )
+            return FeatureRunOutcome("succeeded", candidate_commit=candidate)
+
+        graph = self.graph(
+            {"bad": [], "worse": [], "tail": ["bad", "worse"]},
+            launcher, max_parallelism=2, **options,
+        )
+        result = graph.run()
+        self.assertEqual(result.status, "blocked")
+        escalation = json.loads(
+            (graph.run_root / graph.graph_run_id / "escalation.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        return (
+            escalation["resume_directive_template"]["retry_frontier"],
+            result.failed_run_id,
+        )
+
+    def test_escalation_retry_frontier_names_every_terminal_node(self) -> None:
+        """With the flag on, the resume template names both blocked nodes."""
+        frontier, failed_run_id = self._two_blocked_frontier(
+            continue_independent_after_block=True
+        )
+        self.assertEqual(frontier[0], failed_run_id)
+        self.assertEqual(set(frontier), {"bad", "worse"})
+
+    def test_escalation_retry_frontier_is_unchanged_by_default(self) -> None:
+        """escalation.json is a published contract read by operator loops, so
+        the widened frontier is gated on the same flag that makes
+        multi-terminal attempts common. Off, it keeps its long-standing
+        single-element form -- including the pre-existing under-report when a
+        drain produces a second terminal node, which is what this graph does.
+        """
+        frontier, failed_run_id = self._two_blocked_frontier()
+        self.assertEqual(frontier, [failed_run_id])
+
     def test_launcher_exception_is_a_child_failure(self) -> None:
         def launcher(request):
             raise RuntimeError("launcher escaped")
@@ -335,6 +460,42 @@ class ParallelPlanGraphTests(unittest.TestCase):
             if event.get("event_type") == "plan_graph_gate_slot_acquired"
         }
         self.assertEqual(acquired, {"a", "b"})
+
+
+class ReadySetWithheldTests(unittest.TestCase):
+    """Admission-only unit tests for the ``withheld`` selection exclusion."""
+
+    def scheduler(self, *, max_parallelism: int = 2) -> ReadySetScheduler:
+        return ReadySetScheduler(
+            [
+                _run("bad", []),
+                _run("extra", []),
+                _run("tail", ["bad"]),
+            ],
+            max_parallelism=max_parallelism,
+        )
+
+    def test_default_selection_is_unchanged(self) -> None:
+        selected = self.scheduler().select(set())
+        self.assertEqual(
+            [unit.node_id for unit in selected], ["bad", "extra"]
+        )
+
+    def test_withheld_node_frees_its_slot_for_a_later_ready_node(self) -> None:
+        selected = self.scheduler(max_parallelism=1).select(
+            set(), withheld=("bad",)
+        )
+        self.assertEqual([unit.node_id for unit in selected], ["extra"])
+
+    def test_withheld_node_does_not_unblock_its_dependents(self) -> None:
+        selected = self.scheduler().select(set(), withheld=("bad",))
+        self.assertNotIn("tail", [unit.node_id for unit in selected])
+
+    def test_withheld_rejects_unknown_and_sealed_nodes(self) -> None:
+        with self.assertRaisesRegex(PlanGraphError, "unknown"):
+            self.scheduler().select(set(), withheld=("nope",))
+        with self.assertRaisesRegex(PlanGraphError, "cannot be sealed"):
+            self.scheduler().select({"bad"}, withheld=("bad",))
 
 
 if __name__ == "__main__":

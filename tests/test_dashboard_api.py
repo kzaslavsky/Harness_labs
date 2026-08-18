@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import hashlib
 import io
 import json
@@ -12,6 +13,8 @@ from unittest.mock import patch
 from harness_labs.core.audit import AuditActor, AuditJournal
 from harness_labs.observability.dashboard_server import (
     MAX_RESPONSE_BYTES,
+    MIN_STALE_SNAPSHOT_SECONDS,
+    STALE_SNAPSHOT_REFRESH_MULTIPLIER,
     DashboardApplication,
     DashboardError,
     _DashboardHandler,
@@ -387,6 +390,133 @@ class DashboardApiTests(unittest.TestCase):
                     self._request(app, "GET", "/api/feature-runs/run-1")[0],
                     404,
                 )
+
+
+class DashboardHealthTests(unittest.TestCase):
+    """Health must answer "is the served data still being updated?".
+
+    Reporting that a snapshot exists is not the same question: a snapshot is
+    only ever replaced by a *successful* refresh, so once refresh starts
+    failing the dashboard serves frozen data indefinitely. That is exactly
+    what happened when /api/catalog outgrew the 1 MiB response cap -- the
+    dashboard served a stale snapshot for ~10.5 hours while health reported
+    "ok" the entire time.
+    """
+
+    _run = DashboardApiTests._run
+    _request = DashboardApiTests._request
+
+    def _age_snapshot(self, app: DashboardApplication, seconds: float) -> None:
+        current = app._snapshot
+        assert current is not None
+        app._snapshot = replace(current, created_at=current.created_at - seconds)
+
+    def test_degraded_while_refresh_fails_and_a_stale_snapshot_is_served(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._run(root)
+            # The scheduler is stubbed out so the assertions observe exactly
+            # the refreshes this test drives, not a background thread.
+            with patch.object(DashboardApplication, "_schedule_refresh", lambda self: None):
+                app = DashboardApplication(root, refresh_seconds=60)
+                self.assertEqual(json.loads(app.health())["status"], "ok")
+                self._age_snapshot(app, 3600)
+                with patch.object(
+                    DashboardApplication,
+                    "_build_snapshot",
+                    side_effect=DashboardError("response exceeds size limit"),
+                ):
+                    app.refresh()
+                    app.refresh()
+
+                    report = json.loads(app.health())
+                    self.assertEqual(report["status"], "degraded")
+                    self.assertEqual(report["consecutive_refresh_failures"], 2)
+                    self.assertIn("response exceeds size limit", report["refresh_error"])
+                    self.assertIn("3600", report["reason"].replace(".0s", ""))
+                    self.assertGreaterEqual(report["snapshot_age_seconds"], 3600)
+
+                    # Frozen *but serving*: the catalog still answers 200 with
+                    # the stale body, which is why health is the only place
+                    # the freeze can surface.
+                    self.assertEqual(self._request(app, "GET", "/api/catalog")[0], 200)
+                    self.assertEqual(self._request(app, "GET", "/api/health")[0], 503)
+
+    def test_recovers_to_ok_once_a_refresh_succeeds(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._run(root)
+            with patch.object(DashboardApplication, "_schedule_refresh", lambda self: None):
+                app = DashboardApplication(root, refresh_seconds=60)
+                self.assertEqual(json.loads(app.health())["status"], "ok")
+                self._age_snapshot(app, 3600)
+                with patch.object(
+                    DashboardApplication,
+                    "_build_snapshot",
+                    side_effect=DashboardError("response exceeds size limit"),
+                ):
+                    app.refresh()
+                self.assertEqual(json.loads(app.health())["status"], "degraded")
+                app.refresh()
+                report = json.loads(app.health())
+                self.assertEqual(report["status"], "ok")
+                self.assertEqual(report["consecutive_refresh_failures"], 0)
+                self.assertNotIn("refresh_error", report)
+                self.assertEqual(self._request(app, "GET", "/api/health")[0], 200)
+
+    def test_degraded_on_age_alone_when_no_refresh_is_recorded(self) -> None:
+        """The secondary net: a refresh that stops running without raising.
+
+        No error is recorded here, so the failure counter says nothing; only
+        the snapshot's age reveals that nothing is updating it.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._run(root)
+            with patch.object(DashboardApplication, "_schedule_refresh", lambda self: None):
+                app = DashboardApplication(root, refresh_seconds=2.0)
+                self.assertEqual(json.loads(app.health())["status"], "ok")
+                self._age_snapshot(app, app.stale_after_seconds + 1)
+                report = json.loads(app.health())
+                self.assertEqual(report["status"], "degraded")
+                self.assertEqual(report["consecutive_refresh_failures"], 0)
+                self.assertNotIn("refresh_error", report)
+                self.assertIn("no refresh recorded", report["reason"])
+                self.assertEqual(self._request(app, "GET", "/api/health")[0], 503)
+
+    def test_stale_threshold_is_generous_relative_to_the_refresh_interval(self) -> None:
+        """An idle dashboard holds an old snapshot legitimately; the age net
+        must not fire on ordinary lazy refresh."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._run(root)
+            with patch.object(DashboardApplication, "_schedule_refresh", lambda self: None):
+                app = DashboardApplication(root, refresh_seconds=2.0)
+                self.assertEqual(
+                    app.stale_after_seconds,
+                    max(2.0 * STALE_SNAPSHOT_REFRESH_MULTIPLIER, MIN_STALE_SNAPSHOT_SECONDS),
+                )
+                self.assertEqual(json.loads(app.health())["status"], "ok")
+                self._age_snapshot(app, app.refresh_seconds * 3)
+                self.assertEqual(json.loads(app.health())["status"], "ok")
+                # A sub-second refresh interval must not make every snapshot
+                # look frozen a second later.
+                brisk = DashboardApplication(root, refresh_seconds=0.01)
+                self.assertEqual(brisk.stale_after_seconds, MIN_STALE_SNAPSHOT_SECONDS)
+
+    def test_unavailable_when_no_snapshot_was_ever_built(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._run(root)
+            with patch.object(
+                DashboardApplication,
+                "_build_snapshot",
+                side_effect=DashboardError("response exceeds size limit"),
+            ):
+                app = DashboardApplication(root, refresh_seconds=60)
+                report = json.loads(app.health())
+                self.assertEqual(report["status"], "unavailable")
+                self.assertEqual(self._request(app, "GET", "/api/health")[0], 503)
 
 
 if __name__ == "__main__":

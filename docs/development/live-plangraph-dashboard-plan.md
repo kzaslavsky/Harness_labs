@@ -239,7 +239,10 @@ this local read-only surface.
 
 Required endpoints:
 
-- `GET /api/health`
+- `GET /api/health` -- reports `ok`, `degraded`, or `unavailable`. `degraded`
+  (HTTP 503) means a snapshot is still being served but is no longer being
+  updated: either refresh is failing, or nothing has refreshed it within
+  `stale_after_seconds`. Serving a snapshot is not by itself health.
 - `GET /api/catalog`
 - `GET /api/plan-graphs`
 - `GET /api/plan-graphs/<graph-id>`
