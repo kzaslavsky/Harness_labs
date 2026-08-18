@@ -176,6 +176,78 @@ class PlanGraphTests(unittest.TestCase):
         self.assertEqual(calls[1].finding_obligations, (transfer,))
         self.assertTrue(calls[1].inherited_ledger_frozen)
 
+    def test_blocked_node_carries_its_open_findings_into_graph_state(self) -> None:
+        """A blocked node's open findings survive as its own obligations.
+
+        Without this the findings live only in the FeatureRun ledger, and the
+        successor attempt re-runs implementation and rediscovers them.
+        """
+
+        open_finding = {
+            "key": "producer.py:missing-guard",
+            "file": "producer.py",
+            "subject": "missing guard",
+            "statement": "The guard was never added.",
+            "requires_disposition": True,
+            "outcome": "open",
+            "origin_node": "",
+            "transferred_to": "",
+            "required_paths": ["producer.py"],
+        }
+
+        result = self.graph(
+            lambda request: FeatureRunOutcome(
+                "blocked",
+                None,
+                evidence={
+                    "review_fix": {
+                        "status": "blocked",
+                        "open_finding_keys": [open_finding["key"]],
+                        "open_findings": [open_finding],
+                        "transferred_findings": [],
+                    }
+                },
+            ),
+            registration=self._transfer_registration(),
+        ).run()
+
+        self.assertEqual(result.status, "blocked")
+        self.assertEqual(result.failed_run_id, "a")
+        state = json.loads(
+            (self.root / "runs" / "attempt-1" / "checkpoint.json").read_text()
+        )["state"]
+        carried = state["finding_obligations"]["a"]
+        self.assertEqual([item["key"] for item in carried], [open_finding["key"]])
+        # Self-carried, not transferred: origin stays on the blocked node so a
+        # retry that re-implements the work is not review-frozen.
+        self.assertEqual(carried[0]["origin_node"], "a")
+        self.assertEqual(carried[0]["transferred_to"], "")
+
+    def test_self_carried_obligations_do_not_freeze_review_discovery(self) -> None:
+        """A retry that re-implements must still be allowed to find new work."""
+
+        carried = {
+            "key": "producer.py:missing-guard",
+            "file": "producer.py",
+            "origin_node": "a",
+            "transferred_to": "",
+            "required_paths": ["producer.py"],
+        }
+        requests = []
+
+        graph = self.graph(
+            lambda request: (
+                requests.append(request)
+                or FeatureRunOutcome("succeeded", f"{request.run.id}-commit")
+            ),
+            registration=self._transfer_registration(),
+        )
+        graph._audit_for_run()
+        request = graph._request_for_run(graph.plan.runs[0], self.base_commit, (carried,))
+
+        self.assertEqual(request.finding_obligations, (carried,))
+        self.assertFalse(request.inherited_ledger_frozen)
+
     def test_transfer_to_unbound_owner_fails_closed(self) -> None:
         transfer = {
             "key": "consumer.py:wire-producer",

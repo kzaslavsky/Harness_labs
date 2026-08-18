@@ -603,7 +603,14 @@ class PlanGraphAudit:
             ),
         )
 
-    def node_failed(self, node_id: str, status: str, evidence: object | None) -> None:
+    def node_failed(
+        self,
+        node_id: str,
+        status: str,
+        evidence: object | None,
+        *,
+        finding_obligations: Mapping[str, object] | None = None,
+    ) -> None:
         artifact = self.journal.write_artifact(
             "plan-graph-node-failure-evidence",
             {"plan_node_id": node_id, "status": status, "evidence": evidence},
@@ -615,6 +622,11 @@ class PlanGraphAudit:
             {"status": status, "finished_at": _timestamp(),
              "evidence": {"evidence_ref": f"artifact:sha256:{artifact.sha256}"}},
             artifacts=(artifact,),
+            **(
+                {"finding_obligations": dict(finding_obligations)}
+                if finding_obligations is not None
+                else {}
+            ),
         )
 
     def candidate_verified_pending_transfer(

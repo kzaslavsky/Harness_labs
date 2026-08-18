@@ -11,7 +11,11 @@ from harness_labs.core.attempts import TaskResult
 from harness_labs.core.audit import AuditActor, AuditJournal
 from harness_labs.core.controller_evidence import EvidenceCatalog
 from harness_labs.core.controller_results import semantic_payload
-from harness_labs.featurerun.review_fix import ReviewFixLoop, ReviewFixPolicy
+from harness_labs.featurerun.review_fix import (
+    ReviewFixLoop,
+    ReviewFixPolicy,
+    ReviewLedger,
+)
 
 
 def result(attempt_id, schema, *, findings=(), details=None):
@@ -82,6 +86,44 @@ class ReviewFixLoopTests(unittest.TestCase):
         )
         return loop.run(), audit, evidence
 
+    def build_loop(
+        self,
+        factory,
+        *,
+        policy=ReviewFixPolicy(),
+        paths=("feature.txt",),
+        allowed_paths=("feature.txt",),
+        evidence=None,
+        audit=None,
+        **loop_options,
+    ):
+        """Return the loop itself so a test can continue its ledger."""
+
+        if audit is None:
+            temporary = tempfile.TemporaryDirectory()
+            self.addCleanup(temporary.cleanup)
+            audit = AuditJournal(
+                Path(temporary.name) / "run",
+                "review-test",
+                actor=AuditActor("kernel", "controller"),
+                evidence_classification="component",
+            )
+            evidence = EvidenceCatalog(audit=audit)
+        return ReviewFixLoop(
+            run_id="review-test",
+            objective="Make the feature correct.",
+            acceptance_criteria=(
+                {"id": "correct", "statement": "Feature is correct."},
+            ),
+            allowed_paths=allowed_paths,
+            changed_paths=paths,
+            executor_factory=factory,
+            evidence=evidence,
+            audit=audit,
+            policy=policy,
+            **loop_options,
+        ), audit, evidence
+
     def test_fix_is_verified_and_regression_review_closes_ledger_entry(self):
         finding = {
             "id": "wrong",
@@ -148,6 +190,136 @@ class ReviewFixLoopTests(unittest.TestCase):
         )
         audit.finalize("succeeded", result=outcome.as_dict())
         AuditJournal.verify(audit.run_dir)
+
+    def test_continuation_resumes_the_blocked_ledger_instead_of_restarting(self):
+        """A granted continuation keeps finding identity and cycle numbering.
+
+        This is the whole point of the continuation: the predecessor already
+        paid for discovery, so the extra cycles go to discharging what it
+        found rather than re-reviewing the same worktree from cycle one.
+        """
+
+        finding = {
+            "id": "wrong",
+            "statement": "The value is reversed.",
+            "category": "correctness",
+            "severity": "major",
+            "requires_disposition": True,
+            "file": "feature.txt",
+            "subject": "wrong value",
+            "score": 90,
+            "fix_cost": "local",
+            "protects": "acceptance criterion correct",
+        }
+        key = "feature.txt:wrong-value"
+        # One cycle only: review finds the item, the limit lands before any fix.
+        policy = ReviewFixPolicy(mechanical_cycle_limit=1, continuation_cycles=2)
+        blocked_factory = _Factory(
+            {
+                "review": [
+                    lambda attempt: result(
+                        attempt.attempt_id,
+                        "review-fix-review/1",
+                        findings=(finding,),
+                    )
+                ]
+            }
+        )
+        loop, audit, evidence = self.build_loop(blocked_factory, policy=policy)
+        blocked = loop.run()
+
+        self.assertEqual(blocked.status, "blocked")
+        self.assertEqual(blocked.cycles, 1)
+        self.assertEqual(blocked.open_finding_keys, (key,))
+        self.assertEqual(
+            [item["key"] for item in blocked.open_findings], [key]
+        )
+
+        continuation_factory = _Factory(
+            {
+                "fix": [
+                    lambda attempt: result(
+                        attempt.attempt_id,
+                        "review-fix-fix/1",
+                        details={"addressed_finding_keys": [key]},
+                    )
+                ],
+                "verify": [
+                    lambda attempt: result(
+                        attempt.attempt_id,
+                        "review-fix-verify/1",
+                        details={"verified_finding_keys": [key]},
+                    )
+                ],
+                "review": [
+                    lambda attempt: result(
+                        attempt.attempt_id, "review-fix-review/1"
+                    ),
+                    lambda attempt: result(
+                        attempt.attempt_id, "review-fix-review/1"
+                    ),
+                ],
+            }
+        )
+        continuation, _, _ = self.build_loop(
+            continuation_factory,
+            policy=policy,
+            audit=audit,
+            evidence=evidence,
+            resumed_ledger=loop.ledger,
+            resume_from_cycle=blocked.cycles,
+            additional_cycles=policy.continuation_cycles,
+        )
+        outcome = continuation.run()
+
+        self.assertEqual(outcome.status, "succeeded")
+        # Cycle numbering continues, so no attempt id collides with the
+        # predecessor's and the ledger reads as one history.
+        self.assertEqual(outcome.cycles, 3)
+        ledger = json.loads(evidence.open(outcome.ledger_ref))
+        self.assertEqual(ledger["findings"][key]["outcome"], "fixed")
+        # Identity survived: the finding was seen in the predecessor's cycle,
+        # never re-ingested as a new item.
+        self.assertEqual(ledger["findings"][key]["cycles_seen"], [1])
+        self.assertEqual([entry["cycle"] for entry in ledger["cycles"]], [1, 2, 3])
+        # The continuation opens with a regression review, not a discovery
+        # review: it may only confirm the inherited findings, so the cycle it
+        # was granted goes to fixing them.
+        self.assertEqual(
+            [call[0] for call in continuation_factory.calls],
+            ["review", "fix", "verify", "review"],
+        )
+        self.assertIn(
+            "Do not discover or authorize new work",
+            continuation_factory.calls[0][1]["regression_focus"],
+        )
+        self.assertEqual(continuation_factory.calls[0][1]["cycle"], 2)
+        audit.finalize("succeeded", result=outcome.as_dict())
+        AuditJournal.verify(audit.run_dir)
+
+    def test_continuation_rejects_an_incoherent_grant(self):
+        factory = _Factory({})
+        with self.assertRaises(ValueError):
+            self.build_loop(factory, resume_from_cycle=2)
+        ledger_owner, _, _ = self.build_loop(factory)
+        with self.assertRaises(ValueError):
+            self.build_loop(
+                factory,
+                resumed_ledger=ReviewLedger(ReviewFixPolicy(), "mechanical"),
+                resume_from_cycle=1,
+                additional_cycles=0,
+            )
+        with self.assertRaises(ValueError):
+            # Re-seeding a ledger that already carries the obligation would
+            # collide on its key.
+            self.build_loop(
+                factory,
+                resumed_ledger=ReviewLedger(ReviewFixPolicy(), "mechanical"),
+                resume_from_cycle=1,
+                additional_cycles=1,
+                inherited_findings=({"key": "a.py:thing"},),
+            )
+        del ledger_owner
 
     def test_no_change_fix_triggers_one_fresh_recovery_attempt(self):
         finding = {

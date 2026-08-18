@@ -684,17 +684,11 @@ def _launch_node(
     )
     # Feed the node's structured verification facts into the RB ledger; without
     # this the retry-budget accounting never sees gate or repair evidence.
-    evidence: dict[str, object] | None = None
-    if result.verification is not None:
-        evidence = {
-            "verification": {
-                "command_attempts": list(result.verification.command_attempts),
-                "repair_invocation_ids": list(
-                    result.verification.repair_invocation_ids
-                ),
-                "repair_invocations": list(result.verification.repair_invocations),
-            }
-        }
+    # Canonical outcome evidence: the verification facts the RB ledger accounts
+    # against, plus the review-fix record the graph reads transferred and
+    # still-open findings out of.  Without the review-fix half a blocked node's
+    # open findings never reach graph state and its retry rediscovers them.
+    evidence: dict[str, object] | None = result.outcome_evidence() or None
     return FeatureRunOutcome(
         status=result.status,
         candidate_commit=result.candidate_commit,

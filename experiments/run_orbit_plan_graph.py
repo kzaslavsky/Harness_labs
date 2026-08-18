@@ -967,6 +967,9 @@ def _launch_node(
     return FeatureRunOutcome(
         status=result.status,
         candidate_commit=result.candidate_commit,
+        # Verification facts for the retry-budget ledger plus the review-fix
+        # record the graph reads transferred and still-open findings out of.
+        evidence=result.outcome_evidence() or None,
         plan_graph_id=request.plan_graph_id,
         plan_node_id=request.plan_node_id,
         feature_run_id=request.feature_run_id,
