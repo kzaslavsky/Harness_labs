@@ -273,6 +273,16 @@ class ClaudeSemanticTaskExecutor:
         ]
         if self.sandbox == "workspace-write":
             argv.append("--dangerously-skip-permissions")
+        # The captured images live under the audit run directory, outside the
+        # worker's cwd. Claude Code's file-reading tool refuses paths outside
+        # its allowed directories, and `-p` has no prompt to answer, so telling
+        # the worker to open them is inert without this grant -- verified
+        # against the installed CLI, which answers "CANNOT" without it. Granted
+        # per-directory rather than leaning on --dangerously-skip-permissions,
+        # so a read-only worker gets the pixels too and the access stays
+        # narrowed to the artifacts the controller itself produced.
+        for directory in sorted({str(path.parent) for path in image_paths}):
+            argv.extend(("--add-dir", directory))
         started_ns = monotonic_ns()
         try:
             completed = subprocess.run(

@@ -772,5 +772,128 @@ class ClaudeSemanticTaskExecutorDirtyBaselineTests(unittest.TestCase):
         self.assertIn("inspection/1-report", kinds)
 
 
+class ClaudeImageAttachmentTests(unittest.TestCase):
+    """The access grant that makes the Claude image path more than a suggestion.
+
+    P4 told a Claude worker to open absolute artifact paths with its
+    file-reading tool but granted it no access to the directory holding them.
+    Probed against the installed CLI, a read-only `claude -p` worker asked to
+    read a file outside its cwd answers "CANNOT"; with ``--add-dir`` for that
+    directory it returns the file's contents. The prompt text alone therefore
+    proved nothing, which is what these tests now pin.
+    """
+
+    def _execute(self, repository: Path, context: dict, sandbox: str) -> list[str]:
+        task = {
+            "id": "repair",
+            "objective": "Repair the visual gate",
+            "context": json.dumps(context),
+            "details_schema": "repair/1",
+            "acceptance_criteria": [],
+            "required_capabilities": (
+                ["repo.write"] if sandbox == "workspace-write" else ["repo.read"]
+            ),
+        }
+        argvs: list[list[str]] = []
+        prompts: list[str] = []
+
+        def run(argv, **kwargs):
+            argvs.append(list(argv))
+            prompts.append(kwargs["input"])
+            return subprocess.CompletedProcess(
+                argv, 0, stdout=json.dumps(_envelope(_raw_result())), stderr=""
+            )
+
+        snapshot = {
+            "head": "abc",
+            "branch": "feature",
+            "changed_paths": [],
+            "files": {},
+        }
+        executor = ClaudeSemanticTaskExecutor(
+            task,
+            repository,
+            EvidenceCatalog(),
+            "Repair precisely.",
+            sandbox=sandbox,
+        )
+        with (
+            patch(
+                "harness_labs.core.claude_task_executor.shutil.which",
+                return_value="claude",
+            ),
+            patch(
+                "harness_labs.core.claude_task_executor.subprocess.run",
+                side_effect=run,
+            ),
+            patch(
+                "harness_labs.core.claude_task_executor.workspace_snapshot",
+                return_value=snapshot,
+            ),
+        ):
+            result = executor.execute(
+                TaskAttempt(
+                    "repair/attempt-1",
+                    "task:repair",
+                    "context:repair",
+                    "profile:repairer",
+                )
+            )
+        self.assertEqual(result.status, "succeeded", result.payload)
+        self.assertEqual(len(argvs), 1)
+        self.prompt = prompts[0]
+        return argvs[0]
+
+    def _images(self, root: Path) -> list[Path]:
+        artifacts = root / "run" / "artifacts"
+        artifacts.mkdir(parents=True)
+        images = []
+        for index in range(2):
+            image = artifacts / f"{index:06d}-verification-failure-image.png"
+            image.write_bytes(b"\x89PNG\r\n\x1a\n" + bytes([index]))
+            images.append(image)
+        return images
+
+    def test_a_read_only_worker_is_granted_the_directory_holding_the_images(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repository = root / "repo"
+            repository.mkdir()
+            (repository / ".git").write_text("gitdir: elsewhere\n", encoding="utf-8")
+            images = self._images(root)
+            argv = self._execute(
+                repository,
+                {
+                    "failed_verification": {
+                        "image_artifacts": [{"path": str(i)} for i in images]
+                    }
+                },
+                "read-only",
+            )
+            # One grant for the single directory the images share, not one per
+            # file, and no --dangerously-skip-permissions on a read-only worker.
+            granted = [
+                argv[index + 1]
+                for index, value in enumerate(argv)
+                if value == "--add-dir"
+            ]
+            self.assertEqual(granted, [str(images[0].parent)])
+            self.assertNotIn("--dangerously-skip-permissions", argv)
+            # The prompt still has to name the paths it just granted access to.
+            for image in images:
+                self.assertIn(str(image), self.prompt)
+            self.assertIn("file-reading tool", self.prompt)
+
+    def test_a_round_without_images_grants_no_extra_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repository = Path(temporary) / "repo"
+            repository.mkdir()
+            (repository / ".git").write_text("gitdir: elsewhere\n", encoding="utf-8")
+            argv = self._execute(repository, {"failed_verification": {}}, "read-only")
+            self.assertNotIn("--add-dir", argv)
+
+
 if __name__ == "__main__":
     unittest.main()
