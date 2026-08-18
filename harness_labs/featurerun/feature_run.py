@@ -1264,12 +1264,7 @@ def _review_stage_detail(
         "stop_reason": result.stop_reason,
         "risk_tier": result.risk_tier,
         "cycles_spent": result.cycles,
-        "cycle_limit": (
-            loop.policy.sensitive_cycle_limit
-            if result.risk_tier == "sensitive"
-            else loop.policy.mechanical_cycle_limit
-        )
-        + loop.additional_cycles,
+        "cycle_limit": loop.cycle_budget(result.risk_tier),
         "continuation_cycles_granted": loop.additional_cycles,
         "resumed_from_cycle": loop.resume_from_cycle,
         "open_finding_keys": list(result.open_finding_keys),
@@ -1395,15 +1390,22 @@ def run_plan_graph_feature_worktree(
         # Without an agent every `_recover_abnormal` call site is inert, so a
         # review loop that exhausts its cycles blocks the node and the next
         # graph attempt re-runs implementation and verification from scratch.
-        # Bind the conservative default; a launcher may pass its own agent, or
+        # Bind the composed default; a launcher may pass its own agent, or
         # `recovery_agent=None` to keep the old block-immediately behaviour.
+        #
+        # It must be the *composed* agent, not the continuation policy alone.
+        # `run_feature_worktree`'s own default is deterministic_recovery_agent
+        # (transient retry), and binding the continuation policy here would
+        # silently take that away from every PlanGraph campaign that does not
+        # pass an agent explicitly -- an infrastructure blip that costs a
+        # bounded retry today would instead block the node and burn a whole
+        # graph attempt. The two policies cover disjoint conditions; the
+        # PlanGraph path needs both.
         from harness_labs.featurerun.feature_run_policy import (
-            standard_review_continuation_recovery_agent,
+            standard_composed_recovery_agent,
         )
 
-        feature_run_options["recovery_agent"] = (
-            standard_review_continuation_recovery_agent()
-        )
+        feature_run_options["recovery_agent"] = standard_composed_recovery_agent()
     if binding.is_child_lane:
         supplied_branch = feature_run_options.get("feature_branch")
         if supplied_branch != binding.lane_branch:

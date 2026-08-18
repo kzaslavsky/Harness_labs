@@ -555,6 +555,34 @@ class ReviewFixLoop:
         self.ledger: ReviewLedger | None = resumed_ledger
         self.runner = AttemptRunner()
 
+    def cycle_budget(self, risk_tier: str) -> int:
+        """Highest cycle ordinal this loop may reach, continuations included.
+
+        ``cycle`` counts *cumulatively* across a continuation chain: a
+        continuation starts at its predecessor's total (``resume_from_cycle``)
+        rather than at zero, so the ceiling has to be relative to where it
+        resumes.  Computing it as ``base + additional_cycles`` was correct only
+        for the first continuation, where ``resume_from_cycle`` happens to
+        equal ``base`` -- a continuation triggers on ``stop_reason ==
+        "cycle_limit"``, so its predecessor stopped exactly at its own ceiling.
+        A *second* consecutive continuation resumed at ``base + granted`` and
+        was handed the same ``base + granted`` as its limit, so it burned one
+        review call and stopped immediately on ``cycle_limit``.
+
+        Anchoring on ``max(base, resume_from_cycle)`` grants each continuation
+        its full ``continuation_cycles`` wherever it resumes, and leaves the
+        non-continuation case (``resume_from_cycle`` and ``additional_cycles``
+        both zero) at exactly ``base``.  How many continuations may be granted
+        at all is bounded separately, by ``recovery_limit``.
+        """
+
+        base = (
+            self.policy.sensitive_cycle_limit
+            if risk_tier == "sensitive"
+            else self.policy.mechanical_cycle_limit
+        )
+        return max(base, self.resume_from_cycle) + self.additional_cycles
+
     def run(self) -> ReviewFixResult:
         if self.resumed_ledger is not None:
             # Continue the predecessor's ledger: finding identity, cycle
@@ -577,11 +605,7 @@ class ReviewFixLoop:
             return self._finish(
                 ledger, "succeeded", "review-fix loop disabled", 0, "disabled"
             )
-        cycle_limit = (
-            self.policy.sensitive_cycle_limit
-            if risk_tier == "sensitive"
-            else self.policy.mechanical_cycle_limit
-        ) + self.additional_cycles
+        cycle_limit = self.cycle_budget(risk_tier)
         low_yield_streak = 0
         cycle = self.resume_from_cycle
         try:

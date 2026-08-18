@@ -297,6 +297,153 @@ class ReviewFixLoopTests(unittest.TestCase):
         audit.finalize("succeeded", result=outcome.as_dict())
         AuditJournal.verify(audit.run_dir)
 
+    def test_second_consecutive_continuation_gets_a_real_cycle_budget(self):
+        """A continuation chain must keep granting cycles, not stall at two.
+
+        ``cycle`` is cumulative across the chain, so a continuation resumes at
+        its predecessor's total. Computing the ceiling as
+        ``base + continuation_cycles`` therefore worked only for the *first*
+        continuation, where ``resume_from_cycle == base``. The second resumed
+        at ``base + granted`` against a limit of ``base + granted``: its first
+        review tripped ``cycle >= cycle_limit`` immediately, so it spent a
+        review call and blocked without ever reaching a fix. This drives the
+        real ledger through two consecutive continuations to pin that.
+        """
+
+        def finding(identifier, subject, statement):
+            return {
+                "id": identifier,
+                "statement": statement,
+                "category": "correctness",
+                "severity": "major",
+                "requires_disposition": True,
+                "file": "feature.txt",
+                "subject": subject,
+                "score": 90,
+                "fix_cost": "local",
+                "protects": "acceptance criterion correct",
+            }
+
+        first_key = "feature.txt:first-defect"
+        second_key = "feature.txt:second-defect"
+        # Futility stops are disabled so the only thing that can end a loop
+        # here is the cycle budget -- which is what is under test.
+        policy = ReviewFixPolicy(
+            mechanical_cycle_limit=1,
+            continuation_cycles=2,
+            marginal_yield_stop_enabled=False,
+            no_progress_stop_enabled=False,
+        )
+
+        discovery = _Factory(
+            {
+                "review": [
+                    lambda attempt: result(
+                        attempt.attempt_id,
+                        "review-fix-review/1",
+                        findings=(
+                            finding("first", "first defect", "The first is wrong."),
+                            finding("second", "second defect", "The second is wrong."),
+                        ),
+                    )
+                ]
+            }
+        )
+        loop, audit, evidence = self.build_loop(discovery, policy=policy)
+        blocked = loop.run()
+        self.assertEqual((blocked.status, blocked.stop_reason), ("blocked", "cycle_limit"))
+        self.assertEqual(blocked.cycles, 1)
+        self.assertEqual(set(blocked.open_finding_keys), {first_key, second_key})
+
+        def discharging_factory(key, reviews):
+            return _Factory(
+                {
+                    "review": reviews,
+                    "fix": [
+                        lambda attempt: result(
+                            attempt.attempt_id,
+                            "review-fix-fix/1",
+                            details={"addressed_finding_keys": [key]},
+                        )
+                    ],
+                    "verify": [
+                        lambda attempt: result(
+                            attempt.attempt_id,
+                            "review-fix-verify/1",
+                            details={"verified_finding_keys": [key]},
+                        )
+                    ],
+                }
+            )
+
+        # First continuation: cycles 2 and 3. It discharges one finding and
+        # runs out of budget with the other still open -- so it blocks on
+        # cycle_limit again, which is the only stop reason a further
+        # continuation is granted for.
+        first_factory = discharging_factory(
+            first_key,
+            [
+                lambda attempt: result(attempt.attempt_id, "review-fix-review/1"),
+                lambda attempt: result(attempt.attempt_id, "review-fix-review/1"),
+            ],
+        )
+        first_continuation, _, _ = self.build_loop(
+            first_factory, policy=policy, audit=audit, evidence=evidence,
+            resumed_ledger=loop.ledger,
+            resume_from_cycle=blocked.cycles,
+            additional_cycles=policy.continuation_cycles,
+        )
+        self.assertEqual(first_continuation.cycle_budget("mechanical"), 3)
+        first_outcome = first_continuation.run()
+        self.assertEqual(
+            (first_outcome.status, first_outcome.stop_reason),
+            ("blocked", "cycle_limit"),
+        )
+        self.assertEqual(first_outcome.cycles, 3)
+        self.assertEqual(first_outcome.open_finding_keys, (second_key,))
+
+        # Second continuation: resumes at cycle 3, so its ceiling must be 5.
+        # Under the old arithmetic it was base + granted = 3, i.e. already
+        # behind where this loop starts.
+        second_factory = discharging_factory(
+            second_key,
+            [
+                lambda attempt: result(attempt.attempt_id, "review-fix-review/1"),
+                lambda attempt: result(attempt.attempt_id, "review-fix-review/1"),
+            ],
+        )
+        second_continuation, _, _ = self.build_loop(
+            second_factory, policy=policy, audit=audit, evidence=evidence,
+            resumed_ledger=first_continuation.ledger,
+            resume_from_cycle=first_outcome.cycles,
+            additional_cycles=policy.continuation_cycles,
+        )
+        budget = second_continuation.cycle_budget("mechanical")
+        self.assertEqual(budget, 5)
+        self.assertGreater(
+            budget,
+            policy.mechanical_cycle_limit + policy.continuation_cycles,
+            "a second continuation must not be capped at the first one's ceiling",
+        )
+
+        second_outcome = second_continuation.run()
+        self.assertEqual(second_outcome.status, "succeeded")
+        self.assertEqual(second_outcome.cycles, 5)
+        # The proof it was not a one-review stall: it reached fix and verify.
+        self.assertEqual(
+            [call[0] for call in second_factory.calls],
+            ["review", "fix", "verify", "review"],
+        )
+        ledger = json.loads(evidence.open(second_outcome.ledger_ref))
+        self.assertEqual(ledger["findings"][first_key]["outcome"], "fixed")
+        self.assertEqual(ledger["findings"][second_key]["outcome"], "fixed")
+        # One continuous history across all three loops.
+        self.assertEqual(
+            [entry["cycle"] for entry in ledger["cycles"]], [1, 2, 3, 4, 5]
+        )
+        audit.finalize("succeeded", result=second_outcome.as_dict())
+        AuditJournal.verify(audit.run_dir)
+
     def test_continuation_rejects_an_incoherent_grant(self):
         factory = _Factory({})
         with self.assertRaises(ValueError):
