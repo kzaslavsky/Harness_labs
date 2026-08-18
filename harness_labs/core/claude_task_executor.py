@@ -52,6 +52,7 @@ from harness_labs.core.git_transaction import (
     workspace_snapshot,
 )
 from harness_labs.core.usage import ModelPrice, parse_claude_result_usage, usage_payload
+from harness_labs.core.verification_images import attached_image_paths
 
 
 _READ_ONLY_TOOLS = "Read,Glob,Grep"
@@ -234,7 +235,19 @@ class ClaudeSemanticTaskExecutor:
                 media_type="application/json",
                 producer_task_id=str(self.task["id"]),
             )
-        prompt = _worker_prompt(self.task, context, self.role_instructions)
+        # The Claude CLI is driven here with a plain-text prompt on stdin, so
+        # the images reach the model through its own file-reading tool (which
+        # renders an image into context) rather than as inline content blocks;
+        # switching stdin to the stream-json content-block protocol would
+        # change the transport for every task, not just repair rounds.
+        image_paths = attached_image_paths(context)
+        prompt = _worker_prompt(
+            self.task,
+            context,
+            self.role_instructions,
+            image_paths,
+            images_attached=False,
+        )
 
         argv = [
             claude,
@@ -260,6 +273,16 @@ class ClaudeSemanticTaskExecutor:
         ]
         if self.sandbox == "workspace-write":
             argv.append("--dangerously-skip-permissions")
+        # The captured images live under the audit run directory, outside the
+        # worker's cwd. Claude Code's file-reading tool refuses paths outside
+        # its allowed directories, and `-p` has no prompt to answer, so telling
+        # the worker to open them is inert without this grant -- verified
+        # against the installed CLI, which answers "CANNOT" without it. Granted
+        # per-directory rather than leaning on --dangerously-skip-permissions,
+        # so a read-only worker gets the pixels too and the access stays
+        # narrowed to the artifacts the controller itself produced.
+        for directory in sorted({str(path.parent) for path in image_paths}):
+            argv.extend(("--add-dir", directory))
         started_ns = monotonic_ns()
         try:
             completed = subprocess.run(
