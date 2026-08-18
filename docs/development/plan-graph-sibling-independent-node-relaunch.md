@@ -3,8 +3,8 @@
 Status: design + a narrow implemented slice (Phase 1). Phases 2–4 need a human
 decision before any code.
 Date: 2026-08-16
-Scope: `harness_labs/plangraph/` attempt lifecycle; the campaign runner scripts
-under `experiments/`.
+Scope: `harness_labs/plangraph/` attempt lifecycle, plus the operator driver
+that consumes its escalation artifact.
 
 ## The observed problem
 
@@ -21,11 +21,14 @@ but even a perfectly per-node-aware driver is refused by the library today.
 
 ### Layer 0 — the driver does serialize (but is not the binding constraint)
 
-`experiments/few_autoresume.py` blocks on `wait_for_quiescence()` (no
-`run_flow_editor_streamline_plan_graph.py` process alive) and then picks a
-predecessor from `latest_finalized_attempt()`, which requires
-`manifest.json`'s `status` to be `failed`/`blocked`. Removing both would not
-help, because of layers 1–3.
+The driver this was diagnosed against is the Retinology Flow-Editor
+campaign's autoresume loop, which is campaign-specific and deliberately not
+merged here (patch P7 of `HARNESS_LABS_PATCH_AUDIT_20260818.md`; a
+parameterized `scripts/plan_graph_autoresume.py` is the named follow-up). Its
+shape is what matters: it blocks on a quiescence wait (no campaign-runner
+process alive) and then picks a predecessor from the latest *finalized*
+attempt, which requires `manifest.json`'s `status` to be `failed`/`blocked`.
+Removing both would not help, because of layers 1–3.
 
 Worth noting: per-node terminal status *is* already observable in real time.
 `PlanGraphAudit.node_failed` (`plan_graph_audit.py:597-609`) writes a
@@ -198,19 +201,40 @@ Additive, strictly opt-in, default behavior byte-identical.
    An **admission-stage** failure (join construction or retry-budget exhaustion)
    still stops admission entirely even when the flag is on — that is a
    graph-level problem, not one node's product failure.
-3. `_transition_to_blocked`'s `resume_directive_template.retry_frontier` now
-   names *every* node the attempt terminalized, primary blocker first, rather
-   than only `result.failed_run_id`. This was already under-reporting today (a
-   drain can produce a second failure) and the flag makes multi-blocked attempts
-   common; a successor that retries only the first node blocks again immediately
-   on the rest. `schemas/block-escalation.json` types this field as an open
-   object, so no schema change was needed.
+3. `_transition_to_blocked`'s `resume_directive_template.retry_frontier` names
+   *every* node the attempt terminalized, primary blocker first, rather than
+   only `result.failed_run_id` — **but only when the flag is on** (see the
+   decision below). A successor that retries only the first node blocks again
+   immediately on the rest, and the flag makes multi-blocked attempts common.
+   `schemas/block-escalation.json` types this field as an open object, so no
+   schema change was needed.
 
-Tests added in `tests/test_plan_graph_parallel_run.py`:
+Tests in `tests/test_plan_graph_parallel_run.py`:
 `test_block_stops_all_admission_by_default`,
 `test_independent_node_is_admitted_after_a_block_when_opted_in`,
-`test_escalation_retry_frontier_names_every_terminal_node`, and a
-`ReadySetWithheldTests` unit class. Full suite: 488 tests, OK.
+`test_escalation_retry_frontier_names_every_terminal_node`,
+`test_escalation_retry_frontier_is_unchanged_by_default`, and a
+`ReadySetWithheldTests` unit class.
+
+### Decision: the widened frontier is gated on the flag
+
+Open question 2 below asked whether the widened `retry_frontier` was wanted
+independently of `continue_independent_after_block`. As first written it
+applied on *every* blocked attempt regardless of the flag, which meant an
+operator who opted into nothing would still see the content of
+`escalation.json` change under them. `retry_frontier` is a published contract:
+any autoresume driver reads it to decide what the successor attempt retries.
+Widening it is therefore a change to that contract, and it is now gated on the
+same flag that creates the condition motivating it. With the flag off the
+field keeps its long-standing single-element form, byte for byte.
+
+The residual is deliberate and worth stating plainly: a drained attempt can
+already finish with more than one terminal node without the flag (the survivor
+of a drain can fail too), and in that case the frontier still under-reports, as
+it always has. That is a pre-existing gap in the artifact contract, and fixing
+it is a decision about the contract rather than a side effect of shipping this
+feature. `test_escalation_retry_frontier_is_unchanged_by_default` pins the
+current behaviour so the gap is recorded rather than merely tolerated.
 
 ### Correctness risks of Phase 1
 
@@ -252,9 +276,10 @@ auto-resume driver, and the dashboard run catalog all depend on.
 ## Open questions for the human
 
 1. Ship Phase 1 default-off (current state), or default-on after one campaign?
-2. Is the widened `retry_frontier` (item 3) wanted independently of the flag? It
-   changes `escalation.json` content for every blocked attempt, including
-   serial ones.
+2. ~~Is the widened `retry_frontier` (item 3) wanted independently of the
+   flag?~~ **Decided: no** — it is gated on the flag, see "Decision: the
+   widened frontier is gated on the flag" above. The pre-existing under-report
+   on a multi-terminal drain remains open as a separate contract question.
 3. For Phase 3: who owns the final join and the functionality tests when node
    lifecycles span attempts — the newest attempt, a dedicated integration
    attempt, or does `attempt` stop being the integration unit entirely?

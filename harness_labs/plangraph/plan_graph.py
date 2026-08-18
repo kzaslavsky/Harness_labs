@@ -2474,19 +2474,33 @@ class PlanGraph:
                         "open_obligations": node.get("finding_obligations", []),
                     })
         # The resume template names every node this attempt terminalized, not
-        # only the first one recorded.  A drained attempt can already end with
-        # more than one failed/blocked node today (the survivor of a drain can
-        # fail too), and more often under continue_independent_after_block; a
-        # successor that retries only the first leaves the rest unrepaired and
-        # blocks again on them immediately.  The primary blocker stays first,
-        # the remainder are sorted for a stable artifact digest.
+        # only the first one recorded.  A successor that retries only the
+        # first leaves the rest unrepaired and blocks again on them
+        # immediately.
+        #
+        # Gated on the same flag that produces multi-terminal attempts.  This
+        # field is a published contract: every consumer of escalation.json
+        # reads it, so widening it unconditionally would change what an
+        # existing operator loop retries whether or not that operator opted
+        # into anything.  With the flag off the frontier is byte-identical to
+        # its long-standing single-element form.
+        #
+        # Known residual, left deliberately: a drained attempt can already end
+        # with more than one failed/blocked node without this flag (the
+        # survivor of a drain can fail too), and in that case the frontier
+        # still under-reports, as it always has.  Fixing that is a separate
+        # decision about the artifact contract, not a side effect of this
+        # feature; see docs/development/plan-graph-sibling-independent-node-relaunch.md.
         retry_frontier = [result.failed_run_id] if result.failed_run_id else []
-        retry_frontier += sorted(
-            node["node_id"] for node in node_detail
-            if isinstance(node.get("node_id"), str)
-            and node.get("status") in {"failed", "blocked"}
-            and node["node_id"] not in retry_frontier
-        )
+        if self.continue_independent_after_block:
+            # The primary blocker stays first, the remainder are sorted for a
+            # stable artifact digest.
+            retry_frontier += sorted(
+                node["node_id"] for node in node_detail
+                if isinstance(node.get("node_id"), str)
+                and node.get("status") in {"failed", "blocked"}
+                and node["node_id"] not in retry_frontier
+            )
         escalation = {
             "protocol": "plan-graph-block-escalation/1",
             "graph_run_id": self.graph_run_id,

@@ -339,8 +339,8 @@ class ParallelPlanGraphTests(unittest.TestCase):
         self.assertNotIn("tail", launched)
         self.assertNotIn("tail", result.completed)
 
-    def test_escalation_retry_frontier_names_every_terminal_node(self) -> None:
-        """Two independent nodes block; the resume template must name both."""
+    def _two_blocked_frontier(self, **options) -> tuple[list, str]:
+        """Run a graph where two independent nodes block; return the frontier."""
         def launcher(request):
             if request.plan_node_id in {"bad", "worse"}:
                 return FeatureRunOutcome(
@@ -354,7 +354,7 @@ class ParallelPlanGraphTests(unittest.TestCase):
 
         graph = self.graph(
             {"bad": [], "worse": [], "tail": ["bad", "worse"]},
-            launcher, max_parallelism=2,
+            launcher, max_parallelism=2, **options,
         )
         result = graph.run()
         self.assertEqual(result.status, "blocked")
@@ -363,9 +363,28 @@ class ParallelPlanGraphTests(unittest.TestCase):
                 encoding="utf-8"
             )
         )
-        frontier = escalation["resume_directive_template"]["retry_frontier"]
-        self.assertEqual(frontier[0], result.failed_run_id)
+        return (
+            escalation["resume_directive_template"]["retry_frontier"],
+            result.failed_run_id,
+        )
+
+    def test_escalation_retry_frontier_names_every_terminal_node(self) -> None:
+        """With the flag on, the resume template names both blocked nodes."""
+        frontier, failed_run_id = self._two_blocked_frontier(
+            continue_independent_after_block=True
+        )
+        self.assertEqual(frontier[0], failed_run_id)
         self.assertEqual(set(frontier), {"bad", "worse"})
+
+    def test_escalation_retry_frontier_is_unchanged_by_default(self) -> None:
+        """escalation.json is a published contract read by operator loops, so
+        the widened frontier is gated on the same flag that makes
+        multi-terminal attempts common. Off, it keeps its long-standing
+        single-element form -- including the pre-existing under-report when a
+        drain produces a second terminal node, which is what this graph does.
+        """
+        frontier, failed_run_id = self._two_blocked_frontier()
+        self.assertEqual(frontier, [failed_run_id])
 
     def test_launcher_exception_is_a_child_failure(self) -> None:
         def launcher(request):
