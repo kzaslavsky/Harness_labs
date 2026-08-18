@@ -20,6 +20,11 @@ from harness_labs.core.audit import AuditError
 from harness_labs.plangraph.plan_graph_audit import PlanGraphAudit, validate_plan_graph_id
 from harness_labs.plangraph.plan_graph_budget import BudgetError, RetryBudgetLedger, gate_digest
 from harness_labs.plangraph.plan_graph_authority import AutomaticRecoveryAuthority, RecoveryAuthorityError
+from harness_labs.plangraph.plan_graph_join import (
+    JoinConflictResolutionStore,
+    JoinResolutionError,
+    describe_join_conflict,
+)
 from harness_labs.plangraph.plan_graph_contract import (
     PLAN_GRAPH_PROTOCOL,
     PlanGraphContractError,
@@ -1174,6 +1179,9 @@ class PlanGraph:
             raise PlanGraphError("on-block argv must be a non-empty string array")
         self.on_block_argv = tuple(on_block_argv or ())
         self.on_block_hook: dict[str, object] | None = None
+        self.join_resolutions = JoinConflictResolutionStore(
+            self.run_root, registration.plan_lineage_id, self.repository
+        )
         self.budget = RetryBudgetLedger(self.run_root, registration.plan_lineage_id)
         try:
             self.budget.register(
@@ -1785,7 +1793,11 @@ class PlanGraph:
         Ancestor parents are pruned first, so a linear lineage joins to its
         tip without creating a merge commit. Conflicting joins raise — a
         conflict between siblings means their allowed paths were not disjoint
-        in effect, which is a plan defect, not a repair target.
+        in effect, which is a plan defect, not a repair target. The one
+        sanctioned exception is a resolution an operator has already
+        registered and verified through ``JoinConflictResolutionStore`` for
+        this exact conflict; the mechanical step never invents a resolution
+        of its own.
         """
         unique = list(dict.fromkeys(parents))
         pruned = [
@@ -1804,16 +1816,16 @@ class PlanGraph:
                 cwd=self.repository, text=True, capture_output=True, check=False,
             )
             if tree_run.returncode != 0:
-                raise PlanGraphError(
-                    f"PlanGraph join {label!r} has merge conflicts between "
-                    f"{merged[:12]} and {parent[:12]}: "
-                    + tree_run.stdout.strip().splitlines()[-1][:200]
+                tree, message_suffix = self._resolve_join_conflict(
+                    label, merged, parent, tree_run
                 )
-            tree = tree_run.stdout.strip().splitlines()[0]
+            else:
+                tree = tree_run.stdout.strip().splitlines()[0]
+                message_suffix = ""
             merged = _git(
                 self.repository, "commit-tree", tree,
                 "-p", merged, "-p", parent,
-                "-m", f"PlanGraph join {label} ({self.graph_run_id})",
+                "-m", f"PlanGraph join {label} ({self.graph_run_id}){message_suffix}",
             ).decode().strip()
         if merged not in unique:
             # Protect the synthetic join commit from gc for the run's lifetime.
@@ -1822,6 +1834,91 @@ class PlanGraph:
                 f"refs/plan-graph/{self.graph_run_id}/join-{label}", merged,
             )
         return merged
+
+    def _resolve_join_conflict(
+        self,
+        label: str,
+        merged: str,
+        parent: str,
+        tree_run: subprocess.CompletedProcess,
+    ) -> tuple[str, str]:
+        """Return a registered, re-verified resolution tree for a join conflict.
+
+        Without a registered resolution this raises exactly as the mechanical
+        join always has — a sibling conflict is a plan defect — but first
+        writes a durable conflict artifact carrying the label, both full
+        parent ids, the conflicted paths, and the complete ``git merge-tree``
+        output, so an orchestrating session can diagnose and register a
+        resolution without re-deriving anything.
+        """
+        try:
+            record = self.join_resolutions.resolve(
+                label=label, parent_a=merged, parent_b=parent
+            )
+        except JoinResolutionError as exc:
+            raise PlanGraphError(
+                f"PlanGraph join {label!r} has a registered conflict resolution "
+                f"that failed re-verification: {exc}"
+            ) from exc
+        if record is not None:
+            return (
+                record["resolved_tree"],
+                f" [conflict resolved: {record['resolution_key'][:12]}"
+                f" seq {record['sequence']}]",
+            )
+        try:
+            description = describe_join_conflict(
+                self.repository, label, merged, parent
+            )
+        except JoinResolutionError as exc:
+            # The conflict could not even be described; fall back to the
+            # legacy diagnostic so the failure still surfaces.
+            raise PlanGraphError(
+                f"PlanGraph join {label!r} has merge conflicts between "
+                f"{merged[:12]} and {parent[:12]}: "
+                + tree_run.stdout.strip().splitlines()[-1][:200]
+                + f" (conflict description failed: {exc})"
+            ) from exc
+        artifact_directory = self.run_root / ".plan-graph-join-conflicts"
+        artifact_directory.mkdir(parents=True, exist_ok=True)
+        artifact_path = (
+            artifact_directory
+            / f"{self.registration.plan_lineage_id}-{description['resolution_key'][:16]}.json"
+        )
+        artifact_path.write_text(
+            json.dumps(
+                {
+                    **description,
+                    "graph_run_id": self.graph_run_id,
+                    "plan_lineage_id": self.registration.plan_lineage_id,
+                    "run_root": str(self.run_root),
+                    "repository": str(self.repository),
+                    "resolution_registration": {
+                        "store": "harness_labs.plangraph.plan_graph_join.JoinConflictResolutionStore",
+                        "argv": [
+                            "python3", "-m", "harness_labs.plangraph.plan_graph_join",
+                            "--repository", str(self.repository),
+                            "register",
+                            "--run-root", str(self.run_root),
+                            "--lineage-id", self.registration.plan_lineage_id,
+                            "--resolved-tree", "<verified tree id>",
+                            "--reason", "<why this resolution is correct>",
+                            label, *description["parents"],
+                        ],
+                    },
+                },
+                indent=2, sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        conflicted = ", ".join(description["conflicted_paths"])
+        raise PlanGraphError(
+            f"PlanGraph join {label!r} has merge conflicts between "
+            f"{description['parents'][0]} and {description['parents'][1]} "
+            f"in: {conflicted}. This is a plan defect; no verified resolution "
+            f"is registered for this conflict. Full diagnostics: {artifact_path}"
+        )
 
     def _is_ancestor(self, ancestor: str, descendant: str) -> bool:
         probe = subprocess.run(
