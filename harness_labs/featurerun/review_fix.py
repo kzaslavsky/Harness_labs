@@ -573,7 +573,7 @@ class ReviewFixLoop:
         its full ``continuation_cycles`` wherever it resumes, and leaves the
         non-continuation case (``resume_from_cycle`` and ``additional_cycles``
         both zero) at exactly ``base``.  How many continuations may be granted
-        at all is bounded separately, by ``recovery_limit``.
+        at all is bounded separately, by ``continuation_recovery_limit``.
         """
 
         base = (
