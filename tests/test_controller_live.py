@@ -784,5 +784,115 @@ class SelectDirtyBaselineReceiptTests(unittest.TestCase):
         self.assertIsNone(failure)
 
 
+class CodexImageAttachmentTests(unittest.TestCase):
+    """The ``-i`` argv the repair round actually hands to ``codex exec``.
+
+    The flag was asserted only in a commit message. Nothing checked that the
+    executor emits one ``-i`` per captured image, that they precede the ``-``
+    stdin marker (``codex exec`` reads options before the prompt operand), or
+    that a round with no images still produces the byte-identical argv the
+    non-repair path always produced.
+    """
+
+    RAW = {
+        "summary": "Repaired.",
+        "deliverable_markdown": "# Repair\nDone.",
+        "details_json": "{}",
+        "claims": [],
+        "findings": [],
+        "recommendations": [],
+        "unresolved_questions": [],
+        "satisfied_criteria": [],
+    }
+
+    def _execute(self, repository: Path, context: dict) -> list[str]:
+        task = {
+            "id": "repair",
+            "objective": "Repair the visual gate",
+            "context": json.dumps(context),
+            "details_schema": "repair/1",
+            "acceptance_criteria": [],
+            "required_capabilities": ["repo.read"],
+        }
+        captured: list[list[str]] = []
+
+        def run(argv, **kwargs):
+            captured.append(list(argv))
+            output = Path(argv[argv.index("-o") + 1])
+            output.write_text(json.dumps(self.RAW), encoding="utf-8")
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+        executor = CodexSemanticTaskExecutor(
+            task,
+            repository,
+            EvidenceCatalog(),
+            "Repair precisely.",
+        )
+        with (
+            patch(
+                "harness_labs.core.controller_live.shutil.which", return_value="codex"
+            ),
+            patch("harness_labs.core.controller_live.subprocess.run", side_effect=run),
+        ):
+            result = executor.execute(
+                TaskAttempt(
+                    "repair/attempt-1",
+                    "task:repair",
+                    "context:repair",
+                    "profile:repairer",
+                )
+            )
+        self.assertEqual(result.status, "succeeded", result.payload)
+        self.assertEqual(len(captured), 1)
+        return captured[0]
+
+    def test_each_captured_image_becomes_one_i_flag_before_the_stdin_marker(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repository = root / "repo"
+            repository.mkdir()
+            (repository / ".git").write_text("gitdir: elsewhere\n", encoding="utf-8")
+            images = []
+            for index in range(3):
+                image = root / f"{index:06d}-verification-failure-image.png"
+                image.write_bytes(b"\x89PNG\r\n\x1a\n" + bytes([index]))
+                images.append(image)
+            # A descriptor whose file no longer exists must not reach the CLI:
+            # ``codex exec -i`` on a missing path fails the whole invocation.
+            missing = root / "gone.png"
+            argv = self._execute(
+                repository,
+                {
+                    "failed_verification": {
+                        "image_artifacts": [
+                            *({"path": str(image)} for image in images),
+                            {"path": str(missing)},
+                        ]
+                    }
+                },
+            )
+
+            pairs = [
+                argv[index + 1]
+                for index, value in enumerate(argv)
+                if value == "-i"
+            ]
+            self.assertEqual(pairs, [str(image) for image in images])
+            self.assertEqual(argv[-1], "-")
+            self.assertLess(max(i for i, v in enumerate(argv) if v == "-i"), len(argv) - 1)
+            self.assertNotIn(str(missing), argv)
+
+    def test_a_round_without_images_passes_no_image_flag_at_all(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repository = Path(temporary) / "repo"
+            repository.mkdir()
+            (repository / ".git").write_text("gitdir: elsewhere\n", encoding="utf-8")
+            argv = self._execute(repository, {"failed_verification": {}})
+            self.assertNotIn("-i", argv)
+            self.assertEqual(argv[-1], "-")
+
+
 if __name__ == "__main__":
     unittest.main()
