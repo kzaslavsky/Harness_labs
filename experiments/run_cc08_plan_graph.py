@@ -367,12 +367,22 @@ _transfer_targets_for, escalation after transfer, no review stage in the
 bounded loop, and byte-identical behaviour with the feature off?
 Every finding needs file, stable subject, score, fix_cost, and the exact
 acceptance clause in protects. Empty findings means the candidate clears.
+Your structured result is part of the deliverable: summary and every
+deliverable field must substantively describe what you did — at least four
+characters, never a placeholder token (test, todo, tbd, n/a, na,
+placeholder, wip, fixme, xxx, lorem ipsum), never one token repeated. A
+placeholder summary hard-fails the whole run at this cycle.
 """,
             "fix": f"""\
 Inspect the supplied ledger and fix_finding_keys. Modify only
 {', '.join(writable)}, and only as needed to resolve those exact findings
 without feature growth. Run {' '.join(node.run.verification_argv)}. Return
 addressed_finding_keys as the exact subset actually fixed. Do not commit.
+Your structured result is part of the deliverable: summary and every
+deliverable field must substantively describe what you did — at least four
+characters, never a placeholder token (test, todo, tbd, n/a, na,
+placeholder, wip, fixme, xxx, lorem ipsum), never one token repeated. A
+placeholder summary hard-fails the whole run at this cycle.
 {_operator_note(node.plan_node_id)}\
 """,
             "verify": f"""\
@@ -380,6 +390,11 @@ Treat controller_verified_command as authoritative. Inspect the repaired
 candidate and check every supplied fix_finding_key. Return
 verified_finding_keys containing every key genuinely covered when the command
 passes. Do not edit files.
+Your structured result is part of the deliverable: summary and every
+deliverable field must substantively describe what you did — at least four
+characters, never a placeholder token (test, todo, tbd, n/a, na,
+placeholder, wip, fixme, xxx, lorem ipsum), never one token repeated. A
+placeholder summary hard-fails the whole run at this cycle.
 """,
         }[stage]
         return ClaudeSemanticTaskExecutor(
