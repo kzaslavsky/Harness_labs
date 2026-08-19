@@ -66,9 +66,12 @@ def main() -> int:
                 ),
             }
         elif arguments.command == "refine":
-            # No judge is wired in from the command line: the CLI reports what
-            # it would repair and leaves the decomposition alone. Callers that
-            # want the loop to revise inject a judge through the library.
+            # No judge is wired in from the command line, so the loop applies
+            # only its built-in intent-aware narrowing -- dropping grants no
+            # run declared any intent to use -- and reports what it would not
+            # decide alone. ``--revised-decomposition`` writes the narrowed
+            # plan out. Callers that want the contested findings repaired too
+            # inject a judge through the library.
             outcome = refine_repository_decomposition(
                 repository=arguments.repository,
                 decomposition_path=arguments.decomposition,

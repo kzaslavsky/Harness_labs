@@ -16,12 +16,30 @@ edit and why it was made.
 
 Two deliberate contracts:
 
-* The judge is an injected callable defaulting to ``None``. Rewriting an
-  operator's decomposition is not something to do without a decision-maker in
-  the loop, so ``None`` means *report only*: the loop runs the analysis, marks
-  every finding with the repair it would apply and whether that repair is
-  mechanical or a judgment call, and returns the decomposition untouched.
-  Tests therefore never need a live model.
+* The judge is an injected callable defaulting to ``None``, and what it is
+  consulted about is only what the loop cannot settle mechanically. Two
+  built-in repairs cover the mechanical half. *Intent-aware narrowing* is the
+  first and the cheap one: a run declares both ``allowed_paths`` (what it may
+  write) and ``path_intents`` (what it says it will write), and on the real
+  26-run flow-editor plan those diverge badly -- mean 2 declared intents
+  against 3.88 grants. 16 of that plan's 17 HIGH overlap findings were not
+  contention at all but surplus grant breadth: a run held a write grant on a
+  file it never declared any intent to touch, and that unused grant is what
+  collided with a sibling. Dropping the unintended half removes the collision
+  and leaves both runs parallel -- 13 narrowings clear those 16 findings and
+  the refined plan's dependency graph is unchanged in shape (depth 12, max
+  width 8), where serializing all 17 cost three waves and two runs off the
+  widest one (depth 15, max width 6). *Serialization* is the fallback for the
+  one remaining genuine contention, where both runs declare intent on the
+  shared path -- two declared writers of one file is a conflicting join by
+  construction and ordering them is the honest repair.
+
+  ``judge=None`` therefore no longer means "change nothing". It means the
+  loop applies the repair that only removes a permission the run never
+  claimed to need, and reports rather than applies anything that would change
+  the plan's execution shape (serialization) or pick a winner between two
+  declared writers. An injected judge still gets first refusal on exactly
+  those contested findings. Tests never need a live model either way.
 * Only the git-independent half of preparation runs here. Blob freezing and
   host-executable evidence do not vary with the decomposition's *content*, and
   a revised decomposition is not committed yet; ``prepare_approval`` runs the
@@ -60,8 +78,9 @@ from pathlib import Path
 REFINEMENT_PROTOCOL = "plan-refinement-report/1"
 JUDGMENT_PROTOCOL = "plan-refinement-judgment/1"
 
-#: Repairs a judge may return. ``serialize`` is the mechanical one and is also
-#: what the loop applies on its own; the other two are the judgment calls.
+#: Repairs a judge may return. The loop reaches a judge only for findings its
+#: own built-in intent-aware narrowing could not settle, so what arrives here
+#: is a decision about contested ownership, ordering, or the operator's desk.
 JUDGE_REPAIRS = ("serialize", "narrow_grant", "defer")
 
 
@@ -323,6 +342,172 @@ def _narrow_grant(
 
 
 # ---------------------------------------------------------------------------
+# Intent-aware narrowing: the built-in, parallelism-preserving repair
+# ---------------------------------------------------------------------------
+
+
+def declares_intent(run: Mapping[str, object]) -> bool:
+    """Whether this run carries evidence about what it means to write.
+
+    The predicate is deliberately *per run*, not per path: ``path_intents``
+    is optional (``PlanRun.path_intents`` defaults to ``()``), so a
+    decomposition that simply omits the field would make every grant look
+    unintended and naive narrowing would strip grants wholesale, leaving runs
+    unable to do their work. An empty tuple is an absence of evidence, not
+    evidence of absence, and a run with no declared intent is never narrowed.
+
+    Per-path coverage is the wrong granularity for the same reason in
+    miniature: an uncovered path is exactly the signal narrowing acts on, so
+    requiring coverage per path would make the rule vacuous. A run that
+    declares *any* intent has told us what it is for, and the contract already
+    requires each declared intent to sit inside the run's own grants
+    (``_canonical_run``), so a run with intents always keeps at least one
+    grant -- which is why narrowing can never empty a grant here.
+    """
+
+    return bool(run.get("path_intents"))
+
+
+def unintended_grants(
+    run: Mapping[str, object], paths: Sequence[str]
+) -> list[str]:
+    """Which of ``paths`` this run holds as a grant but declared no intent for.
+
+    Containment runs through ``path_is_allowed`` in the direction that
+    matters: a grant justifies itself when some declared intent falls *under*
+    it, so a directory grant on ``a/b`` is kept by an intent on ``a/b/c.py``.
+    """
+
+    if not declares_intent(run):
+        return []
+    intents = [str(intent["path"]) for intent in run["path_intents"]]  # type: ignore[index,union-attr]
+    allowed = {str(value) for value in run["allowed_paths"]}  # type: ignore[index]
+    return [
+        path
+        for path in paths
+        if path in allowed
+        and not any(path_is_allowed(intent, [path]) for intent in intents)
+    ]
+
+
+def _shared_grants(
+    canonical: Mapping[str, object], finding: Mapping[str, object]
+) -> list[str]:
+    """The finding's contested paths both runs still literally hold.
+
+    Findings are computed once per round, so an earlier narrowing in the same
+    round can already have dissolved a later one. Re-checking against the
+    working copy keeps the loop from dropping a grant to repair an overlap
+    that no longer exists -- the repair would be safe but gratuitous, and a
+    diff an operator has to read should carry no gratuitous edits.
+    """
+
+    runs = _run_index(canonical)
+    held = [
+        {str(value) for value in runs[str(run_id)]["allowed_paths"]}  # type: ignore[index]
+        for run_id in finding["runs"]  # type: ignore[union-attr]
+    ]
+    return [
+        str(path)
+        for path in finding["paths"]  # type: ignore[union-attr]
+        if all(str(path) in grants for grants in held)
+    ]
+
+
+def _plan_narrowing(
+    canonical: Mapping[str, object], finding: Mapping[str, object]
+) -> tuple[str, list[str]] | None:
+    """Pick the run whose surplus grants can be dropped, or ``None``.
+
+    When both sides hold droppable surplus the one holding more of it is
+    narrowed first: that clears the most breadth per edit, and the sibling's
+    own surplus is re-examined on the next round against whatever findings
+    survive. Plan order breaks ties so the choice is reproducible.
+    """
+
+    runs = _run_index(canonical)
+    paths = _shared_grants(canonical, finding)
+    if not paths:
+        return None
+    candidates: list[tuple[int, int, str, list[str]]] = []
+    for order, run_id in enumerate(str(value) for value in finding["runs"]):  # type: ignore[union-attr]
+        run = runs[run_id]
+        droppable = unintended_grants(run, paths)
+        if not droppable:
+            continue
+        remaining = [
+            str(value)
+            for value in run["allowed_paths"]  # type: ignore[index]
+            if str(value) not in set(droppable)
+        ]
+        if not remaining:
+            # Unreachable while the contract holds (a run with intents keeps
+            # the grants those intents sit under), but narrowing a run down to
+            # nothing is never the repair, so the case is refused rather than
+            # handed to ``_narrow_grant`` to raise on.
+            continue
+        candidates.append((-len(droppable), order, run_id, droppable))
+    if not candidates:
+        return None
+    _, _, run_id, droppable = min(candidates)
+    return run_id, sorted(droppable)
+
+
+def contention_reason(
+    canonical: Mapping[str, object], finding: Mapping[str, object]
+) -> str:
+    """Why intent-aware narrowing could not settle this finding.
+
+    The two cases read very differently to an operator: genuine contention is
+    a decomposition question, while a pair of runs that declared no intents at
+    all is a plan that simply did not say enough for the mechanical repair to
+    fire.
+    """
+
+    runs = _run_index(canonical)
+    subjects = [runs[str(value)] for value in finding["runs"]]  # type: ignore[union-attr]
+    silent = [
+        str(run["id"]) for run in subjects if not declares_intent(run)  # type: ignore[index]
+    ]
+    if not silent:
+        return (
+            "both runs declare a path intent under the shared grant, so the "
+            "overlap is genuine contention rather than surplus grant breadth; "
+            "serializing them changes the plan's execution shape and was left "
+            "for a decision-maker"
+        )
+    return (
+        f"{', '.join(silent)} declares no path intents, so there is no evidence "
+        "that any grant it holds is unused; narrowing on silence would strip a "
+        "run of the access it needs, and the repair was left for a "
+        "decision-maker"
+    )
+
+
+def _narrowing_repair(
+    working: dict[str, object], finding: Mapping[str, object]
+) -> Repair | None:
+    """Apply intent-aware narrowing to ``finding``, if it applies at all."""
+
+    choice = _plan_narrowing(working, finding)
+    if choice is None:
+        return None
+    run_id, droppable = choice
+    detail = _narrow_grant(working, run_id, droppable, ())
+    return Repair(
+        "narrow_grant",
+        "deterministic",
+        f"run {run_id!r} held write grants on "
+        f"{', '.join(droppable)} without declaring any path intent under them; "
+        "dropping the unintended grant removes the overlap and keeps both runs "
+        "parallel",
+        (run_id,),
+        detail,
+        dict(finding),
+    )
+
+
+# ---------------------------------------------------------------------------
 # The judge boundary
 # ---------------------------------------------------------------------------
 
@@ -352,10 +537,13 @@ def judgment_request(
         "repairs": list(JUDGE_REPAIRS),
         "question": (
             "These dependency-unordered runs hold overlapping write grants; "
-            "their edits will collide in the controller join. Decide which run "
-            "should own the contested path (narrow_grant), or order them "
-            "(serialize), or defer the call to the operator (defer). Every "
-            "decision requires a reason."
+            "their edits will collide in the controller join. The loop has "
+            "already dropped every contested grant that its holder declared no "
+            "intent to use, so what remains is contested by declared intent or "
+            "by runs that declared none. Decide which run should own the "
+            "contested path (narrow_grant), or order them (serialize), or "
+            "defer the call to the operator (defer). Every decision requires a "
+            "reason."
         ),
     }
 
@@ -404,8 +592,10 @@ def refine_decomposition(
 ) -> RefinementOutcome:
     """Revise ``decomposition`` until its HIGH overlap warnings are resolved.
 
-    With no ``judge`` the decomposition is returned untouched and every
-    finding is reported as a proposal -- see the module docstring.
+    With no ``judge`` the loop still applies intent-aware narrowing -- it only
+    removes grants the run never declared any intent to use -- and reports
+    every finding it could not settle that way as a proposal, leaving the plan
+    otherwise as the operator wrote it. See the module docstring.
     """
 
     if max_rounds < 1:
@@ -417,8 +607,6 @@ def refine_decomposition(
         plan_sha256=plan_sha256,
     )
     counts = {"high": len(original.high), "info": len(original.info)}
-    if judge is None:
-        return _report_only(original, counts)
 
     session = _Session(judge, NoProgressGuard(no_progress_threshold))
     working = copy.deepcopy(original.canonical)
@@ -475,6 +663,17 @@ def refine_decomposition(
         repository_id=repository_id,
         plan_sha256=plan_sha256,
     )
+    proposals: tuple[Mapping[str, object], ...] = ()
+    if judge is None and final.high:
+        # Nobody was in the loop to dispose of what narrowing could not fix,
+        # so the remaining findings are reported rather than repaired.
+        status = "report_only"
+        reason = (
+            f"no judge was injected; {len(session.applied)} intent-narrowing "
+            f"repair(s) applied and {len(final.high)} finding(s) needing "
+            "serialization or an ownership decision left for the operator"
+        )
+        proposals = _proposals(final, session)
     return RefinementOutcome(
         status=status,
         reason=reason,
@@ -483,7 +682,7 @@ def refine_decomposition(
         rounds=tuple(rounds),
         applied=tuple(session.applied),
         deferred=tuple(session.deferred.values()),
-        proposals=(),
+        proposals=proposals,
         initial_plan_graph_digest=original.digest,
         final_plan_graph_digest=final.digest,
         initial_warnings=counts,
@@ -509,11 +708,39 @@ def _apply_round(
     actionable: Sequence[Mapping[str, object]],
     session: _Session,
 ) -> list[Repair]:
-    """Apply one round of repairs, judge first, mechanics as the fallback."""
+    """Apply one round: built-in narrowing first, then the judge, then order.
+
+    The order matters, and so does the *exhaustion*. Intent-aware narrowing is
+    deterministic and preserves parallelism, so it is not worth asking anyone
+    about; and because dropping one surplus grant frequently dissolves several
+    findings at once, a round that narrowed anything ends there and re-prepares
+    rather than passing the rest of the round's stale findings to a judge. What
+    reaches the judge is therefore only the contention that survives every
+    mechanical repair, and plan-order serialization catches whatever the judge
+    cannot carry.
+    """
 
     applied: list[Repair] = []
     for finding in actionable:
+        narrowing = _narrowing_repair(working, finding)
+        if narrowing is not None:
+            applied.append(narrowing)
+            session.applied.append(narrowing)
+    if applied:
+        return applied
+    for finding in actionable:
         first, second = (str(value) for value in finding["runs"])  # type: ignore[index]
+        if session.judge is None:
+            # What is left is contested, and every remaining repair either
+            # changes the plan's execution shape or picks a winner between two
+            # declared writers. Neither is defensible with nobody deciding.
+            session.deferred[warning_identity(finding)] = {
+                **dict(finding),
+                "decided_by": "deterministic",
+                "disposition": "operator",
+                "reason": contention_reason(working, finding),
+            }
+            continue
         assert session.judge is not None
         decision = _decide(session.judge, finding, working)
         repair: Repair | None = None
@@ -574,10 +801,23 @@ def _apply_round(
     return applied
 
 
-def _report_only(prepared: _Prepared, counts: Mapping[str, int]) -> RefinementOutcome:
+def _proposals(
+    prepared: _Prepared, session: _Session
+) -> tuple[Mapping[str, object], ...]:
+    """What a judge-less run would still repair, and what class of call it is.
+
+    Every HIGH finding that reaches here survived intent-aware narrowing, so
+    its proposed repair is serialization. That edit is still mechanical --
+    hence ``repair_class`` stays ``deterministic`` -- but the loop withholds
+    it without a decision-maker because it changes the plan's execution shape;
+    the per-finding note says which case it is. INFO findings stay what they
+    always were: a shared directory grant that may well be intentional.
+    """
+
     proposals = []
     for finding in prepared.warnings:
         high = finding["severity"] == "high"
+        deferred = session.deferred.get(warning_identity(finding))
         proposals.append(
             {
                 **dict(finding),
@@ -585,28 +825,16 @@ def _report_only(prepared: _Prepared, counts: Mapping[str, int]) -> RefinementOu
                 "proposed_repair": "serialize" if high else "narrow_grant",
                 "repair_class": "deterministic" if high else "judgment",
                 "note": (
-                    "plan-order depends_on edge removes the overlap mechanically"
+                    str(deferred["reason"])
+                    if deferred is not None
+                    else "plan-order depends_on edge removes the overlap mechanically"
                     if high
                     else "narrowing a directory grant needs the node's intent, "
                     "not just the repository listing"
                 ),
             }
         )
-    return RefinementOutcome(
-        status="report_only",
-        reason="no judge was injected; the decomposition was left untouched",
-        decomposition=prepared.canonical,
-        original_decomposition=prepared.canonical,
-        rounds=(_round(0, prepared, ()),),
-        applied=(),
-        deferred=(),
-        proposals=tuple(proposals),
-        initial_plan_graph_digest=prepared.digest,
-        final_plan_graph_digest=prepared.digest,
-        initial_warnings=dict(counts),
-        final_warnings=dict(counts),
-        open_warnings=prepared.high,
-    )
+    return tuple(proposals)
 
 
 # ---------------------------------------------------------------------------
@@ -697,9 +925,12 @@ __all__ = [
     "RefinementOutcome",
     "RefinementRound",
     "Repair",
+    "contention_reason",
+    "declares_intent",
     "decomposition_diff",
     "judgment_request",
     "refine_decomposition",
     "refine_repository_decomposition",
+    "unintended_grants",
     "warning_identity",
 ]
