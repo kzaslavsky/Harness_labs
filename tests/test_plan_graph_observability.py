@@ -189,6 +189,69 @@ class PlanGraphObservabilityTests(unittest.TestCase):
         )
         self.assertEqual(successor.run().status, "succeeded")
 
+    def test_block_escalation_names_the_review_findings_scope_screened_away(self) -> None:
+        """A screened finding leaves no obligation, so it needs its own field.
+
+        ``open_obligations`` cannot carry it: a screen is precisely the
+        disposition that attaches no obligation anywhere. Without this the
+        artifact an operator reads after a block is silent about work the run
+        decided it could not do.
+        """
+
+        screening = {
+            "screened_count": 2,
+            "screened_finding_keys": ["docs/plan.md:a", "other/mod.py:b"],
+            "by_class": {"anchor_out_of_grant": 2},
+            "required_finding_keys": [],
+        }
+        graph = PlanGraph(
+            self.repository, self.registration,
+            lambda request: FeatureRunOutcome(
+                "blocked",
+                evidence={
+                    "error": "operator review needed",
+                    "review_fix": {"scope_screening": screening},
+                },
+            ),
+            run_root=self.run_root, graph_run_id="screened-graph",
+        )
+        self.assertEqual(graph.run().status, "blocked")
+        escalation = json.loads(
+            (self.run_root / "screened-graph" / "escalation.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(escalation["nodes"][0]["scope_screening"], screening)
+        node = graph._audit_for_run().state["nodes"]["first"]
+        self.assertEqual(node["scope_screening"], screening)
+
+    def test_block_escalation_omits_scope_screening_when_nothing_was_screened(self) -> None:
+        graph = PlanGraph(
+            self.repository, self.registration,
+            lambda request: FeatureRunOutcome(
+                "blocked",
+                evidence={
+                    "error": "operator review needed",
+                    "review_fix": {
+                        "scope_screening": {
+                            "screened_count": 0,
+                            "screened_finding_keys": [],
+                            "by_class": {},
+                            "required_finding_keys": [],
+                        }
+                    },
+                },
+            ),
+            run_root=self.run_root, graph_run_id="unscreened-graph",
+        )
+        self.assertEqual(graph.run().status, "blocked")
+        escalation = json.loads(
+            (self.run_root / "unscreened-graph" / "escalation.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(escalation["nodes"][0]["scope_screening"], {})
+
     def test_oversized_block_escalation_externalizes_node_detail(self) -> None:
         graph = PlanGraph(
             self.repository, self.registration,

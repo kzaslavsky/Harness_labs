@@ -5,7 +5,9 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import types
 from dataclasses import asdict, dataclass
+from pathlib import PurePosixPath
 from typing import Any, Mapping, Protocol
 
 from harness_labs.core.attempts import AttemptRunner, Executor, TaskAttempt, TaskResult
@@ -19,6 +21,52 @@ REVIEW_LEDGER_PROTOCOL = "review-ledger/1"
 REVIEW_FIX_RESULT_PROTOCOL = "review-fix-result/1"
 _SEVERITY_SCORE = {"critical": 95, "major": 85, "minor": 60, "info": 20}
 _KEY_TEXT = re.compile(r"[^a-z0-9._/-]+")
+# A review anchor written before the ledger schema had somewhere to put a
+# location carries it inside ``file`` itself: "pkg/mod.py:100" or
+# "pkg/mod.py:100-140".  Exactly one trailing ":N" or ":N-M" is recognised, and
+# only when the path part carries no colon of its own -- past that the shape is
+# guesswork, and guessing wrong on a path that legitimately contains a colon
+# would compare a *shorter* path against the grant, which is the one direction
+# that could loosen a write boundary rather than tighten it.
+_ANCHOR_LOCATION = re.compile(
+    r"^(?P<path>[^:]*[^/:]):(?P<line>\d+)(?:-(?P<end>\d+))?$"
+)
+
+
+def _normalize_anchor_path(value: str) -> str:
+    """Read a reviewer-written anchor as the repository path it denotes.
+
+    ``normalize_allowed_paths`` already does this for the *grant* side, so
+    without it here ``./feature.txt`` and ``src//app.py`` fail a scope test
+    against grants they plainly name.  Whitespace is deliberately *not*
+    stripped: POSIX permits a filename to begin with a space, so trimming one
+    would be a guess about reviewer intent rather than a path equivalence.
+    """
+
+    if not value:
+        return ""
+    return PurePosixPath(value).as_posix()
+
+
+def split_anchor_location(anchor: str) -> tuple[str, int | None, int | None]:
+    """Split a legacy ``path:line`` review anchor into path and line numbers.
+
+    Returns the anchor unchanged with ``None`` line numbers when it carries no
+    recognised suffix, so it is safe to apply to a bare path.
+    """
+
+    match = _ANCHOR_LOCATION.match(anchor)
+    if match is None:
+        return anchor, None, None
+    line = int(match.group("line"))
+    raw_end = match.group("end")
+    end = int(raw_end) if raw_end is not None else None
+    if line < 1 or (end is not None and end < line):
+        return anchor, None, None
+    return match.group("path"), line, end
+
+
+_EMPTY_MAPPING: Mapping[str, Any] = types.MappingProxyType({})
 
 
 class ReviewFixError(RuntimeError):
@@ -94,6 +142,12 @@ class ReviewFixResult:
     # and is the only continuable stop; "no_progress" and "marginal_yield" are
     # the loop's own futility detectors firing.
     stop_reason: str = ""
+    # Every scope screen this loop performed, so a screen is countable by a
+    # caller that never opens the ledger artifact.  Screening is the one
+    # disposition that attaches no downstream obligation -- it is absent from
+    # ``open_all``/``open_required`` by construction -- which is exactly why it
+    # has to be reported rather than merely recorded.
+    scope_screening: Mapping[str, Any] = _EMPTY_MAPPING
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -110,6 +164,7 @@ class ReviewFixResult:
             ],
             "open_findings": [dict(item) for item in self.open_findings],
             "stop_reason": self.stop_reason,
+            "scope_screening": dict(self.scope_screening),
         }
 
 
@@ -128,6 +183,46 @@ class ReviewLedger:
         self.findings: dict[str, dict[str, Any]] = {}
         self.cycles: list[dict[str, Any]] = []
         self.discovery_frozen = False
+
+    def anchor_scope_paths(self, record: Mapping[str, Any]) -> tuple[str, ...]:
+        """Every repository path spelling this record's anchor could denote.
+
+        Two, at most: the anchor normalized as written, and -- when the anchor
+        carries a legacy ``:line`` suffix -- the bare path underneath it.  The
+        scope test treats the anchor as in grant when *either* spelling is, so
+        a file genuinely named ``notes:10`` keeps its own name if it is granted
+        and is only re-read as a location when it is not.
+        """
+
+        candidates: list[str] = []
+        for value in (
+            _normalize_anchor_path(str(record.get("file", ""))),
+            str(record.get("anchor_path", "")),
+        ):
+            if value and value not in candidates:
+                candidates.append(value)
+        return tuple(candidates)
+
+    def anchor_out_of_grant(self, record: Mapping[str, Any]) -> bool:
+        candidates = self.anchor_scope_paths(record)
+        return bool(candidates) and all(
+            bool(paths_outside_scope((candidate,), self.allowed_paths))
+            for candidate in candidates
+        )
+
+    def _backfill_location(self, record: dict[str, Any]) -> None:
+        """Give a record from another ledger the location fields it predates.
+
+        Ledgers written before ``line``/``end_line`` existed keep the location
+        inside ``file``; reading it back out here is what lets an old record
+        load without either rewriting ``file`` -- which is half of the finding
+        key -- or losing the location.
+        """
+
+        path, line, end_line = split_anchor_location(str(record.get("file", "")))
+        record.setdefault("anchor_path", _normalize_anchor_path(path))
+        record.setdefault("line", line)
+        record.setdefault("end_line", end_line)
 
     def seed_transferred(
         self, findings: tuple[Mapping[str, Any], ...]
@@ -159,6 +254,13 @@ class ReviewLedger:
             record.setdefault("reopened_count", 0)
             record.setdefault("required_paths", [])
             record.setdefault("anchor_out_of_grant", False)
+            record.setdefault("scope_screen_class", "")
+            # Minted by another ledger against another grant.  Recorded so the
+            # screen can tell an inherited obligation from one this node's own
+            # reviewer just raised, without depending on ``origin_node`` --
+            # which ``open_records`` exports empty for locally minted records.
+            record["inherited"] = True
+            self._backfill_location(record)
             self.findings[key] = record
 
     def seed_retained_transfers(
@@ -188,6 +290,9 @@ class ReviewLedger:
             record.setdefault("reopened_count", 0)
             record.setdefault("required_paths", [])
             record.setdefault("anchor_out_of_grant", False)
+            record.setdefault("scope_screen_class", "")
+            record["inherited"] = True
+            self._backfill_location(record)
             self.findings[key] = record
 
     def freeze_discovery(self) -> None:
@@ -217,7 +322,9 @@ class ReviewLedger:
                 str(path) for path in required_paths if str(path) not in current_paths
             ]
             if not downstream_paths and anchor_out:
-                anchor_path = str(record.get("file", ""))
+                anchor_path = str(
+                    record.get("anchor_path") or record.get("file", "")
+                )
                 if anchor_path and anchor_path not in current_paths:
                     downstream_paths = [anchor_path]
             resolved = [_target_for_path(path, targets) for path in downstream_paths]
@@ -297,25 +404,66 @@ class ReviewLedger:
                         record["outcome"] = "fixed"
                         fixed_by_absence += 1
 
+        scope_screened = 0
         for record in self.findings.values():
             if record["outcome"] != "open":
                 continue
-            if record.get("origin_node"):
-                # Inherited via cross-node transfer: the file anchor still
-                # names the origin node's path, not this node's. Screening
-                # against that anchor would silently discharge an obligation
-                # this node now owns through required_paths.
+            if record.get("origin_node") or record.get("inherited"):
+                # Minted against another node's grant: the file anchor names
+                # the origin's path, not this node's.  Screening against that
+                # anchor would silently discharge an obligation this node now
+                # owns -- through required_paths for a cross-node transfer, and
+                # outright for an obligation inherited from a blocked
+                # predecessor, whose escalation would otherwise be erased
+                # before any reviewer here had looked at it.
                 record["anchor_out_of_grant"] = False
                 continue
-            anchor_out_of_grant = bool(record["file"]) and bool(
-                paths_outside_scope((record["file"],), self.allowed_paths)
+            # Computed before any exemption is consulted: a malformed grant has
+            # to raise out of ``ingest`` for *every* finding, not only for the
+            # ones an exemption would have let through.  Degrading a bad grant
+            # into an empty one would screen the whole ledger and exit clean.
+            anchor_out_of_grant = self.anchor_out_of_grant(record)
+            fixable_in_grant = bool(record["required_paths"]) and not paths_outside_scope(
+                record["required_paths"], self.allowed_paths
             )
+            if fixable_in_grant:
+                # The reviewer anchored the finding where the defect is
+                # *visible* and declared in required_paths where it must be
+                # *fixed* -- and every one of those paths is inside this
+                # node's grant.  The node can fix it, so it is not out of
+                # grant at all; leaving the flag set would additionally let
+                # transfer_scope_expanding hand the work to another node on
+                # the strength of the anchor alone.
+                anchor_out_of_grant = False
             record["anchor_out_of_grant"] = anchor_out_of_grant
-            if self.policy.scope_expansion_guard_enabled and anchor_out_of_grant:
+            if (
+                self.policy.scope_expansion_guard_enabled
+                and anchor_out_of_grant
+                and not record["contract_violation"]
+                and not record["requires_disposition"]
+            ):
+                # The same exemption the scope_expanding branch below has
+                # always carried.  This branch runs first and used to carry
+                # none, so it consumed exactly the findings that exemption
+                # exists to protect.  An exempt finding stays open here, which
+                # is what the scope_expanding branch already does with one.
+                #
+                # SEAM.  Everything reaching this line is a finding the node
+                # genuinely cannot act on: the anchor is out of grant, no
+                # required path brings it back in, it was minted here rather
+                # than inherited, and it carries neither escalation flag.
+                # What *should* become of it -- block here, carry it to a
+                # successor, or hand it to a periodic collector -- is a
+                # separate decision, and it is unchanged: it is still
+                # discharged, exactly as before.  All that is new is that it
+                # is now counted, so whoever makes that decision can see how
+                # much traffic passes through this branch.
                 record["outcome"] = "scope_screened"
                 record["outcome_reason"] = (
                     "finding file anchor is outside the node's writable paths"
                 )
+                record["scope_screen_class"] = "anchor_out_of_grant"
+                scope_screened += 1
                 continue
             if (
                 self.policy.scope_expansion_guard_enabled
@@ -324,6 +472,11 @@ class ReviewLedger:
                 and not record["requires_disposition"]
             ):
                 record["outcome"] = "scope_screened"
+                record["outcome_reason"] = (
+                    "finding grows the node's surface beyond its writable paths"
+                )
+                record["scope_screen_class"] = "scope_expanding"
+                scope_screened += 1
                 continue
             if (
                 self.policy.citation_guard_enabled
@@ -351,6 +504,7 @@ class ReviewLedger:
             "deferred_findings": deferred_findings,
             "fixed_by_re_review": fixed_by_absence,
             "distinct_findings": len(current),
+            "scope_screened": scope_screened,
         }
 
     def mark_fix_attempt(
@@ -396,6 +550,42 @@ class ReviewLedger:
             if item["outcome"] in {"open", "pending_review"}
         )
 
+    def scope_screening(self) -> dict[str, Any]:
+        """Summarize every scope screen still standing in this ledger.
+
+        A screen leaves no obligation behind: it is absent from ``open_all``
+        and ``open_required``, blocks nothing, and used to leave no counter and
+        no field of its own either.  That invisibility is why a leak of this
+        shape survived a whole campaign, so the tally travels with the ledger
+        and, through ``ReviewFixResult``, with the run's evidence.
+
+        Screens recorded here are the ones this node genuinely cannot fix.
+        What *should* become of them -- block, carry to a successor, or route
+        to a periodic collector -- is a separate decision this summary
+        deliberately does not make; it only makes them countable.
+        """
+
+        screened = sorted(
+            key
+            for key, item in self.findings.items()
+            if item["outcome"] == "scope_screened"
+        )
+        by_class: dict[str, int] = {}
+        for key in screened:
+            name = str(self.findings[key].get("scope_screen_class") or "unclassified")
+            by_class[name] = by_class.get(name, 0) + 1
+        return {
+            "screened_count": len(screened),
+            "screened_finding_keys": screened,
+            "by_class": by_class,
+            "required_finding_keys": sorted(
+                key
+                for key in screened
+                if self.findings[key]["requires_disposition"]
+                or self.findings[key]["contract_violation"]
+            ),
+        }
+
     def open_records(self) -> tuple[Mapping[str, Any], ...]:
         """Return full records for still-open findings with identity intact.
 
@@ -423,6 +613,7 @@ class ReviewLedger:
                 key: dict(value) for key, value in sorted(self.findings.items())
             },
             "cycles": list(self.cycles),
+            "scope_screening": self.scope_screening(),
         }
 
     def _new_record(
@@ -435,9 +626,25 @@ class ReviewLedger:
         score = finding.get("score", _SEVERITY_SCORE.get(severity, 0))
         if not isinstance(score, int) or not 0 <= score <= 100:
             raise ReviewFixError(f"finding {key} has an invalid score")
+        anchor = str(finding.get("file", ""))
+        parsed_path, parsed_line, parsed_end = split_anchor_location(anchor)
+        # A structured line beats one recovered from a legacy suffix: the
+        # schema now asks producers for ``line``, and ``file`` for a path.
+        line = _line_number(finding.get("line", parsed_line), "line", key)
+        end_line = _line_number(finding.get("end_line", parsed_end), "end_line", key)
+        if end_line is not None and line is None:
+            raise ReviewFixError(f"finding {key} has an end_line without a line")
+        if line is not None and end_line is not None and end_line < line:
+            raise ReviewFixError(f"finding {key} has an end_line before its line")
         return {
             "key": key,
-            "file": str(finding.get("file", "")),
+            # ``file`` stays exactly as the reviewer wrote it: it is half of
+            # the finding key, so rewriting it would break identity against a
+            # resumed ledger and against every ledger already on disk.
+            "file": anchor,
+            "anchor_path": _normalize_anchor_path(parsed_path),
+            "line": line,
+            "end_line": end_line,
             "subject": str(finding.get("subject", finding.get("statement", ""))),
             "statement": str(finding.get("statement", "")),
             "category": str(finding.get("category", "review")),
@@ -464,6 +671,8 @@ class ReviewLedger:
             "transfer_eligible": True,
             "required_paths": list(finding.get("required_paths", ())),
             "anchor_out_of_grant": False,
+            "scope_screen_class": "",
+            "inherited": False,
         }
 
     @staticmethod
@@ -591,6 +800,13 @@ class ReviewFixLoop:
             # instead of re-reviewing the same worktree from cycle one.
             ledger = self.resumed_ledger
             risk_tier = ledger.risk_tier
+            # The grant is the continuation's, not the predecessor's.  The
+            # ledger captured allowed_paths at construction, so a continuation
+            # launched specifically to widen the grant used to screen against
+            # the narrower one -- while this same cycle recomputed
+            # scope_expanding from self.allowed_paths, leaving the loop
+            # disagreeing with itself about which grant it holds.
+            ledger.allowed_paths = self.allowed_paths
         else:
             risk_tier = _risk_tier(self.changed_paths, self.policy)
             ledger = ReviewLedger(
@@ -936,6 +1152,7 @@ class ReviewFixLoop:
                     "risk_tier": ledger.risk_tier,
                     "cycles": len(ledger.cycles),
                     "open_finding_keys": ledger.open_all(),
+                    "scope_screening": ledger.scope_screening(),
                 }
             }
         )
@@ -977,6 +1194,7 @@ class ReviewFixLoop:
             ledger.transferred(),
             ledger.open_records(),
             stop_reason,
+            ledger.scope_screening(),
         )
 
 
@@ -987,6 +1205,14 @@ def _finding_key(finding: Mapping[str, Any]) -> str:
         subject = str(finding.get("id", "finding")).lower()
     normalized = _KEY_TEXT.sub("-", subject).strip("-")[:120] or "finding"
     return f"{path}:{normalized}"
+
+
+def _line_number(value: Any, field: str, key: str) -> int | None:
+    if value is None:
+        return None
+    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+        raise ReviewFixError(f"finding {key} has an invalid {field}")
+    return value
 
 
 def _target_for_path(path: str, targets: Mapping[str, str]) -> str | None:

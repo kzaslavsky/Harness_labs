@@ -559,6 +559,7 @@ class PlanGraphAudit:
         candidate_commit: str,
         *,
         finding_obligations: Mapping[str, object] | None = None,
+        scope_screening: Mapping[str, object] | None = None,
     ) -> None:
         state = self.state
         nodes = state.get("nodes")
@@ -593,6 +594,14 @@ class PlanGraphAudit:
                 "candidate_commit": candidate_commit,
                 "input_commit": input_commit,
                 "integrated_commit": candidate_commit,
+                # Per-node, unlike finding_obligations: a screened finding has
+                # no obligation, so the graph-level obligations map has nowhere
+                # to hold it and this is its only place in the checkpoint.
+                **(
+                    {"scope_screening": dict(scope_screening)}
+                    if scope_screening
+                    else {}
+                ),
             },
             current_candidate_commit=candidate_commit,
             integration_barriers=barriers,
@@ -610,6 +619,7 @@ class PlanGraphAudit:
         evidence: object | None,
         *,
         finding_obligations: Mapping[str, object] | None = None,
+        scope_screening: Mapping[str, object] | None = None,
     ) -> None:
         artifact = self.journal.write_artifact(
             "plan-graph-node-failure-evidence",
@@ -620,7 +630,12 @@ class PlanGraphAudit:
             status,
             node_id,
             {"status": status, "finished_at": _timestamp(),
-             "evidence": {"evidence_ref": f"artifact:sha256:{artifact.sha256}"}},
+             "evidence": {"evidence_ref": f"artifact:sha256:{artifact.sha256}"},
+             **(
+                 {"scope_screening": dict(scope_screening)}
+                 if scope_screening
+                 else {}
+             )},
             artifacts=(artifact,),
             **(
                 {"finding_obligations": dict(finding_obligations)}
@@ -1376,6 +1391,7 @@ class PlanGraphAudit:
                 "tier": node.get("tier"),
                 "classification": node.get("classification"),
                 "open_obligations": node.get("open_obligations", []),
+                "scope_screening": node.get("scope_screening", {}),
                 "candidate_commit": node.get("candidate_commit"),
                 "evidence_ref": node.get("evidence_ref"),
                 "detail_ref": f"artifact:sha256:{detail.sha256}",
