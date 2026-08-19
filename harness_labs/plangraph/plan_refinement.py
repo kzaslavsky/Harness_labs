@@ -53,11 +53,14 @@ from dataclasses import dataclass, field
 from typing import Callable, Mapping, Sequence
 
 from harness_labs.plangraph.plan_approval import (
+    SIBLING_OVERLAP_WARNING,
+    UNCLAIMED_GRANT_WARNING,
     _git,
     _git_artifact,
     _load_json_bytes,
     _relative_repository_path,
     _sibling_overlap_warnings,
+    _unclaimed_grant_warnings,
     warning_identity,
 )
 from harness_labs.plangraph.plan_graph import (
@@ -68,9 +71,11 @@ from harness_labs.plangraph.plan_graph import (
 from harness_labs.plangraph.plan_graph_contract import (
     PlanGraphContractError,
     canonical_plan_graph_payload,
+    declares_intent,
     load_repository_id,
     path_is_allowed,
     plan_graph_identity,
+    unintended_grants,
 )
 from pathlib import Path
 
@@ -145,6 +150,7 @@ class RefinementOutcome:
     applied: tuple[Repair, ...]
     deferred: tuple[Mapping[str, object], ...]
     proposals: tuple[Mapping[str, object], ...]
+    advisories: tuple[Mapping[str, object], ...]
     initial_plan_graph_digest: str
     final_plan_graph_digest: str
     initial_warnings: Mapping[str, int]
@@ -169,6 +175,10 @@ class RefinementOutcome:
             "applied": [repair.as_mapping() for repair in self.applied],
             "deferred": [dict(item) for item in self.deferred],
             "proposals": [dict(item) for item in self.proposals],
+            "advisories": [
+                {**dict(item), "warning_sha256": warning_identity(item)}
+                for item in self.advisories
+            ],
             "open_warnings": [dict(item) for item in self.open_warnings],
             "decomposition_diff": decomposition_diff(
                 self.original_decomposition, self.decomposition
@@ -217,11 +227,42 @@ class _Prepared:
 
     @property
     def high(self) -> tuple[dict[str, object], ...]:
-        return tuple(item for item in self.warnings if item["severity"] == "high")
+        """The findings this loop knows how to repair.
+
+        Selection is by *kind as well as severity*. Severity alone was a
+        latent fragility: admission is free to add warning kinds, and a
+        high-severity finding of a kind with no applicable repair would be
+        picked up as actionable, survive every round untouched, and push an
+        otherwise repairable plan into ``judgment_only``. The loop should
+        claim only what it can act on.
+        """
+
+        return tuple(
+            item
+            for item in self.warnings
+            if item["severity"] == "high" and item["kind"] == SIBLING_OVERLAP_WARNING
+        )
 
     @property
     def info(self) -> tuple[dict[str, object], ...]:
-        return tuple(item for item in self.warnings if item["severity"] != "high")
+        return tuple(
+            item
+            for item in self.warnings
+            if item["severity"] != "high" and item["kind"] == SIBLING_OVERLAP_WARNING
+        )
+
+    @property
+    def advisories(self) -> tuple[dict[str, object], ...]:
+        """Admission findings that are not overlap findings at all.
+
+        They are reported, never repaired: the surplus-grant advisory in
+        particular is what predicts a narrowing, and an operator reading the
+        decomposition diff should be able to connect the two.
+        """
+
+        return tuple(
+            item for item in self.warnings if item["kind"] != SIBLING_OVERLAP_WARNING
+        )
 
 
 def _prepare(
@@ -248,7 +289,11 @@ def _prepare(
         )
     except (PlanGraphContractError, PlanGraphError) as exc:
         raise PlanRefinementError(str(exc)) from exc
-    return _Prepared(canonical, digest, tuple(_sibling_overlap_warnings(plan)))
+    return _Prepared(
+        canonical,
+        digest,
+        tuple(_sibling_overlap_warnings(plan)) + tuple(_unclaimed_grant_warnings(plan)),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -346,48 +391,27 @@ def _narrow_grant(
 # ---------------------------------------------------------------------------
 
 
-def declares_intent(run: Mapping[str, object]) -> bool:
-    """Whether this run carries evidence about what it means to write.
+def _intent_paths(run: Mapping[str, object]) -> list[str]:
+    """The paths this run declared an intent to write, in canonical shape."""
 
-    The predicate is deliberately *per run*, not per path: ``path_intents``
-    is optional (``PlanRun.path_intents`` defaults to ``()``), so a
-    decomposition that simply omits the field would make every grant look
-    unintended and naive narrowing would strip grants wholesale, leaving runs
-    unable to do their work. An empty tuple is an absence of evidence, not
-    evidence of absence, and a run with no declared intent is never narrowed.
+    return [str(intent["path"]) for intent in run.get("path_intents") or ()]  # type: ignore[index]
 
-    Per-path coverage is the wrong granularity for the same reason in
-    miniature: an uncovered path is exactly the signal narrowing acts on, so
-    requiring coverage per path would make the rule vacuous. A run that
-    declares *any* intent has told us what it is for, and the contract already
-    requires each declared intent to sit inside the run's own grants
-    (``_canonical_run``), so a run with intents always keeps at least one
-    grant -- which is why narrowing can never empty a grant here.
+
+def _droppable_grants(run: Mapping[str, object], paths: Sequence[str]) -> list[str]:
+    """Which of ``paths`` this run holds as a grant without claiming it.
+
+    ``unintended_grants`` and ``declares_intent`` live in
+    ``plan_graph_contract`` because admission asks the same question of the
+    same plan (``_unclaimed_grant_warnings``) and ``plan_approval`` cannot
+    import this module -- see the contract module for the full argument. This
+    wrapper only restricts the question to the contested paths a finding
+    named, and to grants the run literally holds.
     """
 
-    return bool(run.get("path_intents"))
-
-
-def unintended_grants(
-    run: Mapping[str, object], paths: Sequence[str]
-) -> list[str]:
-    """Which of ``paths`` this run holds as a grant but declared no intent for.
-
-    Containment runs through ``path_is_allowed`` in the direction that
-    matters: a grant justifies itself when some declared intent falls *under*
-    it, so a directory grant on ``a/b`` is kept by an intent on ``a/b/c.py``.
-    """
-
-    if not declares_intent(run):
-        return []
-    intents = [str(intent["path"]) for intent in run["path_intents"]]  # type: ignore[index,union-attr]
     allowed = {str(value) for value in run["allowed_paths"]}  # type: ignore[index]
-    return [
-        path
-        for path in paths
-        if path in allowed
-        and not any(path_is_allowed(intent, [path]) for intent in intents)
-    ]
+    return unintended_grants(
+        _intent_paths(run), [path for path in paths if path in allowed]
+    )
 
 
 def _shared_grants(
@@ -432,7 +456,7 @@ def _plan_narrowing(
     candidates: list[tuple[int, int, str, list[str]]] = []
     for order, run_id in enumerate(str(value) for value in finding["runs"]):  # type: ignore[union-attr]
         run = runs[run_id]
-        droppable = unintended_grants(run, paths)
+        droppable = _droppable_grants(run, paths)
         if not droppable:
             continue
         remaining = [
@@ -467,7 +491,9 @@ def contention_reason(
     runs = _run_index(canonical)
     subjects = [runs[str(value)] for value in finding["runs"]]  # type: ignore[union-attr]
     silent = [
-        str(run["id"]) for run in subjects if not declares_intent(run)  # type: ignore[index]
+        str(run["id"])  # type: ignore[index]
+        for run in subjects
+        if not declares_intent(_intent_paths(run))
     ]
     if not silent:
         return (
@@ -683,6 +709,10 @@ def refine_decomposition(
         applied=tuple(session.applied),
         deferred=tuple(session.deferred.values()),
         proposals=proposals,
+        # Advisories are reported from the *original* plan, not the refined
+        # one: their whole purpose is to say what the plan declared before the
+        # loop acted, so a reader can see which narrowing each one predicted.
+        advisories=original.advisories,
         initial_plan_graph_digest=original.digest,
         final_plan_graph_digest=final.digest,
         initial_warnings=counts,
@@ -815,7 +845,7 @@ def _proposals(
     """
 
     proposals = []
-    for finding in prepared.warnings:
+    for finding in prepared.high + prepared.info:
         high = finding["severity"] == "high"
         deferred = session.deferred.get(warning_identity(finding))
         proposals.append(

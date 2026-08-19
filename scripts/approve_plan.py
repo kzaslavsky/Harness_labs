@@ -11,6 +11,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from harness_labs.plangraph.plan_approval import (  # noqa: E402
+    UNCLAIMED_GRANT_WARNING,
     PlanApprovalError,
     issue_receipt,
     prepare_approval,
@@ -64,6 +65,15 @@ def main() -> int:
                     1 for warning in result.warnings
                     if warning.get("severity") == "high"
                 ),
+                # An author cannot act on "you are over-granted" in the
+                # aggregate, so the surplus-grant advisories are also
+                # projected per run with their uncovered grants named. They
+                # are advisory: nothing here blocks issuing a receipt.
+                "unclaimed_grants": {
+                    str(warning["runs"][0]): list(warning["paths"])
+                    for warning in result.warnings
+                    if warning.get("kind") == UNCLAIMED_GRANT_WARNING
+                },
             }
         elif arguments.command == "refine":
             # No judge is wired in from the command line, so the loop applies
@@ -97,6 +107,9 @@ def main() -> int:
                 "initial_warnings": dict(outcome.initial_warnings),
                 "final_warnings": dict(outcome.final_warnings),
                 "revised": outcome.revised,
+                # The advisories are what predicted the narrowings in the
+                # diff; surfacing the count here points a reader at them.
+                "advisories": len(outcome.advisories),
                 "report": str(arguments.report) if arguments.report else None,
             }
         else:

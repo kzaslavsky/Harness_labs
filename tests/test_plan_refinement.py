@@ -16,10 +16,12 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 
 from harness_labs.plangraph.plan_approval import (
     OPERATOR_APPROVAL_PROTOCOL,
     PlanApprovalError,
+    _unclaimed_grant_warnings,
     issue_receipt,
     prepare_approval,
     warning_identity,
@@ -218,6 +220,138 @@ class FlowEditorRefinementTests(unittest.TestCase):
                 repair["reason"] and repair["decided_by"] in {"judge", "deterministic"}
                 for repair in record["applied"]
             )
+        )
+
+
+class SurplusGrantAdvisoryTests(unittest.TestCase):
+    """The admission warning that says what narrowing is about to act on."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.fixture = json.loads(FIXTURE.read_text(encoding="utf-8"))
+        cls.decomposition = cls.fixture["canonical_decomposition"]
+
+    def _refine(self, **overrides):
+        return refine_decomposition(
+            self.decomposition,
+            base_commit=self.fixture["base_commit"],
+            repository_id=self.fixture["repository_id"],
+            plan_sha256=self.fixture["plan_sha256"],
+            **overrides,
+        )
+
+    def test_every_run_on_the_real_plan_holds_grants_it_never_claimed(self) -> None:
+        plan = plan_from_mapping(
+            canonical_plan_graph_payload(self.decomposition),
+            base_commit=self.fixture["base_commit"],
+            repository_id=self.fixture["repository_id"],
+            plan_sha256=self.fixture["plan_sha256"],
+        )
+        grants = [len(run.allowed_paths) for run in plan.runs]
+        intents = [len(run.path_intents) for run in plan.runs]
+        self.assertEqual(len(plan.runs), 26)
+        self.assertAlmostEqual(sum(grants) / len(grants), 3.88, places=2)
+        self.assertEqual(sum(intents) / len(intents), 2.0)
+
+        warnings = _unclaimed_grant_warnings(plan)
+        self.assertEqual(
+            len(warnings), 26,
+            "every run on this plan holds at least one unclaimed grant",
+        )
+        self.assertEqual(
+            {record["kind"] for record in warnings},
+            {"run-grants-exceed-declared-intents"},
+        )
+        self.assertEqual(sum(len(record["paths"]) for record in warnings), 57)
+        by_run = {record["runs"][0]: record for record in warnings}
+        # The node whose objective says its fixes "go back to WP-13-owned
+        # CSS/layout" while it holds the write grant on that CSS.
+        self.assertIn(
+            "retinology/web/static/css/flow_editor.css", by_run["WP-21"]["paths"]
+        )
+        self.assertTrue(
+            all(record["severity"] != "high" for record in warnings),
+            "a high-severity advisory would reach the receipt acknowledgement "
+            "backstop and the refinement loop's actionable selection",
+        )
+
+    def test_the_advisory_predicts_the_narrowing_in_the_diff(self) -> None:
+        judge, _ = _serializing_judge()
+        record = self._refine(judge=judge).as_mapping()
+
+        advised = {
+            str(item["runs"][0]): set(item["paths"])
+            for item in record["advisories"]
+            if item["kind"] == "run-grants-exceed-declared-intents"
+        }
+        self.assertEqual(len(advised), 26)
+        self.assertTrue(
+            all(item["warning_sha256"] for item in record["advisories"])
+        )
+        narrowed = {
+            run_id: set(entry["allowed_paths"]["removed"])
+            for run_id, entry in record["decomposition_diff"].items()
+            if "allowed_paths" in entry
+        }
+        self.assertTrue(narrowed)
+        for run_id, dropped in narrowed.items():
+            self.assertTrue(
+                dropped <= advised.get(run_id, set()),
+                f"{run_id} lost grants no advisory had named: "
+                f"{sorted(dropped - advised.get(run_id, set()))}",
+            )
+
+    def test_a_foreign_high_warning_does_not_become_actionable(self) -> None:
+        """The kind filter, exercised where its absence would bite.
+
+        The loop selects what it can repair by kind *and* severity. Selecting
+        on severity alone would make this fabricated finding actionable, and
+        since no repair applies to it the loop would carry it to the round
+        ceiling and report ``judgment_only`` on a plan it fully repaired.
+        """
+
+        def foreign(plan):
+            return [
+                {
+                    "kind": "some-future-admission-finding",
+                    "severity": "high",
+                    "runs": ["WP-01", "WP-02"],
+                    "paths": ["retinology/web/routes"],
+                    "note": "a warning kind this loop has no repair for",
+                }
+            ]
+
+        judge, _ = _serializing_judge()
+        with unittest.mock.patch(
+            "harness_labs.plangraph.plan_refinement._unclaimed_grant_warnings",
+            foreign,
+        ):
+            outcome = self._refine(judge=judge)
+
+        self.assertEqual(outcome.status, "clean")
+        self.assertEqual(outcome.final_warnings, {"high": 0, "info": 78})
+        self.assertEqual(
+            collections.Counter(repair.kind for repair in outcome.applied),
+            {"narrow_grant": 13, "serialize": 1},
+        )
+
+    def test_the_advisory_leaves_the_loop_otherwise_unchanged(self) -> None:
+        """The regression that matters: same repairs, same shape, same status."""
+
+        judge, seen = _serializing_judge()
+        outcome = self._refine(judge=judge)
+
+        self.assertEqual(outcome.status, "clean")
+        self.assertEqual(outcome.initial_warnings, {"high": 17, "info": 102})
+        self.assertEqual(outcome.final_warnings, {"high": 0, "info": 78})
+        self.assertEqual(
+            collections.Counter(repair.kind for repair in outcome.applied),
+            {"narrow_grant": 13, "serialize": 1},
+        )
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(
+            _graph_shape(outcome.decomposition),
+            {"depth": 12, "max_width": 8, "mean_width": 2.17},
         )
 
 
@@ -580,15 +714,25 @@ class RefinedPlanReachesAReceiptTests(unittest.TestCase):
             decomposition_path=decomposition,
             output_directory=self.root / "approval",
         )
-        self.assertEqual(len(prepared.warnings), 1)
-        self.assertEqual(prepared.warnings[0]["severity"], "high")
+        high = [
+            warning for warning in prepared.warnings
+            if warning["severity"] == "high"
+        ]
+        self.assertEqual(len(high), 1)
+        # This plan declares no path intents anywhere, so admission also
+        # reports that once for the whole plan -- advisory, never blocking.
+        self.assertEqual(
+            [warning["kind"] for warning in prepared.warnings
+             if warning["severity"] != "high"],
+            ["plan-declares-no-path-intents"],
+        )
 
         with self.assertRaisesRegex(
             PlanApprovalError, "unacknowledged high-severity admission warnings"
         ):
             self._issue(prepared)
 
-        digest = warning_identity(prepared.warnings[0])
+        digest = warning_identity(high[0])
         receipt = self._issue(
             prepared,
             acknowledgements=[
@@ -636,8 +780,12 @@ class RefinedPlanReachesAReceiptTests(unittest.TestCase):
             output_directory=self.root / "approval-refined",
         )
         self.assertEqual(
-            prepared.warnings, (),
-            "the refined decomposition still carries admission warnings",
+            [
+                warning for warning in prepared.warnings
+                if warning["severity"] == "high"
+            ],
+            [],
+            "the refined decomposition still carries high admission warnings",
         )
         # No acknowledgements at all: the defect was repaired, not waived.
         self.assertTrue(self._issue(prepared).exists())

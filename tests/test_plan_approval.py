@@ -314,6 +314,35 @@ class PlanApprovalTests(unittest.TestCase):
             preparation["subject_sha256"],
         )
 
+    def test_cli_prepare_names_unclaimed_grants_without_blocking(self) -> None:
+        """The author's chance to declare or drop before the refiner decides."""
+
+        plan = self._canonical_plan()
+        plan["runs"][0]["allowed_paths"] = ["feature.txt", "docs"]
+        decomposition = self._commit_decomposition(plan)
+        approval_directory = self.root / "cli-surplus"
+        prepared = subprocess.run(
+            [
+                sys.executable,
+                str(Path(__file__).resolve().parents[1] / "scripts" / "approve_plan.py"),
+                "prepare",
+                str(decomposition),
+                "--repository",
+                str(self.repository),
+                "--output-directory",
+                str(approval_directory),
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(prepared.returncode, 0, prepared.stderr)
+        preparation = json.loads(prepared.stdout)
+        self.assertEqual(preparation["unclaimed_grants"], {"A": ["docs"]})
+        self.assertEqual(preparation["high_severity_warnings"], 0)
+        # Advisory: nothing here stands between the operator and a receipt.
+        self.assertTrue(self._approve(decomposition)[1].exists())
+
     def _canonical_plan(self) -> dict[str, object]:
         return {
             "protocol": "plan-graph-plan/1",
@@ -489,6 +518,119 @@ class SiblingOverlapWarningTests(unittest.TestCase):
             _validate_gate_evidence({**base, "warnings": [{"runs": ["A", "B"]}]})
         with self.assertRaises(PlanApprovalError):
             _validate_gate_evidence({**base, "warnings": "not-a-list"})
+
+
+class UnclaimedGrantWarningTests(unittest.TestCase):
+    """Admission-time report of grants a run never claimed to need.
+
+    Intent-aware narrowing in the refinement loop keys off ``path_intents``,
+    not the objective, so a plan that under-declares intent has grants
+    silently dropped and the run discovers it as a write failure mid-flight.
+    These warnings are the author's chance to declare or drop first.
+    """
+
+    @staticmethod
+    def _plan(runs):
+        from harness_labs.plangraph.plan_graph import PathIntent, PlanGraphPlan, PlanRun
+
+        return PlanGraphPlan(
+            plan="PLAN.md",
+            base_commit="0" * 40,
+            runs=tuple(
+                PlanRun(
+                    id=run_id,
+                    objective=f"objective {run_id}",
+                    plan_sections=(run_id,),
+                    criteria=(),
+                    allowed_paths=tuple(allowed_paths),
+                    path_intents=tuple(
+                        PathIntent(path=path, action="modify") for path in intents
+                    ),
+                )
+                for run_id, allowed_paths, intents in runs
+            ),
+            plan_sections={},
+            acceptance_criteria={},
+        )
+
+    def test_uncovered_grants_are_named_exactly(self) -> None:
+        from harness_labs.plangraph.plan_approval import _unclaimed_grant_warnings
+
+        plan = self._plan(
+            [
+                ("WP-A", ("src/palette.py", "src/lanes.py", "tests"), ("src/palette.py",)),
+                ("WP-B", ("docs/plan.md",), ("docs/plan.md",)),
+            ]
+        )
+        warnings = _unclaimed_grant_warnings(plan)
+        self.assertEqual(len(warnings), 1)
+        record = warnings[0]
+        self.assertEqual(record["kind"], "run-grants-exceed-declared-intents")
+        self.assertEqual(record["runs"], ["WP-A"])
+        self.assertEqual(record["paths"], ["src/lanes.py", "tests"])
+        self.assertEqual((record["granted"], record["claimed"]), (3, 1))
+        # Advisory by design: a high severity here would be picked up by
+        # ``issue_receipt``'s acknowledgement backstop and by the refinement
+        # loop's actionable selection, neither of which can act on it.
+        self.assertEqual(record["severity"], "info")
+
+    def test_a_run_declaring_no_intents_is_not_reported(self) -> None:
+        from harness_labs.plangraph.plan_approval import _unclaimed_grant_warnings
+
+        plan = self._plan(
+            [
+                ("WP-A", ("src/palette.py", "tests"), ()),
+                ("WP-B", ("docs/plan.md", "tests"), ("docs/plan.md",)),
+            ]
+        )
+        warnings = _unclaimed_grant_warnings(plan)
+        # WP-A carries no evidence either way; only WP-B, which did declare,
+        # is held to what it declared.
+        self.assertEqual([record["runs"] for record in warnings], [["WP-B"]])
+
+    def test_a_directory_grant_is_covered_by_an_intent_beneath_it(self) -> None:
+        from harness_labs.plangraph.plan_approval import _unclaimed_grant_warnings
+
+        plan = self._plan(
+            [("WP-A", ("src/web", "tests"), ("src/web/palette.py", "tests"))]
+        )
+        self.assertEqual(_unclaimed_grant_warnings(plan), [])
+
+    def test_a_plan_with_no_intents_anywhere_warns_once(self) -> None:
+        from harness_labs.plangraph.plan_approval import _unclaimed_grant_warnings
+
+        plan = self._plan(
+            [
+                ("WP-A", ("src/palette.py", "tests"), ()),
+                ("WP-B", ("src/lanes.py", "tests"), ()),
+                ("WP-C", ("docs/plan.md",), ()),
+            ]
+        )
+        warnings = _unclaimed_grant_warnings(plan)
+        self.assertEqual(len(warnings), 1)
+        self.assertEqual(warnings[0]["kind"], "plan-declares-no-path-intents")
+        self.assertEqual(warnings[0]["runs"], ["WP-A", "WP-B", "WP-C"])
+        self.assertEqual(warnings[0]["severity"], "info")
+
+    def test_the_widest_surplus_is_reported_first(self) -> None:
+        from harness_labs.plangraph.plan_approval import _unclaimed_grant_warnings
+
+        plan = self._plan(
+            [
+                ("WP-A", ("src/a.py", "tests"), ("src/a.py",)),
+                (
+                    "WP-B",
+                    ("src/b.py", "src/c.py", "src/d.py", "tests"),
+                    ("src/b.py",),
+                ),
+            ]
+        )
+        warnings = _unclaimed_grant_warnings(plan)
+        self.assertEqual(
+            [record["runs"] for record in warnings], [["WP-B"], ["WP-A"]],
+            "a run claiming one of four grants is the stronger signal and "
+            "should be read first",
+        )
 
 
 if __name__ == "__main__":
