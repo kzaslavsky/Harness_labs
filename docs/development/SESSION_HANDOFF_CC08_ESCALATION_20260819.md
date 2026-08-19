@@ -2,8 +2,15 @@
 
 Date: 2026-08-19
 Repository: `harness_labs`
-Base commit: `1462892` on branch `claude/convergence-harness-impl-fe83e1`
+Base commit: `489b307` on branch `claude/cc08-escalation`
 Deliverable: implement ADR 0007 per the CC-08 plan.
+
+**Revised 2026-08-19, after the base moved.** This document was first written
+against `1462892`, which by the time the work started was twelve commits behind
+`main` — four of them on the three files CC-08 edits. The base is now
+`489b307`, which merges `main` into `99930b4`. What changed for you is in
+§1.0; §3's line numbers have been re-verified against the new
+base.
 
 This document is self-contained. It assumes no access to the session that
 produced it. Read it top to bottom before touching a file.
@@ -28,16 +35,46 @@ Each unseal spends one structural-decision allowance and is journaled.
 
 ## 1. Repo ground rules — non-negotiable
 
+### 1.0 Your base, and what moved
+
+The worktree is already created:
+`/Users/kirillzaslavsky/Documents/harness_labs/.claude/worktrees/cc08-escalation`,
+branch `claude/cc08-escalation`, at `489b307`. It is verified: 898 passed, 2
+skipped, 1 xfailed; `tests/test_import_boundaries.py` passes; `python3
+scripts/run_plan_graph.py run --help` exits 0; and
+`git status --porcelain --untracked-files=all` prints nothing, so §1.4's
+precondition holds. Do not re-create it off `1462892` — ADR 0007 and the CC-08
+plan, both marked Binding in §2, do not exist at that commit.
+
+Three things arrived with `main` that bear on this work:
+
+- **`b6fd71e` (scope-screen false-positive repair) added `fixable_in_grant` at
+  `review_fix.py:426`:** `bool(required_paths) and not
+  paths_outside_scope(required_paths, allowed_paths)`. That is the exact
+  complement of the predicate CC-08 escalates on, already computed, for a
+  different purpose — and it clears `anchor_out_of_grant` when true. **Trap 5
+  is now three-way, not two-way.** Read that block before writing CC-08-1, and
+  put `escalate_out_of_grant` beside that computation rather than recomputing
+  the same set check.
+- **`597b160` rewrote `_transfer_targets_for`**, the function trap 2 forbids
+  widening. Its downstream-only BFS still holds, but the tests that pin it have
+  moved; re-grep rather than trusting the line numbers the campaign plan cites.
+- **`98f92e0` / `3b8a743` reindented `run_feature_worktree`** inside a new
+  `try`/`finally` that releases the controller liveness lease on every exit.
+  This is where CC-08-2 wires `bounded_fix_only`; the construction is now one
+  indent level deeper than §3.2 described.
+
 ### 1.1 Worktree-only workflow
 
 **Never edit the primary checkout at `/Users/kirillzaslavsky/Documents/harness_labs`.**
 All work happens in a dedicated git worktree; `main` receives merges only.
-Create one:
+Yours already exists (§1.0). If you need another, branch it off
+`489b307`, never off `1462892`:
 
 ```
 git -C /Users/kirillzaslavsky/Documents/harness_labs worktree add \
     /Users/kirillzaslavsky/Documents/harness_labs/.claude/worktrees/<name> \
-    -b claude/<name> 1462892
+    -b claude/<name> 489b307
 ```
 
 Work exclusively inside that directory. `git worktree list` will show many
@@ -95,6 +132,13 @@ A live PlanGraph campaign (`cc-graph/convergence-campaign-harness`) runs
 against this repository. Do not modify anything under `logs/runs/`,
 `logs/plan-approval/`, or `.plan-graph-*` directories. Read them freely.
 
+It runs out of the **`convergence-harness-impl-fe83e1` worktree**, on branch
+`claude/convergence-harness-impl-fe83e1` at `99930b4`. Do not write anything
+into that worktree, including this document — its base must stay pristine per
+§1.4, and a scratch edit there is seen as a node's output. That branch
+also cannot be rebased while the campaign holds it, which is why the merge was
+taken onto a new branch instead.
+
 ---
 
 ## 2. Authoritative documents
@@ -113,43 +157,50 @@ against this repository. Do not modify anything under `logs/runs/`,
 
 ## 3. Ground truth: the code you are changing
 
-Verified against the working tree at `1462892`. If any of this has drifted,
-**report the drift, do not invent around it.**
+Re-verified against the working tree at `489b307`. If any of this has drifted
+further, **report the drift, do not invent around it.**
 
-### 3.1 `harness_labs/featurerun/review_fix.py` (1079 lines)
+**Line numbers below were re-verified against `489b307`.** Every symbol
+survived the merge; most moved. The largest shifts are in `review_fix.py`,
+where `main` added 271 lines ahead of the material you need.
+
+### 3.1 `harness_labs/featurerun/review_fix.py` (1305 lines)
 
 | Symbol | Line | What it does today |
 |---|---|---|
-| `ReviewFixPolicy` | 40 | Frozen dataclass; every guard is an explicit boolean switch (`scope_expansion_guard_enabled`, `regression_review_enabled`, `cycle_limit_enabled`, …) plus numeric limits. Add `escalation_enabled: bool = False` here. |
-| `ReviewFixResult` | 81 | `status, reason, cycles, risk_tier, ledger_ref, open_finding_keys, technical_debt_keys, transferred_findings, open_findings, stop_reason`; `as_dict()` at 98. Add `escalated_findings`. |
-| `ReviewLedger` | 116 | Owns finding identity. `allowed_paths` is a constructor arg (123). |
-| `ReviewLedger.seed_transferred` | 132 | Reopens inherited obligations, preserving `key`. Raises on empty or duplicate key. |
-| `ReviewLedger.freeze_discovery` | 193 | Sets `discovery_frozen`; `ingest` then marks any new finding `deferred`. |
-| `ReviewLedger.transfer_scope_expanding` | 196 | Routes eligible findings to a **pre-bound downstream** owner via `_target_for_path`. Skips when `not downstream_paths or None in owners or len(owners) != 1`. |
-| `ReviewLedger.ingest` | 243 | Assigns outcomes. **Lines 300-344** are the disposition loop: `anchor_out_of_grant` from the single `file`; `scope_screened` only when *not* `contract_violation` and *not* `requires_disposition`; then citation guard and score threshold. |
-| `ReviewLedger.mark_fix_attempt` | 356 | Raises `ReviewFixError("fixer claimed findings outside its fix list: …")` — copy this discipline for `unresolvable_finding_keys`. |
-| `ReviewLedger._new_record` | 428 | The finding record. Fields include `key, file, subject, statement, category, severity, score, fix_cost, protects, requires_disposition, contract_violation, scope_expanding, outcome, outcome_reason, cycles_seen, occurrences, source_finding_ids, evidence_refs, fix_attempts, reopened_count, origin_node, transferred_to, transfer_eligible, required_paths, anchor_out_of_grant`. Add `escalation_reason: ""`. |
-| `ReviewFixLoop.__init__` | 498 | Kwargs include `inherited_findings`, `retained_transfers`, `finding_transfer_targets`, `origin_node_id`, `inherited_ledger_frozen`, `resumed_ledger`, `resume_from_cycle`, `additional_cycles`. Add `bounded_fix_only`, `seeded_fix_keys`. |
-| `ReviewFixLoop.run` | 586 | The cycle loop. **Line 614** is the unconditional `review` stage. **Lines 616-628** compute `scope_expanding` via `paths_outside_scope(finding.get("required_paths", ()), self.allowed_paths)`. **629** `ingest`, **630** `transfer_scope_expanding`, **635** `fix_keys` recomputation. Insert `escalate_out_of_grant` between 630 and 635. |
-| `ReviewFixLoop._execute` | 791 | Builds the `review-fix-context/1` context. **Line 811** is `"fix_finding_keys": list(fix_keys or ())` — the fixer's exact bound. |
-| `_target_for_path` | 992 | Longest-prefix owner lookup over `{grant_path: node_id}`; returns `None` on no match or a tie between distinct owners. Reuse this rule for CC-08 routing. |
-| `_detail_keys` | 1005 | Validates a `list[str]` detail; raises `ReviewFixError(f"{name} must be a list of finding keys")`. |
-| `_stage_output_contract` | 1046 | For `fix`, `{"details_schema": "review-fix-fix/1", "required_details": {"addressed_finding_keys": "list[string]"}}`. Add `unresolvable_finding_keys` as **optional**. |
+| `ReviewFixPolicy` | 88 | Frozen dataclass; every guard is an explicit boolean switch (`scope_expansion_guard_enabled`, `regression_review_enabled`, `cycle_limit_enabled`, …) plus numeric limits. Add `escalation_enabled: bool = False` here. |
+| `ReviewFixResult` | 129 | `status, reason, cycles, risk_tier, ledger_ref, open_finding_keys, technical_debt_keys, transferred_findings, open_findings, stop_reason`; `as_dict()` at 98. Add `escalated_findings`. |
+| `ReviewLedger` | 171 | Owns finding identity. `allowed_paths` is a constructor arg (178). |
+| `ReviewLedger.seed_transferred` | 227 | Reopens inherited obligations, preserving `key`. Raises on empty or duplicate key. |
+| `ReviewLedger.freeze_discovery` | 298 | Sets `discovery_frozen`; `ingest` then marks any new finding `deferred`. |
+| `ReviewLedger.transfer_scope_expanding` | 301 | Routes eligible findings to a **pre-bound downstream** owner via `_target_for_path`. Skips when `not downstream_paths or None in owners or len(owners) != 1`. |
+| `ReviewLedger.ingest` | 350 | Assigns outcomes. **Lines 415-500** are the disposition loop, rewritten by `b6fd71e` and `597b160`: `anchor_out_of_grant` from the single `file` (425), then the new `fixable_in_grant` (426), which clears it when every `required_paths` entry is inside the grant; `scope_screened` at 461 and 474; `note` demotion at 488 and 496. **Read 415-500 before writing CC-08-1** — this is the block trap 5 now has three terms in. |
+| `ReviewLedger.mark_fix_attempt` | 510 | Raises `ReviewFixError("fixer claimed findings outside its fix list: …")` — copy this discipline for `unresolvable_finding_keys`. |
+| `ReviewLedger._new_record` | 619 | The finding record. Fields include `key, file, subject, statement, category, severity, score, fix_cost, protects, requires_disposition, contract_violation, scope_expanding, outcome, outcome_reason, cycles_seen, occurrences, source_finding_ids, evidence_refs, fix_attempts, reopened_count, origin_node, transferred_to, transfer_eligible, required_paths, anchor_out_of_grant`. Add `escalation_reason: ""`. |
+| `ReviewFixLoop.__init__` | 707 | Kwargs include `inherited_findings`, `retained_transfers`, `finding_transfer_targets`, `origin_node_id`, `inherited_ledger_frozen`, `resumed_ledger`, `resume_from_cycle`, `additional_cycles`. Add `bounded_fix_only`, `seeded_fix_keys`. |
+| `ReviewFixLoop.run` | 795 | The cycle loop. **Line 830** is the unconditional `review` stage. **Lines 833-844** compute `scope_expanding` via `paths_outside_scope(finding.get("required_paths", ()), self.allowed_paths)`. **845** `ingest`, **846** `transfer_scope_expanding`, **851** `fix_keys` recomputation. Insert `escalate_out_of_grant` between 846 and 851. |
+| `ReviewFixLoop._execute` | 1007 | Builds the `review-fix-context/1` context. **Line 1027** is `"fix_finding_keys": list(fix_keys or ())` — the fixer's exact bound. |
+| `_target_for_path` | 1218 | Longest-prefix owner lookup over `{grant_path: node_id}`; returns `None` on no match or a tie between distinct owners. Reuse this rule for CC-08 routing. |
+| `_detail_keys` | 1234 | Validates a `list[str]` detail; raises `ReviewFixError(f"{name} must be a list of finding keys")`. |
+| `_stage_output_contract` | 1275 | For `fix`, `{"details_schema": "review-fix-fix/1", "required_details": {"addressed_finding_keys": "list[string]"}}`. Add `unresolvable_finding_keys` as **optional**. |
 
-Protocol constants: `REVIEW_LEDGER_PROTOCOL = "review-ledger/1"` (18),
-`REVIEW_FIX_RESULT_PROTOCOL = "review-fix-result/1"` (19). Stage detail
+Protocol constants: `REVIEW_LEDGER_PROTOCOL = "review-ledger/1"` (20),
+`REVIEW_FIX_RESULT_PROTOCOL = "review-fix-result/1"` (21). Stage detail
 schemas are `review-fix-review/1`, `review-fix-fix/1`, `review-fix-verify/1`.
 
-### 3.2 `harness_labs/featurerun/feature_run.py` (3176 lines)
+### 3.2 `harness_labs/featurerun/feature_run.py` (3196 lines)
 
-- **1050-1065**: the production `ReviewFixLoop(...)` construction. Wire
-  `bounded_fix_only` / `seeded_fix_keys` here.
-- **1071-1133**: the recovery/continuation loop (`_recover_abnormal`, then a
-  fresh loop with `resumed_ledger`, `resume_from_cycle`,
-  `additional_cycles=review_fix_policy.continuation_cycles`).
-- **154, 210-222**: `finding_transfer_targets` and `inherited_ledger_frozen`
-  validation on the PlanGraph-context dataclass.
-- **738-742**: run options `review_fix_policy`,
+- **1065**: the production `ReviewFixLoop(...)` construction. Wire
+  `bounded_fix_only` / `seeded_fix_keys` here. It now sits one indent level
+  deeper than it did: `98f92e0`/`3b8a743` wrapped everything from the journal's
+  creation to the return in a `try`/`finally` that releases the controller
+  liveness lease. Keep your edit inside that block.
+- **1109-1140**: the recovery/continuation loop (`_recover_abnormal` at 961,
+  980 and 1028, then a fresh loop at 1109 with `resumed_ledger` (1134),
+  `resume_from_cycle` (1135), `additional_cycles` (1138)).
+- **154, 156, 210-222**: `finding_transfer_targets` and
+  `inherited_ledger_frozen` validation on the PlanGraph-context dataclass.
+- **740-742**: run options `review_fix_policy`,
   `review_finding_transfer_targets`, `review_inherited_ledger_frozen`.
 - Imports `DirtyBaselineGrantVerification, verify_dirty_baseline_grant` from
   `harness_labs.core.controller_live` (line 22);
@@ -160,23 +211,23 @@ schemas are `review-fix-review/1`, `review-fix-fix/1`, `review-fix-verify/1`.
 
 | Symbol | Line | Note |
 |---|---|---|
-| `FeatureRunRequest` | 500 | Frozen dataclass: `protocol, run, base_commit, plan, plan_base_commit, plan_sha256, plan_graph_id, plan_node_id, feature_run_id, run_dir, finding_obligations, finding_transfer_targets, inherited_ledger_frozen, verification_gate_slot`. Add `bounded_fix_only: bool = False`. |
-| `FeatureRunOutcome` | 524 | `status, candidate_commit, evidence, plan_graph_id, plan_node_id, feature_run_id, run_dir`. |
-| `_SealDecision` | 535 | `kind ∈ {"sealed","blocked","failed"}`, `result, reason, evidence, evidence_ref, finding_obligations`. |
-| `PlanGraphResult` | 547 | `status, candidate_commit, completed, failed_run_id, functionality_failure, deviation_records`. |
-| `RepairResumeDirective` | 569 | `logical_graph_id, predecessor_attempt_id, retry_frontier, blocker_evidence_ref`. |
-| `PlanGraph.resume` | 1246 | Derives `graph_run_id`, `logical_graph_id`, `predecessor_attempt_id`, `resume_directive`, `reused_completed`, `predecessor_checkpoint` itself — passing any of those as a kwarg is rejected (1266-1277). |
-| `PlanGraph.run` | 1424 | Entry point. |
-| `_request_for_run` | 2150 | Builds the request; sets `finding_transfer_targets=self._transfer_targets_for(run)` and `inherited_ledger_frozen=any(origin_node != run.id ...)` (2179-2182). Derive `bounded_fix_only` here from the obligation records. |
-| `_load_finding_obligations` | 2186 | Reads `audit.state["finding_obligations"]` — this is how a successor attempt inherits the packet with no new directive field. |
-| `_advance_finding_obligations` | 2247 | **2283-2286** raises `PlanGraphError(f"finding {key} was transferred to a completed or current node")`. Relax **only** for escalation-routed records. |
-| `_open_findings` | 2350 | Reads `outcome.evidence["review_fix"]["open_findings"]`; degrades to `()` on malformed input. Mirror it for `escalated_findings`. |
-| `_transferred_findings` | 2368 | Reads `evidence["transferred_findings"]`, falling back to `evidence["review_fix"]["transferred_findings"]`; raises on malformed input. |
-| `_transfer_targets_for` | 2388 | **The dependents-only BFS.** `_owner_for_paths` must be a separate, full-plan lookup — do not widen this one, several tests pin its downstream-only semantics. |
-| `_transition_to_blocked` | 2493 | Builds the `plan-graph-block-escalation/1` dict at **2597**; `retry_frontier` at 2587-2596; `record_block_escalation` at 2631; writes `escalation.json` and invokes `self.on_block_argv` at 2641-2646. Add the `escalations` array here. |
+| `FeatureRunRequest` | 502 | Frozen dataclass: `protocol, run, base_commit, plan, plan_base_commit, plan_sha256, plan_graph_id, plan_node_id, feature_run_id, run_dir, finding_obligations, finding_transfer_targets, inherited_ledger_frozen, verification_gate_slot`. Add `bounded_fix_only: bool = False`. |
+| `FeatureRunOutcome` | 526 | `status, candidate_commit, evidence, plan_graph_id, plan_node_id, feature_run_id, run_dir`. |
+| `_SealDecision` | 537 | `kind ∈ {"sealed","blocked","failed"}`, `result, reason, evidence, evidence_ref, finding_obligations`. |
+| `PlanGraphResult` | 549 | `status, candidate_commit, completed, failed_run_id, functionality_failure, deviation_records`. |
+| `RepairResumeDirective` | 571 | `logical_graph_id, predecessor_attempt_id, retry_frontier, blocker_evidence_ref`. |
+| `PlanGraph.resume` | 1248 | Derives `graph_run_id`, `logical_graph_id`, `predecessor_attempt_id`, `resume_directive`, `reused_completed`, `predecessor_checkpoint` itself — passing any of those as a kwarg is rejected (1266-1277). |
+| `PlanGraph.run` | 1425 | Entry point. |
+| `_request_for_run` | 2153 | Builds the request; sets `finding_transfer_targets=self._transfer_targets_for(run)` (2176) and `inherited_ledger_frozen=any(origin_node != run.id ...)`. Derive `bounded_fix_only` here from the obligation records. |
+| `_load_finding_obligations` | 2190 | Reads `audit.state["finding_obligations"]` — this is how a successor attempt inherits the packet with no new directive field. |
+| `_advance_finding_obligations` | 2250 | **2288** raises `PlanGraphError(f"finding {key} was transferred to a completed or current node")`. Relax **only** for escalation-routed records. |
+| `_open_findings` | 2378 | Reads `outcome.evidence["review_fix"]["open_findings"]`; degrades to `()` on malformed input. Mirror it for `escalated_findings`. |
+| `_transferred_findings` | 2396 | Reads `evidence["transferred_findings"]`, falling back to `evidence["review_fix"]["transferred_findings"]`; raises on malformed input. |
+| `_transfer_targets_for` | 2415 | **The dependents-only BFS**, rewritten by `597b160` so a directory grant routes to the node that owns it. Its downstream-only semantics still hold and are still pinned by tests, but those tests have moved — re-grep rather than trusting the line numbers the campaign plan cites. `_owner_for_paths` must remain a separate, full-plan lookup; do not widen this one. |
+| `_transition_to_blocked` | 2520 | Builds the `plan-graph-block-escalation/1` dict at **2633**; `retry_frontier` at 2622-2630; `record_block_escalation` at 2666; writes `escalation.json` (2655) and invokes `self.on_block_argv`. Add the `escalations` array here. |
 
-`PlanGraphRegistration` carries `plan_lineage_id` (396) and
-`automatic_recovery` (397); `RetryBudgetLedger` is constructed at 1235 with
+`PlanGraphRegistration` carries `plan_lineage_id` (398) and
+`automatic_recovery` (399); `RetryBudgetLedger` is constructed at 1237 with
 `(self.run_root, registration.plan_lineage_id)`.
 
 ### 3.4 `harness_labs/plangraph/plan_graph_authority.py` (136 lines)
@@ -338,10 +389,12 @@ escalation keys off. `changed_paths` (33) counts untracked.
 
 ## 6. Do this, in order
 
-1. **Set up.** Create your worktree off `1462892` per §1.1. Confirm
-   `git status --porcelain --untracked-files=all` is empty.
-2. **Re-verify §3 before writing code.** Grep each symbol. If a line number
-   or name has moved, trust the tree and note the drift in your summary.
+1. **Set up.** Your worktree already exists at `489b307` (§1.0) and is
+   verified green. Confirm `git status --porcelain --untracked-files=all` is
+   empty before you start, and again before any graph run.
+2. **Re-verify §3 before writing code.** Its line numbers were correct at
+   `489b307`; grep each symbol anyway. If one has moved again, trust the tree
+   and note the drift in your summary.
 3. **CC-08-1** — `review_fix.py` escalation primitives. Criteria AC-CC08-1
    through AC-CC08-4. Gate:
    `python3 -m pytest tests/test_review_fix.py -q`.
