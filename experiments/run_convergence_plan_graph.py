@@ -16,10 +16,10 @@ Stages:
   issue   — requires the operator-authored operator-approval.json; issues
             the immutable receipt (high-severity warnings hard-fail here
             unless the approval carries matching warning_acknowledgements).
-  run     — the approved graph executes with max_parallelism=2; each node
-            is a PlanGraph-bound FeatureRun with a Fable coordinator
-            (medium, 7200s silence tolerance), Sonnet implementation
-            workers, and Opus reviewers. Registration carries automatic
+  run     — the approved graph executes with max_parallelism=5; each node
+            is a PlanGraph-bound FeatureRun with an Opus 4.8 [1m]
+            coordinator (medium, 7200s silence tolerance), Sonnet
+            implementation workers, and Opus reviewers. Registration carries automatic
             recovery authority (resume, extend_budget) and rides the
             approval-bound retry-budget lineage.
   resume  — repair-successor attempt over a retry frontier. The flag
@@ -28,7 +28,7 @@ Stages:
             unchanged as its --resume-command.
 
 Agent mixture (operator-fixed):
-  coordinator   claude:claude-fable-5@medium
+  coordinator   claude:claude-opus-4-8[1m]@medium
   implementers  claude-sonnet-5 (high effort)
   reviewers     claude-opus-5 (high effort)
 """
@@ -92,7 +92,7 @@ REPO = ROOT
 WORKTREE_ROOT = ROOT.parent
 CLAUDE = os.environ.get("CC_CLAUDE_EXECUTABLE", "claude")
 
-COORDINATOR_SPEC = "claude:claude-fable-5@medium"
+COORDINATOR_SPEC = "claude:claude-opus-4-8[1m]@medium"
 # The coordinator sits silent inside task.dispatch while its worker runs, so
 # this must exceed the longest worker runtime (600–900s killed real builds).
 COORDINATOR_TIMEOUT_SECONDS = 7200.0
@@ -608,8 +608,8 @@ def run_graph(receipt_path: Path, graph_attempt_id: str, run_root: Path) -> int:
         approval_validator=admission.approval_validator(),
         # Ready-set execution: CC-01 first; then the CC-02→CC-04 spine runs
         # parallel to CC-03 (file-disjoint lanes, S1); CC-05 joins both;
-        # CC-07 last.
-        max_parallelism=2,
+        # CC-07 last. Operator-preferred ceiling; graph width caps actual use.
+        max_parallelism=5,
     )
     result = graph.run()
     print(
@@ -657,7 +657,7 @@ def resume_graph(
         run_root=run_root,
         directive=directive,
         approval_validator=admission.approval_validator(),
-        max_parallelism=2,
+        max_parallelism=5,
     )
     result = graph.run()
     print(
