@@ -620,5 +620,70 @@ class UnchangedBehaviourTests(ScopeScreenTestCase):
         self.assertEqual(record["required_paths"], ["consumer.py"])
 
 
+class DirectoryTransferGrantTests(ScopeScreenTestCase):
+    """A transfer grant naming a directory must route the files beneath it.
+
+    ``_target_for_path`` used to look beneath a grant only when the grant
+    string ended in ``/``.  ``normalize_repository_path`` rejects a trailing
+    slash outright, so every grant that survives the plan contract is
+    slash-free: no directory grant could ever route a file, and the only
+    transfers that ever fired were the exact-filename ones every existing
+    fence happened to use.  On the 26-node Flow Editor decomposition that left
+    51 of 101 grant entries directory-style and unable to receive anything.
+    """
+
+    def test_a_directory_grant_routes_a_file_beneath_it(self):
+        _, record, _ = self.review_once(
+            _defect(file="retinology/web/routes/l2.py"),
+            allowed_paths=("feature.txt",),
+            finding_transfer_targets={"retinology/web/routes": "WP-10"},
+            origin_node_id="WP-02",
+        )
+
+        self.assertEqual(record["outcome"], "transferred")
+        self.assertEqual(record["transferred_to"], "WP-10")
+        self.assertEqual(record["required_paths"], ["retinology/web/routes/l2.py"])
+
+    def test_a_directory_grant_does_not_claim_its_sibling_by_prefix(self):
+        """The fence: containment is judged at a segment boundary.
+
+        A naive ``startswith`` repair would hand ``src/app_helpers/util.py`` to
+        the owner of ``src/app`` -- a node with no write access to it, which
+        would then be asked to fix a file it cannot touch.
+        """
+
+        _, record, _ = self.review_once(
+            _defect(file="src/app_helpers/util.py"),
+            allowed_paths=("feature.txt",),
+            finding_transfer_targets={"src/app": "WP-10"},
+            origin_node_id="WP-02",
+        )
+
+        self.assertNotEqual(record["outcome"], "transferred")
+        self.assertEqual(record["transferred_to"], "")
+
+    def test_the_deepest_enclosing_directory_grant_owns_the_path(self):
+        _, record, _ = self.review_once(
+            _defect(file="src/app/view.py"),
+            allowed_paths=("feature.txt",),
+            finding_transfer_targets={"src": "WP-09", "src/app": "WP-10"},
+            origin_node_id="WP-02",
+        )
+
+        self.assertEqual(record["transferred_to"], "WP-10")
+
+    def test_two_equally_deep_grants_leave_the_path_unowned(self):
+        """Ambiguity must not be resolved by dictionary order."""
+
+        _, record, _ = self.review_once(
+            _defect(file="src/app/view.py", required_paths=["src/app/view.py", "docs/x.md"]),
+            allowed_paths=("feature.txt",),
+            finding_transfer_targets={"src/app": "WP-10", "docs": "WP-11"},
+            origin_node_id="WP-02",
+        )
+
+        self.assertNotEqual(record["outcome"], "transferred")
+
+
 if __name__ == "__main__":
     unittest.main()

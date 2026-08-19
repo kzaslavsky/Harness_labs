@@ -17,6 +17,7 @@ from typing import Callable, Mapping, Sequence
 from uuid import uuid4
 
 from harness_labs.core.audit import AuditError
+from harness_labs.core.git_transaction import owner_for_path
 from harness_labs.plangraph.plan_graph_audit import PlanGraphAudit, validate_plan_graph_id
 from harness_labs.plangraph.plan_graph_budget import BudgetError, RetryBudgetLedger, gate_digest
 from harness_labs.plangraph.plan_graph_authority import AutomaticRecoveryAuthority, RecoveryAuthorityError
@@ -3120,16 +3121,19 @@ def _required_path_from_mapping(value: Mapping[str, object]) -> RequiredPath:
 
 
 def _target_for_path(path: str, targets: Mapping[str, str]) -> str | None:
-    matches = []
-    for grant, target in targets.items():
-        normalized = grant.rstrip("/")
-        if path == normalized or (grant.endswith("/") and path.startswith(grant)):
-            matches.append((len(normalized), target))
-    if not matches:
-        return None
-    longest = max(length for length, _ in matches)
-    owners = {target for length, target in matches if length == longest}
-    return next(iter(owners)) if len(owners) == 1 else None
+    """Resolve one required path to the downstream node granted it.
+
+    The hand-rolled prefix test this replaces demanded ``grant.endswith("/")``
+    before it would look beneath a grant.  ``normalize_repository_path``
+    rejects a trailing slash outright, so no grant that survives the plan
+    contract could ever satisfy it and only an exact filename match routed:
+    every directory grant in a real decomposition was unroutable, and
+    cross-node finding transfer could not fire.  Containment now comes from
+    ``owner_for_path``, which asks the write boundary's own predicate and is
+    shared with PlanGraph so the claim and its validation cannot drift apart.
+    """
+
+    return owner_for_path(path, targets)
 
 
 __all__ = [

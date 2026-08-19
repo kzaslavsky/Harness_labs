@@ -14,7 +14,7 @@ from harness_labs.core.attempts import AttemptRunner, Executor, TaskAttempt, Tas
 from harness_labs.core.audit import AuditActor, AuditJournal
 from harness_labs.core.controller_evidence import EvidenceCatalog
 from harness_labs.core.controller_results import validate_semantic_result
-from harness_labs.core.git_transaction import paths_outside_scope
+from harness_labs.core.git_transaction import owner_for_path, paths_outside_scope
 
 
 REVIEW_LEDGER_PROTOCOL = "review-ledger/1"
@@ -1216,16 +1216,19 @@ def _line_number(value: Any, field: str, key: str) -> int | None:
 
 
 def _target_for_path(path: str, targets: Mapping[str, str]) -> str | None:
-    matches = []
-    for grant, target in targets.items():
-        normalized = grant.rstrip("/")
-        if path == normalized or (grant.endswith("/") and path.startswith(grant)):
-            matches.append((len(normalized), target))
-    if not matches:
-        return None
-    longest = max(length for length, _ in matches)
-    owners = {target for length, target in matches if length == longest}
-    return next(iter(owners)) if len(owners) == 1 else None
+    """Resolve one required path to the downstream node granted it.
+
+    The hand-rolled prefix test this replaces demanded ``grant.endswith("/")``
+    before it would look beneath a grant.  ``normalize_repository_path``
+    rejects a trailing slash outright, so no grant that survives the plan
+    contract could ever satisfy it and only an exact filename match routed:
+    every directory grant in a real decomposition was unroutable, and
+    cross-node finding transfer could not fire.  Containment now comes from
+    ``owner_for_path``, which asks the write boundary's own predicate and is
+    shared with PlanGraph so the claim and its validation cannot drift apart.
+    """
+
+    return owner_for_path(path, targets)
 
 
 def _detail_keys(details: Mapping[str, Any], name: str) -> list[str]:
