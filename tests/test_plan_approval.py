@@ -491,6 +491,7 @@ class SiblingOverlapWarningTests(unittest.TestCase):
     def test_gate_evidence_accepts_optional_warnings_and_rejects_bad_shape(
         self,
     ) -> None:
+        from harness_labs.plangraph.decomposition_conformance import CONFORMANCE_PROTOCOL
         from harness_labs.plangraph.plan_approval import (
             PlanApprovalError,
             _validate_gate_evidence,
@@ -504,6 +505,14 @@ class SiblingOverlapWarningTests(unittest.TestCase):
             "host_path": "/usr/bin",
             "host_executables": [],
             "checked_at": "2026-08-15T00:00:00+00:00",
+            "conformance_report": {
+                "protocol": CONFORMANCE_PROTOCOL,
+                "conformance_aware": False,
+                "enforced": False,
+                "findings": [],
+                "proposals": [],
+                "overrides_applied": [],
+            },
         }
         _validate_gate_evidence(base)
         _validate_gate_evidence(
