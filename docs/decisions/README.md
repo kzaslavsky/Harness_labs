@@ -18,3 +18,4 @@ is immutable after acceptance except for status and links to superseding records
 - [`0004 — Hybrid controller command kernel`](0004-hybrid-controller-command-kernel.md)
 - [`0005 — Ledger-backed review/fix gate`](0005-ledger-backed-review-fix.md)
 - [`0006 — Repository-bound PlanGraph approval`](0006-repository-bound-plan-approval.md)
+- [`0007 — In-graph escalation with bounded unsealing`](0007-in-graph-escalation-bounded-unsealing.md)
