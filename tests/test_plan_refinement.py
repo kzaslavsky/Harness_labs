@@ -8,6 +8,7 @@ machine that does not have the campaign worktree.
 
 from __future__ import annotations
 
+import collections
 import copy
 import json
 from pathlib import Path
@@ -56,6 +57,35 @@ def _serializing_judge(reason: str = "shared file grant; no ownership split avai
     return judge, seen
 
 
+def _graph_shape(decomposition) -> dict:
+    """Depth and width of the decomposition's dependency graph.
+
+    Parallelism is the thing intent-aware narrowing exists to protect, so the
+    tests measure it directly rather than trusting that a warning count of
+    zero was reached the cheap way. A run's level is one past its deepest
+    dependency; depth is the longest chain (how many waves the controller
+    needs) and width is how many runs a wave can dispatch at once.
+    """
+
+    runs = {run["id"]: run for run in decomposition["runs"]}
+    level: dict[str, int] = {}
+
+    def depth_of(run_id: str) -> int:
+        if run_id not in level:
+            level[run_id] = 1 + max(
+                (depth_of(dependency) for dependency in runs[run_id]["depends_on"]),
+                default=0,
+            )
+        return level[run_id]
+
+    widths = collections.Counter(depth_of(run_id) for run_id in runs)
+    return {
+        "depth": max(widths),
+        "max_width": max(widths.values()),
+        "mean_width": round(len(runs) / max(widths), 2),
+    }
+
+
 class FlowEditorRefinementTests(unittest.TestCase):
     """The loop against the real defective plan."""
 
@@ -84,8 +114,14 @@ class FlowEditorRefinementTests(unittest.TestCase):
             f"flow-editor plan: {[dict(item) for item in outcome.open_warnings]}",
         )
         self.assertEqual(outcome.status, "clean")
-        self.assertEqual(len(outcome.applied), 17)
-        self.assertEqual(len(seen), 17)
+        # 13 of the 17 findings were surplus grant breadth, and narrowing one
+        # run's unintended grants dissolves every finding that grant fed; only
+        # WP-08/WP-09 -- both declaring intent on the same module -- is real
+        # contention, and it is the only thing the judge is asked about.
+        kinds = collections.Counter(repair.kind for repair in outcome.applied)
+        self.assertEqual(kinds, {"narrow_grant": 13, "serialize": 1})
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(seen[0]["finding"]["runs"], ["WP-08", "WP-09"])
         self.assertTrue(outcome.revised)
         self.assertNotEqual(
             outcome.initial_plan_graph_digest, outcome.final_plan_graph_digest
@@ -103,30 +139,80 @@ class FlowEditorRefinementTests(unittest.TestCase):
             )
         )
 
-    def test_report_only_when_no_judge_is_injected(self) -> None:
+    def test_narrowing_preserves_the_plans_parallelism(self) -> None:
+        """The property the built-in repair exists for.
+
+        Serializing all 17 findings costs three extra waves and two runs off
+        the widest one. Intent-aware narrowing reaches the same clean plan
+        with the dependency graph bit-for-bit unchanged in shape.
+        """
+
+        judge, _ = _serializing_judge()
+        before = _graph_shape(canonical_plan_graph_payload(self.decomposition))
+        self.assertEqual(before, {"depth": 12, "max_width": 8, "mean_width": 2.17})
+
+        outcome = self._refine(judge=judge)
+
+        self.assertEqual(outcome.status, "clean")
+        self.assertEqual(
+            _graph_shape(outcome.decomposition), before,
+            "refinement flattened the plan's parallelism: "
+            f"{_graph_shape(outcome.decomposition)} against {before}",
+        )
+        # The single serialization is between runs already on different waves,
+        # so it costs nothing; every other repair left depends_on alone.
+        ordered = [
+            run_id
+            for run_id, entry in outcome.as_mapping()["decomposition_diff"].items()
+            if "depends_on" in entry
+        ]
+        self.assertEqual(ordered, ["WP-09"])
+
+    def test_no_judge_narrows_but_will_not_serialize(self) -> None:
         outcome = self._refine()
 
         self.assertEqual(outcome.status, "report_only")
-        self.assertEqual(outcome.applied, ())
-        self.assertFalse(outcome.revised)
+        # Narrowing removes only a permission the run never claimed to need,
+        # so it needs nobody's approval; the one genuinely contested finding
+        # would change the execution shape and is reported, not applied.
         self.assertEqual(
-            canonical_plan_graph_payload(self.decomposition), outcome.decomposition,
-            "report-only refinement edited the decomposition",
+            collections.Counter(repair.kind for repair in outcome.applied),
+            {"narrow_grant": 13},
         )
-        self.assertEqual(len(outcome.proposals), 17 + 102)
-        classes = {
-            proposal["severity"]: proposal["repair_class"]
-            for proposal in outcome.proposals
-        }
-        self.assertEqual(classes, {"high": "deterministic", "info": "judgment"})
+        self.assertTrue(
+            all(repair.decided_by == "deterministic" for repair in outcome.applied)
+        )
+        self.assertTrue(outcome.revised)
+        self.assertEqual(outcome.final_warnings["high"], 1)
+        self.assertEqual(
+            _graph_shape(outcome.decomposition),
+            _graph_shape(canonical_plan_graph_payload(self.decomposition)),
+            "the judge-less path changed the plan's execution shape",
+        )
+        self.assertEqual(
+            [dict(item)["runs"] for item in outcome.deferred], [["WP-08", "WP-09"]]
+        )
+        high = [
+            proposal for proposal in outcome.proposals
+            if proposal["severity"] == "high"
+        ]
+        self.assertEqual(len(high), 1)
+        self.assertEqual(high[0]["proposed_repair"], "serialize")
+        self.assertIn("genuine contention", high[0]["note"])
 
     def test_report_records_the_diff_from_what_the_operator_wrote(self) -> None:
         judge, _ = _serializing_judge()
         record = self._refine(judge=judge).as_mapping()
 
         diff = record["decomposition_diff"]
-        self.assertIn("WP-03", diff)
-        self.assertEqual(diff["WP-03"]["depends_on"]["added"], ["WP-02"])
+        # WP-08 held a write grant on the catalog module without declaring any
+        # intent to touch it; WP-09 declared one. The grant, not the work, was
+        # the collision.
+        self.assertEqual(
+            diff["WP-08"]["allowed_paths"]["removed"],
+            ["retinology/web/_l2_document_catalog.py", "tests"],
+        )
+        self.assertEqual(diff["WP-09"]["depends_on"]["added"], ["WP-08"])
         self.assertTrue(
             all(
                 repair["reason"] and repair["decided_by"] in {"judge", "deterministic"}
@@ -193,6 +279,95 @@ class RefinementLoopPropertyTests(unittest.TestCase):
             outcome.as_mapping()["decomposition_diff"], {},
             "the refiner edited a plan that had nothing wrong with it",
         )
+
+    @staticmethod
+    def _intend(decomposition, **intents):
+        """Give named runs their declared ``path_intents``."""
+
+        for run in decomposition["runs"]:
+            for path in intents.get(run["id"], ()):
+                run["path_intents"].append({"path": path, "action": "modify"})
+        return decomposition
+
+    def test_a_run_that_declares_no_intents_is_never_narrowed(self) -> None:
+        """Silence is not evidence that a grant is unused.
+
+        ``path_intents`` is optional. A decomposition that omits it would make
+        every grant look unintended, and narrowing on that would strip runs of
+        the access they need to do their work. B says nothing here, so B keeps
+        everything -- even though its grant on the shared module is exactly
+        what a naive rule would drop.
+        """
+
+        decomposition = self._intend(
+            self._decomposition(
+                [
+                    ("A", (), ("src/shared.py", "src/a.py"), ("AC-1",)),
+                    ("B", (), ("src/shared.py", "src/b.py"), ("AC-1",)),
+                ]
+            ),
+            A=("src/shared.py",),
+        )
+        outcome = self._refine(decomposition)
+
+        self.assertEqual(outcome.applied, ())
+        self.assertEqual(
+            outcome.as_mapping()["decomposition_diff"], {},
+            "a run that declared no path intents was narrowed on silence alone",
+        )
+        self.assertEqual(outcome.status, "report_only")
+        self.assertEqual(outcome.final_warnings["high"], 1)
+        self.assertIn("B declares no path intents", outcome.deferred[0]["reason"])
+
+    def test_directory_grant_is_kept_by_an_intent_on_a_file_beneath_it(self) -> None:
+        decomposition = self._intend(
+            self._decomposition(
+                [
+                    ("A", (), ("src/pkg", "src/shared.py", "src/a.py"), ("AC-1",)),
+                    ("B", (), ("src/pkg", "src/shared.py"), ("AC-1",)),
+                ]
+            ),
+            A=("src/pkg/mod.py", "src/a.py"),
+            B=("src/shared.py", "src/pkg/other.py"),
+        )
+        outcome = self._refine(decomposition)
+
+        self.assertEqual(outcome.status, "clean")
+        self.assertEqual(len(outcome.applied), 1)
+        self.assertEqual(
+            outcome.applied[0].detail["dropped"], ["src/shared.py"],
+            "the directory grant justifying A's declared intent was dropped too",
+        )
+        runs = {run["id"]: run for run in outcome.decomposition["runs"]}
+        self.assertEqual(runs["A"]["allowed_paths"], ["src/pkg", "src/a.py"])
+        self.assertEqual(runs["A"]["depends_on"], [])
+        self.assertEqual(runs["B"]["depends_on"], [])
+
+    def test_both_sides_declaring_intent_falls_back_to_serialize(self) -> None:
+        decomposition = self._intend(
+            self._decomposition(
+                [
+                    ("A", (), ("src/shared.py",), ("AC-1",)),
+                    ("B", (), ("src/shared.py",), ("AC-1",)),
+                ]
+            ),
+            A=("src/shared.py",),
+            B=("src/shared.py",),
+        )
+        judge, seen = _serializing_judge()
+        outcome = self._refine(decomposition, judge=judge)
+
+        self.assertEqual(outcome.status, "clean")
+        self.assertEqual(
+            [repair.kind for repair in outcome.applied], ["serialize"],
+            "two runs that both declared intent on the same file were not "
+            "serialized; one of them lost a grant it said it needed",
+        )
+        self.assertEqual(len(seen), 1, "the judge was skipped on real contention")
+        runs = {run["id"]: run for run in outcome.decomposition["runs"]}
+        self.assertEqual(runs["B"]["depends_on"], ["A"])
+        self.assertEqual(runs["A"]["allowed_paths"], ["src/shared.py"])
+        self.assertEqual(runs["B"]["allowed_paths"], ["src/shared.py"])
 
     def test_reverse_direction_is_used_when_plan_order_would_cycle(self) -> None:
         decomposition = canonical_plan_graph_payload(
