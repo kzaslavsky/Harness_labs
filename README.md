@@ -177,16 +177,6 @@ child:
 python3 -m examples.run_delegated_treasure_attempt --backend codex
 ```
 
-Start the Retinology oMLX server, then compare both backends on the identical
-attempt:
-
-```sh
-/Users/kirillzaslavsky/claudeprojects/RDPcrawler/.omlx-venv/bin/python \
-  /Users/kirillzaslavsky/claudeprojects/RDPcrawler/scripts/start_omlx_server.py \
-  --port 8100 --max-memory 8GB
-python3 -m examples.run_delegated_treasure_attempt --backend all
-```
-
 Parent and child backends are selected independently. Exercise all four routes:
 
 ```sh
