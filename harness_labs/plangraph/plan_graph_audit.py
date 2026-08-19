@@ -37,7 +37,16 @@ _IMMUTABLE_NODE_FIELDS = (
 _AUDIT_STATE_PROTOCOL = "harness-plan-graph-audit/2"
 _GIT_COMMIT = re.compile(r"^[a-f0-9]{40}$")
 _ARTIFACT_REF = re.compile(r"^artifact:sha256:[a-f0-9]{64}$")
-_CHILD_LIVENESS_NAMES = ("plan-graph-liveness.json", "liveness.json")
+# ``liveness.json`` was once accepted here as an alias.  It no longer is:
+# that filename is the controller liveness lease
+# (``harness-controller-liveness/1``, written by
+# ``core.controller_liveness`` for every running FeatureRun), and both
+# readers of this tuple refuse to look when more than one candidate name is
+# present.  Leaving the alias in place would mean a child that wrote a real
+# ``plan-graph-liveness.json`` beside its own controller lease became
+# unobservable -- two names present, so neither is read.  One filename, one
+# protocol.
+_CHILD_LIVENESS_NAMES = ("plan-graph-liveness.json",)
 _CHILD_SEAL_NAMES = ("plan-graph-seal-receipt.json", "seal-receipt.json")
 _BLOCK_ESCALATION_MAX_BYTES = 4 * 1024 * 1024
 # Written at repair-successor creation so a crash-orphaned directory (one
@@ -1432,7 +1441,15 @@ class PlanGraphAudit:
 
     def _open_or_create(self) -> AuditJournal:
         if self.run_dir.exists():
-            journal = AuditJournal.open_existing(self.run_dir, actor=_ACTOR)
+            # This attempt's own directory, reopened to keep working in it, so
+            # this process is the controller and owns the liveness lease.  The
+            # two other ``open_existing`` calls in this module deliberately do
+            # not pass a controller kind: one reads a finalized predecessor and
+            # one reclaims a directory whose process is provably gone, and
+            # neither is a running controller for the run it opens.
+            journal = AuditJournal.open_existing(
+                self.run_dir, actor=_ACTOR, controller_kind="plan_graph"
+            )
             state = journal.checkpoint_state()
             if state.get("audit_state_protocol") != _AUDIT_STATE_PROTOCOL:
                 raise AuditError(
@@ -1466,7 +1483,9 @@ class PlanGraphAudit:
         self.run_dir.parent.mkdir(parents=True, exist_ok=True)
         # AuditJournal creates its own directory; write the descriptor only after
         # that succeeds, then bind its digest in the first graph event.
-        journal = AuditJournal(self.run_dir, self.graph_run_id, actor=_ACTOR)
+        journal = AuditJournal(
+            self.run_dir, self.graph_run_id, actor=_ACTOR, controller_kind="plan_graph"
+        )
         # Recorded as early as possible so a crash anywhere after this point
         # leaves a directory that reclaim_orphaned_successor_attempt can
         # later prove has no live admission process, rather than one that

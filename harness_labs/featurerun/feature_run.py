@@ -842,6 +842,12 @@ def run_feature_worktree(
         contract.run_id,
         actor=AuditActor("kernel", "controller_kernel"),
         evidence_classification=evidence_classification,
+        # This process is the run's controller from here until the journal is
+        # finalized, so it owns the run's liveness lease.  Without one the run
+        # catalog reports every non-terminal FeatureRun as
+        # ``liveness_unavailable``, and a PlanGraph node inherits that state
+        # from its correlated child.
+        controller_kind="feature_run",
     )
     # Bind a run descriptor so the catalog can correlate this run (dashboard
     # metrics join graph nodes to FeatureRuns through parent_correlation);
