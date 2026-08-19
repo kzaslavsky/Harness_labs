@@ -1,9 +1,18 @@
 # Convergence Campaign Plan
 
-Status: proposed. First application:
+Status: proposed; decomposition-reviewed (verdict:
+DECOMPOSABLE-WITH-EDITS, edits applied). First application:
 [`flow-editor-convergence-application.md`](flow-editor-convergence-application.md).
+Registerable decomposition:
+[`convergence-campaign-decomposition.json`](convergence-campaign-decomposition.json).
 Supporting analyses: [`plangraph-node-sizing-review.md`](plangraph-node-sizing-review.md),
 [`convergence-generalization-and-tooling-survey.md`](convergence-generalization-and-tooling-survey.md).
+
+Section headings below are stable citation anchors: a decomposition run
+cites sections by the slugs shown in brackets, and its workers read only
+the cited sections. Citation discipline is a reading contract — the
+harness validates key references, not text inclusion; the driver adds
+the byte-identity check (AC-CC04-8).
 
 ## Purpose
 
@@ -34,21 +43,24 @@ fixed only when a later audit observed it fixed.
 
 ## Contracts
 
-### Target
+### Target [contracts-target]
 
-`target: {kind, digest, snapshot_path}` pinned at campaign open; the
+`target: {kind, digest, snapshot_path}` pinned at `campaign_opened`; the
 target file is snapshotted into the campaign root. Amendment requires a
 `target_amended` record naming the new digest and the invalidation scope
 (which keys and confirmed-good entries it voids); rulings carry forward.
-Amendment without a stated scope blocks the campaign. A repair node may
-never write the target path.
+A `target_amended` record without a stated invalidation scope sets the
+derived blocked state. The target path is rejected as a repair-node
+grant.
 
-### Finding
+### Finding [contracts-finding]
 
 The semantic envelope (`harness_labs/core/controller_results.py`:
 validated `id`, `statement`, `category`, `severity`,
 `requires_disposition`, `evidence_refs`, `source_finding_ids`) plus a
-`details.fidelity` block:
+`fidelity` block carried **on each `findings[]` entry** (finding entries
+accept extra keys; the top-level `details` object carries audit-level
+fields such as sweep counts and coverage):
 
 ```json
 {
@@ -68,7 +80,7 @@ against a fixed key raises a re-emission warning at the rule step.
 `confidence`: `C` confirmed by interaction/measurement, `S` inferred
 from source, `C+S` observed then root-caused.
 
-### Verdicts
+### Verdicts [contracts-verdicts]
 
 Every audit returns, for every prior `open` or `fix_claimed` key, exactly
 one of:
@@ -78,8 +90,12 @@ one of:
 
 A key the inspector does not mention is `unobserved`. Only
 `observed_fixed` closes a key. `unobserved` blocks success termination.
+A verdict citing a capture cell recorded `unstable` cannot write
+`finding_fixed`; the key remains `fix_claimed` until re-observed on a
+stable cell. The inspector output validator rejects a result missing a
+verdict for any prior key supplied in the task context.
 
-### Rulings
+### Rulings [contracts-rulings]
 
 Findings with `requires_disposition: true` go to a human at the rule
 step, each as a packet: target excerpt, quoted criterion, capture
@@ -101,41 +117,51 @@ are never machine-authored.
 ## Campaign state
 
 Location: `<run_root>/.convergence-campaigns/<campaign_id>/` (dot-dir;
-invisible to the dashboard catalog by design).
+skipped by the dashboard run catalog by design).
 
-- **Ledger** — append-only JSONL, flock+fsync (the
-  `JoinConflictResolutionStore` discipline). Records: `campaign_opened`
-  (domain, target, base commit + merge-base with the product default
-  branch, predecessor graph id, seed-audit digest, repo-identity branch
-  constraint), `finding_opened`, `finding_fix_claimed` (projected from
-  graph success; never terminal), `finding_fixed` (only from an
-  `observed_fixed` verdict), `finding_reopened` (with `reason`; a base
-  rebase is `reason: "base_rebase"`, stall-exempt, and demotes every
-  fixed key to `fix_claimed`), `finding_ruled`, `confirmed_good` (only
-  with a machine-checkable assertion; otherwise recorded as `watch` —
-  still swept, findings there route normally), `target_amended`,
-  `capture_coverage`.
-- **Checkpoint** — `convergence-campaign-checkpoint/1`: atomic replace,
-  monotonic sequence, lifecycle field, owner/liveness stamp, and
-  staleness rejection (names the base commit it believes current; a
-  mismatch on load refuses).
-- **Artifact store** — content-addressed
-  (`artifacts/<digest>`, with size, media type, retention): every
-  sanitized capture artifact the ledger references is atomically copied
-  in at seal time. Worktree copies are working files; the store is the
-  record.
+### Ledger [state-ledger]
+
+Append-only JSONL, flock+fsync (the `JoinConflictResolutionStore`
+discipline). Records:
+
+- `campaign_opened` — domain; `target` per the target contract; base
+  commit and its merge-base with the product default branch; predecessor
+  graph id; seed-audit digest; repo-identity branch constraint; and the
+  campaign config: `pre_journal_sanitizer` hook, inspector recall
+  threshold, amendment-ratio threshold.
+- `finding_opened`, `finding_fix_claimed` (projected from graph success;
+  never terminal), `finding_fixed` (only from an `observed_fixed`
+  verdict), `finding_reopened` (with `reason`; `reason: "base_rebase"`
+  is stall-exempt and demotes every `finding_fixed` key to
+  `fix_claimed`), `finding_ruled`, `confirmed_good` (admitted to the
+  exclusion set only with a machine-checkable assertion; otherwise
+  recorded as `watch` — still swept, findings there route normally
+  through the open set), `target_amended`, `capture_coverage`.
+
+Derived views: open set; exclusion set; stall state; coverage state;
+**amendment ratio** (keys closed via `amend_criterion` / keys closed) —
+printed at every termination; success above the declared threshold
+requires explicit human acknowledgment.
 
 Per-round state inside a running graph stays exclusively in the existing
 review-ledger machinery; the campaign ledger carries only cross-round
 facts, with round outcomes projected from review-ledger artifacts by one
 adapter function.
 
-Derived views: open set; exclusion set; stall state; coverage state;
-**amendment ratio** (keys closed via `amend_criterion` / keys closed) —
-printed at every termination; success above a declared threshold
-requires explicit human acknowledgment.
+### Checkpoint and artifact store [state-checkpoint-store]
+
+- **Checkpoint** — `convergence-campaign-checkpoint/1`: atomic replace
+  (write-temp + rename + directory fsync), monotonic sequence number,
+  lifecycle field, owner/liveness stamp, and staleness rejection (names
+  the base commit it believes current; a mismatch on load refuses).
+- **Artifact store** — content-addressed (`artifacts/<digest>`, with
+  size, media type, retention): every sanitized capture artifact the
+  ledger references is atomically copied in at seal time. Worktree
+  copies are working files; the store is the record.
 
 ## Driver
+
+### Steps [driver-steps]
 
 `scripts/run_convergence_campaign.py` — a sequencer that delegates node
 launching, approval, and resume to existing machinery. Steps per round:
@@ -150,23 +176,34 @@ launching, approval, and resume to existing machinery. Steps per round:
 4. `plan` — the operator, agent-assisted (no planner code), emits a
    registration whose repair nodes' `allowed_paths` equal the union of
    their owned findings' `required_paths`, disjoint per the sizing
-   criteria below. No standing catch-all node: a mid-run surprise on an
+   criteria. No standing catch-all node: a mid-run surprise on an
    unowned path blocks fail-closed and routes to the per-node
    operator-relief path or the next round's seed — authority follows an
    observed finding.
-5. `approve` — the driver renders the findings→owners→paths table plus
-   every `prepare_approval` warning, commits it in the product repo, and
-   lists it in `referenced_artifacts` (hash-bound into the approval
-   subject). The driver never authors `operator-approval.json`; it
-   halts for the human-written file. Machine approval, if ever enabled,
-   requires its own `machine-attested-plan-approval/1` policy (approver
-   identity + profile digest, allowed predicates, evidence snapshot,
-   explicit human delegation, revocation, deterministic predicate
-   recomputation) — deferred; see the deferral table.
-   Preconditions checked: pristine base worktree (untracked included);
-   plan artifacts committed at HEAD; repo identity file present at
-   base; verbatim acceptance-criteria statements; zero unacknowledged
-   sibling-overlap warnings.
+5. `approve` — the driver first runs the admission refinement loop
+   (`approve_plan.py refine`, `plan_refinement.refine_decomposition` on
+   main — narrow-grant and serialize repairs with a diffable report),
+   then renders the findings→owners→paths table plus every warning from
+   `prepare` (main's `prepare` now emits `warnings`,
+   `high_severity_warnings`, and `unclaimed_grants` directly, each with
+   a `warning_sha256`; high-severity warnings hard-fail `issue_receipt`
+   unless the operator approval carries a matching
+   `warning_acknowledgements` entry with a reason — the
+   discarded-warnings failure mode is closed on main). The table is
+   committed in the product repo and listed in `referenced_artifacts`.
+   The driver refuses to proceed
+   while any warning is unacknowledged, refuses to render a packet when
+   a run's criteria text is not byte-identical to the
+   `acceptance_criteria` entry it names or a node's objective is absent
+   from its cited sections at base, and never authors
+   `operator-approval.json` — it halts for the human-written file.
+   Machine approval, if ever enabled, requires its own
+   `machine-attested-plan-approval/1` policy (approver identity +
+   profile digest, allowed predicates, evidence snapshot, explicit human
+   delegation, revocation, deterministic predicate recomputation) —
+   deferred; see the deferral table. Other preconditions checked:
+   pristine base worktree (untracked included); plan artifacts committed
+   at HEAD; repo identity file present at base.
 6. `run` — existing PlanGraph execution, with registration persisted,
    `--on-block-argv` set, an automatic-recovery authority baked in, and
    `resume --round N` deriving arguments from `escalation.json`.
@@ -179,7 +216,7 @@ launching, approval, and resume to existing machinery. Steps per round:
    graph result itself carries no findings, and on the common block
    path no candidate).
 
-## Bounds and termination
+## Bounds and termination [bounds-termination]
 
 - **3 repair rounds** per campaign (default). The post-repair audit is
   always permitted and never consumes the bound.
@@ -192,10 +229,10 @@ launching, approval, and resume to existing machinery. Steps per round:
 - **Success** requires, on the final audit: zero new required findings;
   every key `observed_fixed` or ruled (no `unobserved`); full required
   capture coverage (from `capture_coverage`; unreachable required cells
-  block); inspector recall at the calibration threshold; amendment
-  ratio acknowledged if above threshold; and — the first time a
-  campaign reaches this state — a second independent dry inspector
-  session.
+  block); inspector recall at the configured calibration threshold;
+  amendment ratio acknowledged if above the configured threshold; and —
+  the first time a campaign reaches this state — a second independent
+  dry inspector session.
 - **Blocked** end states (ledger + pinned base + checkpoint are the
   handoff): rulings unanswered; stall; round bound exhausted with keys
   open; target amended without scope; sanitizer failure; predecessor
@@ -203,7 +240,7 @@ launching, approval, and resume to existing machinery. Steps per round:
   into disjoint owners.
 - Exhaustion never waives findings.
 
-## Measurer requirements (domain-generic)
+## Measurer requirements [measurer-requirements]
 
 Capture must: acquire evidence deterministically (readiness gating; an
 end-state double-read whose digest disagreement marks a cell
@@ -211,9 +248,12 @@ end-state double-read whose digest disagreement marks a cell
 `unstable`); exit zero whenever it ran (statuses recorded), nonzero only
 when it could not run at all; and pass every artifact through the
 campaign's `pre_journal_sanitizer` hook before anything is journaled,
-digested, or injected into worker context. An `unstable` cell makes
-measurement inconclusive: findings keep their severity, but the key
-cannot reach `observed_fixed` until re-observed on a stable cell.
+digested, or injected into worker context. The capture script resolves
+its browser interpreter from `--python` (default `sys.executable`);
+whether a real browser or a stub driver executed is recorded in the
+receipt, never inferred. An `unstable` cell makes measurement
+inconclusive: findings keep their severity, but the key cannot reach
+`observed_fixed` until re-observed on a stable cell.
 
 Inspection must: read the target as source where the target is
 inspectable; sweep with a bounded lens set plus at most one confirming
@@ -223,31 +263,39 @@ findings per the contract; and return the per-key verdicts.
 The domain filter for future measurers: the delta must localize to file
 paths, or it cannot participate in PlanGraph ownership.
 
-## Node sizing criteria (generated graphs)
+## Node sizing criteria [sizing-s1-s10]
 
 Empirical basis: `plangraph-node-sizing-review.md`. Conformance is on by
 default for generated graphs; overrides are per-criterion, per-node,
-with a recorded reason; no blanket bypass. The existing
-`_sibling_overlap_warnings` (`harness_labs/plangraph/plan_approval.py:458`)
-covers only a same-file subset of S1 and its output is currently
-discarded by `scripts/approve_plan.py`; S1–S10 as specified are a new
-admission subsystem.
+with a recorded reason; no blanket bypass. Main has meanwhile grown the
+scaffolding S1–S10 slot into: `_sibling_overlap_warnings` plus
+`_unclaimed_grant_warnings` with typed warning-kind constants,
+`warning_identity()` digests, a hard acknowledgment gate for
+high-severity warnings in `issue_receipt`/admission, and a
+prepare→warn→revise refinement loop
+(`harness_labs/plangraph/plan_refinement.py`, `approve_plan.py refine`)
+with narrow-grant and serialize repairs. S1-at-directory-granularity and
+S4–S9 remain new work; the conformance analyzer registers its findings
+as new warning kinds beside the existing constants and rides the
+existing acknowledgment gate rather than inventing an enforcement
+channel.
 
 - **S1** No two dependency-unordered nodes share a writable path, at
   file or directory granularity. *Block.*
 - **S2** Every grant is an explicit file (or declared create); no
   directory grants. *Block.*
 - **S3** Shared writers are serialized by `depends_on`, never by prose
-  discipline. *Auto-fix (insert edge), report.*
+  discipline. *Auto-fix as a proposal the operator re-commits — the
+  analyzer never mutates an approved decomposition in place.*
 - **S4** A node's grants equal the union of its owned findings'
   `required_paths`; no grants on paths its objective disclaims.
   *Block.*
-- **S5** Every criterion names its own observable (file, test id,
-  selector, state, quantified check); none delegates pass/fail to an
-  external document. *Block, quoting the criterion.*
-- **S6** Every criterion is observable from the node's own execution
-  environment, or moves to a node/preflight that can observe it.
-  *Block.*
+- **S5** Every criterion carries a machine-readable observable
+  declaration — `{kind: file|test_id|selector|command, referent}` — and
+  never delegates pass/fail to an external document. *Block when the
+  declaration is absent.*
+- **S6** Every criterion's observable referent lies within the node's
+  grants and is reachable from the node's `verification_argv`. *Block.*
 - **S7** Exit checks are satisfiable within the node's own grants
   (including inherited-region merge obligations). *Block.*
 - **S8** The verification gate is no larger than the criteria set;
@@ -255,7 +303,7 @@ admission subsystem.
   acknowledgment required.*
 - **S9** Fan-in ≤ 3 for repair nodes; only the join/regression node
   exceeds it, and it carries integration criteria only. *Auto-fix
-  (propose intermediate join), report.*
+  (propose intermediate join) as a proposal, report.*
 - **S10** ≤ ~8 repair nodes per round; split otherwise. *Warn.*
 
 Deliberately not criteria (measured negatives): no cap on criteria
@@ -264,50 +312,121 @@ check never auto-splits nodes — it blocks with a suggested split.
 
 ## Build order
 
-Measurement before orchestration (harness-contract execution-first):
+Measurement before orchestration (harness-contract execution-first).
+Scope note for every node: consumers import by full module path;
+`harness_labs/__init__.py` is deliberately out of scope.
 
-1. **CC-00 Base establishment** — a separately approved integration plan
-   producing the campaign's base candidate, with its own acceptance
-   criteria; the predecessor graph settled. Precedes all estimates.
-2. **CC-01 Ledger core + finding contract** (~1.5 d) —
-   `harness_labs/plangraph/convergence_ledger.py`,
-   `tests/test_convergence_ledger.py`: records, ingest validation,
-   verdict semantics, derived views.
-3. **CC-02 Checkpoint + artifact store** (~1 d) —
-   `harness_labs/plangraph/convergence_campaign.py`, tests: atomic
-   replace, staleness rejection, seal-time copy.
-4. **CC-03 First measurer** (~2.5–3 d) — domain capture script +
-   inspector role + smoke test on a static fixture (see application
-   doc).
-5. **CC-04 Driver** (~2 d) — `scripts/run_convergence_campaign.py`,
-   `tests/test_convergence_campaign_driver.py`: step machine, approval
-   rendering and preconditions, harvest on both block paths, base
-   adoption, bounds.
-6. **CC-05 Lifecycle proof** — one subprocess-level run of the full
-   slice (capture → inspection → findings → one approved repair graph →
-   join → post-repair verdicts) through shipped CLIs on a static
-   fixture. Gate for everything after.
-7. **CC-06 Round 1 on the real product** — human rulings, human
-   approval.
-8. **CC-07 Conformance analyzer (S1–S10)** — separately specified
-   admission feature with its own tests.
+**Base note:** this branch merges cleanly into current main
+(`00b4e79`), but main rewrote `plan_approval.py` (+194 lines: warning
+kinds, acknowledgment gate, refinement loop) and added
+`plan_graph_autoresume.py` and `verification_images.py`. **The CC graph
+must be registered against a base that includes main** — CC-04, CC-03,
+and CC-07 all delegate to machinery that exists only there. Merge main
+into this branch (or rebase) before CC-00 completes.
 
-Dependencies: CC-01 → CC-02 → CC-04; CC-03 independent after CC-00;
-CC-05 needs CC-01..04; CC-06 needs CC-05; CC-07 after CC-05. Each edge
-is a data dependency: CC-02's checkpoint embeds CC-01's ledger records;
-CC-04's driver reads and writes both; CC-05 executes CC-03's measurer
-and CC-04's driver together; CC-07 consumes CC-05's proven registration
-shape. CC-03 shares no files with CC-01/CC-02/CC-04, so it runs
-parallel (S1).
+### CC-00 Base establishment [build-order-cc-00]
 
-The registerable decomposition — nodes CC-01..CC-05 and CC-07 with
-objectives, acceptance-criteria ids, explicit `allowed_paths`,
-`path_intents`, `depends_on`, and per-node `verification_argv`, in the
-registration schema the dashboard campaign used — is
-[`convergence-campaign-decomposition.json`](convergence-campaign-decomposition.json).
-CC-00 is a separately approved product-side plan and CC-06 is a
-campaign action (running round 1), so neither is a node in the harness
-build graph.
+A separately approved integration plan producing the campaign's base
+candidate, with its own acceptance criteria; the predecessor graph
+settled. Precedes all estimates.
+
+### CC-01 Ledger core and finding contract [build-order-cc-01]
+
+Implement the convergence campaign ledger: append-only flock+fsync JSONL
+journal with the campaign record types, ingest-time finding-contract
+validation, per-key verdict semantics, and the derived views (open set,
+exclusion set, stall state, coverage state, amendment ratio). Also
+creates `harness_labs/core/convergence_contract.py` holding the closed
+verdict and disposition vocabularies, so `core`-layer consumers never
+import from the `plangraph` layer. Files:
+`harness_labs/plangraph/convergence_ledger.py`,
+`harness_labs/core/convergence_contract.py`,
+`tests/test_convergence_ledger.py`. ~1.5–2 d.
+
+### CC-02 Checkpoint and artifact store [build-order-cc-02]
+
+Implement the campaign checkpoint and content-addressed artifact store
+per the state contract, including the campaign config surface
+(sanitizer hook, recall and amendment-ratio thresholds) and the target
+pin/amendment records. Files:
+`harness_labs/plangraph/convergence_campaign.py`,
+`tests/test_convergence_campaign.py`. ~1 d. Depends on CC-01.
+
+### CC-03 First measurer [build-order-cc-03]
+
+Domain capture script + inspector role + smoke test on a static fixture
+(see the application doc for the UI instantiation). The fixture is a
+directory grant (`tests/fixtures/convergence_fixture_app`) — a recorded,
+deliberate deviation from S2, which nothing enforces until CC-07 builds
+the enforcer. The smoke test resolves its interpreter from
+`UI_FIDELITY_PYTHON`, exercises the receipt and exit contract through a
+stub browser driver when no real browser is available, and records a
+skip reason rather than passing silently. Evidence persistence reuses
+main's `harness_labs/core/verification_images.py` (selection, size/count
+budgets, atomic copy into the evidence catalog, `--add-dir` worker
+grants) — CC-03 adds only the matrix walk and receipt on top. ~2–2.5 d.
+Depends on CC-01 (imports the verdict vocabulary from
+`harness_labs/core/convergence_contract.py`).
+
+### CC-04 Driver [build-order-cc-04]
+
+The measure/ingest/rule/plan/approve/run/close step machine per the
+driver contract, delegating node launching, approval, and resume to
+existing machinery — specifically, per-round attempt execution
+(quiescence detection, frontier reconciliation, no-progress bounding,
+bounded relaunch) is **delegated to main's
+`scripts/plan_graph_autoresume.py`**, not reimplemented; the driver owns
+only campaign-round sequencing and the campaign ledger/checkpoint
+interactions. Files: `scripts/run_convergence_campaign.py`,
+`tests/test_convergence_campaign_driver.py`. ~1.5 d after the
+delegation. Depends on CC-02.
+
+### CC-05 Lifecycle proof [build-order-cc-05]
+
+One subprocess-level run of the full slice (capture → inspection →
+findings → one approved repair graph → join → post-repair verdicts)
+through shipped CLIs on the static fixture, driving
+`scripts/run_plan_graph.py` with a deterministic scripted launcher
+fixture. The test authors, inside its temporary repository, exactly the
+two human inputs the flow requires — the `operator-approval.json` and
+the scripted rule dispositions — and nothing else on the human's
+behalf. Files: `tests/test_convergence_lifecycle.py`,
+`tests/fixtures/convergence_lifecycle_launcher.py`. Gate for everything
+after. Depends on CC-03 and CC-04.
+
+### CC-06 Round 1 on the real product [build-order-cc-06]
+
+Human rulings, human approval. A campaign action, not a node in the
+harness build graph.
+
+### CC-07 Conformance analyzer [build-order-cc-07]
+
+The S1–S10 admission analyzer with graded enforcement, proposal-only
+auto-fixes, per-criterion per-node override records, and the conformance
+report emitted into `gate-evidence.json` (shape-checked by
+`_validate_gate_evidence`, hash-bound through the receipt's
+`gate_evidence` reference). Authored against main's rewritten
+`plan_approval.py`: conformance findings register as new warning-kind
+constants beside `SIBLING_OVERLAP_WARNING`/`UNCLAIMED_GRANT_WARNING`,
+blocking rules ride the existing high-severity acknowledgment gate, and
+S3/S9 proposals plug into the `plan_refinement.py` repair loop. Its verification also runs the neighboring
+integration suites (`tests/test_plan_approval.py`,
+`tests/test_plan_graph.py`, `tests/test_import_boundaries.py`) so
+integration breakage lands inside a repairable node rather than only at
+the finalize gate. Files:
+`harness_labs/plangraph/decomposition_conformance.py`,
+`harness_labs/plangraph/plan_approval.py` (modify),
+`tests/test_decomposition_conformance.py`,
+`tests/test_plan_approval.py` (modify). Depends on CC-05.
+
+Dependencies, each a data dependency: CC-02 embeds CC-01's record types;
+CC-03 imports CC-01's verdict vocabulary; CC-04 reads and writes
+CC-01/CC-02 state; CC-05 executes CC-03's measurer and CC-04's driver
+together; CC-07 consumes CC-05's proven registration shape. CC-03 and
+CC-02/CC-04 share no files, so those lanes run parallel (S1). The
+registerable decomposition is
+[`convergence-campaign-decomposition.json`](convergence-campaign-decomposition.json);
+CC-00 and CC-06 are not nodes in it.
 
 ## Deferred, with triggers
 
@@ -330,18 +449,41 @@ build graph.
 
 ## Tests
 
-- Subprocess lifecycle test (CC-05) — the acceptance test; unit suites
-  support it, never substitute.
-- `tests/test_convergence_ledger.py` — round-trip; ruling semantics;
-  `fix_claimed` never terminal; verdict semantics (missing →
-  `unobserved`, blocks success); repair-attempt stall; `base_rebase`
-  demotion; watch admission; ingest validation; idempotent ingest;
-  checkpoint atomicity/staleness; artifact seal-copy; lock safety.
-- `tests/test_convergence_campaign_driver.py` — termination predicate;
-  harvest on both block paths; base-adoption; round bound with audit
-  outside it; stall escalation; resume from every step; predecessor
-  refusal; no silent approval; audit-on-seal.
-- Measurer smoke test — matrix walk, interaction script, logs capture,
-  stability re-read, coverage statuses, exact exit contract.
-- In-graph routing is already pinned by
-  `tests/test_plan_graph.py:147,179,237`; cited, not duplicated.
+### Lifecycle proof [tests-lifecycle]
+
+The subprocess-level lifecycle run (CC-05) is the acceptance test for
+the whole first phase; the unit suites below support it, never
+substitute for it.
+
+### Ledger and state tests [tests-ledger]
+
+`tests/test_convergence_ledger.py`: round-trip; ruling semantics (only
+`waive` excludes; `amend_criterion` transaction invariants);
+`fix_claimed` never terminal; verdict semantics (missing → `unobserved`,
+blocks success; unstable-cell verdicts cannot close); `base_rebase`
+demotion; repair-attempt stall (two failed claims / cycle; aging ≠
+stall); watch admission; ingest validation; idempotent ingest; lock
+safety. `tests/test_convergence_campaign.py`: checkpoint
+atomicity/staleness; artifact seal-copy; target pin and amendment-scope
+refusal; config surface.
+
+### Driver tests [tests-driver]
+
+`tests/test_convergence_campaign_driver.py`: termination predicate
+(coverage, recall, amendment-ratio acknowledgment); harvest on both
+block paths; base-adoption; round bound with the audit outside it;
+stall escalation and `regression_suspect` ordering; resume from every
+step; predecessor refusal; no silent approval; byte-identity approval
+precondition; audit-on-seal.
+
+### Measurer tests [tests-measurer]
+
+`tests/test_ui_fidelity_capture.py` against the static fixture: matrix
+walk with an interaction script, console/network capture, end-state
+stability re-read, coverage statuses, verdict-completeness enforcement,
+stub-vs-real-browser recording, and the exact exit contract (zero
+whenever capture ran; nonzero only when it could not run).
+
+In-graph routing is already pinned by
+`tests/test_plan_graph.py:147,179,237`; cited, not duplicated. The
+finalize gate runs the full suite (`pytest tests/ -q`).
