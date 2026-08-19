@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 import shutil
@@ -13,6 +13,11 @@ import subprocess
 import tempfile
 from typing import Mapping, Sequence
 
+from harness_labs.plangraph.decomposition_conformance import (
+    analyze_decomposition,
+    validate_conformance_report,
+    DecompositionConformanceError,
+)
 from harness_labs.plangraph.plan_graph import (
     ApprovalEvidence,
     PlanGraphPlan,
@@ -60,6 +65,7 @@ class PreparedApproval:
     subject_sha256: str
     plan_graph_digest: str
     warnings: tuple[Mapping[str, object], ...] = ()
+    conformance_report: Mapping[str, object] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -89,8 +95,22 @@ def prepare_approval(
     repository: Path,
     decomposition_path: Path,
     output_directory: Path,
+    enforce: bool | None = None,
+    overrides: Sequence[Mapping[str, object]] = (),
 ) -> PreparedApproval:
-    """Freeze Git inputs and run deterministic admission gates."""
+    """Freeze Git inputs and run deterministic admission gates.
+
+    ``enforce`` and ``overrides`` reach the decomposition-conformance
+    analyzer (``harness_labs.plangraph.decomposition_conformance``): by
+    default enforcement is derived from the decomposition itself (whether it
+    is conformance-aware -- see that module), but a caller may force it on
+    with ``enforce=True`` regardless of what the payload declares.
+    ``overrides`` are per-criterion/per-node suppressions, each carrying a
+    required reason; there is no override that disables the analyzer as a
+    whole. A caller that later calls :func:`issue_receipt` must pass the
+    same ``enforce``/``overrides`` there, or the freshly recomputed gate
+    evidence will not match what was pinned here and issuance will refuse.
+    """
 
     repository = repository.resolve()
     output_directory = output_directory.resolve()
@@ -170,6 +190,8 @@ def prepare_approval(
         plan_sha256=plan_record["sha256"],
         decomposition=canonical,
         subject_sha256=subject_sha,
+        enforce=enforce,
+        overrides=overrides,
     )
     subject_path = output_directory / "subject.json"
     gate_path = output_directory / "gate-evidence.json"
@@ -181,6 +203,7 @@ def prepare_approval(
         subject_sha,
         graph_digest,
         tuple(gates.get("warnings") or ()),
+        gates["conformance_report"],
     )
 
 
@@ -191,8 +214,17 @@ def issue_receipt(
     gate_evidence_path: Path,
     operator_approval_path: Path,
     receipt_path: Path,
+    enforce: bool | None = None,
+    overrides: Sequence[Mapping[str, object]] = (),
 ) -> Path:
-    """Issue an immutable receipt for one explicit operator attestation."""
+    """Issue an immutable receipt for one explicit operator attestation.
+
+    ``enforce``/``overrides`` feed the fresh gate re-derivation exactly as in
+    :func:`prepare_approval`; passing anything other than what was used to
+    prepare ``gate_evidence_path`` changes the recomputed
+    ``conformance_report`` (and, where relevant, ``warnings``), which the
+    freshness check below then refuses as a mismatch.
+    """
 
     subject = _load_json_file(subject_path, "approval subject")
     _validate_subject_shape(subject)
@@ -218,8 +250,10 @@ def issue_receipt(
         plan_sha256=plan_sha256,
         decomposition=decomposition,
         subject_sha256=subject_sha,
+        enforce=enforce,
+        overrides=overrides,
     )
-    for field in (
+    for gate_field in (
         "status",
         "subject_sha256",
         "plan_graph_digest",
@@ -228,10 +262,14 @@ def issue_receipt(
         # Warnings join the pinned set so a hand-edited evidence file cannot
         # drop a high-severity finding and escape the acknowledgment backstop.
         "warnings",
+        # Likewise the conformance report: it is hash-bound through this
+        # same gate-evidence artifact, so a tampered or stale report is
+        # caught here rather than only at the outer file-hash check.
+        "conformance_report",
     ):
-        if gates.get(field) != fresh_gates.get(field):
+        if gates.get(gate_field) != fresh_gates.get(gate_field):
             raise PlanApprovalError(
-                f"gate evidence {field} does not match fresh controller checks"
+                f"gate evidence {gate_field} does not match fresh controller checks"
             )
     operator = _load_json_file(operator_approval_path, "operator approval")
     _validate_operator_approval(operator)
@@ -390,6 +428,8 @@ def _run_static_gates(
     plan_sha256: str,
     decomposition: Mapping[str, object],
     subject_sha256: str,
+    enforce: bool | None = None,
+    overrides: Sequence[Mapping[str, object]] = (),
 ) -> dict[str, object]:
     plan = plan_from_mapping(
         decomposition,
@@ -454,7 +494,31 @@ def _run_static_gates(
         "host_executables": host_executables,
         "checked_at": _timestamp(),
     }
-    warnings = _sibling_overlap_warnings(plan) + _unclaimed_grant_warnings(plan)
+    # The S1-S10 decomposition-conformance analysis (harness_labs.plangraph.
+    # decomposition_conformance) always runs and its report always lands in
+    # gate-evidence.json -- no input can suppress either. Whether an enforced
+    # finding actually blocks or requires acknowledgment is scoped by the
+    # analyzer itself (conformance-awareness, an explicit `enforce`, and
+    # per-criterion/per-node overrides), never by admission choosing not to
+    # ask.
+    try:
+        report = analyze_decomposition(plan, decomposition, enforce=enforce, overrides=overrides)
+    except DecompositionConformanceError as exc:
+        raise PlanApprovalError(str(exc)) from exc
+    if report.block_violations:
+        detail = "; ".join(
+            f"{finding.kind} ({', '.join(finding.runs)})"
+            for finding in report.block_violations
+        )
+        raise PlanApprovalError(
+            f"decomposition conformance blocked admission: {detail}"
+        )
+    gates["conformance_report"] = report.as_mapping()
+    warnings = (
+        _sibling_overlap_warnings(plan)
+        + _unclaimed_grant_warnings(plan)
+        + report.warning_entries()
+    )
     if warnings:
         gates["warnings"] = warnings
     return gates
@@ -959,6 +1023,9 @@ def _validate_gate_evidence(gates: Mapping[str, object]) -> None:
         "host_path",
         "host_executables",
         "checked_at",
+        # Always present: the conformance analyzer runs and its report is
+        # emitted for every decomposition, never conditionally.
+        "conformance_report",
     }
     # "warnings" is optional: advisory admission findings (such as
     # sibling-allowed-path-overlap) that inform the operator without
@@ -974,6 +1041,10 @@ def _validate_gate_evidence(gates: Mapping[str, object]) -> None:
             for item in gates["warnings"]
         ):
             raise PlanApprovalError("gate warnings must be an array of kinded records")
+    try:
+        validate_conformance_report(gates.get("conformance_report"))
+    except DecompositionConformanceError as exc:
+        raise PlanApprovalError(str(exc)) from exc
     if gates.get("protocol") != GATE_PROTOCOL or gates.get("status") != "passed":
         raise PlanApprovalError("gate evidence is not a passed approval gate result")
     _require_hex(gates.get("subject_sha256"), 64, "gate subject digest")

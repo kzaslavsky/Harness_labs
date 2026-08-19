@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Convergence Fixture - Flaky</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body data-fixture-route="flaky">
+  <h1 id="page-title"
+      data-style-light="color:#111827;font-size:24px"
+      data-style-dark="color:#f9fafb;font-size:24px">Flaky Route</h1>
+  <!-- data-dynamic-interval-ms is a general convention (documented in
+       app.js): app.js keeps this element's text changing on that interval
+       once the page is live, so it deliberately never reaches a stable end
+       state. Both the real driver and the stub driver's structural
+       emulation of the same convention must observe two disagreeing
+       end-state reads. -->
+  <div id="flaky-output" class="card" data-dynamic-interval-ms="5">unstable-by-design</div>
+  <script src="app.js"></script>
+</body>
+</html>

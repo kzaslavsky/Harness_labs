@@ -1,0 +1,11 @@
+{
+  "routes": ["index.html", "flaky.html"],
+  "viewports": [
+    {"name": "desktop", "width": 1280, "height": 800}
+  ],
+  "themes": ["light"],
+  "interactions": [
+    {"name": "none", "steps": []}
+  ],
+  "selectors": ["#page-title", ".card"]
+}
