@@ -215,8 +215,11 @@ def issue_receipt(
         "plan_graph_digest",
         "host_path",
         "host_executables",
+        # Warnings join the pinned set so a hand-edited evidence file cannot
+        # drop a high-severity finding and escape the acknowledgment backstop.
+        "warnings",
     ):
-        if gates.get(field) != fresh_gates[field]:
+        if gates.get(field) != fresh_gates.get(field):
             raise PlanApprovalError(
                 f"gate evidence {field} does not match fresh controller checks"
             )
@@ -224,6 +227,7 @@ def issue_receipt(
     _validate_operator_approval(operator)
     if operator.get("subject_sha256") != subject_sha:
         raise PlanApprovalError("operator approval does not match the subject")
+    _require_acknowledged_high_warnings(fresh_gates, operator)
     receipt_path = receipt_path.resolve()
     receipt_path.parent.mkdir(parents=True, exist_ok=True)
     receipt = {
@@ -283,6 +287,7 @@ class PlanApprovalAdmission:
             operator.get("subject_sha256") != subject_sha
         ):
             raise PlanApprovalError("operator approval does not match the subject")
+        _require_acknowledged_high_warnings(gates, operator)
 
         (
             decomposition,
@@ -918,12 +923,71 @@ def _validate_gate_evidence(gates: Mapping[str, object]) -> None:
                 )
 
 
+def warning_identity(warning: Mapping[str, object]) -> str:
+    """The stable digest one operator acknowledgment names.
+
+    Only the fields that make a warning *this* warning participate: a
+    re-worded ``note`` must not silently invalidate an acknowledgment, and a
+    changed run pair or path set must.
+    """
+
+    return sha256_json(
+        {
+            "kind": warning.get("kind"),
+            "severity": warning.get("severity"),
+            "runs": list(warning.get("runs") or ()),
+            "paths": list(warning.get("paths") or ()),
+        }
+    )
+
+
+def _require_acknowledged_high_warnings(
+    gates: Mapping[str, object], operator: Mapping[str, object]
+) -> None:
+    """Refuse to issue on a high-severity warning nobody signed for.
+
+    A decomposition that skipped the refinement loop must not reach a signed
+    receipt while still carrying the defect that predicts join conflicts.
+    Acknowledgment is per warning and carries a reason -- modeled on
+    ``RetryBudgetLedger.extend`` -- so there is no blanket bypass flag to set.
+    """
+
+    outstanding = {
+        warning_identity(warning): warning
+        for warning in gates.get("warnings") or ()
+        if isinstance(warning, Mapping) and warning.get("severity") == "high"
+    }
+    acknowledged = {
+        str(entry["warning_sha256"])
+        for entry in operator.get("warning_acknowledgements") or ()
+    }
+    unknown = sorted(acknowledged - set(outstanding))
+    if unknown:
+        raise PlanApprovalError(
+            "operator approval acknowledges warnings absent from gate evidence: "
+            + ", ".join(unknown)
+        )
+    missing = sorted(set(outstanding) - acknowledged)
+    if missing:
+        detail = "; ".join(
+            f"{digest[:12]} {'+'.join(str(run) for run in outstanding[digest].get('runs') or ())}"
+            for digest in missing
+        )
+        raise PlanApprovalError(
+            "unacknowledged high-severity admission warnings: " + detail
+        )
+
+
 def _validate_operator_approval(operator: Mapping[str, object]) -> None:
+    required = {"protocol", "subject_sha256", "actor", "approved_at", "statement"}
+    # ``warning_acknowledgements`` is optional: a clean plan has nothing to
+    # acknowledge, and approvals written before the field existed stay valid.
     _require_exact_keys(
         operator,
-        {"protocol", "subject_sha256", "actor", "approved_at", "statement"},
+        required | ({"warning_acknowledgements"} if "warning_acknowledgements" in operator else set()),
         "operator approval",
     )
+    _validate_warning_acknowledgements(operator.get("warning_acknowledgements"))
     if operator.get("protocol") != OPERATOR_APPROVAL_PROTOCOL:
         raise PlanApprovalError("unsupported operator approval protocol")
     _require_hex(operator.get("subject_sha256"), 64, "operator subject digest")
@@ -931,6 +995,31 @@ def _validate_operator_approval(operator: Mapping[str, object]) -> None:
         if not isinstance(operator.get(field), str) or not operator[field].strip():
             raise PlanApprovalError(f"operator approval {field} is required")
     _validate_timestamp(operator["approved_at"], "operator approval approved_at")
+
+
+def _validate_warning_acknowledgements(value: object) -> None:
+    if value is None:
+        return
+    if not isinstance(value, list):
+        raise PlanApprovalError("operator warning_acknowledgements must be an array")
+    seen: set[str] = set()
+    for index, entry in enumerate(value):
+        if not isinstance(entry, Mapping):
+            raise PlanApprovalError(f"warning acknowledgement {index} is invalid")
+        _require_exact_keys(
+            entry, {"warning_sha256", "reason"}, f"warning acknowledgement {index}"
+        )
+        _require_hex(entry.get("warning_sha256"), 64, f"warning acknowledgement {index} digest")
+        reason = entry.get("reason")
+        if not isinstance(reason, str) or not reason.strip():
+            raise PlanApprovalError(
+                f"warning acknowledgement {index} requires a reason"
+            )
+        if entry["warning_sha256"] in seen:
+            raise PlanApprovalError(
+                f"warning acknowledgement {index} repeats an earlier warning"
+            )
+        seen.add(str(entry["warning_sha256"]))
 
 
 def _validate_git_artifact(
@@ -1021,4 +1110,5 @@ __all__ = [
     "ValidatedApproval",
     "issue_receipt",
     "prepare_approval",
+    "warning_identity",
 ]
