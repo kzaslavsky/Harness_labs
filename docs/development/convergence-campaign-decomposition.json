@@ -1,0 +1,164 @@
+{
+  "protocol": "harness-canonical-decomposition/1",
+  "plan": "docs/development/convergence-campaign-plan.md",
+  "referenced_artifacts": [
+    "docs/development/convergence-campaign-plan.md",
+    "docs/development/flow-editor-convergence-application.md",
+    "docs/development/plangraph-node-sizing-review.md",
+    "docs/development/convergence-generalization-and-tooling-survey.md"
+  ],
+  "acceptance_criteria": {
+    "AC-CC01-1": "A finding ingested without a non-empty file, subject, or required_paths is rejected and the audit step fails; tests/test_convergence_ledger.py exercises each missing field.",
+    "AC-CC01-2": "finding_fixed can only be written from an observed_fixed verdict carrying a capture-cell citation; a prior open or fix_claimed key with no verdict in an ingested audit is recorded unobserved, and the derived success view returns false while any key is unobserved.",
+    "AC-CC01-3": "finding_ruled accepts exactly waive, require_repair, and amend_criterion; only waive adds the key to the derived exclusion set.",
+    "AC-CC01-4": "A key with two unsuccessful repair claims, or a fixed-to-reopened-to-fixed-to-reopened cycle, sets the derived stall view; a key open across two audits with no intervening fix_claimed does not.",
+    "AC-CC01-5": "Re-ingesting an audit_result artifact whose digest was already ingested changes no ledger state; two processes appending concurrently under flock produce a journal that replays to the same state.",
+    "AC-CC02-1": "The campaign checkpoint is replaced atomically (temp file, rename, directory fsync), carries a monotonically increasing sequence number, and a checkpoint whose recorded base commit differs from the repository head presented at load raises a staleness refusal.",
+    "AC-CC02-2": "Sealing an audit artifact copies every referenced evidence file into the campaign artifact store under its content digest with recorded size and media type; deleting the source worktree afterward leaves every store lookup by digest succeeding.",
+    "AC-CC03-1": "The capture script executes a declared route-viewport-theme-interaction matrix against the static fixture app and records, per cell: screenshot, DOM snapshot, computed styles for the declared selector list, ARIA snapshot, console log, and network log.",
+    "AC-CC03-2": "The capture script exits zero whenever capture ran, recording ok, unreachable, or unstable per cell in the receipt; it exits nonzero only when the browser could not launch or the pre_journal_sanitizer hook failed.",
+    "AC-CC03-3": "A cell whose end-state DOM and computed-style digests differ between the two reads is recorded unstable, and the inspector contract marks keys evidenced only by unstable cells as ineligible for observed_fixed.",
+    "AC-CC03-4": "Every artifact passes the configured pre_journal_sanitizer hook before it is journaled, digested, or injected into worker context; a sanitizer failure aborts the capture run with a nonzero exit.",
+    "AC-CC03-5": "The inspector role instructions require, and the smoke test verifies the output contract enforces, a per-key verdict (observed_fixed, reopened, unobserved, or invalidated) for every prior open or fix_claimed key supplied in the task context.",
+    "AC-CC04-1": "The driver renders the findings-owners-paths table including every prepare_approval warning, refuses to proceed to issue while any sibling-overlap warning is unacknowledged, and never writes operator-approval.json itself.",
+    "AC-CC04-2": "On a blocked graph the driver harvests unrouted findings from child review-ledger artifacts on both block paths (transfer-conflict with candidate retained, and child-blocked with no candidate), and adopts a new base only when the join and regression node sealed.",
+    "AC-CC04-3": "The repair-round bound blocks a fourth plan step while always permitting the post-repair measure step; the measure step is launched automatically when the join and regression node seals.",
+    "AC-CC04-4": "The driver refuses campaign_opened while the predecessor graph is resumable, and resume --round N reconstructs every resume argument from escalation.json.",
+    "AC-CC05-1": "One subprocess-level run through the shipped CLIs on the static fixture completes the full slice: capture, keyed inspection, findings ingest, one approved repair graph, deterministic join, post-repair capture, and per-key verdicts closing the seeded finding.",
+    "AC-CC05-2": "The lifecycle run's campaign directory afterward contains a schema-valid checkpoint, a replayable ledger whose final state shows the seeded key observed_fixed, and store-resident evidence for every ledger evidence reference.",
+    "AC-CC07-1": "The conformance analyzer blocks a generated decomposition containing a dependency-unordered writable-path overlap at file or directory granularity, a directory grant, a grant on a path the objective disclaims, a criterion with no concrete referent, a criterion unobservable from the node's verification, or an exit check outside the node's grants.",
+    "AC-CC07-2": "The analyzer inserts serialization edges for shared writers and proposes intermediate joins for fan-in above three, reporting each auto-fix; gate-larger-than-criteria and node-count findings surface as warnings requiring acknowledgment.",
+    "AC-CC07-3": "Overrides are recorded per criterion and per node with a reason string; no input disables the analyzer wholesale; the conformance report is emitted as a referenced artifact suitable for hash-binding into the approval subject."
+  },
+  "functionality_tests": [
+    {
+      "argv": ["python3", "-m", "pytest", "tests/", "-q"],
+      "required_paths": [],
+      "timeout_seconds": 3600.0
+    }
+  ],
+  "plan_sections": {
+    "CC-01": "CC-01 Ledger core + finding contract: harness_labs/plangraph/convergence_ledger.py and tests/test_convergence_ledger.py — record types, ingest validation, verdict semantics, derived views (open, exclusion, stall, coverage, amendment ratio).",
+    "CC-02": "CC-02 Checkpoint + artifact store: harness_labs/plangraph/convergence_campaign.py and tests — atomic replace, monotonic sequence, staleness rejection, content-addressed store with seal-time copy.",
+    "CC-03": "CC-03 First measurer: scripts/ui_fidelity_capture.py, harness_labs/core/ui_fidelity_inspector.py role module, tests/fixtures/convergence_fixture_app/, tests/test_ui_fidelity_capture.py — interaction-axis capture with honest coverage and sanitizer hook; inspector role with per-key verdicts.",
+    "CC-04": "CC-04 Driver: scripts/run_convergence_campaign.py and tests/test_convergence_campaign_driver.py — step machine, approval rendering and preconditions, both-block-path harvest, base adoption, bounds.",
+    "CC-05": "CC-05 Lifecycle proof: tests/test_convergence_lifecycle.py — one subprocess-level run of the full slice through shipped CLIs on the static fixture; the gate for everything after.",
+    "CC-07": "CC-07 Conformance analyzer: harness_labs/plangraph/decomposition_conformance.py, extension points in harness_labs/plangraph/plan_approval.py, tests/test_decomposition_conformance.py — S1 through S10 with graded enforcement and recorded overrides."
+  },
+  "runs": [
+    {
+      "id": "CC-01",
+      "objective": "Implement the convergence campaign ledger: append-only flock+fsync JSONL journal with the campaign record types, ingest-time finding-contract validation, per-key verdict semantics, and the derived views (open set, exclusion set, stall state, coverage state, amendment ratio).",
+      "criteria": ["AC-CC01-1", "AC-CC01-2", "AC-CC01-3", "AC-CC01-4", "AC-CC01-5"],
+      "allowed_paths": [
+        "harness_labs/plangraph/convergence_ledger.py",
+        "tests/test_convergence_ledger.py"
+      ],
+      "path_intents": [
+        {"action": "create", "path": "harness_labs/plangraph/convergence_ledger.py"},
+        {"action": "create", "path": "tests/test_convergence_ledger.py"}
+      ],
+      "depends_on": [],
+      "plan_sections": ["CC-01"],
+      "verification_argv": ["python3", "-m", "pytest", "tests/test_convergence_ledger.py", "-q"],
+      "verification_required_paths": [],
+      "verification_timeout_seconds": 1800.0
+    },
+    {
+      "id": "CC-02",
+      "objective": "Implement the campaign checkpoint (atomic replace, monotonic sequence, lifecycle field, liveness stamp, repository-staleness rejection) and the content-addressed campaign artifact store with atomic seal-time copy of sanitized evidence.",
+      "criteria": ["AC-CC02-1", "AC-CC02-2"],
+      "allowed_paths": [
+        "harness_labs/plangraph/convergence_campaign.py",
+        "tests/test_convergence_campaign.py"
+      ],
+      "path_intents": [
+        {"action": "create", "path": "harness_labs/plangraph/convergence_campaign.py"},
+        {"action": "create", "path": "tests/test_convergence_campaign.py"}
+      ],
+      "depends_on": ["CC-01"],
+      "plan_sections": ["CC-02"],
+      "verification_argv": ["python3", "-m", "pytest", "tests/test_convergence_campaign.py", "tests/test_convergence_ledger.py", "-q"],
+      "verification_required_paths": [],
+      "verification_timeout_seconds": 1800.0
+    },
+    {
+      "id": "CC-03",
+      "objective": "Implement the first measurer: the UI capture script (route-viewport-theme-interaction matrix, per-cell evidence with console and network logs, end-state stability re-read, honest coverage statuses, sanitizer hook, exact exit contract) plus the inspector role module with mandatory per-key verdicts, smoke-tested against a static fixture app.",
+      "criteria": ["AC-CC03-1", "AC-CC03-2", "AC-CC03-3", "AC-CC03-4", "AC-CC03-5"],
+      "allowed_paths": [
+        "scripts/ui_fidelity_capture.py",
+        "harness_labs/core/ui_fidelity_inspector.py",
+        "tests/fixtures/convergence_fixture_app/index.html",
+        "tests/fixtures/convergence_fixture_app/app.js",
+        "tests/test_ui_fidelity_capture.py"
+      ],
+      "path_intents": [
+        {"action": "create", "path": "scripts/ui_fidelity_capture.py"},
+        {"action": "create", "path": "harness_labs/core/ui_fidelity_inspector.py"},
+        {"action": "create", "path": "tests/fixtures/convergence_fixture_app/index.html"},
+        {"action": "create", "path": "tests/fixtures/convergence_fixture_app/app.js"},
+        {"action": "create", "path": "tests/test_ui_fidelity_capture.py"}
+      ],
+      "depends_on": [],
+      "plan_sections": ["CC-03"],
+      "verification_argv": ["python3", "-m", "pytest", "tests/test_ui_fidelity_capture.py", "-q"],
+      "verification_required_paths": [],
+      "verification_timeout_seconds": 2400.0
+    },
+    {
+      "id": "CC-04",
+      "objective": "Implement the campaign driver: the measure/ingest/rule/plan/approve/run/close step machine delegating node launching, approval, and resume to existing machinery, with approval-packet rendering, warning surfacing and refusal, precondition checks, both-block-path harvest, base-adoption rule, and repair-round bounds with audits outside the bound.",
+      "criteria": ["AC-CC04-1", "AC-CC04-2", "AC-CC04-3", "AC-CC04-4"],
+      "allowed_paths": [
+        "scripts/run_convergence_campaign.py",
+        "tests/test_convergence_campaign_driver.py"
+      ],
+      "path_intents": [
+        {"action": "create", "path": "scripts/run_convergence_campaign.py"},
+        {"action": "create", "path": "tests/test_convergence_campaign_driver.py"}
+      ],
+      "depends_on": ["CC-02"],
+      "plan_sections": ["CC-04"],
+      "verification_argv": ["python3", "-m", "pytest", "tests/test_convergence_campaign_driver.py", "-q"],
+      "verification_required_paths": [],
+      "verification_timeout_seconds": 2400.0
+    },
+    {
+      "id": "CC-05",
+      "objective": "Prove the production lifecycle: one subprocess-level run through the shipped CLIs on the static fixture covering capture, keyed inspection, findings ingest, one approved repair graph, deterministic join, post-repair capture, and per-key verdicts.",
+      "criteria": ["AC-CC05-1", "AC-CC05-2"],
+      "allowed_paths": [
+        "tests/test_convergence_lifecycle.py"
+      ],
+      "path_intents": [
+        {"action": "create", "path": "tests/test_convergence_lifecycle.py"}
+      ],
+      "depends_on": ["CC-03", "CC-04"],
+      "plan_sections": ["CC-05"],
+      "verification_argv": ["python3", "-m", "pytest", "tests/test_convergence_lifecycle.py", "-q"],
+      "verification_required_paths": [],
+      "verification_timeout_seconds": 3600.0
+    },
+    {
+      "id": "CC-07",
+      "objective": "Implement the S1-S10 decomposition conformance analyzer as an admission feature: graded enforcement (block, auto-fix with report, warn with acknowledgment), per-criterion per-node overrides with recorded reasons, and a conformance report emitted as a referenced artifact for the approval subject.",
+      "criteria": ["AC-CC07-1", "AC-CC07-2", "AC-CC07-3"],
+      "allowed_paths": [
+        "harness_labs/plangraph/decomposition_conformance.py",
+        "harness_labs/plangraph/plan_approval.py",
+        "tests/test_decomposition_conformance.py"
+      ],
+      "path_intents": [
+        {"action": "create", "path": "harness_labs/plangraph/decomposition_conformance.py"},
+        {"action": "modify", "path": "harness_labs/plangraph/plan_approval.py"},
+        {"action": "create", "path": "tests/test_decomposition_conformance.py"}
+      ],
+      "depends_on": ["CC-05"],
+      "plan_sections": ["CC-07"],
+      "verification_argv": ["python3", "-m", "pytest", "tests/test_decomposition_conformance.py", "-q"],
+      "verification_required_paths": [],
+      "verification_timeout_seconds": 1800.0
+    }
+  ]
+}
