@@ -7,7 +7,7 @@ import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
 
 class GitTransactionError(RuntimeError):
@@ -86,6 +86,35 @@ def paths_outside_scope(
             if not any(path == root or path.startswith(root + "/") for root in allowed)
         )
     )
+
+
+def owner_for_path(path: str, grants: Mapping[str, str]) -> str | None:
+    """Resolve one repository path to the single nearest grant holder.
+
+    ``grants`` maps a path grant to whoever holds it.  A grant matches when
+    ``path`` is the grant itself or lies beneath it, judged by
+    :func:`paths_outside_scope` so that containment here is the very predicate
+    the write boundary enforces -- ``src/app`` never claims
+    ``src/app_helpers/util.py``.  The deepest matching grant wins, measured in
+    path segments; when two equally deep grants disagree about the holder the
+    path has no unique owner and ``None`` is returned.
+
+    This lives beside ``normalize_allowed_paths`` and ``paths_outside_scope``
+    because it is the same question those answer, asked in the other
+    direction, and because both the FeatureRun review loop (which claims a
+    transfer target) and PlanGraph (which validates that claim) must answer it
+    identically or every transfer is rejected as unresolvable.
+    """
+
+    matches: list[tuple[int, str]] = []
+    for grant, owner in grants.items():
+        if not paths_outside_scope((path,), (grant,)):
+            matches.append((len(PurePosixPath(grant).parts), owner))
+    if not matches:
+        return None
+    deepest = max(depth for depth, _ in matches)
+    owners = {owner for depth, owner in matches if depth == deepest}
+    return next(iter(owners)) if len(owners) == 1 else None
 
 
 def workspace_snapshot(repository: Path) -> dict[str, Any]:
@@ -385,6 +414,7 @@ __all__ = [
     "changed_paths",
     "git_output",
     "normalize_allowed_paths",
+    "owner_for_path",
     "paths_outside_scope",
     "workspace_snapshot",
 ]
