@@ -558,6 +558,12 @@ def _launch_node(
         review_fix_executor_factory=review_fix,
         verification_repair_executor_factory=verification_repair,
         verification_repair_limit=3,
+        # Attempt-4 died on budget, not substance: helper-task micro-failures
+        # (no-change writable worker, one placeholder strike) exhausted the
+        # default in-node recovery budget with the implement work already
+        # delivered. Give real failures the same room, micro-stumbles more.
+        recovery_limit=5,
+        continuation_recovery_limit=3,
     )
     evidence: dict[str, object] | None = None
     if result.verification is not None:
