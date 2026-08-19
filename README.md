@@ -17,6 +17,9 @@ accountable owner, an explicit task tree, isolated Git worktree and branch,
 structured event and decision logs, and a guarded path to commit and merge into
 the recorded base branch.
 
+For a complete capability map and copy-paste operator workflows, see the
+[`Harness Labs user guide`](docs/USER_GUIDE.md).
+
 ## Package layout
 
 ```
@@ -86,9 +89,9 @@ The repository now contains a production-shaped FeatureRun runtime in addition
 to the original dependency-free initializer.
 
 The first runtime primitive is the dependency-free
-[`TaskAttempt` runner](harness_labs/attempts.py). It invokes one replaceable
+[`TaskAttempt` runner](harness_labs/core/attempts.py). It invokes one replaceable
 executor and accepts only a typed result whose identity and status validate.
-The dependency-free [`TextExecutor`](harness_labs/text_executor.py) is the first
+The dependency-free [`TextExecutor`](harness_labs/core/text_executor.py) is the first
 concrete executor: it resolves the attempt's task, context, and capability grant,
 then delegates generation to a replaceable text backend. The reusable backend
 layer includes the deterministic `PoemBackend` and an isolated, read-only
@@ -96,13 +99,13 @@ layer includes the deterministic `PoemBackend` and an isolated, read-only
 servers.
 
 The next prototype composes attempts through the policy-controlled
-[`ChildDispatcher`](harness_labs/composition.py). A parent submits an
+[`ChildDispatcher`](harness_labs/core/composition.py). A parent submits an
 authority-free `ChildRequest` containing a role, objective, and task-specific
 context string. The dispatcher copies that string unchanged to the child
 attempt, chooses fixed task, grant, backend-configuration, and executor
 references, enforces depth and child-count limits, invokes the existing
 `AttemptRunner`, and records parent/child events.
-Provider integration has one narrow [`AgentSession`](harness_labs/agent_sessions.py)
+Provider integration has one narrow [`AgentSession`](harness_labs/core/agent_sessions.py)
 contract and one controller-owned tool loop. The resident Codex app-server
 session exposes only the controller's dynamic child tool and stays alive while
 the child works. The oMLX session translates the same logical tool exchange into
@@ -110,8 +113,8 @@ two structured text completions because its adapter does not use a native tool
 transport.
 
 The analysis-and-planning prototype now includes a
-[`ControllerKernel`](harness_labs/controller_kernel.py) surrounded by a resident
-[`CoordinatorLoop`](harness_labs/controller_coordinator.py). Models submit a
+[`ControllerKernel`](harness_labs/core/controller_kernel.py) surrounded by a resident
+[`CoordinatorLoop`](harness_labs/core/controller_coordinator.py). Models submit a
 fixed command language; the kernel owns revisions, idempotency, tasks, bounds,
 criteria, findings, completion, checkpoints, and audit receipts. A generic
 capability scheduler creates a fresh executor for every parallel attempt, so the
@@ -178,13 +181,13 @@ child:
 python3 -m examples.run_delegated_treasure_attempt --backend codex
 ```
 
-Start the Retinology oMLX server, then compare both backends on the identical
-attempt:
+Start any OpenAI-compatible oMLX server in another terminal. By default, the
+examples expect the model ID `Qwen3.5-4B-MLX-4bit` at the loopback endpoint
+`http://127.0.0.1:8100/v1`. Server installation, model storage, and the launch
+command are intentionally external to Harness Labs. Once that endpoint is
+ready, compare both backends on the identical attempt:
 
 ```sh
-/Users/kirillzaslavsky/claudeprojects/RDPcrawler/.omlx-venv/bin/python \
-  /Users/kirillzaslavsky/claudeprojects/RDPcrawler/scripts/start_omlx_server.py \
-  --port 8100 --max-memory 8GB
 python3 -m examples.run_delegated_treasure_attempt --backend all
 ```
 
@@ -232,7 +235,7 @@ Run the live hybrid-controller flexibility suite against an explicitly selected
 clean repository worktree:
 
 ```sh
-python3 -m harness_labs.controller_live_scenarios \
+python3 -m harness_labs.core.controller_live_scenarios \
   --repository /absolute/path/to/repository-worktree \
   --scenario all
 ```

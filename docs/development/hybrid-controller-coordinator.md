@@ -48,7 +48,7 @@ switch.
 
 ## Runtime and recovery
 
-`python3 -m harness_labs.controller_run --fixture SPEC --run-dir NEW_DIR` runs a
+`python3 -m harness_labs.core.controller_run --fixture SPEC --run-dir NEW_DIR` runs a
 deterministic fixture through the real kernel, scheduler, coordinator loop, audit
 journal, checkpoint, and manifest.
 
@@ -59,7 +59,7 @@ dispatch runs still-ready reserved work once and does not rerun completed work.
 
 ## Live verification
 
-`python3 -m harness_labs.controller_live_scenarios` binds the resident
+`python3 -m harness_labs.core.controller_live_scenarios` binds the resident
 coordinator to `CodexAppServerSession` and role profiles to fresh
 `CodexSemanticTaskExecutor` processes. Workers return constrained raw JSON; the
 adapter registers the prose deliverable and any controller-owned command receipt

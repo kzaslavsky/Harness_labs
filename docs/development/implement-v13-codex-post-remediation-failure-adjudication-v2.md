@@ -6,8 +6,8 @@ Status: final; analysis only
 
 This adjudication resolves only the seven candidate IDs presented in:
 
-- `/Users/kirillzaslavsky/Documents/harness_labs/docs/development/implement-v13-codex-post-remediation-failure-challenge-1.md`
-- `/Users/kirillzaslavsky/Documents/harness_labs/docs/development/implement-v13-codex-post-remediation-failure-challenge-2.md`
+- `<user-home>/Documents/harness_labs/docs/development/implement-v13-codex-post-remediation-failure-challenge-1.md`
+- `<user-home>/Documents/harness_labs/docs/development/implement-v13-codex-post-remediation-failure-challenge-2.md`
 
 The only candidates are `F3`, `F4`, `F5`, `F6`, `F8`, `N1`, and `N2`.
 No candidate is split or renamed, and no additional failure mode, phase, or
@@ -15,7 +15,7 @@ remediation concept is introduced. Additional source and run artifacts were
 inspected only to validate evidence cited by the two challenges.
 
 The bounded source is
-`/Users/kirillzaslavsky/Documents/harness_labs/skills/codex/implement-v13-codex`.
+`<user-home>/Documents/harness_labs/skills/codex/implement-v13-codex`.
 The bounded run is `fr_0a8feb07a847488ea910a0ec5a2a99d7` through the
 operator pause represented by review-closure-ledger revision 188.
 
@@ -40,24 +40,24 @@ Seatbelt attempt.
 
 **Evidence bindings.**
 
-- `/Users/kirillzaslavsky/Documents/harness_labs/skills/codex/implement-v13-codex/scripts/repair_preflight.py:248-293`,
+- `<user-home>/Documents/harness_labs/skills/codex/implement-v13-codex/scripts/repair_preflight.py:248-293`,
   `_sandbox_probe_command`, directly constructs and executes the host
   `sandbox-exec` probe.
 - The same file at `:296-378`, `probe_role_capabilities`, assigns
   `same_broker_as_production=production_real` and emits the asserted execution
   path without comparing it to the later child invocation.
-- `/Users/kirillzaslavsky/Documents/harness_labs/skills/codex/implement-v13-codex/scripts/run_exec.py:986-1041`,
+- `<user-home>/Documents/harness_labs/skills/codex/implement-v13-codex/scripts/run_exec.py:986-1041`,
   `_codex_argv`, gives the child a Codex sandbox; `:1083-1114` validates inputs
   and constructs the ordinary child invocation rather than executing the
   manifest's recorded host command.
 - Run capability manifest
-  `/Users/kirillzaslavsky/.codex/worktrees/harness-labs-testing-base/handoff/serial-runs/qr_405df6b197f24c7fbd2e157278458e15/fr_0a8feb07a847488ea910a0ec5a2a99d7/capability-v14-host/capability-manifest.v1.json`,
+  `<user-home>/.codex/worktrees/harness-labs-testing-base/handoff/serial-runs/qr_405df6b197f24c7fbd2e157278458e15/fr_0a8feb07a847488ea910a0ec5a2a99d7/capability-v14-host/capability-manifest.v1.json`,
   SHA-256
   `ac68ed74cfbb65f01a2e39883fd2afc721b853e197144f31f33714c1f2087c20`,
   records `status="ready"`, `simulation_only=false`, and
   `same_broker_as_production=true` for all probes.
 - Fixer result
-  `/Users/kirillzaslavsky/.codex/worktrees/harness-labs-testing-base/handoff/serial-runs/qr_405df6b197f24c7fbd2e157278458e15/fr_0a8feb07a847488ea910a0ec5a2a99d7/fr_0a8feb07a847488ea910a0ec5a2a99d7-REVIEWING-fix-code_fixer-34-1.output.json`,
+  `<user-home>/.codex/worktrees/harness-labs-testing-base/handoff/serial-runs/qr_405df6b197f24c7fbd2e157278458e15/fr_0a8feb07a847488ea910a0ec5a2a99d7/fr_0a8feb07a847488ea910a0ec5a2a99d7-REVIEWING-fix-code_fixer-34-1.output.json`,
   SHA-256
   `7e34ce4af3b8e18fdb4306166fe8a8e537a8e1f9b0aab972404fbb3ac1a45dc5`,
   accepts the manifest but records `sandbox_apply: Operation not permitted`
@@ -91,22 +91,22 @@ nonzero provider value was already available and was persisted as zero.
 **Evidence bindings.**
 
 - Coordinator stdout
-  `/Users/kirillzaslavsky/.codex/worktrees/harness-labs-testing-base/handoff/serial-runs/qr_405df6b197f24c7fbd2e157278458e15/fr_0a8feb07a847488ea910a0ec5a2a99d7/fr_0a8feb07a847488ea910a0ec5a2a99d7-COORDINATOR-drive-migrated-2d5133f1e4487e32-feature_coordinator-10-1.stdout.jsonl`,
+  `<user-home>/.codex/worktrees/harness-labs-testing-base/handoff/serial-runs/qr_405df6b197f24c7fbd2e157278458e15/fr_0a8feb07a847488ea910a0ec5a2a99d7/fr_0a8feb07a847488ea910a0ec5a2a99d7-COORDINATOR-drive-migrated-2d5133f1e4487e32-feature_coordinator-10-1.stdout.jsonl`,
   SHA-256
   `fe2359d439808605f3f83b2399c1db5fd25acae778afabfbbdf24c26d0105e06`,
   ends with `turn.completed.usage` values of 13,023,321 input, 12,185,856
   cached input, and 82,501 output tokens.
 - Its sibling output
-  `/Users/kirillzaslavsky/.codex/worktrees/harness-labs-testing-base/handoff/serial-runs/qr_405df6b197f24c7fbd2e157278458e15/fr_0a8feb07a847488ea910a0ec5a2a99d7/fr_0a8feb07a847488ea910a0ec5a2a99d7-COORDINATOR-drive-migrated-2d5133f1e4487e32-feature_coordinator-10-1.output.json`,
+  `<user-home>/.codex/worktrees/harness-labs-testing-base/handoff/serial-runs/qr_405df6b197f24c7fbd2e157278458e15/fr_0a8feb07a847488ea910a0ec5a2a99d7/fr_0a8feb07a847488ea910a0ec5a2a99d7-COORDINATOR-drive-migrated-2d5133f1e4487e32-feature_coordinator-10-1.output.json`,
   SHA-256
   `09ad0a08b89d1b9bf7bc3a6bbbd50a130736bb779f9e581e2699ebb1aef705fa`,
   records all three token values as zero.
-- `/Users/kirillzaslavsky/Documents/harness_labs/skills/codex/implement-v13-codex/schemas/feature-coordinator-result.schema.json:60-69`
+- `<user-home>/Documents/harness_labs/skills/codex/implement-v13-codex/schemas/feature-coordinator-result.schema.json:60-69`
   permits nullable, nonnegative self-reported telemetry.
-- `/Users/kirillzaslavsky/Documents/harness_labs/skills/codex/implement-v13-codex/scripts/run_feature.py:153-178`,
+- `<user-home>/Documents/harness_labs/skills/codex/implement-v13-codex/scripts/run_feature.py:153-178`,
   `_coordinator_limits`, makes limits authority-dependent; `:1065-1072` and
   `:1211-1248` consume result telemetry and encode absence as zero.
-- `/Users/kirillzaslavsky/Documents/harness_labs/skills/codex/implement-v13-codex/scripts/run_exec.py:685-734`
+- `<user-home>/Documents/harness_labs/skills/codex/implement-v13-codex/scripts/run_exec.py:685-734`
   reads stdout terminal events for protocol validation but does not supply
   their usage to the coordinator metric consumed by `run_feature.py`.
 
@@ -138,14 +138,14 @@ the current recording schema independently prove the limited claim.
 **Evidence bindings.**
 
 - Reviewer result
-  `/Users/kirillzaslavsky/.codex/worktrees/harness-labs-testing-base/handoff/serial-runs/qr_405df6b197f24c7fbd2e157278458e15/fr_0a8feb07a847488ea910a0ec5a2a99d7/fr_0a8feb07a847488ea910a0ec5a2a99d7-REVIEWING-targeted_review-l1_l2_contract_boundary_reviewer-33-1.output.json`,
+  `<user-home>/.codex/worktrees/harness-labs-testing-base/handoff/serial-runs/qr_405df6b197f24c7fbd2e157278458e15/fr_0a8feb07a847488ea910a0ec5a2a99d7/fr_0a8feb07a847488ea910a0ec5a2a99d7-REVIEWING-targeted_review-l1_l2_contract_boundary_reviewer-33-1.output.json`,
   SHA-256
   `767a83ed38f391f3e5aa30cd86509955028aac48ac2f4192034c6044924cf42a`,
   records that ambient Python 3.14 lacked pytest and that the same immutable
   test node passed with the available certification interpreter.
-- `/Users/kirillzaslavsky/Documents/harness_labs/skills/codex/implement-v13-codex/schemas/closure-test-result.schema.json:5-12`
+- `<user-home>/Documents/harness_labs/skills/codex/implement-v13-codex/schemas/closure-test-result.schema.json:5-12`
   models every command only as a nonempty string.
-- `/Users/kirillzaslavsky/Documents/harness_labs/skills/codex/implement-v13-codex/scripts/review_closure.py:760-853`,
+- `<user-home>/Documents/harness_labs/skills/codex/implement-v13-codex/scripts/review_closure.py:760-853`,
   `record_test`, records command strings verbatim; `:1027-1038` reuses legacy
   strings during assertion-map backfill.
 
@@ -176,17 +176,17 @@ durable state.
 **Evidence bindings.**
 
 - Receipt
-  `/Users/kirillzaslavsky/.codex/worktrees/harness-labs-testing-base/handoff/serial-runs/qr_405df6b197f24c7fbd2e157278458e15/fr_0a8feb07a847488ea910a0ec5a2a99d7/fr_0a8feb07a847488ea910a0ec5a2a99d7-REVIEWING-fix-code_fixer-35-1.receipt.json`,
+  `<user-home>/.codex/worktrees/harness-labs-testing-base/handoff/serial-runs/qr_405df6b197f24c7fbd2e157278458e15/fr_0a8feb07a847488ea910a0ec5a2a99d7/fr_0a8feb07a847488ea910a0ec5a2a99d7-REVIEWING-fix-code_fixer-35-1.receipt.json`,
   SHA-256
   `92c29fe1f2d34d14a5f238029ac7ac3a7fb41bea9aff51ebfcefdc67992fc28a`,
   remains `status="running"`, revision 3, with PID and process group 72376
   and no completion timestamp. Its declared exit and output artifacts are
   absent, and ledger revision 188 retains attempt 6 as running.
-- `/Users/kirillzaslavsky/Documents/harness_labs/skills/codex/implement-v13-codex/scripts/run_exec.py:550-570`
+- `<user-home>/Documents/harness_labs/skills/codex/implement-v13-codex/scripts/run_exec.py:550-570`
   provides fingerprint-safe group termination, while `:1258-1301` invokes it
   only for wall timeout; the polling lifecycle has no exception-finalization
   path.
-- `/Users/kirillzaslavsky/Documents/harness_labs/skills/codex/implement-v13-codex/scripts/supervised_child.py:14-78`
+- `<user-home>/Documents/harness_labs/skills/codex/implement-v13-codex/scripts/supervised_child.py:14-78`
   blocks in `subprocess.run` and writes its exit record only after that call
   returns.
 
@@ -215,12 +215,12 @@ recovery failure, or measured material cost.
 
 **Evidence bindings.**
 
-- `/Users/kirillzaslavsky/Documents/harness_labs/skills/codex/implement-v13-codex/schemas/closure-targeted-review-result.schema.json:5-12`
+- `<user-home>/Documents/harness_labs/skills/codex/implement-v13-codex/schemas/closure-targeted-review-result.schema.json:5-12`
   defines root `status` as `passed|blocked` and finding `status` as
   `fixed|not_fixed|regression`.
-- `/Users/kirillzaslavsky/Documents/harness_labs/skills/codex/implement-v13-codex/scripts/closure_driver.py:471-496`
+- `<user-home>/Documents/harness_labs/skills/codex/implement-v13-codex/scripts/closure_driver.py:471-496`
   builds the controller input only from each finding's status.
-- `/Users/kirillzaslavsky/Documents/harness_labs/skills/codex/implement-v13-codex/scripts/review_closure.py:1640-1705`,
+- `<user-home>/Documents/harness_labs/skills/codex/implement-v13-codex/scripts/review_closure.py:1640-1705`,
   `record_review`, routes closure state only from the per-fingerprint map.
 - The reviewer outputs with SHA-256
   `767a83ed38f391f3e5aa30cd86509955028aac48ac2f4192034c6044924cf42a`
@@ -248,11 +248,11 @@ failure list.
 
 **Evidence bindings.**
 
-- `/Users/kirillzaslavsky/Documents/harness_labs/skills/codex/implement-v13-codex/scripts/run_exec.py:617-682`,
+- `<user-home>/Documents/harness_labs/skills/codex/implement-v13-codex/scripts/run_exec.py:617-682`,
   `classify_terminal_cause` and `_stderr_diagnostics`, intentionally separates
   terminal classification from captured stderr.
 - Successful reviewer receipt
-  `/Users/kirillzaslavsky/.codex/worktrees/harness-labs-testing-base/handoff/serial-runs/qr_405df6b197f24c7fbd2e157278458e15/fr_0a8feb07a847488ea910a0ec5a2a99d7/fr_0a8feb07a847488ea910a0ec5a2a99d7-REVIEWING-targeted_review-l1_l2_contract_boundary_reviewer-33-1.receipt.json`,
+  `<user-home>/.codex/worktrees/harness-labs-testing-base/handoff/serial-runs/qr_405df6b197f24c7fbd2e157278458e15/fr_0a8feb07a847488ea910a0ec5a2a99d7/fr_0a8feb07a847488ea910a0ec5a2a99d7-REVIEWING-targeted_review-l1_l2_contract_boundary_reviewer-33-1.receipt.json`,
   SHA-256
   `f0b033e66ca9565ac39e9ad7b1656402ad888014a99744a7743d249f77344ef1`,
   records `status="succeeded"` and terminal cause `none` despite the cache
@@ -281,16 +281,16 @@ found the contradiction only in the two normative references.
 
 **Evidence bindings.**
 
-- `/Users/kirillzaslavsky/Documents/harness_labs/skills/codex/implement-v13-codex/scripts/closure_driver.py:108-146`,
+- `<user-home>/Documents/harness_labs/skills/codex/implement-v13-codex/scripts/closure_driver.py:108-146`,
   `continue_without_bound_program`, returns the three legal unbound routes;
   `:247-258`, `continue_routine`, invokes that behavior when no program is
   bound.
-- `/Users/kirillzaslavsky/Documents/harness_labs/skills/codex/implement-v13-codex/tests/test_closure_driver.py:33-72`
+- `<user-home>/Documents/harness_labs/skills/codex/implement-v13-codex/tests/test_closure_driver.py:33-72`
   distinguishes a legal unbound retry from an unknown route.
-- `/Users/kirillzaslavsky/Documents/harness_labs/skills/codex/implement-v13-codex/references/protocol.md:160-163`
+- `<user-home>/Documents/harness_labs/skills/codex/implement-v13-codex/references/protocol.md:160-163`
   says a missing same-closure retry or redesign program is
   `routine_program_missing`.
-- `/Users/kirillzaslavsky/Documents/harness_labs/skills/codex/implement-v13-codex/references/phase-contracts.md:125-130`
+- `<user-home>/Documents/harness_labs/skills/codex/implement-v13-codex/references/phase-contracts.md:125-130`
   says absence of the continuation program is a deterministic blocker.
 
 **Responsible source/contract.** Harness normative contract synchronization in

@@ -125,7 +125,7 @@ one Luna-high worker. The worker changed 41 paths and executed 102 commands.
 ## Executed changes
 
 The production skill at
-`/Users/kirillzaslavsky/.codex/skills/implement-v13-codex` now provides:
+`<user-home>/.codex/skills/implement-v13-codex` now provides:
 
 - typed schema binding for every scalar `spec.expected` field before process
   creation, while retaining separate source-schema and attempt-schema hashes;

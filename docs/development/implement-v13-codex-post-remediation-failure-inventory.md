@@ -15,7 +15,7 @@ they reoccurred in this window.
 
 Primary evidence is the immutable run directory:
 
-`/Users/kirillzaslavsky/.codex/worktrees/harness-labs-testing-base/handoff/serial-runs/qr_405df6b197f24c7fbd2e157278458e15/fr_0a8feb07a847488ea910a0ec5a2a99d7`
+`<user-home>/.codex/worktrees/harness-labs-testing-base/handoff/serial-runs/qr_405df6b197f24c7fbd2e157278458e15/fr_0a8feb07a847488ea910a0ec5a2a99d7`
 
 The paused durable state is `serial_implementation_queue.json` field
 `state_revision=91`, `features[0].status="blocked"`,

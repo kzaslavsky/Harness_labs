@@ -7,7 +7,7 @@ Decision: [ADR 0003](../decisions/0003-pass-through-child-context.md)
 ## Repository identity
 
 - Feature worktree:
-  `/Users/kirillzaslavsky/Documents/harness_labs-pass-through-context`
+  `<user-home>/Documents/harness_labs-pass-through-context`
 - Feature branch: `codex/pass-through-child-context`
 - Base branch: `codex/parallel-child-dispatch`
 - Base commit: `d8c52bed444842261dfe73b224d719ad7a101c15`

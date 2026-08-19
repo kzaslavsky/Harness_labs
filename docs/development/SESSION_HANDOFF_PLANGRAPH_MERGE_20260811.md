@@ -1,6 +1,6 @@
 # Session Handoff — PlanGraph branch merges + delta-scoped retry rescope
 
-**Date:** 2026-08-11 · **Repo:** `/Users/kirillzaslavsky/Documents/harness_labs` · **Branch:** `Impl-redo` (ahead of `origin/featureRun` by 32, nothing pushed)
+**Date:** 2026-08-11 · **Repo:** `<user-home>/Documents/harness_labs` · **Branch:** `Impl-redo` (ahead of `origin/featureRun` by 32, nothing pushed)
 
 ## Orientation: what is what in this repo
 
@@ -8,7 +8,7 @@
 - **`skills/codex/implement-v13-codex/` is a DEPRECATED, non-functional template.** Do not build features there. It was never excised from any branch; it still sits in the tree and is slated for deletion. It contains an abandoned delta-scoped-retry draft (see below) that exists only as reference material.
 - Two postmortems motivated all of this work:
   - `docs/development/plangraph-parallelization-run-defect-and-retry-postmortem.md` (this repo): 67% of tokens spent on retries; no native recovery fired; final candidate never merged to base.
-  - `/Users/kirillzaslavsky/claudeprojects/Retinology/.claude/checkouts/flow-node-mockup-parity/docs/development/FLOW_EDITOR_AUTHORING_AND_NODE_EXECUTION_UX_RUN_DEFECT_AND_RETRY_POSTMORTEM.md` (Retinology): 88% retry share; native recovery fired 5× and succeeded 0×; FR-10 burned 21 retries against a monolithic legacy gate.
+  - `<user-home>/claudeprojects/Retinology/.claude/checkouts/flow-node-mockup-parity/docs/development/FLOW_EDITOR_AUTHORING_AND_NODE_EXECUTION_UX_RUN_DEFECT_AND_RETRY_POSTMORTEM.md` (Retinology): 88% retry share; native recovery fired 5× and succeeded 0×; FR-10 burned 21 retries against a monolithic legacy gate.
   - Shared diagnosis: the harness is over-engineered at the gate layer and incomplete at the recovery layer. Recovery that re-runs the whole node against the whole gate is waste automation; retries must be **delta-scoped** (close exactly the open finding keys, re-verify only the node-local slice).
 
 ## What happened this session (chronological)

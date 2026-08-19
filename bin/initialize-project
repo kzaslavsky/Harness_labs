@@ -16,6 +16,7 @@ PACKAGE_ROOT = Path(__file__).resolve().parent.parent
 TEMPLATES = PACKAGE_ROOT / "templates"
 SKILLS = PACKAGE_ROOT / "skills"
 MODULE_ASSETS = PACKAGE_ROOT / "assets" / "module"
+DEPRECATED_CODEX_SKILLS = frozenset({"implement-v13-codex"})
 TOKEN_RE = re.compile(r"__[A-Z][A-Z0-9_]*__")
 SAFE_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 SAFE_COMPONENT_RE = re.compile(r"\.?[A-Za-z0-9_][A-Za-z0-9._-]*")
@@ -221,6 +222,8 @@ def add_skills(outputs: dict[Path, bytes], surface: str) -> None:
         source = SKILLS / "codex"
         require_safe_source_directory(source, "Codex skill")
         for path in sorted(source.iterdir()):
+            if path.name in DEPRECATED_CODEX_SKILLS:
+                continue
             skill = path / "SKILL.md"
             if path.is_symlink() or not path.is_dir() or skill.is_symlink() or not skill.is_file():
                 fail(f"unsafe Codex skill source: {path}")

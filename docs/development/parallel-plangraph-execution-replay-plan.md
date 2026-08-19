@@ -25,7 +25,7 @@ Its SHA-256 is
 Source identity at capture:
 
 - repository:
-  `/Users/kirillzaslavsky/Documents/retinology-clinician-first-ui-20260809t220000z`;
+  `<user-home>/Documents/retinology-clinician-first-ui-20260809t220000z`;
 - immutable execution base:
   `47931ebc9e5993a0dd7babd00350a766b1977601`;
 - intended base branch: `codex/flow-node-mockup-parity`;

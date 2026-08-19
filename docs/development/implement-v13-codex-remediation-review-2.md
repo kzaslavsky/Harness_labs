@@ -5,10 +5,10 @@ Status: complete; review only; no remediation implemented
 Immutable inputs:
 
 - Plan:
-  `/Users/kirillzaslavsky/Documents/harness_labs/docs/development/implement-v13-codex-remediation-plan.md`
+  `<user-home>/Documents/harness_labs/docs/development/implement-v13-codex-remediation-plan.md`
   (`895379e2b5a22ac53e76e94e54317a48700fac212aa92bf5ed238f218e29f59f`)
 - Adversarial review 1:
-  `/Users/kirillzaslavsky/Documents/harness_labs/docs/development/implement-v13-codex-remediation-review-1.md`
+  `<user-home>/Documents/harness_labs/docs/development/implement-v13-codex-remediation-review-1.md`
   (`89d026a5684cef1f14211ba03d173c7fe3d5f7447e1261a7fb2d2f2b36004e7b`)
 
 Method: this review attempts only to refute or materially narrow R1-001 through
@@ -27,18 +27,18 @@ paths cited by that R1 claim.
 - **Allowed evidence with absolute source binding:**
   - The plan requires `launch` and then a fresh bounded coordinator but names no
     executable:
-    `/Users/kirillzaslavsky/Documents/harness_labs/docs/development/implement-v13-codex-remediation-plan.md:759-778`.
+    `<user-home>/Documents/harness_labs/docs/development/implement-v13-codex-remediation-plan.md:759-778`.
   - The serial state machine uses `launch` for both a pending feature and a
     resumed in-progress feature:
-    `/Users/kirillzaslavsky/.codex/skills/serial-implement-codex/scripts/serial_state.py:720-742`.
+    `<user-home>/.codex/skills/serial-implement-codex/scripts/serial_state.py:720-742`.
   - The normal fresh-dispatch protocol sends the payload to
     `start_planning.py`:
-    `/Users/kirillzaslavsky/.codex/skills/serial-implement-codex/references/protocol.md:47-55`.
+    `<user-home>/.codex/skills/serial-implement-codex/references/protocol.md:47-55`.
   - `start_planning.py` accepts only `launch` and rejects an existing worktree:
-    `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/scripts/start_planning.py:248-279`.
+    `<user-home>/.codex/skills/implement-v13-codex/scripts/start_planning.py:248-279`.
   - Direct recovery through `run_feature.py` is an existing, narrowly stated
     exception:
-    `/Users/kirillzaslavsky/.codex/skills/serial-implement-codex/SKILL.md:52-55`.
+    `<user-home>/.codex/skills/serial-implement-codex/SKILL.md:52-55`.
 - **Reasoning:** The categorical word “selects” is too strong because the plan
   never says to invoke `start_planning.py`, and existing policy supplies a
   direct recovery route. The attempted refutation does not remove the defect:
@@ -67,18 +67,18 @@ paths cited by that R1 claim.
 - **Allowed evidence with absolute source binding:**
   - SR-2 calls for one apparent multi-document migration through “normal”
     compare-and-swap APIs, while rollback describes prefix recovery:
-    `/Users/kirillzaslavsky/Documents/harness_labs/docs/development/implement-v13-codex-remediation-plan.md:742-757,798-811`.
+    `<user-home>/Documents/harness_labs/docs/development/implement-v13-codex-remediation-plan.md:742-757,798-811`.
   - Existing CAS updates exactly one locked file:
-    `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/scripts/state_io.py:95-119`.
+    `<user-home>/.codex/skills/implement-v13-codex/scripts/state_io.py:95-119`.
   - The ledger save increments and replaces without an expected-revision
     witness:
-    `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/scripts/review_closure.py:210-219`.
+    `<user-home>/.codex/skills/implement-v13-codex/scripts/review_closure.py:210-219`.
   - Serial resume verifies checkpoint/transaction evidence and mutates queue
     state only:
-    `/Users/kirillzaslavsky/.codex/skills/serial-implement-codex/scripts/serial_state.py:844-949`.
+    `<user-home>/.codex/skills/serial-implement-codex/scripts/serial_state.py:844-949`.
   - Checkpoint reopening remains a later, separate CAS:
-    `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/scripts/feature_state.py:184-225`;
-    `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/scripts/run_feature.py:528-544`.
+    `<user-home>/.codex/skills/implement-v13-codex/scripts/feature_state.py:184-225`;
+    `<user-home>/.codex/skills/implement-v13-codex/scripts/run_feature.py:528-544`.
 - **Reasoning:** The planned journal makes intent clearer but does not identify
   the authority that coordinates its writes or add a ledger CAS contract. More
   importantly, “atomically write ... first, then update” describes sequential
@@ -103,13 +103,13 @@ paths cited by that R1 claim.
 - **Allowed evidence with absolute source binding:**
   - The ambiguous write-set phrase and requirement to bind the digest in all
     updated state documents appear at
-    `/Users/kirillzaslavsky/Documents/harness_labs/docs/development/implement-v13-codex-remediation-plan.md:747-752`.
+    `<user-home>/Documents/harness_labs/docs/development/implement-v13-codex-remediation-plan.md:747-752`.
   - Dispatch payload is immutable run metadata:
-    `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/references/json-phase-flow.md:8-13,31-34`.
+    `<user-home>/.codex/skills/implement-v13-codex/references/json-phase-flow.md:8-13,31-34`.
   - Fresh startup persists the received payload as `dispatch.v1.json`:
-    `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/scripts/start_planning.py:281-285,478-493`.
+    `<user-home>/.codex/skills/implement-v13-codex/scripts/start_planning.py:281-285,478-493`.
   - Synthetic resume and verification reject a changed dispatch hash:
-    `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/scripts/run_synthetic_flow.py:496-507,525-536`.
+    `<user-home>/.codex/skills/implement-v13-codex/scripts/run_synthetic_flow.py:496-507,525-536`.
 - **Reasoning:** Review 1 cannot prove from the phrase alone that the plan
   mandates rewriting dispatch bytes. It can prove that the wording leaves that
   prohibited interpretation open and fails to state that original dispatch
@@ -135,14 +135,14 @@ paths cited by that R1 claim.
 - **Allowed evidence with absolute source binding:**
   - AC-3's completeness and run-owned resolution requirements, alongside its
     named categories, are at
-    `/Users/kirillzaslavsky/Documents/harness_labs/docs/development/implement-v13-codex-remediation-plan.md:56-68`;
+    `<user-home>/Documents/harness_labs/docs/development/implement-v13-codex-remediation-plan.md:56-68`;
     the package implementation language is at
-    `/Users/kirillzaslavsky/Documents/harness_labs/docs/development/implement-v13-codex-remediation-plan.md:268-285,322-329`.
+    `<user-home>/Documents/harness_labs/docs/development/implement-v13-codex-remediation-plan.md:268-285,322-329`.
   - The coordinator prompt reads package `SKILL.md`, and the controller imports
     the sibling serial package by relative path:
-    `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/scripts/run_feature.py:25-61,159-205`.
+    `<user-home>/.codex/skills/implement-v13-codex/scripts/run_feature.py:25-61,159-205`.
   - The phase-flow runner requires package-relative built-ins and support files:
-    `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/scripts/run_phase_flow.py:180-188,349-374`.
+    `<user-home>/.codex/skills/implement-v13-codex/scripts/run_phase_flow.py:180-188,349-374`.
 - **Reasoning:** The acceptance criterion semantically includes the runtime
   dependency closure, so the categorical claim that the proposed snapshot
   excludes these members is not established. However, the concrete manifest
@@ -167,13 +167,13 @@ paths cited by that R1 claim.
 - **Allowed evidence with absolute source binding:**
   - AC-7 and certification mandate a production vertical slice but do not name
     merge, production result, or dispatcher acknowledgment:
-    `/Users/kirillzaslavsky/Documents/harness_labs/docs/development/implement-v13-codex-remediation-plan.md:114-126,663-688`.
+    `<user-home>/Documents/harness_labs/docs/development/implement-v13-codex-remediation-plan.md:114-126,663-688`.
   - The currently named vertical-slice success test intentionally ends with
     blocked checkpoint and queue:
-    `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/tests/test_production_vertical_slice.py:74-219`.
+    `<user-home>/.codex/skills/implement-v13-codex/tests/test_production_vertical_slice.py:74-219`.
   - The repository contract requires shipped subprocess entrypoints and an
     uninterrupted lifecycle through production result and queue acknowledgment:
-    `/Users/kirillzaslavsky/Documents/harness_labs/docs/architecture/harness-contract.md:59-64,198-220`.
+    `<user-home>/Documents/harness_labs/docs/architecture/harness-contract.md:59-64,198-220`.
 - **Reasoning:** Inheritance from the normative contract is the strongest
   defense, but the plan's concrete certification command points to an existing
   test whose asserted terminal condition is blocked. Nothing in the cited plan
@@ -197,13 +197,13 @@ paths cited by that R1 claim.
 - **Allowed evidence with absolute source binding:**
   - The plan promises exact transitive selection and rejection of an
     intentionally omitted edge:
-    `/Users/kirillzaslavsky/Documents/harness_labs/docs/development/implement-v13-codex-remediation-plan.md:584-590,625-644`.
+    `<user-home>/Documents/harness_labs/docs/development/implement-v13-codex-remediation-plan.md:584-590,625-644`.
   - The current ledger accepts caller-supplied dependency fields and derives
     scheduling from them:
-    `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/scripts/review_closure.py:120-193,210-218`.
+    `<user-home>/.codex/skills/implement-v13-codex/scripts/review_closure.py:120-193,210-218`.
   - Repository policy requires gates tied to acceptance criteria and independent
     evidence:
-    `/Users/kirillzaslavsky/Documents/harness_labs/AGENTS.md:49-63`.
+    `<user-home>/Documents/harness_labs/AGENTS.md:49-63`.
 - **Reasoning:** “Source-bound” describes provenance but does not define an
   independent completeness oracle. The mutation test cannot deterministically
   know an edge was omitted if its only input is the candidate graph from which
@@ -225,12 +225,12 @@ paths cited by that R1 claim.
   maximum feature size, so breadth alone cannot prove a violation.
 - **Allowed evidence with absolute source binding:**
   - Repository policy prohibits generalized snapshots and requires bounded work:
-    `/Users/kirillzaslavsky/Documents/harness_labs/AGENTS.md:47-67`.
+    `<user-home>/Documents/harness_labs/AGENTS.md:47-67`.
   - Complexity admission requires a demonstrated failure, production consumer,
     and end-to-end assertion for each new mechanism:
-    `/Users/kirillzaslavsky/Documents/harness_labs/docs/architecture/harness-contract.md:145-156`.
+    `<user-home>/Documents/harness_labs/docs/architecture/harness-contract.md:145-156`.
   - The plan's scope assertion, partition, mechanisms, and AC-6 breadth are at
-    `/Users/kirillzaslavsky/Documents/harness_labs/docs/development/implement-v13-codex-remediation-plan.md:7-14,101-112,216-329,391-460,528-603,820-859`.
+    `<user-home>/Documents/harness_labs/docs/development/implement-v13-codex-remediation-plan.md:7-14,101-112,216-329,391-460,528-603,820-859`.
 - **Reasoning:** Review 1 overreaches by declaring the whole three-group plan a
   proven policy violation merely from mechanism count. The plan contains real
   bounds and maps its mechanisms to adjudicated failures. The narrower concern
@@ -259,13 +259,13 @@ paths cited by that R1 claim.
 - **Allowed evidence with absolute source binding:**
   - The plan requires hard limits yet says certification data will select their
     values:
-    `/Users/kirillzaslavsky/Documents/harness_labs/docs/development/implement-v13-codex-remediation-plan.md:101-112,591-602,906-908`.
+    `<user-home>/Documents/harness_labs/docs/development/implement-v13-codex-remediation-plan.md:101-112,591-602,906-908`.
   - The installed skill forbids deriving hard limits from performance
     observations:
-    `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/SKILL.md:116-119`.
+    `<user-home>/.codex/skills/implement-v13-codex/SKILL.md:116-119`.
   - The protocol requires an exact limit explicitly declared by an operator or
     named safety contract:
-    `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/references/protocol.md:42-50`.
+    `<user-home>/.codex/skills/implement-v13-codex/references/protocol.md:42-50`.
 - **Reasoning:** The plan does not identify that operator decision or safety
   contract. It expressly makes certification data the selector, which is the
   prohibited observational source. A hypothetical later authorization is not
@@ -286,13 +286,13 @@ paths cited by that R1 claim.
 - **Allowed evidence with absolute source binding:**
   - The plan specifies legacy missing-field behavior and “receipt v2” but no
     protocol string:
-    `/Users/kirillzaslavsky/Documents/harness_labs/docs/development/implement-v13-codex-remediation-plan.md:331-343`.
+    `<user-home>/Documents/harness_labs/docs/development/implement-v13-codex-remediation-plan.md:331-343`.
   - The current schema fixes protocol `/1`:
-    `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/schemas/process-receipt.schema.json:1-9`.
+    `<user-home>/.codex/skills/implement-v13-codex/schemas/process-receipt.schema.json:1-9`.
   - Both current writer paths emit `/1`:
-    `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/scripts/run_exec.py:482-530,795-840`.
+    `<user-home>/.codex/skills/implement-v13-codex/scripts/run_exec.py:482-530,795-840`.
   - The synthetic consumer accepts only `/1`:
-    `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/scripts/run_synthetic_flow.py:22-24,300-309`.
+    `<user-home>/.codex/skills/implement-v13-codex/scripts/run_synthetic_flow.py:22-24,300-309`.
 - **Reasoning:** A structural discriminator could work, but the plan does not
   choose it as the protocol strategy or reconcile it with the phrase “receipt
   v2.” Nor does it state how the closed new-writer requirements coexist with
@@ -314,13 +314,13 @@ paths cited by that R1 claim.
   unambiguously limit certification to the filename glob.
 - **Allowed evidence with absolute source binding:**
   - The universal AC, narrower glob, and broader positive test are at
-    `/Users/kirillzaslavsky/Documents/harness_labs/docs/development/implement-v13-codex-remediation-plan.md:40-44,312-316,345-360`.
+    `<user-home>/Documents/harness_labs/docs/development/implement-v13-codex-remediation-plan.md:40-44,312-316,345-360`.
   - Planner startup creates a task-bound schema from `plan.schema.json`:
-    `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/scripts/start_planning.py:159-168,347-395`.
+    `<user-home>/.codex/skills/implement-v13-codex/scripts/start_planning.py:159-168,347-395`.
   - Plan-review uses checked-in `plan-review.schema.json`:
-    `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/references/protocol.md:244-248`.
+    `<user-home>/.codex/skills/implement-v13-codex/references/protocol.md:244-248`.
   - `run_exec.py` has a special byte guard for that non-result schema:
-    `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/scripts/run_exec.py:300-320`.
+    `<user-home>/.codex/skills/implement-v13-codex/scripts/run_exec.py:300-320`.
 - **Reasoning:** Review 1's title says the inventory “does not cover” all
   producers, but the broad AC and positive test do require universal coverage.
   The surviving defect is an internal specification conflict: the concrete glob
@@ -344,10 +344,10 @@ paths cited by that R1 claim.
 - **Allowed evidence with absolute source binding:**
   - The plan lists the new classes, claims use of repository schemas, leaves
     alignment open, and omits a common writer from the group write sets:
-    `/Users/kirillzaslavsky/Documents/harness_labs/docs/development/implement-v13-codex-remediation-plan.md:251-304,399-433,536-570,820-859,912-915`.
+    `<user-home>/Documents/harness_labs/docs/development/implement-v13-codex-remediation-plan.md:251-304,399-433,536-570,820-859,912-915`.
   - The repository event schema has a closed top-level enum containing none of
     the listed class names:
-    `/Users/kirillzaslavsky/Documents/harness_labs/schemas/run-event.schema.json:1-37`.
+    `<user-home>/Documents/harness_labs/schemas/run-event.schema.json:1-37`.
 - **Reasoning:** Payload subtypes are a plausible resolution, which is already
   acknowledged by review 1, but the plan does not provide that mapping. It also
   does not identify the writer or sequence authority within the declared scope.
@@ -369,13 +369,13 @@ paths cited by that R1 claim.
   that non-fabricating interpretation.
 - **Allowed evidence with absolute source binding:**
   - The disputed language is at
-    `/Users/kirillzaslavsky/Documents/harness_labs/docs/development/implement-v13-codex-remediation-plan.md:728-735`.
+    `<user-home>/Documents/harness_labs/docs/development/implement-v13-codex-remediation-plan.md:728-735`.
   - The ledger stores one document, increments `state_revision`, and replaces
     that path:
-    `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/scripts/review_closure.py:184-192,210-219`.
+    `<user-home>/.codex/skills/implement-v13-codex/scripts/review_closure.py:184-192,210-219`.
   - The adjudication establishes revision 124 and embedded histories, not 124
     snapshots:
-    `/Users/kirillzaslavsky/Documents/harness_labs/docs/development/implement-v13-codex-failure-analysis.md:482-490,512-520`.
+    `<user-home>/Documents/harness_labs/docs/development/implement-v13-codex-failure-analysis.md:482-490,512-520`.
 - **Reasoning:** The charitable reading prevents review 1 from proving that the
   plan affirmatively promises fabrication of overwritten states. Nevertheless,
   the plural possessive “124 revisions'” naturally claims preservation of

@@ -26,7 +26,7 @@ The initial product is local-only and binds to `127.0.0.1` by default.
 
 ## Recorded implementation baseline
 
-- Worktree: `/Users/kirillzaslavsky/Documents/harness_labs-featurerun-dashboard`
+- Worktree: `<user-home>/Documents/harness_labs-featurerun-dashboard`
 - Feature branch: `codex/featurerun-plangraph-dashboard`
 - Base branch: `Impl-redo`
 - UI prototype commit: `e6cc7b24aa95ecee10669e94dcfd663592d1b4a0`

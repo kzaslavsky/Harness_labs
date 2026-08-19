@@ -3,7 +3,7 @@
 Status: complete; review only; no remediation implemented
 
 Reviewed artifact:
-`/Users/kirillzaslavsky/Documents/harness_labs/docs/development/implement-v13-codex-remediation-plan.md`
+`<user-home>/Documents/harness_labs/docs/development/implement-v13-codex-remediation-plan.md`
 
 Verified SHA-256:
 `895379e2b5a22ac53e76e94e54317a48700fac212aa92bf5ed238f218e29f59f`
@@ -21,7 +21,7 @@ Observed output:
 ```
 
 Review basis: the immutable plan above, the adjudicated audit at
-`/Users/kirillzaslavsky/Documents/harness_labs/docs/development/implement-v13-codex-failure-analysis.md`,
+`<user-home>/Documents/harness_labs/docs/development/implement-v13-codex-failure-analysis.md`,
 the installed `implement-v13-codex` and `serial-implement-codex` packages, and
 the repository contracts cited below. Findings challenge the plan, not the
 adjudicated existence of C1-C14.
@@ -36,18 +36,18 @@ adjudicated existence of C1-C14.
 - **Evidence:**
   - The plan requires `resume_blocked_feature`, then requires
     `prepare_dispatch` to return `dispatch_action=launch`:
-    `/Users/kirillzaslavsky/Documents/harness_labs/docs/development/implement-v13-codex-remediation-plan.md:766-771`.
+    `<user-home>/Documents/harness_labs/docs/development/implement-v13-codex-remediation-plan.md:766-771`.
   - `prepare_dispatch` consumes `launch_authorized` and does return `launch` for
     a resumed in-progress feature:
-    `/Users/kirillzaslavsky/.codex/skills/serial-implement-codex/scripts/serial_state.py:720-742`.
+    `<user-home>/.codex/skills/serial-implement-codex/scripts/serial_state.py:720-742`.
   - The normal meaning of a launch dispatch is to invoke `start_planning.py`:
-    `/Users/kirillzaslavsky/.codex/skills/serial-implement-codex/references/protocol.md:47-55`.
+    `<user-home>/.codex/skills/serial-implement-codex/references/protocol.md:47-55`.
   - `start_planning.py` rejects an existing feature worktree before it can enter
     `run_feature.py`:
-    `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/scripts/start_planning.py:248-279`.
+    `<user-home>/.codex/skills/implement-v13-codex/scripts/start_planning.py:248-279`.
   - The currently authorized recovery route for an existing successful-planner
     checkpoint is direct `run_feature.py`, not `start_planning.py`:
-    `/Users/kirillzaslavsky/.codex/skills/serial-implement-codex/SKILL.md:52-55`.
+    `<user-home>/.codex/skills/serial-implement-codex/SKILL.md:52-55`.
 - **Reasoning:** The live subject is already at `REVIEWING/fix` with an existing
   worktree. The proposed sequence creates a launch-shaped dispatch but never
   names the recovery executable. Following the normal launch contract fails at
@@ -75,19 +75,19 @@ adjudicated existence of C1-C14.
 - **Evidence:**
   - The plan proposes one operation that writes a migration receipt and then
     updates the ledger, checkpoint, transaction, dispatch, and queue:
-    `/Users/kirillzaslavsky/Documents/harness_labs/docs/development/implement-v13-codex-remediation-plan.md:747-757`.
+    `<user-home>/Documents/harness_labs/docs/development/implement-v13-codex-remediation-plan.md:747-757`.
   - The generic compare-and-swap helper locks and updates exactly one file:
-    `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/scripts/state_io.py:95-119`.
+    `<user-home>/.codex/skills/implement-v13-codex/scripts/state_io.py:95-119`.
   - The closure-ledger save path increments a revision and replaces the file
     without a compare-and-swap witness or advisory lock:
-    `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/scripts/review_closure.py:210-219`.
+    `<user-home>/.codex/skills/implement-v13-codex/scripts/review_closure.py:210-219`.
   - Serial resume validates surviving checkpoint/transaction hashes and mutates
     only queue state; it has no migration transaction over the other documents:
-    `/Users/kirillzaslavsky/.codex/skills/serial-implement-codex/scripts/serial_state.py:844-949`.
+    `<user-home>/.codex/skills/serial-implement-codex/scripts/serial_state.py:844-949`.
   - Checkpoint resume is a later, separate one-file mutation performed by
     `run_feature.py` after serial authorization:
-    `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/scripts/feature_state.py:184-225`;
-    `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/scripts/run_feature.py:528-544`.
+    `<user-home>/.codex/skills/implement-v13-codex/scripts/feature_state.py:184-225`;
+    `<user-home>/.codex/skills/implement-v13-codex/scripts/run_feature.py:528-544`.
 - **Reasoning:** No existing authority API can perform the proposed multi-document
   write, and the plan's exact write sets do not name a new migration coordinator
   command or state API. The rollback text describes a recoverable multi-file
@@ -117,14 +117,14 @@ adjudicated existence of C1-C14.
   ... dispatch/package reference.”
 - **Evidence:**
   - The proposed migration includes the persisted dispatch among updated state:
-    `/Users/kirillzaslavsky/Documents/harness_labs/docs/development/implement-v13-codex-remediation-plan.md:747-752`.
+    `<user-home>/Documents/harness_labs/docs/development/implement-v13-codex-remediation-plan.md:747-752`.
   - The phase-flow contract classifies dispatch metadata as immutable:
-    `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/references/json-phase-flow.md:8-13,31-34`.
+    `<user-home>/.codex/skills/implement-v13-codex/references/json-phase-flow.md:8-13,31-34`.
   - Fresh startup persists the exact dispatch payload and later hands that file
     to `run_feature.py`:
-    `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/scripts/start_planning.py:281-285,478-493`.
+    `<user-home>/.codex/skills/implement-v13-codex/scripts/start_planning.py:281-285,478-493`.
   - The synthetic compatibility path explicitly rejects dispatch-byte changes:
-    `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/scripts/run_synthetic_flow.py:496-507,525-536`.
+    `<user-home>/.codex/skills/implement-v13-codex/scripts/run_synthetic_flow.py:496-507,525-536`.
 - **Reasoning:** Rewriting `dispatch.v1.json` destroys the original dispatch
   witness and changes an input that existing recovery treats as persisted
   metadata. The migration receipt can supersede an effective package selection
@@ -148,17 +148,17 @@ adjudicated existence of C1-C14.
 - **Evidence:**
   - AC-3 enumerates scripts, schemas, prompts, references, and a manifest, but
     does not name `SKILL.md`:
-    `/Users/kirillzaslavsky/Documents/harness_labs/docs/development/implement-v13-codex-remediation-plan.md:56-68`.
+    `<user-home>/Documents/harness_labs/docs/development/implement-v13-codex-remediation-plan.md:56-68`.
   - A fresh coordinator prompt explicitly directs the child to read the package's
     `SKILL.md` and required references:
-    `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/scripts/run_feature.py:159-205`.
+    `<user-home>/.codex/skills/implement-v13-codex/scripts/run_feature.py:159-205`.
   - `run_feature.py` dynamically loads the sibling serial controller from a path
     relative to its own package:
-    `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/scripts/run_feature.py:25-61`.
+    `<user-home>/.codex/skills/implement-v13-codex/scripts/run_feature.py:25-61`.
   - The installed package also contains runtime `builtins`, while the plan's
     named package categories do not include them; the debug runner reads a
     built-in prompt by package-relative path:
-    `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/scripts/run_phase_flow.py:180-188,349-374`.
+    `<user-home>/.codex/skills/implement-v13-codex/scripts/run_phase_flow.py:180-188,349-374`.
 - **Reasoning:** A manifest that excludes `SKILL.md` cannot bootstrap the fresh
   coordinator required by the migration. A snapshot that resolves the serial
   sibling or built-ins from the global installation is not one explicit
@@ -182,14 +182,14 @@ adjudicated existence of C1-C14.
 - **Evidence:**
   - The plan asks for “the production vertical slice” but does not require the
     candidate to reach merge, feature result, and `dispatcher_ack`:
-    `/Users/kirillzaslavsky/Documents/harness_labs/docs/development/implement-v13-codex-remediation-plan.md:114-126,663-688`.
+    `<user-home>/Documents/harness_labs/docs/development/implement-v13-codex-remediation-plan.md:114-126,663-688`.
   - The current named vertical-slice success test terminates intentionally in a
     blocked checkpoint and blocked queue:
-    `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/tests/test_production_vertical_slice.py:74-219`.
+    `<user-home>/.codex/skills/implement-v13-codex/tests/test_production_vertical_slice.py:74-219`.
   - The normative repository contract requires the shipped dispatch and startup
     CLI path and a complete production lifecycle/queue acknowledgment; direct or
     synthetic state fabrication is insufficient:
-    `/Users/kirillzaslavsky/Documents/harness_labs/docs/architecture/harness-contract.md:59-64,198-220`.
+    `<user-home>/Documents/harness_labs/docs/architecture/harness-contract.md:59-64,198-220`.
 - **Reasoning:** All three groups change production dispatch, execution,
   recovery, review routing, and package identity. A blocked vertical slice can
   prove settlement but cannot prove that the new control plane integrates,
@@ -214,13 +214,13 @@ adjudicated existence of C1-C14.
 - **Evidence:**
   - The plan says changed surfaces select exactly the transitive immutable tests
     and that an intentionally omitted dependency must be rejected:
-    `/Users/kirillzaslavsky/Documents/harness_labs/docs/development/implement-v13-codex-remediation-plan.md:584-590,625-644`.
+    `<user-home>/Documents/harness_labs/docs/development/implement-v13-codex-remediation-plan.md:584-590,625-644`.
   - The current ledger accepts caller-supplied dependency fields, cycle-checks
     them, then schedules from those same fields:
-    `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/scripts/review_closure.py:120-193,210-218`.
+    `<user-home>/.codex/skills/implement-v13-codex/scripts/review_closure.py:120-193,210-218`.
   - The repository requires verification gates to be tied to acceptance criteria
     and worker claims to be independently evidenced:
-    `/Users/kirillzaslavsky/Documents/harness_labs/AGENTS.md:49-63`.
+    `<user-home>/Documents/harness_labs/AGENTS.md:49-63`.
 - **Reasoning:** A validator cannot discover an omitted edge by validating only
   the graph that omitted it. The plan names no independent coverage registry,
   instrumentation trace, immutable assertion map, or conservative fallback from
@@ -244,21 +244,21 @@ adjudicated existence of C1-C14.
 - **Evidence:**
   - The repository explicitly forbids a generalized snapshot framework or
     unrelated refactor and requires bounded work:
-    `/Users/kirillzaslavsky/Documents/harness_labs/AGENTS.md:47-67`.
+    `<user-home>/Documents/harness_labs/AGENTS.md:47-67`.
   - The architecture contract requires each new schema, receipt, recovery
     mechanism, abstraction, or telemetry stream to identify its production
     failure, consumer, and end-to-end assertion, and forbids supporting
     machinery from maturing ahead of the executable production path:
-    `/Users/kirillzaslavsky/Documents/harness_labs/docs/architecture/harness-contract.md:145-156`.
+    `<user-home>/Documents/harness_labs/docs/architecture/harness-contract.md:145-156`.
   - The plan combines a package-copy/multi-document migration mechanism,
     normative-to-provider compiler, terminal taxonomy, assertion solver,
     capability broker, resolution-profile interpreter, dependency scheduler,
     multi-closure batching engine, gate engine, coordinator rollover protocol,
     and a large telemetry catalog:
-    `/Users/kirillzaslavsky/Documents/harness_labs/docs/development/implement-v13-codex-remediation-plan.md:244-329,391-460,528-603,820-859`.
+    `<user-home>/Documents/harness_labs/docs/development/implement-v13-codex-remediation-plan.md:244-329,391-460,528-603,820-859`.
   - AC-6 expands the deterministic engine to “routine phase transitions,” not
     only the observed repair loop:
-    `/Users/kirillzaslavsky/Documents/harness_labs/docs/development/implement-v13-codex-remediation-plan.md:101-112`.
+    `<user-home>/Documents/harness_labs/docs/development/implement-v13-codex-remediation-plan.md:101-112`.
 - **Reasoning:** The claim that three sequential owner labels make the work
   bounded is unsupported. Group 3 in particular crosses from the adjudicated
   review-repair failure into a general phase engine and context framework. The
@@ -288,15 +288,15 @@ adjudicated existence of C1-C14.
 - **Evidence:**
   - The plan mandates hard turn/context-slope limits but leaves their numeric
     values to be selected from certification data:
-    `/Users/kirillzaslavsky/Documents/harness_labs/docs/development/implement-v13-codex-remediation-plan.md:101-108,591-602,906-908`.
+    `<user-home>/Documents/harness_labs/docs/development/implement-v13-codex-remediation-plan.md:101-108,591-602,906-908`.
   - The governing installed contract says performance observations cannot stop,
     block, retry, cancel, or change phase state unless an operator explicitly
     declares a separate hard limit:
-    `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/SKILL.md:116-119`.
+    `<user-home>/.codex/skills/implement-v13-codex/SKILL.md:116-119`.
   - The protocol is stricter: an exact numeric hard limit must be declared by
     the operator or a named safety contract and must not be inferred from a
     benchmark:
-    `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/references/protocol.md:42-50`.
+    `<user-home>/.codex/skills/implement-v13-codex/references/protocol.md:42-50`.
 - **Reasoning:** Certification measurements are observational; they do not have
   authority to create a new blocker. The plan also cannot test “exceeds limit”
   before the limit-selection rule exists. Selecting thresholds on the candidate
@@ -320,14 +320,14 @@ adjudicated existence of C1-C14.
   - The plan says readers accept missing fields as legacy receipt v1 and writers
     emit receipt v2, but does not specify a v2 protocol value or reader
     discriminator:
-    `/Users/kirillzaslavsky/Documents/harness_labs/docs/development/implement-v13-codex-remediation-plan.md:331-343`.
+    `<user-home>/Documents/harness_labs/docs/development/implement-v13-codex-remediation-plan.md:331-343`.
   - The current schema fixes the protocol to
     `implement-v13-codex/process-receipt/1`:
-    `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/schemas/process-receipt.schema.json:1-9`.
+    `<user-home>/.codex/skills/implement-v13-codex/schemas/process-receipt.schema.json:1-9`.
   - `run_exec.py` emits that same v1 protocol at both receipt construction sites:
-    `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/scripts/run_exec.py:482-530,795-840`.
+    `<user-home>/.codex/skills/implement-v13-codex/scripts/run_exec.py:482-530,795-840`.
   - The legacy synthetic consumer rejects any other process-receipt protocol:
-    `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/scripts/run_synthetic_flow.py:22-24,300-309`.
+    `<user-home>/.codex/skills/implement-v13-codex/scripts/run_synthetic_flow.py:22-24,300-309`.
 - **Reasoning:** Requiring new fields while retaining `/1` makes legacy versus
   new validity depend on field absence rather than an explicit version. Changing
   to `/2` breaks an existing consumer unless its compatibility behavior is also
@@ -349,17 +349,17 @@ adjudicated existence of C1-C14.
 - **Evidence:**
   - AC-1.3 says every canonical role-output schema must use the production
     preflight/binding path:
-    `/Users/kirillzaslavsky/Documents/harness_labs/docs/development/implement-v13-codex-remediation-plan.md:40-44`.
+    `<user-home>/Documents/harness_labs/docs/development/implement-v13-codex-remediation-plan.md:40-44`.
   - The implementation text narrows the package enumeration to
     `schemas/*-result.schema.json`:
-    `/Users/kirillzaslavsky/Documents/harness_labs/docs/development/implement-v13-codex-remediation-plan.md:312-316`.
+    `<user-home>/Documents/harness_labs/docs/development/implement-v13-codex-remediation-plan.md:312-316`.
   - Planner startup generates a task-bound output schema from
     `plan.schema.json`, so it is not a checked-in `*-result.schema.json`:
-    `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/scripts/start_planning.py:159-168,347-395`.
+    `<user-home>/.codex/skills/implement-v13-codex/scripts/start_planning.py:159-168,347-395`.
   - Plan reviewers use `plan-review.schema.json`, another non-`*-result` schema,
     and `run_exec.py` has a special production byte guard for it:
-    `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/references/protocol.md:244-248`;
-    `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/scripts/run_exec.py:300-320`.
+    `<user-home>/.codex/skills/implement-v13-codex/references/protocol.md:244-248`;
+    `<user-home>/.codex/skills/implement-v13-codex/scripts/run_exec.py:300-320`.
 - **Reasoning:** A filename glob is not the production dispatch registry. It can
   pass while planner, plan-review, coordinator, or dynamically bound schemas
   retain an unsupported provider shape. This contradicts AC-1.3's universal
@@ -381,16 +381,16 @@ adjudicated existence of C1-C14.
 - **Evidence:**
   - The plan requires twenty new named event classes and says they use repository
     event schemas:
-    `/Users/kirillzaslavsky/Documents/harness_labs/docs/development/implement-v13-codex-remediation-plan.md:820-859`.
+    `<user-home>/Documents/harness_labs/docs/development/implement-v13-codex-remediation-plan.md:820-859`.
   - The repository event schema has a closed top-level `event_type` enum that
     contains none of those names:
-    `/Users/kirillzaslavsky/Documents/harness_labs/schemas/run-event.schema.json:1-37`.
+    `<user-home>/Documents/harness_labs/schemas/run-event.schema.json:1-37`.
   - The plan's own open assumption acknowledges that event location/schema
     alignment is unresolved:
-    `/Users/kirillzaslavsky/Documents/harness_labs/docs/development/implement-v13-codex-remediation-plan.md:912-915`.
+    `<user-home>/Documents/harness_labs/docs/development/implement-v13-codex-remediation-plan.md:912-915`.
   - The exact write sets list neither the repository event schema nor a common
     append-only event writer:
-    `/Users/kirillzaslavsky/Documents/harness_labs/docs/development/implement-v13-codex-remediation-plan.md:251-304,399-433,536-570`.
+    `<user-home>/Documents/harness_labs/docs/development/implement-v13-codex-remediation-plan.md:251-304,399-433,536-570`.
 - **Reasoning:** The names might be payload classifications under a generic
   `phase_transition`, `verification`, or `retry` event, or they might be new
   top-level types. The plan does not decide. Without a writer, sequence owner,
@@ -412,13 +412,13 @@ adjudicated existence of C1-C14.
 - **Evidence:**
   - The plan says migration output will “preserve all 124 revisions' current
     durable content”:
-    `/Users/kirillzaslavsky/Documents/harness_labs/docs/development/implement-v13-codex-remediation-plan.md:728-735`.
+    `<user-home>/Documents/harness_labs/docs/development/implement-v13-codex-remediation-plan.md:728-735`.
   - The ledger implementation maintains one JSON document; every `_save`
     increments `state_revision` and atomically replaces that same path:
-    `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/scripts/review_closure.py:184-192,210-219`.
+    `<user-home>/.codex/skills/implement-v13-codex/scripts/review_closure.py:184-192,210-219`.
   - The adjudication establishes ledger revision 124 and embedded rejection/
     resolution history, not 124 retained document snapshots:
-    `/Users/kirillzaslavsky/Documents/harness_labs/docs/development/implement-v13-codex-failure-analysis.md:482-490,512-520`.
+    `<user-home>/Documents/harness_labs/docs/development/implement-v13-codex-failure-analysis.md:482-490,512-520`.
 - **Reasoning:** The current artifact can preserve its revision-124 bytes and
   embedded append-only histories, but it cannot reconstruct overwritten states
   for revisions 0-123 from a revision counter. The wording overstates available

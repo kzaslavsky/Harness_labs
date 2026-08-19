@@ -61,7 +61,7 @@ Every entry below cites the run evidence that qualified it. New entries need the
 
 ## Flow-editor authoring PlanGraph audit (2026-08-12)
 
-**Subject:** `FLOW_EDITOR_AUTHORING_AND_NODE_EXECUTION_UX_PLANGRAPH.json` (15 nodes FR-00 → FR-30, Retinology repo), executing in `/Users/kirillzaslavsky/Documents/retinology-flow-authoring-plangraph-audit/`. At audit time the graph is on **FR-20** (integration certification), attempt **pg101**, live. Attempts pg2 → pg101: **101 whole-graph relaunches**, 232 run-log directories. FR-20 alone consumed at least 16 attempts (pg85–pg101); every terminal FR-20 attempt ended `blocked`.
+**Subject:** `FLOW_EDITOR_AUTHORING_AND_NODE_EXECUTION_UX_PLANGRAPH.json` (15 nodes FR-00 → FR-30, Retinology repo), executing in `<user-home>/Documents/retinology-flow-authoring-plangraph-audit/`. At audit time the graph is on **FR-20** (integration certification), attempt **pg101**, live. Attempts pg2 → pg101: **101 whole-graph relaunches**, 232 run-log directories. FR-20 alone consumed at least 16 attempts (pg85–pg101); every terminal FR-20 attempt ended `blocked`.
 
 **How each FR-20 attempt dies** (from node journals `logs/runs/*-FR-20/{events.jsonl,manifest.json,artifacts}`):
 

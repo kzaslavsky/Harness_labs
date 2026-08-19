@@ -24,7 +24,7 @@ Status: active
 - Proposed platform-agnostic autonomous workflow:
   [`platform-agnostic-autonomous-workflow-strategy.md`](platform-agnostic-autonomous-workflow-strategy.md)
 - Initial runtime primitive:
-  [`../../harness_labs/attempts.py`](../../harness_labs/attempts.py)
+  [`../../harness_labs/core/attempts.py`](../../harness_labs/core/attempts.py)
 - Parallel child dispatch:
   [`parallel-child-dispatch-plan.md`](parallel-child-dispatch-plan.md)
 - Parallel PlanGraph execution and Retinology replay:

@@ -12,10 +12,10 @@ auditability.
 
 The Claude sources examined were:
 
-- `/Users/kirillzaslavsky/claudeprojects/Retinology/.claude/commands/implement-v13.md`
-- `/Users/kirillzaslavsky/claudeprojects/Retinology/.claude/engine/phases/plan-refute.md`
-- `/Users/kirillzaslavsky/claudeprojects/Retinology/.claude/engine/phases/phase-scoped.md`
-- `/Users/kirillzaslavsky/claudeprojects/Retinology/.claude/engine/engines/solo-phased-reviewfix.md`
+- `<user-home>/claudeprojects/Retinology/.claude/commands/implement-v13.md`
+- `<user-home>/claudeprojects/Retinology/.claude/engine/phases/plan-refute.md`
+- `<user-home>/claudeprojects/Retinology/.claude/engine/phases/phase-scoped.md`
+- `<user-home>/claudeprojects/Retinology/.claude/engine/engines/solo-phased-reviewfix.md`
 - the planner, source-binding reviewer, plan-reviser, and review-fixer prompts
   under `.claude/engine/prompts/`
 

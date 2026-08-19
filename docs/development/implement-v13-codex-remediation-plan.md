@@ -14,7 +14,7 @@ Revision record:
   `J-R1-008`, `J-R1-009`, `J-R1-010`, `J-R1-011`, `J-R1-012`.
 
 Scope: adjudicated claims J-C1 through J-C14 in
-`/Users/kirillzaslavsky/Documents/harness_labs/docs/development/implement-v13-codex-failure-analysis.md`.
+`<user-home>/Documents/harness_labs/docs/development/implement-v13-codex-failure-analysis.md`.
 This plan is deliberately limited to the installed `implement-v13-codex` and
 `serial-implement-codex` controller packages, their schemas/tests, and the
 minimum run-owned migration artifacts needed to resume feature run
@@ -214,23 +214,23 @@ flowchart LR
 
 | Contract node or edge | Current fact | Contradiction/gap | Intended downstream consumers |
 |---|---|---|---|
-| Canonical closure-test schema (C1) | `effect_contract` is a property but is absent from top-level `required`: `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/schemas/closure-test-result.schema.json:5-14`. | Provider strict-object completeness is not represented. | `_build_validator`, `_bind_expected_schema`, every closure-test invocation. |
-| Recursive provider preflight (C1, C6) | `_check_codex_response_schema` checks explicit `type` for `const`/`enum` and array `items`, but not complete object `required`: `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/scripts/run_exec.py:207-226`; `_preflight` calls validation before dispatch at lines 288-325. | JSON Schema validity is treated as provider-dialect validity; no source-to-transport compilation contract exists. | `run_exec.run`, all role specs, attempt/receipt creation. |
-| Canonical byte guard (C6) | Repair designers must supply bytes equal to the canonical repair schema: `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/scripts/review_closure.py:785-796`. Current tests only assert selected canonical repair schemas omit `uniqueItems`: `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/tests/test_run_exec.py:18-32` and `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/tests/test_review_closure.py:48-55`. | One artifact is both normative contract and provider transport; keyword deletion is a partial incident fix, not compilation. | Repair designer dispatch, provider, receipt hashes, later reproduction. |
-| Terminal taxonomy (C2) | `_terminal_validation_errors` returns generic exit/thread/turn/output symptoms: `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/scripts/run_exec.py:362-411`. | Structured provider cause is not promoted into receipt-level routing data. | Retry router, blocker settlement, operator diagnostics, metrics. |
-| Receipt provenance (C2, C14) | Per-invocation prompt/schema source hashes are compared at `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/scripts/run_exec.py:482-530`; receipt schema exposes `schema_source_sha256` at `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/schemas/process-receipt.schema.json:10-29`. | No full controller-package digest or normalized terminal cause is required. | Queue/checkpoint/transaction, resume validation, audit. |
-| Dispatch/package identity (C14) | `prepare_dispatch` emits queue/run/path/planning fields, but no package digest: `/Users/kirillzaslavsky/.codex/skills/serial-implement-codex/scripts/serial_state.py:687-785`. Checkpoint and transaction schemas likewise do not require one: `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/schemas/checkpoint.schema.json:1-6`; `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/schemas/feature-transaction.schema.json:1-6`. | Continuation has local hashes but no coherent run-level version. | Serial resume, `run_feature.drive`, `run_exec`, all artifacts. |
-| Same-thread recovery (C3, C14) | Recovery requires contiguous turns on exactly one thread: `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/scripts/run_feature.py:468-497`; drive loops coordinator-to-child-to-coordinator at lines 500-620. | No explicit package migration/context rollover boundary or hard turn/context limit. | Coordinator prompts, closure routing, critical-path latency. |
-| Deterministic normal closure chain (C3 partial) | `run_closure_program` advances a normal author/design/review/fix/targeted-review chain without intervening coordinator turns: `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/scripts/closure_driver.py:49-178`; test: `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/tests/test_closure_driver.py:25-76`. | Rejections, escalations, scheduling, retries, and phase transitions still return to the long-lived coordinator. | Review scheduler and coordinator budget. |
-| Effect-contract comparison (C5) | Canonical effects and prose-derived disposition comparison are defined at `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/scripts/review_closure.py:21-117` and applied at lines 312-400. | No assertion-to-effect mapping or executable satisfiability proof precedes design/fix. | Closure author, designer, fixer, independent reviewer. |
-| Resolution validator (C9, C10) | `resolve_design_contradiction` enumerates exact `testing_harness` paths, nodes, bytes, and fixture channel at `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/scripts/review_closure.py:403-546`. | Structured declarations can be accepted without an executable end-to-end dataflow; generic global code contains project policy. | Blocked-resume authorization, fixer prompt, targeted reviewer. |
-| Budget baseline (C7 partial/fixed) | Post-resolution design/attempt counts subtract baselines at `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/scripts/review_closure.py:226-251`; one-time recovery is at lines 547-602. Tests preserve history and grant a fresh budget at `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/tests/test_review_closure.py:573-643`. | Behavior exists, but the ledger schema does not declare baseline/history fields as required migration invariants: `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/schemas/review-closure-ledger.schema.json:15-35`. | Escalation calculation, legacy ledger migration, audit. |
-| Capability permissions (C8, C11) | `run_exec` models only sandbox plus writable roots and launches Codex under the outer sandbox: `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/scripts/run_exec.py:247-263,605-660`. | There is no semantic production Seatbelt probe and no first-class per-role ephemeral scratch contract. | Orient/planning gate, reviewers, certification receipts. |
-| Closure dependency scheduling (C4 partial) | Ledger creation accepts and cycle-checks `depends_on`/`related_closures`, but `_save` selects the first ready item: `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/scripts/review_closure.py:120-193,210-218`; test: `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/tests/test_review_closure.py:645-691`. | No code-surface/test dependency edges, starvation counter, affected-component batch, or reorder policy. | Repair scheduler, regression selection, write-set enforcement. |
-| Regression closure (C4, C13) | Only one repair action may be batched: `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/scripts/run_feature.py:308-328`. Targeted review must report every other currently closed closure and reopens failed peers: `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/scripts/review_closure.py:655-697`. | Model review carries a global dynamic regression obligation; deterministic affected-surface gates do not precede it. | Closure ledger, later closures, targeted reviewers. |
-| Reviewer mutation protection (C11/C13 partial) | Workspace-write reviewers are recognized and fingerprinted before execution: `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/scripts/run_feature.py:331-370`. | Mutation detection does not define/probe a dedicated scratch capability or the exact test runner. | Read-only independent reviewers and their receipts. |
-| Model identity (C12 partial/fixed policy) | Current coordinator prompt mandates Terra-medium design and Sol-medium review: `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/scripts/run_feature.py:219-223`; invocation validation enforces Terra/Sol/Luna roles at `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/scripts/review_closure.py:775-784`; `run_exec` limits Luna-high to implementation/fix roles at `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/scripts/run_exec.py:663-687`. | Policy changed, but no controlled benchmark establishes Terra quality/cost advantage and deterministic stop gates remain incomplete. | Model policy evaluation and efficiency metrics. |
-| Serial blocked resume (C9, C14) | Resume validates token, exact run identity, and checkpoint/transaction hashes, then records authorization: `/Users/kirillzaslavsky/.codex/skills/serial-implement-codex/scripts/serial_state.py:832-949`; adversarial identity tests are at `/Users/kirillzaslavsky/.codex/skills/serial-implement-codex/tests/test_serial_state.py:581-686`. | Resume evidence does not bind controller migration/package digest or executable resolution proof. | Queue lease, checkpoint resume, run launch. |
+| Canonical closure-test schema (C1) | `effect_contract` is a property but is absent from top-level `required`: `<user-home>/.codex/skills/implement-v13-codex/schemas/closure-test-result.schema.json:5-14`. | Provider strict-object completeness is not represented. | `_build_validator`, `_bind_expected_schema`, every closure-test invocation. |
+| Recursive provider preflight (C1, C6) | `_check_codex_response_schema` checks explicit `type` for `const`/`enum` and array `items`, but not complete object `required`: `<user-home>/.codex/skills/implement-v13-codex/scripts/run_exec.py:207-226`; `_preflight` calls validation before dispatch at lines 288-325. | JSON Schema validity is treated as provider-dialect validity; no source-to-transport compilation contract exists. | `run_exec.run`, all role specs, attempt/receipt creation. |
+| Canonical byte guard (C6) | Repair designers must supply bytes equal to the canonical repair schema: `<user-home>/.codex/skills/implement-v13-codex/scripts/review_closure.py:785-796`. Current tests only assert selected canonical repair schemas omit `uniqueItems`: `<user-home>/.codex/skills/implement-v13-codex/tests/test_run_exec.py:18-32` and `<user-home>/.codex/skills/implement-v13-codex/tests/test_review_closure.py:48-55`. | One artifact is both normative contract and provider transport; keyword deletion is a partial incident fix, not compilation. | Repair designer dispatch, provider, receipt hashes, later reproduction. |
+| Terminal taxonomy (C2) | `_terminal_validation_errors` returns generic exit/thread/turn/output symptoms: `<user-home>/.codex/skills/implement-v13-codex/scripts/run_exec.py:362-411`. | Structured provider cause is not promoted into receipt-level routing data. | Retry router, blocker settlement, operator diagnostics, metrics. |
+| Receipt provenance (C2, C14) | Per-invocation prompt/schema source hashes are compared at `<user-home>/.codex/skills/implement-v13-codex/scripts/run_exec.py:482-530`; receipt schema exposes `schema_source_sha256` at `<user-home>/.codex/skills/implement-v13-codex/schemas/process-receipt.schema.json:10-29`. | No full controller-package digest or normalized terminal cause is required. | Queue/checkpoint/transaction, resume validation, audit. |
+| Dispatch/package identity (C14) | `prepare_dispatch` emits queue/run/path/planning fields, but no package digest: `<user-home>/.codex/skills/serial-implement-codex/scripts/serial_state.py:687-785`. Checkpoint and transaction schemas likewise do not require one: `<user-home>/.codex/skills/implement-v13-codex/schemas/checkpoint.schema.json:1-6`; `<user-home>/.codex/skills/implement-v13-codex/schemas/feature-transaction.schema.json:1-6`. | Continuation has local hashes but no coherent run-level version. | Serial resume, `run_feature.drive`, `run_exec`, all artifacts. |
+| Same-thread recovery (C3, C14) | Recovery requires contiguous turns on exactly one thread: `<user-home>/.codex/skills/implement-v13-codex/scripts/run_feature.py:468-497`; drive loops coordinator-to-child-to-coordinator at lines 500-620. | No explicit package migration/context rollover boundary or hard turn/context limit. | Coordinator prompts, closure routing, critical-path latency. |
+| Deterministic normal closure chain (C3 partial) | `run_closure_program` advances a normal author/design/review/fix/targeted-review chain without intervening coordinator turns: `<user-home>/.codex/skills/implement-v13-codex/scripts/closure_driver.py:49-178`; test: `<user-home>/.codex/skills/implement-v13-codex/tests/test_closure_driver.py:25-76`. | Rejections, escalations, scheduling, retries, and phase transitions still return to the long-lived coordinator. | Review scheduler and coordinator budget. |
+| Effect-contract comparison (C5) | Canonical effects and prose-derived disposition comparison are defined at `<user-home>/.codex/skills/implement-v13-codex/scripts/review_closure.py:21-117` and applied at lines 312-400. | No assertion-to-effect mapping or executable satisfiability proof precedes design/fix. | Closure author, designer, fixer, independent reviewer. |
+| Resolution validator (C9, C10) | `resolve_design_contradiction` enumerates exact `testing_harness` paths, nodes, bytes, and fixture channel at `<user-home>/.codex/skills/implement-v13-codex/scripts/review_closure.py:403-546`. | Structured declarations can be accepted without an executable end-to-end dataflow; generic global code contains project policy. | Blocked-resume authorization, fixer prompt, targeted reviewer. |
+| Budget baseline (C7 partial/fixed) | Post-resolution design/attempt counts subtract baselines at `<user-home>/.codex/skills/implement-v13-codex/scripts/review_closure.py:226-251`; one-time recovery is at lines 547-602. Tests preserve history and grant a fresh budget at `<user-home>/.codex/skills/implement-v13-codex/tests/test_review_closure.py:573-643`. | Behavior exists, but the ledger schema does not declare baseline/history fields as required migration invariants: `<user-home>/.codex/skills/implement-v13-codex/schemas/review-closure-ledger.schema.json:15-35`. | Escalation calculation, legacy ledger migration, audit. |
+| Capability permissions (C8, C11) | `run_exec` models only sandbox plus writable roots and launches Codex under the outer sandbox: `<user-home>/.codex/skills/implement-v13-codex/scripts/run_exec.py:247-263,605-660`. | There is no semantic production Seatbelt probe and no first-class per-role ephemeral scratch contract. | Orient/planning gate, reviewers, certification receipts. |
+| Closure dependency scheduling (C4 partial) | Ledger creation accepts and cycle-checks `depends_on`/`related_closures`, but `_save` selects the first ready item: `<user-home>/.codex/skills/implement-v13-codex/scripts/review_closure.py:120-193,210-218`; test: `<user-home>/.codex/skills/implement-v13-codex/tests/test_review_closure.py:645-691`. | No code-surface/test dependency edges, starvation counter, affected-component batch, or reorder policy. | Repair scheduler, regression selection, write-set enforcement. |
+| Regression closure (C4, C13) | Only one repair action may be batched: `<user-home>/.codex/skills/implement-v13-codex/scripts/run_feature.py:308-328`. Targeted review must report every other currently closed closure and reopens failed peers: `<user-home>/.codex/skills/implement-v13-codex/scripts/review_closure.py:655-697`. | Model review carries a global dynamic regression obligation; deterministic affected-surface gates do not precede it. | Closure ledger, later closures, targeted reviewers. |
+| Reviewer mutation protection (C11/C13 partial) | Workspace-write reviewers are recognized and fingerprinted before execution: `<user-home>/.codex/skills/implement-v13-codex/scripts/run_feature.py:331-370`. | Mutation detection does not define/probe a dedicated scratch capability or the exact test runner. | Read-only independent reviewers and their receipts. |
+| Model identity (C12 partial/fixed policy) | Current coordinator prompt mandates Terra-medium design and Sol-medium review: `<user-home>/.codex/skills/implement-v13-codex/scripts/run_feature.py:219-223`; invocation validation enforces Terra/Sol/Luna roles at `<user-home>/.codex/skills/implement-v13-codex/scripts/review_closure.py:775-784`; `run_exec` limits Luna-high to implementation/fix roles at `<user-home>/.codex/skills/implement-v13-codex/scripts/run_exec.py:663-687`. | Policy changed, but no controlled benchmark establishes Terra quality/cost advantage and deterministic stop gates remain incomplete. | Model policy evaluation and efficiency metrics. |
+| Serial blocked resume (C9, C14) | Resume validates token, exact run identity, and checkpoint/transaction hashes, then records authorization: `<user-home>/.codex/skills/serial-implement-codex/scripts/serial_state.py:832-949`; adversarial identity tests are at `<user-home>/.codex/skills/serial-implement-codex/tests/test_serial_state.py:581-686`. | Resume evidence does not bind controller migration/package digest or executable resolution proof. | Queue lease, checkpoint resume, run launch. |
 
 ## Bounded implementation partition and critical path
 
@@ -271,46 +271,46 @@ also supplies the package identity consumed by Groups 2 and 3.
 
 `implement-v13-codex`:
 
-- `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/schemas/closure-test-result.schema.json`
+- `<user-home>/.codex/skills/implement-v13-codex/schemas/closure-test-result.schema.json`
   — top-level `required`.
 - Add
-  `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/scripts/response_schema.py`
+  `<user-home>/.codex/skills/implement-v13-codex/scripts/response_schema.py`
   — `compile_transport_schema`, `validate_provider_schema`,
   `canonical_schema_hashes`.
-- `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/scripts/run_exec.py`
+- `<user-home>/.codex/skills/implement-v13-codex/scripts/run_exec.py`
   — `_check_codex_response_schema`, `_build_validator`, `_preflight`,
   `_terminal_validation_errors`, `_finalize_receipt`,
   `_assert_receipt_matches`, `run`.
-- `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/scripts/run_feature.py`
+- `<user-home>/.codex/skills/implement-v13-codex/scripts/run_feature.py`
   — `_write_turn_inputs`, `_recover_coordinator_position`, `drive`; package
   resolution and explicit rollover hook only, not the Group 3 scheduler.
 - Add
-  `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/scripts/controller_package.py`
+  `<user-home>/.codex/skills/implement-v13-codex/scripts/controller_package.py`
   — bounded manifest, copy, verify, migration command/coordinator, fixed
   authority lock order, journal state machine, and forward recovery for these
   two skills only.
-- `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/scripts/state_io.py`
+- `<user-home>/.codex/skills/implement-v13-codex/scripts/state_io.py`
   — ordered authority-lock context and locked revision/hash CAS primitives used
   only by the controller migration command.
-- `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/scripts/review_closure.py`
+- `<user-home>/.codex/skills/implement-v13-codex/scripts/review_closure.py`
   — replace repair-design byte comparison with normative/transport hash
   comparison in `validate_invocation_spec`; add `cas_save_ledger` with an
   expected `state_revision` witness for migration.
-- `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/schemas/process-receipt.schema.json`
+- `<user-home>/.codex/skills/implement-v13-codex/schemas/process-receipt.schema.json`
   — require source/transport hashes, package digest, terminal cause object, and
   diagnostics.
-- `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/schemas/checkpoint.schema.json`
+- `<user-home>/.codex/skills/implement-v13-codex/schemas/checkpoint.schema.json`
   and
-  `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/schemas/feature-transaction.schema.json`
+  `<user-home>/.codex/skills/implement-v13-codex/schemas/feature-transaction.schema.json`
   — package digest/version and optional migration receipt hash.
 - Add
-  `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/schemas/controller-package-manifest.schema.json`
+  `<user-home>/.codex/skills/implement-v13-codex/schemas/controller-package-manifest.schema.json`
   and
-  `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/schemas/controller-migration.schema.json`.
+  `<user-home>/.codex/skills/implement-v13-codex/schemas/controller-migration.schema.json`.
 
 `serial-implement-codex`:
 
-- `/Users/kirillzaslavsky/.codex/skills/serial-implement-codex/scripts/serial_state.py`
+- `<user-home>/.codex/skills/serial-implement-codex/scripts/serial_state.py`
   — `prepare_dispatch`, `_expected_resume_identity`,
   `_validate_resume_artifacts`, `resume_blocked_feature`, and
   `cas_migrate_feature_locked`. All serial queue byte construction and writes
@@ -321,15 +321,15 @@ also supplies the package identity consumed by Groups 2 and 3.
 
 Tests:
 
-- `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/tests/test_run_exec.py`
+- `<user-home>/.codex/skills/implement-v13-codex/tests/test_run_exec.py`
 - Add
-  `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/tests/test_response_schema.py`
-- `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/tests/test_review_closure.py`
-- `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/tests/test_run_feature.py`
-- `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/tests/test_production_vertical_slice.py`
+  `<user-home>/.codex/skills/implement-v13-codex/tests/test_response_schema.py`
+- `<user-home>/.codex/skills/implement-v13-codex/tests/test_review_closure.py`
+- `<user-home>/.codex/skills/implement-v13-codex/tests/test_run_feature.py`
+- `<user-home>/.codex/skills/implement-v13-codex/tests/test_production_vertical_slice.py`
 - Add
-  `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/tests/test_controller_migration.py`
-- `/Users/kirillzaslavsky/.codex/skills/serial-implement-codex/tests/test_serial_state.py`
+  `<user-home>/.codex/skills/implement-v13-codex/tests/test_controller_migration.py`
+- `<user-home>/.codex/skills/serial-implement-codex/tests/test_serial_state.py`
 
 ### Contract changes
 
@@ -494,38 +494,38 @@ decides whether repair model work is lawful and executable.
 ### Exact write set and symbols
 
 - Add
-  `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/schemas/repair-assertion-map.schema.json`.
+  `<user-home>/.codex/skills/implement-v13-codex/schemas/repair-assertion-map.schema.json`.
 - Add
-  `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/schemas/capability-manifest.schema.json`.
+  `<user-home>/.codex/skills/implement-v13-codex/schemas/capability-manifest.schema.json`.
 - Add
-  `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/schemas/operator-resolution-profile.schema.json`.
-- `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/schemas/review-closure-ledger.schema.json`
+  `<user-home>/.codex/skills/implement-v13-codex/schemas/operator-resolution-profile.schema.json`.
+- `<user-home>/.codex/skills/implement-v13-codex/schemas/review-closure-ledger.schema.json`
   — declare assertion maps, resolution artifact references/hashes, baseline
   invariants, and capability evidence references.
 - Add
-  `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/scripts/repair_preflight.py`
+  `<user-home>/.codex/skills/implement-v13-codex/scripts/repair_preflight.py`
   — `validate_assertion_effects`, `solve_effect_constraints`,
   `probe_role_capabilities`, `validate_resolution_dataflow`.
-- `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/scripts/review_closure.py`
+- `<user-home>/.codex/skills/implement-v13-codex/scripts/review_closure.py`
   — `record_test`, `_authoritative_effect_contract`,
   `resolve_design_contradiction`, `_post_resolution_*`,
   `validate_invocation_spec`.
-- `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/scripts/closure_driver.py`
+- `<user-home>/.codex/skills/implement-v13-codex/scripts/closure_driver.py`
   — call pre-model gates before design/fix and return structured deterministic
   outcomes.
-- `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/scripts/start_planning.py`
+- `<user-home>/.codex/skills/implement-v13-codex/scripts/start_planning.py`
   — write the orient/planning capability manifest before model implementation.
-- `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/scripts/run_exec.py`
+- `<user-home>/.codex/skills/implement-v13-codex/scripts/run_exec.py`
   — accept controller-owned `ephemeral_scratch` separately from repository
   `writable_roots`, pass it to the child, and record it.
-- `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/schemas/process-receipt.schema.json`
+- `<user-home>/.codex/skills/implement-v13-codex/schemas/process-receipt.schema.json`
   — granted scratch root and capability-manifest hash.
-- `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/tests/test_review_closure.py`
-- `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/tests/test_closure_driver.py`
-- `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/tests/test_start_planning.py`
-- `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/tests/test_run_exec.py`
+- `<user-home>/.codex/skills/implement-v13-codex/tests/test_review_closure.py`
+- `<user-home>/.codex/skills/implement-v13-codex/tests/test_closure_driver.py`
+- `<user-home>/.codex/skills/implement-v13-codex/tests/test_start_planning.py`
+- `<user-home>/.codex/skills/implement-v13-codex/tests/test_run_exec.py`
 - Add
-  `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/tests/test_repair_preflight.py`.
+  `<user-home>/.codex/skills/implement-v13-codex/tests/test_repair_preflight.py`.
 
 ### Contract changes
 
@@ -631,38 +631,38 @@ sub-engine; retain model coordination only for explicit judgment.
 ### Exact write set and symbols
 
 - Add
-  `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/schemas/repair-dependency-graph.schema.json`.
+  `<user-home>/.codex/skills/implement-v13-codex/schemas/repair-dependency-graph.schema.json`.
 - Add
-  `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/schemas/repair-batch.schema.json`.
+  `<user-home>/.codex/skills/implement-v13-codex/schemas/repair-batch.schema.json`.
 - Add
-  `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/schemas/coordinator-rollover.schema.json`.
-- `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/schemas/review-closure-ledger.schema.json`
+  `<user-home>/.codex/skills/implement-v13-codex/schemas/coordinator-rollover.schema.json`.
+- `<user-home>/.codex/skills/implement-v13-codex/schemas/review-closure-ledger.schema.json`
   — code surfaces, test dependencies, ready age/starvation count, batch and
   regression evidence.
-- `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/scripts/review_closure.py`
+- `<user-home>/.codex/skills/implement-v13-codex/scripts/review_closure.py`
   — `create_ledger`, `_save`, `next_action`, `record_review`; replace first-ready
   and global closed-peer recheck behavior with affected-component scheduling.
-- `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/scripts/closure_driver.py`
+- `<user-home>/.codex/skills/implement-v13-codex/scripts/closure_driver.py`
   — execute rejected-design/escalation/retry routing and batch gates without
   returning to the coordinator for routine transitions.
 - Add
-  `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/scripts/repair_gates.py`
+  `<user-home>/.codex/skills/implement-v13-codex/scripts/repair_gates.py`
   — forbidden-read/selector checks, streaming/pre-communication bound check,
   process-evidence validation, production sandbox smoke, and dependency-mapped
   regression command selection.
-- `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/scripts/run_feature.py`
+- `<user-home>/.codex/skills/implement-v13-codex/scripts/run_feature.py`
   — `_requested_specs`, `_recover_coordinator_position`, `drive`; invoke the
   deterministic sub-engine, enumerate judgment reasons, apply hard limits, and
   roll contexts through hash-bound summaries.
-- `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/schemas/feature-coordinator-result.schema.json`
+- `<user-home>/.codex/skills/implement-v13-codex/schemas/feature-coordinator-result.schema.json`
   — enumerated judgment reason and rollover fields.
-- `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/tests/test_review_closure.py`
-- `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/tests/test_closure_driver.py`
+- `<user-home>/.codex/skills/implement-v13-codex/tests/test_review_closure.py`
+- `<user-home>/.codex/skills/implement-v13-codex/tests/test_closure_driver.py`
 - Add
-  `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/tests/test_repair_gates.py`
-- `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/tests/test_run_feature.py`
-- `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/tests/test_production_vertical_slice.py`
-- `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/tests/test_q12_observed_repairs.py`.
+  `<user-home>/.codex/skills/implement-v13-codex/tests/test_repair_gates.py`
+- `<user-home>/.codex/skills/implement-v13-codex/tests/test_run_feature.py`
+- `<user-home>/.codex/skills/implement-v13-codex/tests/test_production_vertical_slice.py`
+- `<user-home>/.codex/skills/implement-v13-codex/tests/test_q12_observed_repairs.py`.
 
 ### Contract changes
 
@@ -762,8 +762,8 @@ worktree/branch and bind output to the candidate package digest.
 
 1. Validate every JSON schema with the pinned non-project validator.
 2. Run all tests under:
-   `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/tests` and
-   `/Users/kirillzaslavsky/.codex/skills/serial-implement-codex/tests`.
+   `<user-home>/.codex/skills/implement-v13-codex/tests` and
+   `<user-home>/.codex/skills/serial-implement-codex/tests`.
 3. Run the production vertical slice, runtime smoke, and synthetic phase flow.
 4. Run production-real managed-environment probes for host-owned sandboxing and
    reviewer scratch. Any unavailable mandatory capability is a failed gate, not
@@ -796,11 +796,11 @@ it now**.
 Under the serial queue lock, read and hash without modification:
 
 - queue
-  `/Users/kirillzaslavsky/.codex/worktrees/harness-labs-testing-base/docs/development/serial_implementation_queue.json`;
+  `<user-home>/.codex/worktrees/harness-labs-testing-base/docs/development/serial_implementation_queue.json`;
 - checkpoint
-  `/Users/kirillzaslavsky/.codex/worktrees/harness-labs-testing-base/.claude/worktrees/impl-codex-fr_0a8feb07a847488ea910a0ec5a2a99d7/docs/development/current_implementation_checkpoint.json`;
+  `<user-home>/.codex/worktrees/harness-labs-testing-base/.claude/worktrees/impl-codex-fr_0a8feb07a847488ea910a0ec5a2a99d7/docs/development/current_implementation_checkpoint.json`;
 - transaction and run artifacts beneath
-  `/Users/kirillzaslavsky/.codex/worktrees/harness-labs-testing-base/handoff/serial-runs/qr_405df6b197f24c7fbd2e157278458e15/fr_0a8feb07a847488ea910a0ec5a2a99d7`;
+  `<user-home>/.codex/worktrees/harness-labs-testing-base/handoff/serial-runs/qr_405df6b197f24c7fbd2e157278458e15/fr_0a8feb07a847488ea910a0ec5a2a99d7`;
 - feature worktree HEAD, branch, tracked diff, untracked-file manifest, closure
   ledger, dispatch, and all coordinator/attempt receipts.
 
@@ -986,7 +986,7 @@ Required receipt/summary metrics include units and denominators:
   integration latency;
 - outcome correctness, gate pass rate, escaped defects, diff churn, tool calls,
   and parallelism under the definitions in
-  `/Users/kirillzaslavsky/Documents/harness_labs/docs/observability/logging-and-metrics.md`.
+  `<user-home>/Documents/harness_labs/docs/observability/logging-and-metrics.md`.
 
 Sensitive prompts, tokens, pipe contents, credentials, and user data must not be
 logged. Store only hashes and non-secret classifications where proof is needed.
@@ -1081,7 +1081,7 @@ creating a fourth group.
    blocked rather than being assigned a guessed effect.
 8. The exact location/schema of repository event logs for installed-skill
    certification may require alignment with
-   `/Users/kirillzaslavsky/Documents/harness_labs/schemas/`; no new logging
+   `<user-home>/Documents/harness_labs/schemas/`; no new logging
    schema should be invented if an existing one applies.
 9. A controlled Terra-medium versus Luna design-quality comparison has not been
    performed. This plan preserves the current Terra policy but makes no

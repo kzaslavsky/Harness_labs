@@ -84,12 +84,12 @@ class InitializerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             target = Path(temp) / "project"
             self.assert_success(self.run_initializer(target, "--skill-surface", "codex"))
-            self.assertTrue((target / ".agents/skills/implement-v13-codex/scripts/feature_queue_state.py").is_file())
-            self.assertTrue((target / ".agents/skills/implement-v13-codex/scripts/run_feature.py").is_file())
-            self.assertTrue((target / ".agents/skills/implement-v13-codex/schemas/closure-program.schema.json").is_file())
+            self.assertFalse((target / ".agents/skills/implement-v13-codex").exists())
+            self.assertTrue((target / ".agents/skills/module-docs/SKILL.md").is_file())
             self.assertFalse((target / ".claude").exists())
             inventory = (target / "docs/development/skill-inventory.md").read_text()
             self.assertIn("Codex skill", inventory)
+            self.assertNotIn("implement-v13-codex", inventory)
             self.assertNotIn("Claude command", inventory)
 
     def test_toml_metadata_is_escaped(self) -> None:

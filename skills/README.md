@@ -16,7 +16,9 @@ Available workflows:
 - `implement-v11` — run one feature through a durable implementation workflow.
 - `local-review` — review uncommitted changes.
 - `local-review-pr` — review a committed branch range before a pull request or merge.
-- `implement-v13-codex` — run one feature through the durable Codex-native production lifecycle.
+- `implement-v13-codex` — **deprecated and non-functional; do not install or
+  invoke it.** The initializer excludes it. The checked-in directory is retained
+  only as historical cleanup debt pending coordinated removal.
 
 These are templates, not universal policy. Adapt commands, validation gates, branch
 rules, and compliance language to the generated project's `AGENTS.md` and selected

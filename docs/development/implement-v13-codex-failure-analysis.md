@@ -8,12 +8,12 @@ This report analyzes the failures observed while `implement-v13-codex` developed
 
 Evidence roots:
 
-- Base worktree: `/Users/kirillzaslavsky/.codex/worktrees/harness-labs-testing-base`
-- Feature worktree: `/Users/kirillzaslavsky/.codex/worktrees/harness-labs-testing-base/.claude/worktrees/impl-codex-fr_0a8feb07a847488ea910a0ec5a2a99d7`
-- Run artifacts: `/Users/kirillzaslavsky/.codex/worktrees/harness-labs-testing-base/handoff/serial-runs/qr_405df6b197f24c7fbd2e157278458e15/fr_0a8feb07a847488ea910a0ec5a2a99d7`
-- Serial queue: `/Users/kirillzaslavsky/.codex/worktrees/harness-labs-testing-base/docs/development/serial_implementation_queue.json`
-- Checkpoint: `/Users/kirillzaslavsky/.codex/worktrees/harness-labs-testing-base/.claude/worktrees/impl-codex-fr_0a8feb07a847488ea910a0ec5a2a99d7/docs/development/current_implementation_checkpoint.json`
-- Installed controller source: `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex`
+- Base worktree: `<user-home>/.codex/worktrees/harness-labs-testing-base`
+- Feature worktree: `<user-home>/.codex/worktrees/harness-labs-testing-base/.claude/worktrees/impl-codex-fr_0a8feb07a847488ea910a0ec5a2a99d7`
+- Run artifacts: `<user-home>/.codex/worktrees/harness-labs-testing-base/handoff/serial-runs/qr_405df6b197f24c7fbd2e157278458e15/fr_0a8feb07a847488ea910a0ec5a2a99d7`
+- Serial queue: `<user-home>/.codex/worktrees/harness-labs-testing-base/docs/development/serial_implementation_queue.json`
+- Checkpoint: `<user-home>/.codex/worktrees/harness-labs-testing-base/.claude/worktrees/impl-codex-fr_0a8feb07a847488ea910a0ec5a2a99d7/docs/development/current_implementation_checkpoint.json`
+- Installed controller source: `<user-home>/.codex/skills/implement-v13-codex`
 
 Unless a paragraph says **Inference**, it reports a directly observed fact. Confidence describes attribution, not severity.
 
@@ -43,7 +43,7 @@ Historical role cost is also material: 26 repair-designer calls consumed about 1
 - `fr_0a8feb07a847488ea910a0ec5a2a99d7-REVIEWING-closure_test-l1_l2_contract_boundary_reviewer-1-15.receipt.json`
 - `fr_0a8feb07a847488ea910a0ec5a2a99d7-REVIEWING-closure_test-l1_l2_contract_boundary_reviewer-1-16.receipt.json`
 
-**Source binding.** `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/schemas/closure-test-result.schema.json:5-14`; `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/scripts/run_exec.py:207-226,288-325`.
+**Source binding.** `<user-home>/.codex/skills/implement-v13-codex/schemas/closure-test-result.schema.json:5-14`; `<user-home>/.codex/skills/implement-v13-codex/scripts/run_exec.py:207-226,288-325`.
 
 **Fix.** Make `effect_contract` required (nullable if semantic absence must remain expressible). Add a recursive strict-response-schema validator before an attempt identity is created, including complete `required` sets and API-required object restrictions. Add a fixture that runs every canonical schema through the same response-format validation path used by production.
 
@@ -59,7 +59,7 @@ Historical role cost is also material: 26 repair-designer calls consumed about 1
 
 **Durable evidence.** The three receipts/stdout files above; attempts 15/16 corresponding stderr logs; queue revision 23 blocker.
 
-**Source binding.** `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/scripts/run_exec.py:362-411`.
+**Source binding.** `<user-home>/.codex/skills/implement-v13-codex/scripts/run_exec.py:362-411`.
 
 **Fix.** Parse terminal `error` events into structured classes such as `response_schema_transport_rejected`, store the server message in the receipt, and mark deterministic 4xx schema failures non-retryable across models. Keep cache warnings in a separate diagnostic field.
 
@@ -75,7 +75,7 @@ Historical role cost is also material: 26 repair-designer calls consumed about 1
 
 **Durable evidence.** 155 `COORDINATOR-drive-feature_coordinator` receipts and their stdout JSONL files; final turn usage event; same `thread_id` across recovered receipts.
 
-**Source binding.** `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/scripts/run_feature.py:159-238,308-328,468-497,500-620`.
+**Source binding.** `<user-home>/.codex/skills/implement-v13-codex/scripts/run_feature.py:159-238,308-328,468-497,500-620`.
 
 **Inference.** Not all 117.1 M input tokens were uncached or billable, but cumulative growth is a reliable indicator of a very large retained coordination context.
 
@@ -93,7 +93,7 @@ Historical role cost is also material: 26 repair-designer calls consumed about 1
 
 **Durable evidence.** `review-triage.v1.json`; closure-ledger revision 124, including closure states and regression checks; fixer and targeted-review receipts.
 
-**Source binding.** `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/scripts/run_feature.py:308-328`; `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/scripts/review_closure.py:660-697`.
+**Source binding.** `<user-home>/.codex/skills/implement-v13-codex/scripts/run_feature.py:308-328`; `<user-home>/.codex/skills/implement-v13-codex/scripts/review_closure.py:660-697`.
 
 **Fix.** Build a dependency graph between findings and code surfaces. Permit an atomic multi-closure repair only when dependency is explicit and reviewers remain independent. Run a deterministic incremental shared regression suite once per repair batch, then independently disposition affected findings. Add starvation limits and reorder unaffected closures around a repeatedly failing architectural cluster.
 
@@ -109,7 +109,7 @@ Historical role cost is also material: 26 repair-designer calls consumed about 1
 
 **Durable evidence.** Queue blocked histories for attempts 1 and 2; closure 3 attempt/design histories in the ledger; operator resolution selecting controller-owned failure persistence.
 
-**Source binding.** `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/scripts/review_closure.py:330-400`.
+**Source binding.** `<user-home>/.codex/skills/implement-v13-codex/scripts/review_closure.py:330-400`.
 
 **Fix.** Require each immutable assertion to map to a canonical lifecycle effect and verify the mapping against real test execution before a fixer starts. Run a contradiction matrix over permitted/forbidden persistent effects. If no assignment satisfies all tests, block once with concrete mutually exclusive alternatives.
 
@@ -125,7 +125,7 @@ Historical role cost is also material: 26 repair-designer calls consumed about 1
 
 **Durable evidence.** Queue attempt-2 blocker and its resolution evidence; checkpoint resolution history recording removal of `uniqueItems` and the 120-test installed-skill suite.
 
-**Source binding.** Canonical schema guards and preflight are in `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/scripts/run_exec.py:288-325`; canonical schemas are under `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/schemas/`.
+**Source binding.** Canonical schema guards and preflight are in `<user-home>/.codex/skills/implement-v13-codex/scripts/run_exec.py:288-325`; canonical schemas are under `<user-home>/.codex/skills/implement-v13-codex/schemas/`.
 
 **Fix.** Keep one normative source schema and compile it deterministically into a provider transport schema. Record and validate both hashes. Test all generated transport schemas against the provider dialect before dispatch; never accept ad hoc child-authored copies.
 
@@ -141,7 +141,7 @@ Historical role cost is also material: 26 repair-designer calls consumed about 1
 
 **Durable evidence.** Queue attempt-4 blocker and resolution; closure 6 `budget_recovery_history` and preserved rejection history.
 
-**Source binding.** The repaired implementation is `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/scripts/review_closure.py:233-251,547-602`.
+**Source binding.** The repaired implementation is `<user-home>/.codex/skills/implement-v13-codex/scripts/review_closure.py:233-251,547-602`.
 
 **Fix.** The current baseline fields are the correct direction. Make them a ledger invariant and migration requirement; add tests proving history remains append-only while post-resolution counts start at zero exactly once.
 
@@ -157,7 +157,7 @@ Historical role cost is also material: 26 repair-designer calls consumed about 1
 
 **Durable evidence.** Closure 6 design-review and targeted-review evidence in the ledger; corresponding designer, fixer, and reviewer outputs.
 
-**Source binding.** The controller launches children with an outer Codex sandbox at `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/scripts/run_exec.py:650-660`.
+**Source binding.** The controller launches children with an outer Codex sandbox at `<user-home>/.codex/skills/implement-v13-codex/scripts/run_exec.py:650-660`.
 
 **Fix.** Probe the actual enforcement capability once before implementation. Put mandatory OS sandboxing in a controller/host-owned broker rather than nesting it inside a constrained child. If unavailable, fail at `orient` with an external-capability blocker. Certification must exercise the real enforcement path; monkeypatched launchers may localize logic but cannot satisfy the gate.
 
@@ -173,7 +173,7 @@ Historical role cost is also material: 26 repair-designer calls consumed about 1
 
 **Durable evidence.** Queue attempts 5, 6, and 7 blocker histories; closure 1 contract-resolution and design-rejection histories.
 
-**Source binding.** `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/scripts/review_closure.py:430-546`.
+**Source binding.** `<user-home>/.codex/skills/implement-v13-codex/scripts/review_closure.py:430-546`.
 
 **Fix.** Resolution validation must prove: exact active closure/test identity; controller ownership of minting; non-caller-selectability; transport, lifetime, and consumption path; fail-closed behavior; and an executable test of the whole channel. Reject incomplete authority before resuming.
 
@@ -189,7 +189,7 @@ Historical role cost is also material: 26 repair-designer calls consumed about 1
 
 **Durable evidence.** Current installed source and checkpoint resolution history.
 
-**Source binding.** `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/scripts/review_closure.py:441-546`.
+**Source binding.** `<user-home>/.codex/skills/implement-v13-codex/scripts/review_closure.py:441-546`.
 
 **Fix.** Define a generic resolution schema and store concrete profiles in the run artifact, bound to repository identity, test/source hashes, operator authorization hash, and active closure. Generic controller code should validate properties, not know project filenames or bytes.
 
@@ -205,7 +205,7 @@ Historical role cost is also material: 26 repair-designer calls consumed about 1
 
 **Durable evidence.** Closure 1 attempt 1/2 histories and reviewer evidence; queue/checkpoint resolution permitting reviewer temp capability.
 
-**Source binding.** Writable roots and child environment are preflighted in `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/scripts/run_exec.py:288-325`, but test-runner temp capability is not semantically probed there.
+**Source binding.** Writable roots and child environment are preflighted in `<user-home>/.codex/skills/implement-v13-codex/scripts/run_exec.py:288-325`, but test-runner temp capability is not semantically probed there.
 
 **Fix.** Define per-role ephemeral scratch as a first-class permission distinct from repository writes. Preflight the exact test command's temp/cache requirements and record the granted scratch root in the receipt.
 
@@ -221,7 +221,7 @@ Historical role cost is also material: 26 repair-designer calls consumed about 1
 
 **Durable evidence.** Historical designer/fixer receipts and their model/reasoning fields; closure rejection histories. The current prompt has since changed designers to Terra-medium.
 
-**Source binding.** Current policy text: `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/scripts/run_feature.py:219-223`; current enforcement keeps Luna-high only for implementation workers/fixers: `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/scripts/run_exec.py:663-687`.
+**Source binding.** Current policy text: `<user-home>/.codex/skills/implement-v13-codex/scripts/run_feature.py:219-223`; current enforcement keeps Luna-high only for implementation workers/fixers: `<user-home>/.codex/skills/implement-v13-codex/scripts/run_exec.py:663-687`.
 
 **Inference.** Terra-medium is likely cheaper/faster for bounded design, but this run contains no controlled Luna-vs-Terra comparison proving equal or better design quality.
 
@@ -239,7 +239,7 @@ Historical role cost is also material: 26 repair-designer calls consumed about 1
 
 **Durable evidence.** `implementation-partition.v1.json`; closure 1/4/5/6 attempt and targeted-review histories; fixer outputs.
 
-**Source binding.** Repair serialization and regression reopening are at `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/scripts/run_feature.py:308-328` and `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/scripts/review_closure.py:660-697`.
+**Source binding.** Repair serialization and regression reopening are at `<user-home>/.codex/skills/implement-v13-codex/scripts/run_feature.py:308-328` and `<user-home>/.codex/skills/implement-v13-codex/scripts/review_closure.py:660-697`.
 
 **Fix.** Before targeted model review, run deterministic impact checks: forbidden reads/selectors, pre-communication bounds, process-evidence schema, production-real sandbox smoke, and all tests mapped to affected closure dependencies. Prefer smaller stable controller interfaces so repair write sets are disjoint.
 
@@ -255,7 +255,7 @@ Historical role cost is also material: 26 repair-designer calls consumed about 1
 
 **Durable evidence.** Historical receipts and prompt/schema snapshots; checkpoint resolution history; current installed model-policy source; same-thread recovery receipts.
 
-**Source binding.** Continuation reads the installed package and overrides model policy at `/Users/kirillzaslavsky/.codex/skills/implement-v13-codex/scripts/run_feature.py:159-238`; recovery requires the same thread at lines 468-497.
+**Source binding.** Continuation reads the installed package and overrides model policy at `<user-home>/.codex/skills/implement-v13-codex/scripts/run_feature.py:159-238`; recovery requires the same thread at lines 468-497.
 
 **Fix.** Snapshot the complete controller package at dispatch and record its digest in queue, checkpoint, transaction, and every receipt. Resume the exact snapshot. If a controller fix is needed, perform an explicit migration with old/new hashes, schema migration proof, state invariants, and a fresh bounded coordinator context.
 

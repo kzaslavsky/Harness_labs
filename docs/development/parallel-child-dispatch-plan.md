@@ -6,7 +6,7 @@ Date: 2026-08-02
 ## Repository identity
 
 - Feature worktree:
-  `/Users/kirillzaslavsky/Documents/harness_labs-parallel-child-dispatch`
+  `<user-home>/Documents/harness_labs-parallel-child-dispatch`
 - Feature branch: `codex/parallel-child-dispatch`
 - Base branch: `Impl-redo`
 - Base commit: `e677f03e2a3a1ecf4d28bcf6630fd613c70c174d`

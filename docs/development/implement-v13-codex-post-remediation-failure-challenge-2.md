@@ -10,7 +10,7 @@ This review attempts to refute only the seven candidate items emitted by
 `F5`, `F6`, `F8`, `N1`, and `N2`. It does not revisit any other inventory
 item, split any candidate into another item, or introduce a remediation. The
 bounded source scope is
-`/Users/kirillzaslavsky/Documents/harness_labs/skills/codex/implement-v13-codex`;
+`<user-home>/Documents/harness_labs/skills/codex/implement-v13-codex`;
 the bounded run scope is feature run
 `fr_0a8feb07a847488ea910a0ec5a2a99d7` through the operator pause represented by
 ledger revision 188.
@@ -28,7 +28,7 @@ refutation.
 sandbox. `run_exec.py` validates the requested sandbox and passes either
 `--sandbox read-only` or `--sandbox workspace-write` to `codex exec`:
 
-- `/Users/kirillzaslavsky/Documents/harness_labs/skills/codex/implement-v13-codex/scripts/run_exec.py:986-1041`,
+- `<user-home>/Documents/harness_labs/skills/codex/implement-v13-codex/scripts/run_exec.py:986-1041`,
   symbol `_codex_argv`.
 
 The capability manifest also contains a real successful host
@@ -231,10 +231,10 @@ The candidate also overstates the documentation scope. No contradictory
 same-closure rule was located in `SKILL.md`. The contradiction is confined to
 two normative references:
 
-- `/Users/kirillzaslavsky/Documents/harness_labs/skills/codex/implement-v13-codex/references/protocol.md:160-163`
+- `<user-home>/Documents/harness_labs/skills/codex/implement-v13-codex/references/protocol.md:160-163`
   says a missing same-closure retry or redesign program is
   `routine_program_missing`;
-- `/Users/kirillzaslavsky/Documents/harness_labs/skills/codex/implement-v13-codex/references/phase-contracts.md:125-130`
+- `<user-home>/Documents/harness_labs/skills/codex/implement-v13-codex/references/phase-contracts.md:125-130`
   says absence of the same continuation program is a deterministic blocker.
 
 Those statements directly contradict the current function and regression
@@ -271,4 +271,4 @@ No candidate collapses into another candidate.
 - New failure modes implied or named: zero.
 - New remediation concepts proposed: zero.
 - Files written: only
-  `/Users/kirillzaslavsky/Documents/harness_labs/docs/development/implement-v13-codex-post-remediation-failure-challenge-2.md`.
+  `<user-home>/Documents/harness_labs/docs/development/implement-v13-codex-post-remediation-failure-challenge-2.md`.

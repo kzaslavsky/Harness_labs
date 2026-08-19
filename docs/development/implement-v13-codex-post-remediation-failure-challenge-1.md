@@ -6,7 +6,7 @@ artifact, or feature worktree was changed
 ## Scope, authority, and method
 
 This challenge tests only the claims in
-`/Users/kirillzaslavsky/Documents/harness_labs/docs/development/implement-v13-codex-post-remediation-failure-inventory.md`
+`<user-home>/Documents/harness_labs/docs/development/implement-v13-codex-post-remediation-failure-inventory.md`
 against the current repository source and the same bounded observation window.
 The lower bound is the committed v13 migration at
 `2026-07-23T09:31:49.275303Z`; the upper bound is the operator pause at queue
@@ -18,20 +18,20 @@ scope is `skills/codex/implement-v13-codex`,
 Durable authority at audit time:
 
 - Queue:
-  `/Users/kirillzaslavsky/.codex/worktrees/harness-labs-testing-base/docs/development/serial_implementation_queue.json`,
+  `<user-home>/.codex/worktrees/harness-labs-testing-base/docs/development/serial_implementation_queue.json`,
   SHA-256
   `d0c4e39a7747f146d7c5da4e721f6f3148c8f9b90f07d702a4b3f46ffeeaa5c9`,
   fields `/state_revision=91`, `/features/0/status="blocked"`, and
   `/features/0/blocker/blocker_class="operator_pause"`.
 - Closure ledger:
-  `/Users/kirillzaslavsky/.codex/worktrees/harness-labs-testing-base/handoff/serial-runs/qr_405df6b197f24c7fbd2e157278458e15/fr_0a8feb07a847488ea910a0ec5a2a99d7/review-closure-ledger.v1.json`,
+  `<user-home>/.codex/worktrees/harness-labs-testing-base/handoff/serial-runs/qr_405df6b197f24c7fbd2e157278458e15/fr_0a8feb07a847488ea910a0ec5a2a99d7/review-closure-ledger.v1.json`,
   SHA-256
   `90ab70400c0470bc788c24bcc3b6f7e6f1e32f5364988724850f7c8ac7785ea2`,
   fields `/state_revision=188`,
   `/active_closure_id="closure-005-disposable-attestation"`, and active
   closure `/status="fix_running"`.
 - Package migration:
-  `/Users/kirillzaslavsky/.codex/worktrees/harness-labs-testing-base/handoff/serial-runs/qr_405df6b197f24c7fbd2e157278458e15/fr_0a8feb07a847488ea910a0ec5a2a99d7/controller-migration-v14.v1.json`,
+  `<user-home>/.codex/worktrees/harness-labs-testing-base/handoff/serial-runs/qr_405df6b197f24c7fbd2e157278458e15/fr_0a8feb07a847488ea910a0ec5a2a99d7/controller-migration-v14.v1.json`,
   SHA-256
   `fe3ce8f20691e8589ebd39ee9f308c8499a5610d10000a709b62921ffd4a104c`,
   fields `/state="committed"` and
@@ -52,11 +52,11 @@ confirmed. Queue `/features/0/blocked_history` records the post-v13
 `routine_program_missing` blocker at `2026-07-23T11:12:50.973248Z`. The current
 fix is concrete:
 
-- `/Users/kirillzaslavsky/Documents/harness_labs/skills/codex/implement-v13-codex/scripts/closure_driver.py:108-146`,
+- `<user-home>/Documents/harness_labs/skills/codex/implement-v13-codex/scripts/closure_driver.py:108-146`,
   symbol `continue_without_bound_program`, returns `next_ready`, `retry_fix`,
   and `redesign` without a blocker.
 - The call site is the same file at `:247-258`, symbol `continue_routine`.
-- `/Users/kirillzaslavsky/Documents/harness_labs/skills/codex/implement-v13-codex/tests/test_closure_driver.py:33-72`
+- `<user-home>/Documents/harness_labs/skills/codex/implement-v13-codex/tests/test_closure_driver.py:33-72`
   distinguishes legal unbound retry from an unknown unbound route.
 
 **Disposition:** survives as confirmed/fixed, not actionable by itself. The
@@ -70,7 +70,7 @@ Closure 004 attempt 4 in the authoritative ledger records the independent
 quarantine. Attempt 5 records strategy
 `terminal_failure_success_artifact_elimination_v14`, finding status `fixed`,
 attempt status `accepted`, and closure status `closed`. Independent result
-`/Users/kirillzaslavsky/.codex/worktrees/harness-labs-testing-base/handoff/serial-runs/qr_405df6b197f24c7fbd2e157278458e15/fr_0a8feb07a847488ea910a0ec5a2a99d7/fr_0a8feb07a847488ea910a0ec5a2a99d7-REVIEWING-targeted_review-l1_l2_contract_boundary_reviewer-33-1.output.json`
+`<user-home>/.codex/worktrees/harness-labs-testing-base/handoff/serial-runs/qr_405df6b197f24c7fbd2e157278458e15/fr_0a8feb07a847488ea910a0ec5a2a99d7/fr_0a8feb07a847488ea910a0ec5a2a99d7-REVIEWING-targeted_review-l1_l2_contract_boundary_reviewer-33-1.output.json`
 (SHA-256
 `767a83ed38f391f3e5aa30cd86509955028aac48ac2f4192034c6044924cf42a`)
 states that no success result, success receipt, integration artifact,
@@ -84,19 +84,19 @@ It is not actionable in the remediation plan for the harness.
 
 The nested Seatbelt failure is real, but the inventory understates the precise
 contract break. The v14 manifest
-`/Users/kirillzaslavsky/.codex/worktrees/harness-labs-testing-base/handoff/serial-runs/qr_405df6b197f24c7fbd2e157278458e15/fr_0a8feb07a847488ea910a0ec5a2a99d7/capability-v14-host/capability-manifest.v1.json`
+`<user-home>/.codex/worktrees/harness-labs-testing-base/handoff/serial-runs/qr_405df6b197f24c7fbd2e157278458e15/fr_0a8feb07a847488ea910a0ec5a2a99d7/capability-v14-host/capability-manifest.v1.json`
 (SHA-256
 `ac68ed74cfbb65f01a2e39883fd2afc721b853e197144f31f33714c1f2087c20`)
 sets `/probes/*/same_broker_as_production=true`. That value is derived from
 `production_real` rather than from an execution-path identity check:
 
-- `/Users/kirillzaslavsky/Documents/harness_labs/skills/codex/implement-v13-codex/scripts/repair_preflight.py:248-293`,
+- `<user-home>/Documents/harness_labs/skills/codex/implement-v13-codex/scripts/repair_preflight.py:248-293`,
   symbol `_sandbox_probe_command`, executes host `/usr/bin/sandbox-exec`.
 - The same file at `:296-378`, symbol `probe_role_capabilities`, assigns
   `same_broker_as_production=production_real` and describes the execution path
   as `"run_exec host-broker policy and role subprocess"`.
 - In contrast,
-  `/Users/kirillzaslavsky/Documents/harness_labs/skills/codex/implement-v13-codex/scripts/run_exec.py:1083-1114,1198-1225`
+  `<user-home>/Documents/harness_labs/skills/codex/implement-v13-codex/scripts/run_exec.py:1083-1114,1198-1225`
   only validates the manifest and then constructs an ordinary `codex exec`
   child. It does not execute the certified host command.
 
@@ -141,10 +141,10 @@ already present in each coordinator stdout `turn.completed` event. For example:
 
 The schema and consumer choose model-authored telemetry:
 
-- `/Users/kirillzaslavsky/Documents/harness_labs/skills/codex/implement-v13-codex/schemas/feature-coordinator-result.schema.json:60-69`
+- `<user-home>/Documents/harness_labs/skills/codex/implement-v13-codex/schemas/feature-coordinator-result.schema.json:60-69`
   permits telemetry to be null and otherwise accepts arbitrary nonnegative
   self-reported values.
-- `/Users/kirillzaslavsky/Documents/harness_labs/skills/codex/implement-v13-codex/scripts/run_feature.py:1066-1072,1211-1248`
+- `<user-home>/Documents/harness_labs/skills/codex/implement-v13-codex/scripts/run_feature.py:1066-1072,1211-1248`
   reads that field and converts null to zero rather than reading the process
   receipt's stdout usage.
 
@@ -196,11 +196,11 @@ historical PPID observation by itself:
 
 The source establishes the cleanup gap:
 
-- `/Users/kirillzaslavsky/Documents/harness_labs/skills/codex/implement-v13-codex/scripts/run_exec.py:550-570`
+- `<user-home>/Documents/harness_labs/skills/codex/implement-v13-codex/scripts/run_exec.py:550-570`
   has a fingerprint-safe group terminator.
 - The same file at `:1258-1301` calls it only on wall timeout; the polling region
   has no `BaseException`/`KeyboardInterrupt` cleanup.
-- `/Users/kirillzaslavsky/Documents/harness_labs/skills/codex/implement-v13-codex/scripts/supervised_child.py:14-78`
+- `<user-home>/Documents/harness_labs/skills/codex/implement-v13-codex/scripts/supervised_child.py:14-78`
   uses blocking `subprocess.run` and has no signal-forwarding/finally path.
 
 **Disposition:** survives, open, harness supervision defect. **Bounded fix
@@ -212,7 +212,7 @@ that proves no descendant survives and recovery preserves attempt history.
 ### F7 — rejected as an independent failure mode; collapse into F3
 
 The broad suite is a required fail-closed integration gate under
-`/Users/kirillzaslavsky/Documents/harness_labs/skills/codex/implement-v13-codex/references/repository-gates.md:5-18`.
+`<user-home>/Documents/harness_labs/skills/codex/implement-v13-codex/references/repository-gates.md:5-18`.
 Its failure is not non-authoritative noise that may be reclassified away. The
 full-suite failure list captured in fixer-34 stdout shows the same early
 `Seatbelt enforcement probe failed` leaves downstream expected role-result and
@@ -240,9 +240,9 @@ The evidence is exact:
 - `...targeted_review-security_privacy_destructive_behavior_reviewer-34-1.output.json`
   has top-level `/status="passed"` and its sole finding
   `/status="not_fixed"`; the ledger rejects the attempt.
-- `/Users/kirillzaslavsky/Documents/harness_labs/skills/codex/implement-v13-codex/schemas/closure-targeted-review-result.schema.json:5-12`
+- `<user-home>/Documents/harness_labs/skills/codex/implement-v13-codex/schemas/closure-targeted-review-result.schema.json:5-12`
   gives both domains the unqualified name `status`.
-- `/Users/kirillzaslavsky/Documents/harness_labs/skills/codex/implement-v13-codex/scripts/review_closure.py:1640-1705`,
+- `<user-home>/Documents/harness_labs/skills/codex/implement-v13-codex/scripts/review_closure.py:1640-1705`,
   symbol `record_review`, correctly routes only from per-fingerprint statuses
   and never consumes the top-level status.
 
@@ -269,7 +269,7 @@ execution/finding cross-product tests.
 - **Responsible contract/source:** primary owner is the Codex CLI/local cache
   compatibility boundary, not model reasoning. The harness copies every
   nonempty stderr line without classification or deduplication at
-  `/Users/kirillzaslavsky/Documents/harness_labs/skills/codex/implement-v13-codex/scripts/run_exec.py:617-682,737-838`,
+  `<user-home>/Documents/harness_labs/skills/codex/implement-v13-codex/scripts/run_exec.py:617-682,737-838`,
   symbols `classify_terminal_cause`, `_stderr_diagnostics`, and
   `_finalize_receipt`.
 - **Impact:** durable evidence is flooded with repeated error lines and the
@@ -291,7 +291,7 @@ execution/finding cross-product tests.
   described under F1. The normative repository reference instead says that a
   same-closure retry/redesign without a pre-bound program is a deterministic
   blocker:
-  `/Users/kirillzaslavsky/Documents/harness_labs/skills/codex/implement-v13-codex/references/phase-contracts.md:125-130`.
+  `<user-home>/Documents/harness_labs/skills/codex/implement-v13-codex/references/phase-contracts.md:125-130`.
   That directly contradicts
   `closure_driver.py:108-146,247-258` and
   `test_closure_driver.py:33-61`, which return the route to the outer
