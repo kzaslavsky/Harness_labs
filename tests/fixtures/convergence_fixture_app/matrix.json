@@ -1,0 +1,13 @@
+{
+  "routes": ["index.html", "about.html", "flaky.html", "missing.html"],
+  "viewports": [
+    {"name": "desktop", "width": 1280, "height": 800},
+    {"name": "mobile", "width": 375, "height": 667}
+  ],
+  "themes": ["light", "dark"],
+  "interactions": [
+    {"name": "none", "steps": []},
+    {"name": "toggle-menu", "steps": [{"action": "click", "selector": "#menu-toggle"}]}
+  ],
+  "selectors": ["#page-title", ".card", "#menu-toggle"]
+}
