@@ -17,6 +17,7 @@ from typing import Callable, Mapping, Sequence
 from uuid import uuid4
 
 from harness_labs.core.audit import AuditError
+from harness_labs.core.git_transaction import owner_for_path
 from harness_labs.plangraph.plan_graph_audit import PlanGraphAudit, validate_plan_graph_id
 from harness_labs.plangraph.plan_graph_budget import BudgetError, RetryBudgetLedger, gate_digest
 from harness_labs.plangraph.plan_graph_authority import AutomaticRecoveryAuthority, RecoveryAuthorityError
@@ -1584,6 +1585,7 @@ class PlanGraph:
                 result.status,
                 outcome.evidence,
                 finding_obligations=carried,
+                scope_screening=self._scope_screening(outcome),
             )
             if result.status == "blocked":
                 return _SealDecision(
@@ -1627,6 +1629,7 @@ class PlanGraph:
             run.id,
             outcome.candidate_commit,
             finding_obligations=finding_obligations,
+            scope_screening=self._scope_screening(outcome),
         )
         return _SealDecision("sealed", finding_obligations=finding_obligations)
 
@@ -2348,6 +2351,30 @@ class PlanGraph:
         return pending
 
     @staticmethod
+    def _scope_screening(outcome: FeatureRunOutcome) -> dict[str, object]:
+        """Read the scope-screen tally a child's review loop reported.
+
+        A screened finding is attached to no obligation, so it appears in no
+        other field of the node's record: without this it leaves no trace at
+        all in what an operator reads.  Best-effort like :meth:`_open_findings`
+        -- nothing branches on it, so a malformed payload must not cost the
+        graph its completion or failure record.
+        """
+
+        if not isinstance(outcome.evidence, Mapping):
+            return {}
+        review_fix = outcome.evidence.get("review_fix")
+        if not isinstance(review_fix, Mapping):
+            return {}
+        screening = review_fix.get("scope_screening")
+        if not isinstance(screening, Mapping):
+            return {}
+        count = screening.get("screened_count")
+        if not isinstance(count, int) or isinstance(count, bool) or count < 1:
+            return {}
+        return dict(screening)
+
+    @staticmethod
     def _open_findings(
         outcome: FeatureRunOutcome,
     ) -> tuple[Mapping[str, object], ...]:
@@ -2565,6 +2592,14 @@ class PlanGraph:
                         "candidate_commit": node.get("candidate_commit") or self._pending_candidate_commit(audit, node_id),
                         "evidence_ref": evidence_ref,
                         "open_obligations": node.get("finding_obligations", []),
+                        # A screened finding is attached to no obligation, so
+                        # without this it leaves no trace in the artifact an
+                        # operator actually reads after a block.
+                        "scope_screening": (
+                            dict(node["scope_screening"])
+                            if isinstance(node.get("scope_screening"), Mapping)
+                            else {}
+                        ),
                     })
         # The resume template names every node this attempt terminalized, not
         # only the first one recorded.  A successor that retries only the
@@ -3086,16 +3121,19 @@ def _required_path_from_mapping(value: Mapping[str, object]) -> RequiredPath:
 
 
 def _target_for_path(path: str, targets: Mapping[str, str]) -> str | None:
-    matches = []
-    for grant, target in targets.items():
-        normalized = grant.rstrip("/")
-        if path == normalized or (grant.endswith("/") and path.startswith(grant)):
-            matches.append((len(normalized), target))
-    if not matches:
-        return None
-    longest = max(length for length, _ in matches)
-    owners = {target for length, target in matches if length == longest}
-    return next(iter(owners)) if len(owners) == 1 else None
+    """Resolve one required path to the downstream node granted it.
+
+    The hand-rolled prefix test this replaces demanded ``grant.endswith("/")``
+    before it would look beneath a grant.  ``normalize_repository_path``
+    rejects a trailing slash outright, so no grant that survives the plan
+    contract could ever satisfy it and only an exact filename match routed:
+    every directory grant in a real decomposition was unroutable, and
+    cross-node finding transfer could not fire.  Containment now comes from
+    ``owner_for_path``, which asks the write boundary's own predicate and is
+    shared with PlanGraph so the claim and its validation cannot drift apart.
+    """
+
+    return owner_for_path(path, targets)
 
 
 __all__ = [

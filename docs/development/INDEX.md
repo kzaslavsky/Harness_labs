@@ -47,6 +47,10 @@ Status: active
   [`plan-approval-design.md`](plan-approval-design.md)
 - Platform-patch merge audit for the Retinology Flow-Editor campaign (P1-P12):
   [`HARNESS_LABS_PATCH_AUDIT_20260818.md`](HARNESS_LABS_PATCH_AUDIT_20260818.md)
+- Porting `dashboard_improve` to main, survey and decision:
+  [`dashboard-improve-port-plan.md`](dashboard-improve-port-plan.md)
+- Session handoff and ranked backlog (2026-08-19):
+  [`SESSION_HANDOFF_20260819.md`](SESSION_HANDOFF_20260819.md)
 
 ## Seed implementation records
 

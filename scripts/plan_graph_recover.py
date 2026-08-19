@@ -45,15 +45,21 @@ class RecoveryCoordinatorError(ValueError):
 class CoordinatorResult:
     status: str
     reason: str
+    #: The primary blocker's decision -- ``decisions[0]`` -- kept as its own
+    #: field because it is the published shape of this program's stdout and
+    #: the frontier's first element is the escalation's primary blocker.
     decision: Mapping[str, object] | None = None
     resume_argv: tuple[str, ...] = ()
     resume_returncode: int | None = None
+    #: Every decision the attempt recorded, one per retry-frontier node.
+    decisions: tuple[Mapping[str, object], ...] = ()
 
     def as_mapping(self) -> dict[str, object]:
         return {
             "status": self.status,
             "reason": self.reason,
             "decision": dict(self.decision) if self.decision else None,
+            "decisions": [dict(item) for item in self.decisions],
             "resume_argv": list(self.resume_argv),
             "resume_returncode": self.resume_returncode,
         }
@@ -86,7 +92,17 @@ def load_escalation(path: Path) -> Mapping[str, object]:
 
 
 class RecoveryCoordinator:
-    """Classify an escalation, consume one bounded decision, and resume fresh."""
+    """Classify an escalation, consume one bounded decision per retry-frontier
+    node, and resume fresh.
+
+    The frontier is whatever the escalation declares, of any width.
+    ``scripts/plan_graph_autoresume.py`` is the unattended driver that will
+    hand this coordinator a frontier it has already reconciled against the
+    predecessor's ``plan_node_failed`` events; the reconciliation is that
+    driver's job and is deliberately not repeated here -- this program trusts
+    the artifact it is given and validates each node against the
+    *registration*, which is the authority it does own.
+    """
 
     def __init__(
         self, *, repository: Path, registration: PlanGraphRegistration,
@@ -128,15 +144,25 @@ class RecoveryCoordinator:
         closed.
         """
         try:
-            target, classification = self._target(escalation)
+            frontier, classifications = self._targets(escalation)
             state = self._ledger_state()
         except (RecoveryCoordinatorError, BudgetError) as exc:
             return CoordinatorResult("externally_blocked", str(exc))
-        if classification in _HUMAN_CLASSIFICATIONS:
-            return CoordinatorResult("requires_human", f"{classification} requires human authority")
+        human = [
+            (target, classification)
+            for target, classification in zip(frontier, classifications)
+            if classification in _HUMAN_CLASSIFICATIONS
+        ]
+        if human:
+            # Fail closed on the whole frontier: the successor relaunches all
+            # of it or none of it, so one node needing a human needs one.
+            target, classification = human[0]
+            return CoordinatorResult(
+                "requires_human", f"{classification} at {target} requires human authority"
+            )
         if self._decision_count(state) >= self.iteration_cap:
             return CoordinatorResult("externally_blocked", "recovery iteration cap exhausted")
-        action = requested_action or self._default_action(target, state)
+        action = requested_action or self._default_action(frontier, state)
         if action is None:
             return CoordinatorResult(
                 "externally_blocked", "authorized Tier-1 recovery actions exhausted"
@@ -148,10 +174,29 @@ class RecoveryCoordinator:
         if action not in {"resume", "extend_budget"}:
             return CoordinatorResult("requires_human", "no Tier-1 recovery action is authorized")
         try:
-            decision = self._decision(action, target, state)
-            if self._is_repeat(state, decision):
-                return CoordinatorResult("externally_blocked", "repeat recovery decision refused", decision)
-            self.ledger.apply_recovery_decision(decision, prior_digest=decision["expected_prior_digest"])
+            # One decision per frontier node.  ``apply_recovery_decision``
+            # binds a decision to a single registered node -- it appends
+            # ``resumed``/``extended`` for that ``target`` -- so a single
+            # decision naming only the primary blocker would under-report a
+            # relaunch of three nodes as a relaunch of one, and would extend
+            # the budget of one node while relaunching three.
+            decisions = tuple(self._decision(action, target, state) for target in frontier)
+            repeat = next(
+                (decision for decision in decisions if self._is_repeat(state, decision)), None
+            )
+            if repeat is not None:
+                return CoordinatorResult(
+                    "externally_blocked", "repeat recovery decision refused", repeat,
+                    decisions=decisions,
+                )
+            # The ledger is append-only and cannot roll back a partial
+            # frontier, so the allowance is checked for the whole frontier
+            # before the first decision is written.
+            self._assert_allowance(action, decisions, state)
+            for decision in decisions:
+                self.ledger.apply_recovery_decision(
+                    decision, prior_digest=decision["expected_prior_digest"]
+                )
         except (RecoveryCoordinatorError, BudgetError) as exc:
             return CoordinatorResult("externally_blocked", str(exc))
         argv = self._resume_argv(escalation, launcher_argv)
@@ -159,23 +204,82 @@ class RecoveryCoordinator:
         # The fresh process owns its own terminal result.  Its nonzero exit is
         # evidence of an external block, never a synthetic coordinator success.
         if returncode:
-            return CoordinatorResult("externally_blocked", "fresh resume process failed", decision, tuple(argv), returncode)
-        return CoordinatorResult("resumed", "fresh resume process started and exited successfully", decision, tuple(argv), returncode)
+            return CoordinatorResult(
+                "externally_blocked", "fresh resume process failed", decisions[0],
+                tuple(argv), returncode, decisions,
+            )
+        return CoordinatorResult(
+            "resumed", "fresh resume process started and exited successfully",
+            decisions[0], tuple(argv), returncode, decisions,
+        )
 
-    def _target(self, escalation: Mapping[str, object]) -> tuple[str, str]:
+    def _assert_allowance(
+        self, action: str, decisions: Sequence[Mapping[str, object]],
+        state: Mapping[str, Any],
+    ) -> None:
+        if action != "extend_budget":
+            return
+        spent = state.get("automatic_recovery_extra_launches")
+        spent = spent if isinstance(spent, int) else 0
+        requested = sum(int(decision["payload"]["launches"]) for decision in decisions)
+        if spent + requested > self.authority.max_extra_node_launches:
+            raise RecoveryCoordinatorError(
+                "recovery allowance cannot cover the whole retry frontier"
+            )
+
+    @staticmethod
+    def _frontier(escalation: Mapping[str, object]) -> tuple[str, ...]:
+        """Read the escalation's declared retry frontier, in its own order.
+
+        Order is load-bearing and preserved: the escalation contract puts the
+        primary blocker at index zero, and ``plan_graph_autoresume`` relies on
+        that when it appends the nodes the template under-reported.
+        """
         directive = _object(escalation["resume_directive_template"], "resume directive")
         frontier = directive.get("retry_frontier")
-        if not isinstance(frontier, list) or len(frontier) != 1 or not isinstance(frontier[0], str) or not frontier[0]:
-            raise RecoveryCoordinatorError("automatic recovery requires one explicit retry-frontier node")
-        target = frontier[0]
+        if (not isinstance(frontier, list) or not frontier
+                or any(not isinstance(node_id, str) or not node_id for node_id in frontier)):
+            raise RecoveryCoordinatorError("automatic recovery requires an explicit retry-frontier node")
+        if len(set(frontier)) != len(frontier):
+            raise RecoveryCoordinatorError("retry frontier names a node twice")
+        return tuple(frontier)
+
+    def _targets(self, escalation: Mapping[str, object]) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        """Validate *every* frontier node, or refuse the whole frontier.
+
+        ``continue_independent_after_block`` makes a multi-node frontier the
+        normal case, and the resume directive is indivisible: the successor
+        argv carries the whole frontier, and there is no way to relaunch a
+        subset while leaving the rest repaired.  So recovering "the nodes that
+        pass" would mean launching a successor that silently drops nodes the
+        predecessor terminalized -- exactly the under-retry defect
+        ``reconcile_frontier`` exists to prevent, which widens the frontier and
+        logs the discrepancy rather than quietly narrowing it.  A partial
+        recovery would also be the synthetic partial success this program's
+        docstring disclaims.  One node that cannot be validated therefore
+        blocks the attempt, and the reason names which node and why.
+        """
+        frontier = self._frontier(escalation)
         nodes = escalation["nodes"]
-        matching = [node for node in nodes if isinstance(node, Mapping) and node.get("node_id") == target]
-        if len(matching) != 1:
-            raise RecoveryCoordinatorError("retry-frontier node is absent from escalation")
-        target_run = [run for run in self.plan.runs if run.id == target]
-        if len(target_run) != 1:
-            raise RecoveryCoordinatorError("retry-frontier node is absent from registered plan")
-        return target, self._classify(escalation, matching[0], target_run[0].criteria)
+        classifications: list[str] = []
+        for target in frontier:
+            matching = [
+                node for node in nodes
+                if isinstance(node, Mapping) and node.get("node_id") == target
+            ]
+            if len(matching) != 1:
+                raise RecoveryCoordinatorError(
+                    f"retry-frontier node {target!r} is absent from escalation"
+                )
+            target_run = [run for run in self.plan.runs if run.id == target]
+            if len(target_run) != 1:
+                raise RecoveryCoordinatorError(
+                    f"retry-frontier node {target!r} is absent from registered plan"
+                )
+            classifications.append(
+                self._classify(escalation, matching[0], target_run[0].criteria)
+            )
+        return frontier, tuple(classifications)
 
     def _classify(
         self, escalation: Mapping[str, object], node: Mapping[str, object],
@@ -207,16 +311,23 @@ class RecoveryCoordinator:
                 for criterion in target_criteria
         ):
             raise RecoveryCoordinatorError(
-                "significance guidance does not cover the retry-frontier node"
+                "significance guidance does not cover retry-frontier node "
+                f"{node.get('node_id')!r}"
             )
         reason = node.get("reason")
         if not isinstance(reason, str) or not reason:
             reason = escalation.get("reason")
         if not isinstance(reason, str) or not reason:
-            raise RecoveryCoordinatorError("retry-frontier node lacks failure evidence for classification")
+            raise RecoveryCoordinatorError(
+                f"retry-frontier node {node.get('node_id')!r} lacks failure "
+                "evidence for classification"
+            )
         classification = classify_verification_failure({"stderr": reason})["classification"]
         if classification not in _CLASSIFICATIONS:
-            raise RecoveryCoordinatorError("retry-frontier failure has unsupported classification")
+            raise RecoveryCoordinatorError(
+                f"retry-frontier node {node.get('node_id')!r} has an "
+                f"unsupported failure classification {classification!r}"
+            )
         return classification
 
     def _ledger_state(self) -> Mapping[str, Any]:
@@ -230,13 +341,22 @@ class RecoveryCoordinator:
     def _decision_count(state: Mapping[str, Any]) -> int:
         return sum(1 for event in state.get("events", ()) if event.get("event") == "recovery_decision")
 
-    def _default_action(self, target: str, state: Mapping[str, Any]) -> str | None:
+    def _default_action(self, frontier: Sequence[str], state: Mapping[str, Any]) -> str | None:
+        """Choose the one action to apply to every node in the frontier.
+
+        The attempted set is the *union* over the frontier rather than a
+        per-node set.  A per-node choice could pick ``resume`` for one node and
+        ``extend_budget`` for another in the same indivisible relaunch, and the
+        union also keeps ``_is_repeat`` from refusing the whole attempt because
+        one node had already seen this action.
+        """
+        targets = set(frontier)
         attempted = {
             event["decision"].get("action")
             for event in state.get("events", ())
             if event.get("event") == "recovery_decision"
             and isinstance(event.get("decision"), Mapping)
-            and event["decision"].get("target") == target
+            and event["decision"].get("target") in targets
         }
         if "resume" in self.authority.allowed_actions and "resume" not in attempted:
             return "resume"
@@ -263,16 +383,25 @@ class RecoveryCoordinator:
 
     def _resume_argv(self, escalation: Mapping[str, object], launcher_argv: Sequence[str]) -> list[str]:
         directive = _object(escalation["resume_directive_template"], "resume directive")
-        logical, predecessor, frontier = (directive.get("logical_graph_id"), directive.get("predecessor_attempt_id"), directive.get("retry_frontier"))
-        if not all(isinstance(value, str) and value for value in (logical, predecessor)) or not isinstance(frontier, list):
+        logical, predecessor = directive.get("logical_graph_id"), directive.get("predecessor_attempt_id")
+        if not all(isinstance(value, str) and value for value in (logical, predecessor)):
             raise RecoveryCoordinatorError("resume directive is incomplete")
+        frontier = self._frontier(escalation)
         graph_attempt_id = f"{predecessor}-recovery-{self._decision_count(self._ledger_state())}"
         script = Path(__file__).with_name("run_plan_graph.py")
-        return [sys.executable, str(script), "run", "--repository", str(self.repository),
+        argv = [sys.executable, str(script), "run", "--repository", str(self.repository),
                 "--registration", str(self._registration_path), "--graph-attempt-id", graph_attempt_id,
                 "--launcher-command", *launcher_argv, "--run-root", str(self.run_root), "--resume",
-                "--logical-graph-id", logical, "--predecessor-attempt-id", predecessor,
-                "--retry-frontier", *frontier, "--blocker-evidence-ref", str(escalation.get("_reference", ""))]
+                "--logical-graph-id", logical, "--predecessor-attempt-id", predecessor]
+        # ``run_plan_graph.py`` declares --retry-frontier as action="append",
+        # so each node needs its own flag.  Splatting the list after a single
+        # flag fed argparse one value and left the rest as stray positionals;
+        # unreachable until now only because the guard above refused every
+        # frontier that had a second node to mis-parse.
+        for node_id in frontier:
+            argv += ["--retry-frontier", node_id]
+        argv += ["--blocker-evidence-ref", str(escalation.get("_reference", ""))]
+        return argv
 
     @property
     def _registration_path(self) -> Path:
