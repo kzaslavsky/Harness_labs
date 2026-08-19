@@ -395,21 +395,36 @@ escalation keys off. `changed_paths` (33) counts untracked.
 2. **Re-verify §3 before writing code.** Its line numbers were correct at
    `489b307`; grep each symbol anyway. If one has moved again, trust the tree
    and note the drift in your summary.
-3. **CC-08-1** — `review_fix.py` escalation primitives. Criteria AC-CC08-1
-   through AC-CC08-4. Gate:
-   `python3 -m pytest tests/test_review_fix.py -q`.
-4. **CC-08-2** — bounded fix-only loop plus
-   `FeatureRunRequest.bounded_fix_only` wiring. AC-CC08-5, AC-CC08-16. Gate:
+3. **CC08-A** — the featurerun layer: escalation primitives *and* the bounded
+   fix-only loop, including the `FeatureRunRequest.bounded_fix_only` wiring.
+   Criteria AC-CC08-1 through 5 and AC-CC08-16. Gate:
    `python3 -m pytest tests/test_review_fix.py tests/test_feature_run.py tests/test_import_boundaries.py -q`.
-5. **CC-08-3** — routing, judgment, packet, schemas, journal events.
-   AC-CC08-6, 7, 8, 12, 13, 14. Gate:
-   `python3 -m pytest tests/test_plan_graph.py -q`.
-6. **CC-08-4** — unseal, authority spend, cascade assertion. AC-CC08-9, 10,
-   11, 15, 17. Gate:
+   Build it internally in the plan's CC-08-1 → CC-08-2 order; that ordering is
+   still load-bearing, it is simply no longer a node boundary.
+4. **CC08-B** — the plangraph layer: routing, judgment, packet, schemas and
+   journal events, then unseal, authority spend and the cascade assertion.
+   AC-CC08-6 through 15, and AC-CC08-17. Depends on CC08-A. Gate:
    `python3 -m pytest tests/test_plan_graph.py tests/test_plan_graph_budget.py -q`.
-7. **Finalize.** `python3 -m pytest tests/ -q`. Then add ADR 0007 to
+   Internal order: the plan's CC-08-3 → CC-08-4.
+
+5. **Finalize.** `python3 -m pytest tests/ -q`. Then add ADR 0007 to
    `docs/decisions/README.md`'s accepted list and the plan to
    `docs/development/INDEX.md` (see §2).
+
+The decomposition is
+[`cc08-escalation-decomposition.json`](cc08-escalation-decomposition.json).
+**It registers two nodes, not the four in the plan's `[cc08-build-order]`.**
+That section asserts "Path grants are disjoint, so S1/S2 hold", and they are
+not: CC-08-1 and CC-08-2 both write `review_fix.py` and
+`tests/test_review_fix.py`, and CC-08-3 and CC-08-4 both write `plan_graph.py`
+and `tests/test_plan_graph.py`. Only the concurrent pair is disjoint. A
+reviewer on CC-08-2 finding a defect in the `review_fix.py` code CC-08-1
+sealed is exactly the escalation case CC-08 is being built to handle — and
+CC-08 does not exist yet to handle it. Splitting on the layer boundary instead
+makes the grants disjoint at file granularity (S1, S2), leaves fan-in at 1
+(S9), and follows the seam `tests/test_import_boundaries.py` already enforces.
+The four-node version bought one step of parallelism between two nodes that
+each overlapped a sibling anyway.
 
 Existing test files (verified present): `tests/test_review_fix.py`,
 `tests/test_feature_run.py`, `tests/test_import_boundaries.py`,
@@ -472,5 +487,5 @@ Existing test files (verified present): `tests/test_review_fix.py`,
   `--retry-frontier` and `--on-block-argv`.
 - The retry-budget lineage used by the new tests folds without error, proving
   no new event kind was added.
-- No file outside the four nodes' declared paths, plus the two index/README
-  one-liners in §6 step 7, has changed.
+- No file outside the two nodes' declared `allowed_paths`, plus the two
+  index/README one-liners in §6 step 5, has changed.
