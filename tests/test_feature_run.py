@@ -515,6 +515,7 @@ class FeatureRunTests(unittest.TestCase):
             finding_obligations=({"key": "feature.txt:transfer"},),
             finding_transfer_targets={"feature.txt": "FR-02"},
             origin_node_id="FR-01", inherited_ledger_frozen=True,
+            bounded_fix_only=True,
         )
         with patch("harness_labs.featurerun.feature_run.subprocess.run") as git_show:
             git_show.return_value = subprocess.CompletedProcess([], 0, stdout=plan_bytes, stderr=b"")
@@ -529,6 +530,33 @@ class FeatureRunTests(unittest.TestCase):
         self.assertEqual(options["review_finding_transfer_targets"], binding.finding_transfer_targets)
         self.assertEqual(options["review_origin_node_id"], "FR-01")
         self.assertTrue(options["review_inherited_ledger_frozen"])
+        self.assertTrue(options["review_bounded_fix_only"])
+
+    def test_plan_graph_binding_bounded_fix_only_defaults_false(self) -> None:
+        plan_bytes = b"registered plan\n"
+        binding = PlanGraphFeatureRunBinding(
+            plan_graph_id="graph-1", plan_node_id="FR-01", objective="Implement.",
+            acceptance_criteria=({"id": "AC-1", "statement": "Works"},),
+            approved_plan={"path": "docs/plan.md", "sha256": hashlib.sha256(plan_bytes).hexdigest()},
+            source_binding_report={"claims": ["approved"]},
+            build_briefing={"allowed_paths": ["feature.txt"]},
+            plan="docs/plan.md", plan_base_commit="a" * 40,
+            plan_sha256=hashlib.sha256(plan_bytes).hexdigest(),
+            allowed_paths=("feature.txt",), verification_argv=("python3", "-m", "unittest"),
+        )
+        self.assertFalse(binding.bounded_fix_only)
+        with self.assertRaisesRegex(ValueError, "bounded_fix_only requires"):
+            PlanGraphFeatureRunBinding(
+                plan_graph_id="graph-1", plan_node_id="FR-01", objective="Implement.",
+                acceptance_criteria=({"id": "AC-1", "statement": "Works"},),
+                approved_plan={"path": "docs/plan.md", "sha256": hashlib.sha256(plan_bytes).hexdigest()},
+                source_binding_report={"claims": ["approved"]},
+                build_briefing={"allowed_paths": ["feature.txt"]},
+                plan="docs/plan.md", plan_base_commit="a" * 40,
+                plan_sha256=hashlib.sha256(plan_bytes).hexdigest(),
+                allowed_paths=("feature.txt",), verification_argv=("python3", "-m", "unittest"),
+                bounded_fix_only=True,
+            )
 
     def test_plan_graph_mode_refuses_disabled_review_ledger(self) -> None:
         criteria = ({"id": "AC-1", "statement": "Works", "source": "plan"},)
@@ -1674,6 +1702,86 @@ class FeatureRunTests(unittest.TestCase):
             self.assertEqual(recovered["retained_transfers"], ())
             self.assertEqual(recovered["inherited_findings"], ())
             AuditJournal.verify(root / "run")
+
+    @patch("harness_labs.featurerun.feature_run.ReviewFixLoop")
+    def test_bounded_fix_only_is_wired_into_review_loop_construction(
+        self, review_loop
+    ) -> None:
+        """CC-08: FeatureRunRequest.bounded_fix_only reaches the review loop."""
+
+        obligation = {
+            "key": "other.py:cross-node-fix",
+            "file": "other.py",
+            "outcome": "open",
+        }
+        review_loop.return_value.run.return_value = ReviewFixResult(
+            "succeeded",
+            "bounded fix-only cleared",
+            1,
+            "mechanical",
+            "ledger-ref",
+            (),
+            (),
+            (),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            result = self._run_verification_recovery_case(
+                root,
+                lambda worktree, attempt: _VerificationRepairExecutor(worktree, []),
+                review_fix_executor_factory=lambda stage, attempt: None,
+                review_fix_policy=ReviewFixPolicy(),
+                review_finding_obligations=(obligation,),
+                review_bounded_fix_only=True,
+            )
+            self.assertEqual(result.status, "succeeded")
+            review_loop.assert_called_once()
+            construction = review_loop.call_args.kwargs
+            self.assertTrue(construction["bounded_fix_only"])
+            self.assertEqual(construction["seeded_fix_keys"], (obligation["key"],))
+            self.assertEqual(construction["inherited_findings"], (obligation,))
+            AuditJournal.verify(root / "run")
+
+    def test_bounded_fix_only_defaults_to_false_and_no_seeded_keys(self) -> None:
+        """CC-08: byte-identical wiring when a caller never opts in."""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with patch(
+                "harness_labs.featurerun.feature_run.ReviewFixLoop"
+            ) as review_loop:
+                review_loop.return_value.run.return_value = ReviewFixResult(
+                    "succeeded", "review cleared", 1, "mechanical", "ledger-ref",
+                    (), (), (),
+                )
+                self._run_verification_recovery_case(
+                    root,
+                    lambda worktree, attempt: _VerificationRepairExecutor(
+                        worktree, []
+                    ),
+                    review_fix_executor_factory=lambda stage, attempt: None,
+                    review_fix_policy=ReviewFixPolicy(),
+                )
+                construction = review_loop.call_args.kwargs
+                self.assertFalse(construction["bounded_fix_only"])
+                self.assertEqual(construction["seeded_fix_keys"], ())
+
+    def test_bounded_fix_only_requires_finding_obligations(self) -> None:
+        with self.assertRaisesRegex(ValueError, "review_bounded_fix_only"):
+            run_feature_worktree(
+                base_repository=Path("unused"),
+                base_branch="main",
+                feature_branch="feature/test",
+                worktree_path=Path("unused-worktree"),
+                run_dir=Path("unused-run"),
+                contract_factory=lambda worktree, receipt: None,
+                schema=standard_feature_run_dispatch_schema(),
+                session_factory=lambda worktree, launch, evidence: None,
+                profile_builder=lambda worktree, evidence: (),
+                allowed_paths=("feature.txt",),
+                commit_message="unused",
+                review_bounded_fix_only=True,
+            )
 
     def test_interrupted_repair_raises_recovery_agent(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
