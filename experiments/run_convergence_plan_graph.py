@@ -360,6 +360,11 @@ atomic replace with directory fsync for checkpoints, content-addressed seals.
 (4) does anything violate the node's cited plan sections in {PLAN_PATH}?
 Every finding needs file, stable subject, score, fix_cost, and the exact
 acceptance clause in protects. Empty findings means the candidate clears.
+Judge strictly against the node's acceptance criteria as written. When an
+operator note below records a design ruling, that ruling is authoritative
+acceptance-criteria interpretation: do not re-open it, and do not demand
+work the ruling explicitly defers out of this node's scope.
+{_operator_note(node.plan_node_id)}\
 """,
             "fix": f"""\
 Inspect the supplied ledger and fix_finding_keys. Modify only
