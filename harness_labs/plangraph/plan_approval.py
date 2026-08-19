@@ -23,10 +23,12 @@ from harness_labs.plangraph.plan_graph_contract import (
     PlanGraphContractError,
     canonical_json,
     canonical_plan_graph_payload,
+    declares_intent,
     load_repository_id,
     plan_graph_identity,
     sha256_bytes,
     sha256_json,
+    unintended_grants,
 )
 
 
@@ -37,6 +39,14 @@ RECEIPT_PROTOCOL = "plan-approval-receipt/1"
 POLICY_ID = "operator-attested-plan-approval/1"
 REPOSITORY_IDENTITY_PATH = ".harness/repository.json"
 MAX_TIMEOUT_SECONDS = 7200.0
+
+#: The warning kinds admission emits. ``SIBLING_OVERLAP_WARNING`` is the one
+#: the refinement loop knows how to repair; consumers that act on findings
+#: must select on kind as well as severity, or a future advisory kind will be
+#: mistaken for work they can do.
+SIBLING_OVERLAP_WARNING = "sibling-allowed-path-overlap"
+UNCLAIMED_GRANT_WARNING = "run-grants-exceed-declared-intents"
+NO_DECLARED_INTENT_WARNING = "plan-declares-no-path-intents"
 
 
 class PlanApprovalError(ValueError):
@@ -444,9 +454,9 @@ def _run_static_gates(
         "host_executables": host_executables,
         "checked_at": _timestamp(),
     }
-    overlap_warnings = _sibling_overlap_warnings(plan)
-    if overlap_warnings:
-        gates["warnings"] = overlap_warnings
+    warnings = _sibling_overlap_warnings(plan) + _unclaimed_grant_warnings(plan)
+    if warnings:
+        gates["warnings"] = warnings
     return gates
 
 
@@ -515,7 +525,7 @@ def _sibling_overlap_warnings(plan: PlanGraphPlan) -> list[dict[str, object]]:
                 )
                 warnings.append(
                     {
-                        "kind": "sibling-allowed-path-overlap",
+                        "kind": SIBLING_OVERLAP_WARNING,
                         "severity": severity,
                         "runs": [first_id, second_id],
                         "paths": sorted(shared),
@@ -527,6 +537,88 @@ def _sibling_overlap_warnings(plan: PlanGraphPlan) -> list[dict[str, object]]:
                     }
                 )
     warnings.sort(key=lambda record: (record["severity"] != "high", record["runs"]))
+    return warnings
+
+
+def _unclaimed_grant_warnings(plan: PlanGraphPlan) -> list[dict[str, object]]:
+    """Name each run holding write grants it never claimed to need.
+
+    The canonical form requires declared intents to sit inside the run's own
+    grants, but nothing constrains the converse: a run may hold grants far
+    beyond anything it says it will write, and until now nothing surfaced
+    that. On the real 26-run flow-editor plan the surplus was universal, and
+    it was the direct cause of most sibling-overlap findings -- two runs
+    colliding over a path neither had a stated reason to touch.
+
+    The refinement loop repairs those collisions by dropping the unclaimed
+    grant, which is correct exactly when the intents are complete. Where an
+    author under-declared intent while the objective does claim the path, the
+    same repair removes something the run genuinely needs and the run learns
+    about it as a write failure mid-execution. This warning is how the author
+    finds out first: it names the specific uncovered grants so they can either
+    declare the intent or drop the grant before the refiner decides for them.
+
+    It is advisory by design. Making it high-severity would put it under
+    ``issue_receipt``'s acknowledgment backstop, which is disproportionate for
+    a plan that is merely over-granted -- and no consumer should be blocked on
+    a finding for which there is no defect yet, only a risk that a later
+    mechanical repair guesses wrong.
+    """
+
+    declaring = [
+        run
+        for run in plan.runs
+        if declares_intent([intent.path for intent in run.path_intents])
+    ]
+    if not declaring:
+        # A plan where nobody declared anything is one fact about the plan,
+        # not one fact per run: reporting it per run would bury the operator
+        # in identical findings (26 of them on the flow-editor plan) and each
+        # would say the same thing. It is also the case narrowing can never
+        # act on, so there is nothing per-run to decide.
+        return [
+            {
+                "kind": NO_DECLARED_INTENT_WARNING,
+                "severity": "info",
+                "runs": [run.id for run in plan.runs],
+                "paths": [],
+                "note": (
+                    "no run in this plan declares any path intents, so every "
+                    "write grant is unexplained and intent-aware repairs "
+                    "cannot fire; declaring intents is what lets overlap be "
+                    "repaired without serializing runs"
+                ),
+            }
+        ]
+    warnings: list[dict[str, object]] = []
+    for run in declaring:
+        uncovered = unintended_grants(
+            [intent.path for intent in run.path_intents], run.allowed_paths
+        )
+        if not uncovered:
+            continue
+        warnings.append(
+            {
+                "kind": UNCLAIMED_GRANT_WARNING,
+                "severity": "info",
+                "runs": [run.id],
+                "paths": sorted(uncovered),
+                "granted": len(run.allowed_paths),
+                "claimed": len(run.allowed_paths) - len(uncovered),
+                "note": (
+                    f"run holds {len(run.allowed_paths)} write grant(s) and "
+                    f"declares intent under only "
+                    f"{len(run.allowed_paths) - len(uncovered)}; the listed "
+                    "grants are held without a stated reason -- declare the "
+                    "intent or drop the grant, or refinement will drop it to "
+                    "repair any overlap it causes"
+                ),
+            }
+        )
+    # Most uncovered grants first: a run claiming one of five grants is a
+    # much stronger signal of a mis-scoped node than one claiming four of
+    # five, and the counts stay exact rather than becoming a threshold.
+    warnings.sort(key=lambda record: (-len(record["paths"]), record["runs"]))
     return warnings
 
 

@@ -143,6 +143,54 @@ def path_is_allowed(path: str, allowed_paths: Sequence[str]) -> bool:
     )
 
 
+def declares_intent(intent_paths: Sequence[str]) -> bool:
+    """Whether a run carries evidence about what it means to write.
+
+    The predicate is deliberately *per run*, not per path: ``path_intents``
+    is optional (``PlanRun.path_intents`` defaults to ``()``), so a
+    decomposition that simply omits the field would make every grant look
+    unintended. An empty sequence is an absence of evidence, not evidence of
+    absence, and a run with no declared intent is neither narrowed by the
+    refinement loop nor reported at admission as holding surplus grants.
+    """
+
+    return bool(intent_paths)
+
+
+def unintended_grants(
+    intent_paths: Sequence[str], grants: Sequence[str]
+) -> list[str]:
+    """Which of ``grants`` no declared intent falls under.
+
+    Containment runs through ``path_is_allowed`` in the direction that
+    matters: a grant justifies itself when some declared intent falls *under*
+    it, so a directory grant on ``a/b`` is kept by an intent on ``a/b/c.py``.
+    A run that declared no intents at all yields nothing -- see
+    ``declares_intent``.
+
+    This lives here rather than in either consumer because both the admission
+    gates (``plan_approval``) and the refinement loop (``plan_refinement``)
+    ask the same question, and ``plan_refinement`` already imports
+    ``plan_approval``: a shared home is the only placement that avoids either
+    an import cycle or two copies of the predicate drifting apart. The
+    contract module is also where the intent/grant subset relationship is
+    already enforced (``_canonical_run``) and where ``path_is_allowed``
+    lives, so the rule sits with the invariant it reads.
+
+    The arguments are plain path sequences rather than a run, because the two
+    callers hold different shapes of the same run -- ``plan_approval`` a
+    ``PlanRun`` dataclass, ``plan_refinement`` a canonical mapping.
+    """
+
+    if not declares_intent(intent_paths):
+        return []
+    return [
+        grant
+        for grant in grants
+        if not any(path_is_allowed(intent, [grant]) for intent in intent_paths)
+    ]
+
+
 def _canonical_run(value: object, index: int) -> dict[str, Any]:
     field = f"plan.runs[{index}]"
     if not isinstance(value, Mapping):
@@ -378,10 +426,12 @@ __all__ = [
     "PlanGraphContractError",
     "canonical_json",
     "canonical_plan_graph_payload",
+    "declares_intent",
     "load_repository_id",
     "normalize_repository_path",
     "path_is_allowed",
     "plan_graph_identity",
     "sha256_bytes",
     "sha256_json",
+    "unintended_grants",
 ]
