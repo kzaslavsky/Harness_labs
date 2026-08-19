@@ -849,106 +849,134 @@ def run_feature_worktree(
         # from its correlated child.
         controller_kind="feature_run",
     )
-    # Bind a run descriptor so the catalog can correlate this run (dashboard
-    # metrics join graph nodes to FeatureRuns through parent_correlation);
-    # without it the run projects as an uncorrelated legacy record.
-    descriptor_raw = (
-        json.dumps(
-            {
-                "protocol": "harness-run-descriptor/1",
-                "run_kind": "feature_run",
-                "run_id": contract.run_id,
-                "created_at": datetime.now(timezone.utc).isoformat(),
-                "objective": contract.objective,
-                "evidence_classification": evidence_classification,
-                "repository": {
-                    "path": str(transaction.worktree_path),
-                    "base_branch": base_branch,
-                    "base_commit": str(creation["base_commit"]),
+    # From here to the return, this process is the run's controller and its
+    # lease says so.  Nothing between those points released it: ``finalize``
+    # is the only caller of ``release_liveness``, and an exception raised in
+    # between escapes to ``PlanGraph``'s launcher-escape handler, which
+    # records the node as failed and keeps the graph process running.  The
+    # abandoned run would then keep a fresh heartbeat under a live pid and
+    # project as ``live`` for the rest of the graph -- the wedged-controller
+    # answer the lease exists to rule out.  Release on every exit instead.
+    try:
+        # Bind a run descriptor so the catalog can correlate this run (dashboard
+        # metrics join graph nodes to FeatureRuns through parent_correlation);
+        # without it the run projects as an uncorrelated legacy record.
+        descriptor_raw = (
+            json.dumps(
+                {
+                    "protocol": "harness-run-descriptor/1",
+                    "run_kind": "feature_run",
+                    "run_id": contract.run_id,
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                    "objective": contract.objective,
+                    "evidence_classification": evidence_classification,
+                    "repository": {
+                        "path": str(transaction.worktree_path),
+                        "base_branch": base_branch,
+                        "base_commit": str(creation["base_commit"]),
+                    },
+                    "approved_plan": dict(descriptor_plan) if descriptor_plan else None,
+                    "parent_correlation": (
+                        dict(descriptor_correlation) if descriptor_correlation else None
+                    ),
                 },
-                "approved_plan": dict(descriptor_plan) if descriptor_plan else None,
-                "parent_correlation": (
-                    dict(descriptor_correlation) if descriptor_correlation else None
-                ),
-            },
-            sort_keys=True,
-            separators=(",", ":"),
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n"
+        ).encode("utf-8")
+        (audit.run_dir / "descriptor.json").write_bytes(descriptor_raw)
+        audit.append(
+            "run_descriptor_bound",
+            status="succeeded",
+            payload={"descriptor_sha256": hashlib.sha256(descriptor_raw).hexdigest()},
         )
-        + "\n"
-    ).encode("utf-8")
-    (audit.run_dir / "descriptor.json").write_bytes(descriptor_raw)
-    audit.append(
-        "run_descriptor_bound",
-        status="succeeded",
-        payload={"descriptor_sha256": hashlib.sha256(descriptor_raw).hexdigest()},
-    )
-    evidence = EvidenceCatalog(audit=audit)
-    if verification_repair_executor_factory is not None:
-        verification_repair_executor_factory = _grant_aware_repair_factory(
-            verification_repair_executor_factory,
-            evidence=evidence,
-            worktree_path=transaction.worktree_path,
-            audit=audit,
-        )
-    if review_fix_executor_factory is not None:
-        review_fix_executor_factory = _grant_aware_review_fix_factory(
-            review_fix_executor_factory,
-            evidence=evidence,
-            worktree_path=transaction.worktree_path,
-            audit=audit,
-        )
-    recovery = _RecoveryState(recovery_limit, continuation_recovery_limit)
-    handoff_records = []
-    for handoff in initial_evidence:
-        record = evidence.add(
-            kind=handoff.kind,
-            content=handoff.content,
-            media_type=handoff.media_type,
-            producer_task_id=handoff.producer_task_id,
+        evidence = EvidenceCatalog(audit=audit)
+        if verification_repair_executor_factory is not None:
+            verification_repair_executor_factory = _grant_aware_repair_factory(
+                verification_repair_executor_factory,
+                evidence=evidence,
+                worktree_path=transaction.worktree_path,
+                audit=audit,
+            )
+        if review_fix_executor_factory is not None:
+            review_fix_executor_factory = _grant_aware_review_fix_factory(
+                review_fix_executor_factory,
+                evidence=evidence,
+                worktree_path=transaction.worktree_path,
+                audit=audit,
+            )
+        recovery = _RecoveryState(recovery_limit, continuation_recovery_limit)
+        handoff_records = []
+        for handoff in initial_evidence:
+            record = evidence.add(
+                kind=handoff.kind,
+                content=handoff.content,
+                media_type=handoff.media_type,
+                producer_task_id=handoff.producer_task_id,
+            )
+            audit.append(
+                "feature_run_handoff_bound",
+                status="succeeded",
+                payload={"kind": handoff.kind, "evidence_ref": record.ref},
+                actor=AuditActor("plan-graph", "parent_controller"),
+            )
+            handoff_records.append(record.as_dict())
+        creation_artifact = evidence.add(
+            kind="git-worktree-receipt",
+            content=creation,
+            media_type="application/json",
+            producer_task_id="integration-owner",
         )
         audit.append(
-            "feature_run_handoff_bound",
+            "git_worktree_created",
             status="succeeded",
-            payload={"kind": handoff.kind, "evidence_ref": record.ref},
-            actor=AuditActor("plan-graph", "parent_controller"),
+            payload={**creation, "evidence_ref": creation_artifact.ref},
+            actor=AuditActor("integration-owner", "integration_owner"),
         )
-        handoff_records.append(record.as_dict())
-    creation_artifact = evidence.add(
-        kind="git-worktree-receipt",
-        content=creation,
-        media_type="application/json",
-        producer_task_id="integration-owner",
-    )
-    audit.append(
-        "git_worktree_created",
-        status="succeeded",
-        payload={**creation, "evidence_ref": creation_artifact.ref},
-        actor=AuditActor("integration-owner", "integration_owner"),
-    )
-    kernel = ControllerKernel(
-        contract,
-        evidence=evidence,
-        audit=audit,
-        initial_artifacts=handoff_records,
-    )
-    scheduler = CapabilityScheduler(
-        profile_builder(transaction.worktree_path, evidence)
-    )
-    dispatcher = CoordinatorDispatcher(
-        kernel,
-        evidence,
-        scheduler,
-        schema,
-        lambda launch, catalog: session_factory(
-            transaction.worktree_path,
-            launch,
-            catalog,
-        ),
-    )
-    while True:
-        try:
-            dispatch = dispatcher.run()
-        except InterruptedError as exc:
+        kernel = ControllerKernel(
+            contract,
+            evidence=evidence,
+            audit=audit,
+            initial_artifacts=handoff_records,
+        )
+        scheduler = CapabilityScheduler(
+            profile_builder(transaction.worktree_path, evidence)
+        )
+        dispatcher = CoordinatorDispatcher(
+            kernel,
+            evidence,
+            scheduler,
+            schema,
+            lambda launch, catalog: session_factory(
+                transaction.worktree_path,
+                launch,
+                catalog,
+            ),
+        )
+        while True:
+            try:
+                dispatch = dispatcher.run()
+            except InterruptedError as exc:
+                if not _recover_abnormal(
+                    agent=recovery_agent,
+                    recovery=recovery,
+                    audit=audit,
+                    contract=contract,
+                    worktree_path=transaction.worktree_path,
+                    allowed_paths=allowed_paths,
+                    stage="dispatch",
+                    condition="interrupted",
+                    reason=str(exc) or "coordinator dispatch interrupted",
+                ):
+                    dispatch = dispatcher._result(None)
+                    break
+                if not dispatcher.recover_interrupted_state():
+                    dispatch = dispatcher._result(None)
+                    break
+                continue
+            if dispatch.result.status not in {"blocked", "failed", "interrupted"}:
+                break
             if not _recover_abnormal(
                 agent=recovery_agent,
                 recovery=recovery,
@@ -957,78 +985,31 @@ def run_feature_worktree(
                 worktree_path=transaction.worktree_path,
                 allowed_paths=allowed_paths,
                 stage="dispatch",
-                condition="interrupted",
-                reason=str(exc) or "coordinator dispatch interrupted",
+                condition=dispatch.result.status,
+                reason=_dispatch_reason(dispatch, kernel),
             ):
-                dispatch = dispatcher._result(None)
                 break
-            if not dispatcher.recover_interrupted_state():
-                dispatch = dispatcher._result(None)
-                break
-            continue
-        if dispatch.result.status not in {"blocked", "failed", "interrupted"}:
-            break
-        if not _recover_abnormal(
-            agent=recovery_agent,
-            recovery=recovery,
-            audit=audit,
-            contract=contract,
-            worktree_path=transaction.worktree_path,
-            allowed_paths=allowed_paths,
-            stage="dispatch",
-            condition=dispatch.result.status,
-            reason=_dispatch_reason(dispatch, kernel),
-        ):
-            break
-        if project_run_view(kernel)["status"] == "blocked":
-            _resume_kernel_after_recovery(kernel, recovery.decisions[-1])
-    receipts: list[Mapping[str, object]] = [creation]
-    status = dispatch.result.status
-    verification_result = None
-    review_fix_result = None
-    review_transfers: dict[str, Mapping[str, object]] = {}
-    pre_review_workspace = None
-    if status == "succeeded" and project_run_view(kernel)["status"] == "succeeded":
-        if has_verification:
-            assert verification_repair_executor_factory is not None
-            # A graph-owned exclusive gate slot, when supplied by a PlanGraph
-            # ready-set run, serializes this whole verification stage —
-            # including its recovery retries and their recovery-agent
-            # invocations below, which run for an unbounded duration —
-            # across concurrently admitted siblings; dispatch above and
-            # review/fix below stay parallel. Solo FeatureRuns and
-            # max_parallelism=1 pass no slot, so `nullcontext()` makes this a
-            # no-op identical to before.
-            with (verification_gate_slot or nullcontext()):
-                verification_result = _run_verification_stage(
-                    run_id=contract.run_id,
-                    objective=contract.objective,
-                    acceptance_criteria=contract.criteria,
-                    worktree_path=transaction.worktree_path,
-                    allowed_paths=allowed_paths,
-                    verification_argv=verification_argv,
-                    verification_gates=verification_gates,
-                    repair_executor_factory=verification_repair_executor_factory,
-                    repair_limit=verification_repair_limit,
-                    timeout_seconds=verification_timeout_seconds,
-                    evidence=evidence,
-                    audit=audit,
-                )
-                status = verification_result.status
-                while status in {"blocked", "failed", "interrupted"}:
-                    if not _recover_abnormal(
-                        agent=recovery_agent,
-                        recovery=recovery,
-                        audit=audit,
-                        contract=contract,
-                        worktree_path=transaction.worktree_path,
-                        allowed_paths=allowed_paths,
-                        stage="verification",
-                        condition=status,
-                        reason=verification_result.reason,
-                    ):
-                        break
-                    retried_verification = _run_verification_stage(
+            if project_run_view(kernel)["status"] == "blocked":
+                _resume_kernel_after_recovery(kernel, recovery.decisions[-1])
+        receipts: list[Mapping[str, object]] = [creation]
+        status = dispatch.result.status
+        verification_result = None
+        review_fix_result = None
+        review_transfers: dict[str, Mapping[str, object]] = {}
+        pre_review_workspace = None
+        if status == "succeeded" and project_run_view(kernel)["status"] == "succeeded":
+            if has_verification:
+                assert verification_repair_executor_factory is not None
+                # A graph-owned exclusive gate slot, when supplied by a PlanGraph
+                # ready-set run, serializes this whole verification stage —
+                # including its recovery retries and their recovery-agent
+                # invocations below, which run for an unbounded duration —
+                # across concurrently admitted siblings; dispatch above and
+                # review/fix below stay parallel. Solo FeatureRuns and
+                # max_parallelism=1 pass no slot, so `nullcontext()` makes this a
+                # no-op identical to before.
+                with (verification_gate_slot or nullcontext()):
+                    verification_result = _run_verification_stage(
                         run_id=contract.run_id,
                         objective=contract.objective,
                         acceptance_criteria=contract.criteria,
@@ -1041,150 +1022,145 @@ def run_feature_worktree(
                         timeout_seconds=verification_timeout_seconds,
                         evidence=evidence,
                         audit=audit,
-                        stage="recovery",
                     )
-                    verification_result = _combine_verification_results(
-                        verification_result,
-                        retried_verification,
-                    )
-                    status = retried_verification.status
-    if status == "succeeded" and project_run_view(kernel)["status"] == "succeeded":
-        if review_fix_policy.enabled:
-            assert review_fix_executor_factory is not None
-            snapshot = workspace_snapshot(transaction.worktree_path)
-            pre_review_workspace = snapshot
-            review_loop = ReviewFixLoop(
-                run_id=contract.run_id,
-                objective=contract.objective,
-                acceptance_criteria=contract.criteria,
-                allowed_paths=allowed_paths,
-                changed_paths=tuple(snapshot["changed_paths"]),
-                executor_factory=review_fix_executor_factory,
-                evidence=evidence,
-                audit=audit,
-                policy=review_fix_policy,
-                inherited_findings=review_finding_obligations,
-                retained_transfers=(),
-                finding_transfer_targets=review_finding_transfer_targets or {},
-                origin_node_id=review_origin_node_id,
-                inherited_ledger_frozen=review_inherited_ledger_frozen,
-            )
-            review_fix_result = review_loop.run()
-            _remember_review_transfers(
-                review_transfers, review_fix_result.transferred_findings
-            )
-            status = review_fix_result.status
-            while status in {"blocked", "failed", "interrupted"}:
-                if not _recover_abnormal(
-                    agent=recovery_agent,
-                    recovery=recovery,
-                    audit=audit,
-                    contract=contract,
-                    worktree_path=transaction.worktree_path,
-                    allowed_paths=allowed_paths,
-                    stage="review",
-                    condition=status,
-                    reason=review_fix_result.reason,
-                    detail=_review_stage_detail(review_loop, review_fix_result),
-                ):
-                    break
-                # Continue the same ledger rather than restarting discovery:
-                # the recovered loop resumes after the cycle that stopped and
-                # spends an explicit additional cycle grant on findings whose
-                # identity, fix attempts, and dispositions all carry over.
-                # Only a ledger the loop never produced (a loop that raised
-                # before its first checkpoint) forces a cold restart.
-                resumed = (
-                    review_loop.ledger if review_fix_result.cycles >= 1 else None
-                )
+                    status = verification_result.status
+                    while status in {"blocked", "failed", "interrupted"}:
+                        if not _recover_abnormal(
+                            agent=recovery_agent,
+                            recovery=recovery,
+                            audit=audit,
+                            contract=contract,
+                            worktree_path=transaction.worktree_path,
+                            allowed_paths=allowed_paths,
+                            stage="verification",
+                            condition=status,
+                            reason=verification_result.reason,
+                        ):
+                            break
+                        retried_verification = _run_verification_stage(
+                            run_id=contract.run_id,
+                            objective=contract.objective,
+                            acceptance_criteria=contract.criteria,
+                            worktree_path=transaction.worktree_path,
+                            allowed_paths=allowed_paths,
+                            verification_argv=verification_argv,
+                            verification_gates=verification_gates,
+                            repair_executor_factory=verification_repair_executor_factory,
+                            repair_limit=verification_repair_limit,
+                            timeout_seconds=verification_timeout_seconds,
+                            evidence=evidence,
+                            audit=audit,
+                            stage="recovery",
+                        )
+                        verification_result = _combine_verification_results(
+                            verification_result,
+                            retried_verification,
+                        )
+                        status = retried_verification.status
+        if status == "succeeded" and project_run_view(kernel)["status"] == "succeeded":
+            if review_fix_policy.enabled:
+                assert review_fix_executor_factory is not None
+                snapshot = workspace_snapshot(transaction.worktree_path)
+                pre_review_workspace = snapshot
                 review_loop = ReviewFixLoop(
                     run_id=contract.run_id,
                     objective=contract.objective,
                     acceptance_criteria=contract.criteria,
                     allowed_paths=allowed_paths,
-                    changed_paths=tuple(
-                        workspace_snapshot(transaction.worktree_path)["changed_paths"]
-                    ),
+                    changed_paths=tuple(snapshot["changed_paths"]),
                     executor_factory=review_fix_executor_factory,
                     evidence=evidence,
                     audit=audit,
                     policy=review_fix_policy,
-                    inherited_findings=(
-                        () if resumed is not None else review_finding_obligations
-                    ),
-                    retained_transfers=(
-                        ()
-                        if resumed is not None
-                        else tuple(
-                            review_transfers[key] for key in sorted(review_transfers)
-                        )
-                    ),
+                    inherited_findings=review_finding_obligations,
+                    retained_transfers=(),
                     finding_transfer_targets=review_finding_transfer_targets or {},
                     origin_node_id=review_origin_node_id,
                     inherited_ledger_frozen=review_inherited_ledger_frozen,
-                    resumed_ledger=resumed,
-                    resume_from_cycle=(
-                        review_fix_result.cycles if resumed is not None else 0
-                    ),
-                    additional_cycles=(
-                        review_fix_policy.continuation_cycles
-                        if resumed is not None
-                        else 0
-                    ),
                 )
                 review_fix_result = review_loop.run()
                 _remember_review_transfers(
                     review_transfers, review_fix_result.transferred_findings
                 )
                 status = review_fix_result.status
-            review_fix_result = replace(
-                review_fix_result,
-                transferred_findings=tuple(
-                    review_transfers[key] for key in sorted(review_transfers)
-                ),
-            )
-    if (
-        status == "succeeded"
-        and project_run_view(kernel)["status"] == "succeeded"
-        and has_verification
-        and pre_review_workspace is not None
-        and workspace_snapshot(transaction.worktree_path) != pre_review_workspace
-    ):
-        assert verification_repair_executor_factory is not None
-        post_review = _run_verification_stage(
-            run_id=contract.run_id,
-            objective=contract.objective,
-            acceptance_criteria=contract.criteria,
-            worktree_path=transaction.worktree_path,
-            allowed_paths=allowed_paths,
-            verification_argv=verification_argv,
-            verification_gates=verification_gates,
-            repair_executor_factory=verification_repair_executor_factory,
-            repair_limit=verification_repair_limit,
-            timeout_seconds=verification_timeout_seconds,
-            evidence=evidence,
-            audit=audit,
-            stage="post_review_repair",
-        )
-        verification_result = _combine_verification_results(
-            verification_result,
-            post_review,
-        )
-        status = post_review.status
-        while status in {"blocked", "failed", "interrupted"}:
-            if not _recover_abnormal(
-                agent=recovery_agent,
-                recovery=recovery,
-                audit=audit,
-                contract=contract,
-                worktree_path=transaction.worktree_path,
-                allowed_paths=allowed_paths,
-                stage="post_review_verification",
-                condition=status,
-                reason=post_review.reason,
-            ):
-                break
-            retried_post_review = _run_verification_stage(
+                while status in {"blocked", "failed", "interrupted"}:
+                    if not _recover_abnormal(
+                        agent=recovery_agent,
+                        recovery=recovery,
+                        audit=audit,
+                        contract=contract,
+                        worktree_path=transaction.worktree_path,
+                        allowed_paths=allowed_paths,
+                        stage="review",
+                        condition=status,
+                        reason=review_fix_result.reason,
+                        detail=_review_stage_detail(review_loop, review_fix_result),
+                    ):
+                        break
+                    # Continue the same ledger rather than restarting discovery:
+                    # the recovered loop resumes after the cycle that stopped and
+                    # spends an explicit additional cycle grant on findings whose
+                    # identity, fix attempts, and dispositions all carry over.
+                    # Only a ledger the loop never produced (a loop that raised
+                    # before its first checkpoint) forces a cold restart.
+                    resumed = (
+                        review_loop.ledger if review_fix_result.cycles >= 1 else None
+                    )
+                    review_loop = ReviewFixLoop(
+                        run_id=contract.run_id,
+                        objective=contract.objective,
+                        acceptance_criteria=contract.criteria,
+                        allowed_paths=allowed_paths,
+                        changed_paths=tuple(
+                            workspace_snapshot(transaction.worktree_path)["changed_paths"]
+                        ),
+                        executor_factory=review_fix_executor_factory,
+                        evidence=evidence,
+                        audit=audit,
+                        policy=review_fix_policy,
+                        inherited_findings=(
+                            () if resumed is not None else review_finding_obligations
+                        ),
+                        retained_transfers=(
+                            ()
+                            if resumed is not None
+                            else tuple(
+                                review_transfers[key] for key in sorted(review_transfers)
+                            )
+                        ),
+                        finding_transfer_targets=review_finding_transfer_targets or {},
+                        origin_node_id=review_origin_node_id,
+                        inherited_ledger_frozen=review_inherited_ledger_frozen,
+                        resumed_ledger=resumed,
+                        resume_from_cycle=(
+                            review_fix_result.cycles if resumed is not None else 0
+                        ),
+                        additional_cycles=(
+                            review_fix_policy.continuation_cycles
+                            if resumed is not None
+                            else 0
+                        ),
+                    )
+                    review_fix_result = review_loop.run()
+                    _remember_review_transfers(
+                        review_transfers, review_fix_result.transferred_findings
+                    )
+                    status = review_fix_result.status
+                review_fix_result = replace(
+                    review_fix_result,
+                    transferred_findings=tuple(
+                        review_transfers[key] for key in sorted(review_transfers)
+                    ),
+                )
+        if (
+            status == "succeeded"
+            and project_run_view(kernel)["status"] == "succeeded"
+            and has_verification
+            and pre_review_workspace is not None
+            and workspace_snapshot(transaction.worktree_path) != pre_review_workspace
+        ):
+            assert verification_repair_executor_factory is not None
+            post_review = _run_verification_stage(
                 run_id=contract.run_id,
                 objective=contract.objective,
                 acceptance_criteria=contract.criteria,
@@ -1197,130 +1173,166 @@ def run_feature_worktree(
                 timeout_seconds=verification_timeout_seconds,
                 evidence=evidence,
                 audit=audit,
-                stage="post_review_recovery",
+                stage="post_review_repair",
             )
             verification_result = _combine_verification_results(
                 verification_result,
-                retried_post_review,
+                post_review,
             )
-            post_review = retried_post_review
             status = post_review.status
-    if (
-        status == "succeeded"
-        and project_run_view(kernel)["status"] == "succeeded"
-        and verification_result is not None
-        and verification_result.status == "succeeded"
-    ):
-        _promote_gate_criteria(kernel, verification_result)
-    if status == "succeeded" and project_run_view(kernel)["status"] == "succeeded":
-        while True:
-            try:
-                if transaction.candidate_commit is None:
-                    commit = transaction.commit_candidate(
-                        allowed_paths=allowed_paths,
-                        message=commit_message,
-                    )
-                    receipts.append(commit)
-                    _record_git_receipt(audit, evidence, commit)
-                if not candidate_only:
-                    integration = transaction.integrate(merge=merge)
-                    receipts.append(integration)
-                    _record_git_receipt(audit, evidence, integration)
-                break
-            except (GitTransactionError, InterruptedError) as exc:
-                condition = (
-                    "interrupted" if isinstance(exc, InterruptedError) else "failed"
-                )
-                status = condition
-                audit.append(
-                    "git_transaction_failed",
-                    status=condition,
-                    payload={"error": str(exc)},
-                    actor=AuditActor("integration-owner", "integration_owner"),
-                )
-                if _recover_abnormal(
+            while status in {"blocked", "failed", "interrupted"}:
+                if not _recover_abnormal(
                     agent=recovery_agent,
                     recovery=recovery,
                     audit=audit,
                     contract=contract,
                     worktree_path=transaction.worktree_path,
                     allowed_paths=allowed_paths,
-                    stage="integration",
-                    condition=condition,
-                    reason=str(exc),
+                    stage="post_review_verification",
+                    condition=status,
+                    reason=post_review.reason,
                 ):
-                    status = "succeeded"
-                    continue
-                dispatch = CoordinatorDispatchResult(
-                    TaskResult(
-                        attempt_id=f"{contract.run_id}/integration-owner",
-                        status="failed",
-                        payload={
-                            "error": str(exc),
-                            "error_type": type(exc).__name__,
-                        },
-                    ),
-                    dispatch.launches,
+                    break
+                retried_post_review = _run_verification_stage(
+                    run_id=contract.run_id,
+                    objective=contract.objective,
+                    acceptance_criteria=contract.criteria,
+                    worktree_path=transaction.worktree_path,
+                    allowed_paths=allowed_paths,
+                    verification_argv=verification_argv,
+                    verification_gates=verification_gates,
+                    repair_executor_factory=verification_repair_executor_factory,
+                    repair_limit=verification_repair_limit,
+                    timeout_seconds=verification_timeout_seconds,
+                    evidence=evidence,
+                    audit=audit,
+                    stage="post_review_recovery",
                 )
-                break
+                verification_result = _combine_verification_results(
+                    verification_result,
+                    retried_post_review,
+                )
+                post_review = retried_post_review
+                status = post_review.status
+        if (
+            status == "succeeded"
+            and project_run_view(kernel)["status"] == "succeeded"
+            and verification_result is not None
+            and verification_result.status == "succeeded"
+        ):
+            _promote_gate_criteria(kernel, verification_result)
+        if status == "succeeded" and project_run_view(kernel)["status"] == "succeeded":
+            while True:
+                try:
+                    if transaction.candidate_commit is None:
+                        commit = transaction.commit_candidate(
+                            allowed_paths=allowed_paths,
+                            message=commit_message,
+                        )
+                        receipts.append(commit)
+                        _record_git_receipt(audit, evidence, commit)
+                    if not candidate_only:
+                        integration = transaction.integrate(merge=merge)
+                        receipts.append(integration)
+                        _record_git_receipt(audit, evidence, integration)
+                    break
+                except (GitTransactionError, InterruptedError) as exc:
+                    condition = (
+                        "interrupted" if isinstance(exc, InterruptedError) else "failed"
+                    )
+                    status = condition
+                    audit.append(
+                        "git_transaction_failed",
+                        status=condition,
+                        payload={"error": str(exc)},
+                        actor=AuditActor("integration-owner", "integration_owner"),
+                    )
+                    if _recover_abnormal(
+                        agent=recovery_agent,
+                        recovery=recovery,
+                        audit=audit,
+                        contract=contract,
+                        worktree_path=transaction.worktree_path,
+                        allowed_paths=allowed_paths,
+                        stage="integration",
+                        condition=condition,
+                        reason=str(exc),
+                    ):
+                        status = "succeeded"
+                        continue
+                    dispatch = CoordinatorDispatchResult(
+                        TaskResult(
+                            attempt_id=f"{contract.run_id}/integration-owner",
+                            status="failed",
+                            payload={
+                                "error": str(exc),
+                                "error_type": type(exc).__name__,
+                            },
+                        ),
+                        dispatch.launches,
+                    )
+                    break
 
-    view = project_run_view(kernel)
-    if (
-        view["status"] == "succeeded"
-        and status != "succeeded"
-        and verification_result is not None
-    ):
-        _record_gate_verification_failure(kernel, verification_result)
         view = project_run_view(kernel)
-    terminal_status = (
-        "succeeded"
-        if status == "succeeded" and view["status"] == "succeeded"
-        else "blocked"
-        if status == "blocked" or view["status"] == "blocked"
-        else "failed"
-    )
-    review_fix_payload = (
-        review_fix_result.as_dict() if review_fix_result is not None else None
-    )
-    verification_payload = (
-        verification_result.as_dict() if verification_result is not None else None
-    )
-    manifest = audit.finalize(
-        terminal_status,
-        result={
-            "dispatcher_result": {
-                "attempt_id": dispatch.result.attempt_id,
-                "status": dispatch.result.status,
-                "payload": dict(dispatch.result.payload),
+        if (
+            view["status"] == "succeeded"
+            and status != "succeeded"
+            and verification_result is not None
+        ):
+            _record_gate_verification_failure(kernel, verification_result)
+            view = project_run_view(kernel)
+        terminal_status = (
+            "succeeded"
+            if status == "succeeded" and view["status"] == "succeeded"
+            else "blocked"
+            if status == "blocked" or view["status"] == "blocked"
+            else "failed"
+        )
+        review_fix_payload = (
+            review_fix_result.as_dict() if review_fix_result is not None else None
+        )
+        verification_payload = (
+            verification_result.as_dict() if verification_result is not None else None
+        )
+        manifest = audit.finalize(
+            terminal_status,
+            result={
+                "dispatcher_result": {
+                    "attempt_id": dispatch.result.attempt_id,
+                    "status": dispatch.result.status,
+                    "payload": dict(dispatch.result.payload),
+                },
+                "run_view": view,
+                "state_digest": kernel.state_digest(),
+                "git_receipts": list(receipts),
+                "verification": verification_payload,
+                "review_fix": review_fix_payload,
+                "recovery_decisions": list(recovery.decisions),
             },
-            "run_view": view,
-            "state_digest": kernel.state_digest(),
-            "git_receipts": list(receipts),
-            "verification": verification_payload,
-            "review_fix": review_fix_payload,
-            "recovery_decisions": list(recovery.decisions),
-        },
-        state={
-            "controller": kernel.snapshot(),
-            "verification": verification_payload,
-            "review_fix": review_fix_payload,
-            "recovery": {
-                "decisions": list(recovery.decisions),
+            state={
+                "controller": kernel.snapshot(),
+                "verification": verification_payload,
+                "review_fix": review_fix_payload,
+                "recovery": {
+                    "decisions": list(recovery.decisions),
+                },
             },
-        },
-    )
-    return FeatureRunResult(
-        terminal_status,
-        contract,
-        dispatch,
-        view,
-        tuple(receipts),
-        manifest,
-        run_dir,
-        transaction.worktree_path,
-        review_fix_result,
-        verification_result,
-    )
+        )
+        return FeatureRunResult(
+            terminal_status,
+            contract,
+            dispatch,
+            view,
+            tuple(receipts),
+            manifest,
+            run_dir,
+            transaction.worktree_path,
+            review_fix_result,
+            verification_result,
+        )
+    finally:
+        # Idempotent: on the success path ``finalize`` released it already.
+        audit.release_liveness()
 
 
 def _review_stage_detail(

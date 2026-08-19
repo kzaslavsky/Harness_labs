@@ -187,6 +187,62 @@ class ControllerLivenessLeaseTests(_LivenessFixture):
         self.assertEqual(observed["payload"]["run_id"], "fr-run")
         self.assertEqual(observed["payload"]["controller_kind"], "feature_run")
 
+    def test_a_feature_run_that_escapes_stops_claiming_to_be_alive(self) -> None:
+        """An abandoned run must not read ``live`` while its process lives on.
+
+        Launchers run in a ``ThreadPoolExecutor``, so a ``run_feature_worktree``
+        that raises escapes into ``PlanGraph``'s launcher-escape handler, which
+        records the node failed and keeps the *same* process running.  The
+        journal is never finalized, so nothing else releases the lease: the
+        run would keep a fresh heartbeat under a genuinely live pid and read
+        ``live`` for the rest of the graph.  Neither guard catches that -- the
+        pid is real and the heartbeat is current -- so the release has to
+        happen on the error path itself.
+        """
+
+        run_dir = self.run_root / "escaped"
+
+        def contract_factory(worktree, receipt):
+            return RunContract(
+                run_id="escaped", objective="Escape.", phases=("active",),
+                criteria=({"id": "seen", "statement": "Seen.", "source": "operator"},),
+                terminal_artifact_kinds=("implementation-summary",),
+                repository={
+                    "path": str(worktree), "branch": receipt["feature_branch"],
+                    "base_branch": receipt["base_branch"],
+                    "base_commit": receipt["base_commit"],
+                },
+            )
+
+        schema = CoordinatorDispatchSchema(
+            "liveness-probe/1",
+            (CoordinatorSegment(id="active", phases=("active",),
+                                instructions="Do nothing."),),
+        )
+        with self.assertRaises(Exception):
+            run_feature_worktree(
+                base_repository=self.repository, base_branch="main",
+                feature_branch="feature/escaped",
+                worktree_path=self.root / "escaped-worktree", run_dir=run_dir,
+                contract_factory=contract_factory, schema=schema,
+                session_factory=lambda worktree, launch, evidence: None,
+                # Stops the run after the journal -- and its lease -- exist.
+                profile_builder=lambda worktree, evidence: (),
+                allowed_paths=("plan.md",), commit_message="probe",
+            )
+
+        # This process is still alive, exactly as the graph process would be.
+        self.assertFalse(
+            (run_dir.resolve() / LIVENESS_FILENAME).exists(),
+            "the lease outlived the run that escaped",
+        )
+        record = _records(build_run_catalog(self.run_root))["escaped"]
+        self.assertNotEqual(record["status"], "succeeded")
+        self.assertEqual(
+            record["liveness"],
+            {"state": "liveness_unavailable", "reason": "no liveness lease"},
+        )
+
     def test_a_running_feature_run_reports_live_to_the_catalog(self) -> None:
         self.feature_journal("child")
 
