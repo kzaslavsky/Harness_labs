@@ -14,6 +14,7 @@ from pathlib import Path
 from time import monotonic_ns, sleep
 from typing import Any, Mapping
 
+from harness_labs.core.controller_liveness import ControllerLivenessLease
 from harness_labs.core.usage import build_run_summary
 
 try:
@@ -103,6 +104,7 @@ class AuditJournal:
         *,
         actor: AuditActor,
         evidence_classification: str = "production_lifecycle",
+        controller_kind: str | None = None,
     ) -> None:
         if not run_id or "/" in run_id:
             raise ValueError("run_id must be a non-empty path-safe name")
@@ -125,6 +127,7 @@ class AuditJournal:
         self._started_at = _timestamp()
         self._mutex = threading.RLock()
         self._finalized = False
+        self._liveness: ControllerLivenessLease | None = None
 
         self.run_dir.mkdir(parents=True, mode=0o700, exist_ok=False)
         os.chmod(self.run_dir, 0o700)
@@ -146,6 +149,30 @@ class AuditJournal:
             payload={"audit_protocol": AUDIT_PROTOCOL},
         )
         self.checkpoint("running", {"active_children": [], "active_sessions": []})
+        self._start_liveness(controller_kind)
+
+    def _start_liveness(self, controller_kind: str | None) -> None:
+        """Own the run's ``liveness.json`` lease for as long as it is running.
+
+        The journal is where the lease belongs: it is created once per run,
+        knows the run's identity, and already owns the run directory the lease
+        sits beside.  Opt-in, because only a real controller process may claim
+        to be alive -- a test or tool that opens a journal to read or replay a
+        run must not publish a heartbeat for it.
+        """
+
+        if controller_kind is None or self._finalized:
+            return
+        self._liveness = ControllerLivenessLease(
+            self.run_dir, self.run_id, controller_kind
+        )
+
+    def release_liveness(self) -> None:
+        """Stop claiming this run is alive.  Idempotent; safe if never started."""
+
+        if self._liveness is not None:
+            self._liveness.stop()
+            self._liveness = None
 
     @classmethod
     def open_existing(
@@ -153,6 +180,7 @@ class AuditJournal:
         run_dir: Path,
         *,
         actor: AuditActor,
+        controller_kind: str | None = None,
     ) -> AuditJournal:
         run_dir = run_dir.resolve()
         verification = _verify_event_journal(run_dir)
@@ -226,6 +254,8 @@ class AuditJournal:
         instance._started_at = checkpoint["started_at"]
         instance._mutex = threading.RLock()
         instance._finalized = instance.manifest_path.is_file()
+        instance._liveness = None
+        instance._start_liveness(controller_kind)
         if checkpoint_lag:
             instance.append(
                 "checkpoint_reconciled",
@@ -532,6 +562,9 @@ class AuditJournal:
             mode=0o600,
         )
         self._finalized = True
+        # The run is terminal, so the catalog reports it from the manifest and
+        # a lingering lease could only ever contradict that.
+        self.release_liveness()
         self.verify(self.run_dir)
         return manifest
 
