@@ -140,6 +140,23 @@ Hard constraints from the plan ({PLAN_PATH}):
 """
 
 
+def _operator_note(node_id: str) -> str:
+    """Operator-relief guidance folded into a retried node's instructions.
+
+    Written by the human-facing session operator after a blocked or failed
+    attempt, anchored in reviewer findings; empty when no note exists. Lives
+    under the gitignored approval directory so it never dirties the base.
+    """
+    path = ROOT / "logs" / "plan-approval" / "operator-notes" / f"{node_id}.md"
+    if not path.exists():
+        return ""
+    return (
+        "\nOperator note for this retry (anchored in prior-attempt review "
+        "findings; it clarifies the existing acceptance criteria and never "
+        "widens your allowed paths):\n" + path.read_text(encoding="utf-8") + "\n"
+    )
+
+
 def git(repository: Path, *args: str) -> str:
     completed = subprocess.run(
         ["git", *args], cwd=repository, text=True, capture_output=True, check=False
@@ -267,6 +284,7 @@ Edit only these paths: {', '.join(run.allowed_paths)}.
 The controller-owned gate is: {' '.join(run.verification_argv)}
 Run it yourself before finishing and repair every failure.
 {HARD_CONSTRAINTS}\
+{_operator_note(node.plan_node_id)}\
 Do not commit. A prior failed attempt may have left uncommitted work in your
 allowed paths; inspect and finish or replace it rather than starting blind.
 Your structured result is part of the deliverable: summary and
@@ -345,6 +363,7 @@ Inspect the supplied ledger and fix_finding_keys. Modify only
 {', '.join(writable)}, and only as needed to resolve those exact findings
 without feature growth. Run {' '.join(node.run.verification_argv)}. Return
 addressed_finding_keys as the exact subset actually fixed. Do not commit.
+{_operator_note(node.plan_node_id)}\
 """,
             "verify": f"""\
 Treat controller_verified_command as authoritative. Inspect the repaired
