@@ -18,6 +18,26 @@
       "type": "object",
       "additionalProperties": { "$ref": "#/$defs/finding" }
     },
+    "scope_screening": {
+      "type": "object",
+      "description": "Tally of findings the scope guard screened out. A screened finding carries no obligation anywhere else in this document -- it is absent from every open-finding list by construction -- so this is the only place a screen is countable.",
+      "properties": {
+        "screened_count": { "type": "integer", "minimum": 0 },
+        "screened_finding_keys": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "by_class": {
+          "type": "object",
+          "additionalProperties": { "type": "integer", "minimum": 0 }
+        },
+        "required_finding_keys": {
+          "type": "array",
+          "description": "Screened findings that carry requires_disposition or contract_violation. Those are exempt from screening, so this list is expected to be empty; a non-empty one means a required obligation was discharged in silence.",
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
     "cycles": {
       "type": "array",
       "items": {
@@ -61,7 +81,24 @@
       ],
       "properties": {
         "key": { "type": "string", "minLength": 1 },
-        "file": { "type": "string" },
+        "file": {
+          "type": "string",
+          "description": "Repository-relative path the finding is anchored at, exactly as the reviewer wrote it -- it is half of the finding key, so it is never rewritten. Ledgers written before line/end_line existed embed the location here as 'path:N' or 'path:N-M'; such values still load and are read back into anchor_path/line/end_line. New producers write a bare path here and put the location in line/end_line."
+        },
+        "anchor_path": {
+          "type": "string",
+          "description": "The anchor as a normalized repository path: './' prefixes, duplicate separators and trailing slashes collapsed, and any legacy ':N'/':N-M' suffix removed. This, not file, is what the writable-path scope test reads."
+        },
+        "line": {
+          "type": ["integer", "null"],
+          "minimum": 1,
+          "description": "First line the finding refers to. Absent or null when the finding is about the file as a whole."
+        },
+        "end_line": {
+          "type": ["integer", "null"],
+          "minimum": 1,
+          "description": "Last line of the range, when the finding spans one. Requires line and must not precede it. A single-line finding leaves this null rather than repeating line."
+        },
         "subject": { "type": "string", "minLength": 1 },
         "statement": { "type": "string", "minLength": 1 },
         "category": { "type": "string", "minLength": 1 },
@@ -106,7 +143,16 @@
           "items": { "type": "string", "minLength": 1 }
         },
         "fix_attempts": { "type": "array", "items": { "type": "object" } },
-        "reopened_count": { "type": "integer", "minimum": 0 }
+        "reopened_count": { "type": "integer", "minimum": 0 },
+        "anchor_out_of_grant": { "type": "boolean" },
+        "inherited": {
+          "type": "boolean",
+          "description": "Seeded from another ledger (a cross-node transfer, or an obligation exported by a blocked predecessor). Such a record was minted against another grant, so this node's grant does not screen it."
+        },
+        "scope_screen_class": {
+          "enum": ["", "anchor_out_of_grant", "scope_expanding"],
+          "description": "Which screening branch disposed of this finding, when one did."
+        }
       }
     }
   }

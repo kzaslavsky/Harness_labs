@@ -1584,6 +1584,7 @@ class PlanGraph:
                 result.status,
                 outcome.evidence,
                 finding_obligations=carried,
+                scope_screening=self._scope_screening(outcome),
             )
             if result.status == "blocked":
                 return _SealDecision(
@@ -1627,6 +1628,7 @@ class PlanGraph:
             run.id,
             outcome.candidate_commit,
             finding_obligations=finding_obligations,
+            scope_screening=self._scope_screening(outcome),
         )
         return _SealDecision("sealed", finding_obligations=finding_obligations)
 
@@ -2348,6 +2350,30 @@ class PlanGraph:
         return pending
 
     @staticmethod
+    def _scope_screening(outcome: FeatureRunOutcome) -> dict[str, object]:
+        """Read the scope-screen tally a child's review loop reported.
+
+        A screened finding is attached to no obligation, so it appears in no
+        other field of the node's record: without this it leaves no trace at
+        all in what an operator reads.  Best-effort like :meth:`_open_findings`
+        -- nothing branches on it, so a malformed payload must not cost the
+        graph its completion or failure record.
+        """
+
+        if not isinstance(outcome.evidence, Mapping):
+            return {}
+        review_fix = outcome.evidence.get("review_fix")
+        if not isinstance(review_fix, Mapping):
+            return {}
+        screening = review_fix.get("scope_screening")
+        if not isinstance(screening, Mapping):
+            return {}
+        count = screening.get("screened_count")
+        if not isinstance(count, int) or isinstance(count, bool) or count < 1:
+            return {}
+        return dict(screening)
+
+    @staticmethod
     def _open_findings(
         outcome: FeatureRunOutcome,
     ) -> tuple[Mapping[str, object], ...]:
@@ -2565,6 +2591,14 @@ class PlanGraph:
                         "candidate_commit": node.get("candidate_commit") or self._pending_candidate_commit(audit, node_id),
                         "evidence_ref": evidence_ref,
                         "open_obligations": node.get("finding_obligations", []),
+                        # A screened finding is attached to no obligation, so
+                        # without this it leaves no trace in the artifact an
+                        # operator actually reads after a block.
+                        "scope_screening": (
+                            dict(node["scope_screening"])
+                            if isinstance(node.get("scope_screening"), Mapping)
+                            else {}
+                        ),
                     })
         # The resume template names every node this attempt terminalized, not
         # only the first one recorded.  A successor that retries only the
