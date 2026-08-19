@@ -43,7 +43,16 @@ from harness_labs.plangraph.plan_graph_audit import _process_start_token
 _ESCALATION_PROTOCOL = "plan-graph-block-escalation/1"
 _ADMISSION_LIVENESS_NAME = "plan-graph-admission-liveness.json"
 _ADMISSION_LIVENESS_PROTOCOL = "harness-plan-graph-admission-liveness/1"
-_CHILD_LIVENESS_NAMES = ("plan-graph-liveness.json", "liveness.json")
+# ``liveness.json`` was once accepted here as an alias.  It no longer is:
+# that filename is the controller liveness lease
+# (``harness-controller-liveness/1``, written by
+# ``core.controller_liveness`` for every running FeatureRun), and both
+# readers of this tuple refuse to look when more than one candidate name is
+# present.  Leaving the alias in place would mean a child that wrote a real
+# ``plan-graph-liveness.json`` beside its own controller lease became
+# unobservable -- two names present, so neither is read.  One filename, one
+# protocol.
+_CHILD_LIVENESS_NAMES = ("plan-graph-liveness.json",)
 _CHILD_LIVENESS_PROTOCOL = "harness-plan-graph-parallel-liveness/1"
 _TERMINAL_NODE_STATUSES = frozenset({"failed", "blocked"})
 _RESUMABLE_ATTEMPT_STATUSES = frozenset({"failed", "blocked"})
@@ -370,10 +379,14 @@ class QuiescenceMonitor:
     tell one campaign's runner from another's on a shared host, cannot see a
     child agent whose parent has exited, and treats a recycled pid as live.
     The ``controller-liveness.schema.json`` lease that the run catalog reads
-    would be the tidier basis, but nothing in ``harness_labs`` writes one
-    outside the dashboard fixture, so a quiescence check built on it would
-    report "quiescent" unconditionally -- the most dangerous possible answer
-    for this tool.
+    is now written by every running controller (``core.controller_liveness``),
+    but this check deliberately still reads the lineage's own markers.  The
+    lease answers "is this run's controller alive", one run at a time and
+    keyed by run id; quiescence is a question about a whole lineage including
+    the children of a controller that has already exited, which is exactly
+    what the admission and child markers describe.  The two agree on the rule
+    that matters -- pid plus process-start token -- because both apply
+    ``_process_start_token``.
     """
 
     def __init__(self, run_root: Path, *, process_probe: Callable[[int], str | None] | None = None) -> None:

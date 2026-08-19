@@ -176,6 +176,57 @@ class PlanGraphTests(unittest.TestCase):
         self.assertEqual(calls[1].finding_obligations, (transfer,))
         self.assertTrue(calls[1].inherited_ledger_frozen)
 
+    def test_a_directory_grant_resolves_a_transferred_finding_to_its_owner(self) -> None:
+        """PlanGraph must validate the claim its own grant map made possible.
+
+        ``_pending_findings`` re-resolves every ``required_path`` of a
+        transferred finding and rejects the transfer unless it lands uniquely
+        on the node the child named.  It used to look beneath a grant only
+        when the grant string ended in ``/``, which the plan contract forbids,
+        so a child that correctly routed a file to the owner of a *directory*
+        grant had its transfer rejected as unresolvable.
+        """
+
+        payload = dict(self.payload)
+        payload["runs"] = [
+            dict(payload["runs"][0], allowed_paths=["producer.py"]),
+            dict(payload["runs"][1], allowed_paths=["web/routes"]),
+        ]
+        registration = register_plan_graph(
+            repository=self.repository,
+            logical_graph_id="directory-transfer-graph",
+            decomposition=payload,
+        )
+        transfer = {
+            "key": "web/routes/l2.py:wire-producer",
+            "file": "producer.py",
+            "subject": "wire producer",
+            "statement": "Consume the producer receipt.",
+            "scope_expanding": True,
+            "outcome": "transferred",
+            "origin_node": "a",
+            "transferred_to": "b",
+            "required_paths": ["web/routes/l2.py"],
+        }
+        calls = []
+
+        def launcher(request):
+            calls.append(request)
+            evidence = (
+                {"transferred_findings": [transfer]}
+                if request.run.id == "a"
+                else {"transferred_findings": []}
+            )
+            return FeatureRunOutcome(
+                "succeeded", f"{request.run.id}-commit", evidence=evidence
+            )
+
+        result = self.graph(launcher, registration=registration).run()
+
+        self.assertEqual(result.status, "succeeded")
+        self.assertEqual(calls[0].finding_transfer_targets, {"web/routes": "b"})
+        self.assertEqual(calls[1].finding_obligations, (transfer,))
+
     def test_blocked_node_carries_its_open_findings_into_graph_state(self) -> None:
         """A blocked node's open findings survive as its own obligations.
 
