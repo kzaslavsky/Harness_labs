@@ -1,0 +1,1270 @@
+{
+  "base_commit": "c53cb14802f00ca6aa21f700d3d8274759074aca",
+  "canonical_decomposition": {
+    "acceptance_criteria": {
+      "EV-CHROME-01": "No legacy toolbar; pane grammar per D30/D31 with trimmed palette and Review pill in the process group.",
+      "EV-CHROME-02": "Pipeline chip autosaves with transient Saving state; edits survive reload; no standalone Save.",
+      "EV-CHROME-03": "Run silently pins an immutable revision with no dialog or lock ceremony.",
+      "EV-CHROME-04": "History revisions open read-only; Fork mints an editable draft.",
+      "EV-CHROME-05": "Chain drawing only in explicit Connect-steps mode with live connectivity feedback.",
+      "EV-CHROME-06": "Fields-to-extract strip always present; neutral vs binding styles per D29 with no layout jump.",
+      "EV-CHROME-07": "Schema chip click assigns to the selected node only.",
+      "EV-CHROME-08": "Every placed node shows an output edge stub; incompatible targets show plain-language refusal.",
+      "EV-E2E-01": "Full Operative Note pipeline builds and runs from empty with consistent counts end-to-end.",
+      "EV-E2E-02": "Grumpy path: every failure is loud, clinician-worded, and never mistakable for success.",
+      "EV-EXPORT-01": "DB ingest writes exactly the review-accepted set through the hardened import gate.",
+      "EV-EXPORT-02": "No wiring or API path lets unreviewed rows reach the clinical DB (POC straight-through excepted).",
+      "EV-EXPORT-03": "Data export includes exactly the reviewed subset with N-of-M recorded in UI and file.",
+      "EV-EXPORT-04": "Data export carries a PHI label; web-served and repo destinations are refused.",
+      "EV-EXPORT-05": "CSV/TXT/XLSX all parse with id plus per-upstream-kind columns, one row per document.",
+      "EV-EXPORT-06": "Projection SQL-view flavor re-runs a saved view over the clinical DB in export styling.",
+      "EV-EXPORT-07": "Projection inputs persist as (pipeline ref + field selector) by-reference shape.",
+      "EV-IMPORT-01": "Empty-rail fresh start renders the no-doctypes state with add affordance only.",
+      "EV-IMPORT-02": "Adding a lone doctype auto-selects it and makes the Import node placeable.",
+      "EV-IMPORT-03": "Dragged Import node renders circle+rectangle with doctype, description, summed total, and an output edge stub.",
+      "EV-IMPORT-04": "Plus-disc click reveals three translucent ghost sources with live availability states.",
+      "EV-IMPORT-05": "Undetected L1 ghost is inert with a jargon-free explanation.",
+      "EV-IMPORT-06": "L1 activation shows selectable-row counts per doctype and the node total is the arithmetic sum across active sources.",
+      "EV-IMPORT-07": "Upload source shows per-source count; batch UUIDs persist as the node selection across reload.",
+      "EV-IMPORT-08": "POC ghost is inert without a vault, gate surfaced in plain language before capture.",
+      "EV-IMPORT-09": "Lazy-intake strip shows visible vs vaulted counts; parked documents surface as a count, never guessed or skipped.",
+      "EV-IMPORT-10": "Incompatible payload edges refused with plain-language reasons; incompatible source options greyed.",
+      "EV-PROCESS-01": "OCR/LLM cards expose all config rows on-card with no hidden drawer.",
+      "EV-PROCESS-02": "Test-N is choose-then-press: selecting N never fires; Test runs exactly N.",
+      "EV-PROCESS-03": "Card expands on run with progress bar, running/ok/failed counts, and throughput.",
+      "EV-PROCESS-04": "Prompt edit expands the card in place; save collapses and autosaves.",
+      "EV-PROCESS-05": "Run results persist on-card until explicitly dismissed; no inspect drawer in DOM.",
+      "EV-PROCESS-06": "Empty scope renders as a loud warning with server-provided reason, never quiet 0/0 success.",
+      "EV-PROCESS-07": "Boot failure renders a visible plain-language error banner with disabled controls.",
+      "EV-REVIEW-01": "Suggested ghost Review circle appears after placed process nodes; ignoring costs nothing; clicking accepts it into persistence.",
+      "EV-REVIEW-02": "Review ring shows n/total progress, yellow while partial, green at completion.",
+      "EV-REVIEW-03": "Review mode hides node settings and shows source left, output right, with yellow banner.",
+      "EV-REVIEW-04": "Field edits render as tracked corrections and persist with provenance.",
+      "EV-REVIEW-05": "Accept/Reject advance progress; rejected docs are visibly recorded and excluded from the accepted set.",
+      "EV-REVIEW-06": "Test mode shows blue banner, live settings pane, re-run and keep-settings controls, scratch-labeled output.",
+      "EV-REVIEW-07": "Test re-run hits the identical N docs; scratch never counts as reviewed or persists after close.",
+      "EV-REVIEW-08": "Keep-these-settings writes node config and survives reload; scratch still not counted as reviewed.",
+      "PL-1": "RULED (operator, 2026-08-15): subject resolution is L2-side. The admission worker reads only the L1 manifest's patient_extraction_id via the sanctioned read-only connector, joins it against L2's mirrored identity rows (identity_source set; L1 id preserved verbatim per Phase 2), and resolves-or-mints the intake subject with the existing set-once binding pattern. It never reads L1 patient_extraction identity columns on the run path. Park conditions: unmirrored id, NULL patient_extraction_id, the __L2_INGEST__ synthetic parent, or conflicting identities -> needs-patient-match worklist. Operational precondition: scripts/mirror_l2_identity.py refreshed before/during campaigns; parked docs admit on a later pass after re-mirror.",
+      "PL-2": "SIGNED via plan approval (operator, 2026-08-15): ADR-A and ADR-B accepted as drafted; contradiction surfaced during implementation -> park. WP-01 promotes accepted text, it does not negotiate content.",
+      "PL-3": "Gate runs use the deterministic synthetic inference stub from WP-00; live omlx runs are operator-attended only.",
+      "PL-4": "Redacted_notes_OCR.zip untouched until a de-identification verification pass; all committed evals use synthetic fixtures.",
+      "WP-00-EXIT": "Deterministic synthetic fixture factory (SYN-OR PNGs, SYN-TXT files, SYN-L1.db builder, POC envelope helper) and loopback inference stub exist, are PHI-free, and are importable by any test.",
+      "WP-01-EXIT": "ADR-A and ADR-B are Accepted in docs/architecture, name every affected authority and migration, retain benchmark-mode frozen membership; no P2b/P2c implementation starts from draft semantics.",
+      "WP-02-EXIT": "Cutover refusal and empty scope are distinct visible states; neither renders as quiet 0-succeeded-0-failed success; all four boot awaits surfaced.",
+      "WP-03-EXIT": "Card controls are the single accessible editing surface; VLM/transform/confidence_router hidden via palette-visibility flag but remain saveable/executable; Review pill joins the process group.",
+      "WP-04-EXIT": "POST, PUT, and DELETE share the same fail-closed CSRF rule before autosave issues PUTs.",
+      "WP-05-EXIT": "No server execution/readiness path requires get_draft; immutable revisions are execution authority; migration idempotent and completeness-tested.",
+      "WP-06-EXIT": "Reload preserves autosaved edits; Run creates an immutable revision without a dialog; selecting N does not fire and Test uses the selected N.",
+      "WP-07-EXIT": "Pipelines unique by (project_id, name); every root is Import; multi-root and import-fed fan-in work; no run-header type filter drops a source.",
+      "WP-08-EXIT": "Counts exclude unselectable paths and sum by source; POC_NOTE reclassification cannot strand existing records.",
+      "WP-09-EXIT": "Each registration batch regenerates the cutover receipt in the same transaction; rollback leaves both unchanged.",
+      "WP-10-EXIT": "Ready documents feed execution incrementally under their pinned revision; admitted documents join the work set; ambiguous identity parks, never guesses; benchmark mode stays frozen. Model-based state-transition tests, custody/admission failure injection, concurrency/idempotency tests, and an independent architecture+security review pass before WP-13 consumes it.",
+      "WP-11-EXIT": "Typed kinds cannot omit handles; Import/Export kinds never produce node_kind_unhandled; no Import or Export kind ships before this package.",
+      "WP-12-EXIT": "No deleted-toolbar synthetic click remains; History usable; pane grammar per D30 and keyboard/focus behavior stable; right pane may hold static placeholders only (no registry dependency).",
+      "WP-13-EXIT": "Import node persists source predicate plus safe labels/UUIDs, never filesystem paths; shows found/preparing/excluded denominators; no run-import control exists.",
+      "WP-14-EXIT": "Results no longer require the inspect drawer; schema/field assignment is per node with D29 binding styles; incompatible stubs fail visibly.",
+      "WP-15-EXIT": "Direct API calls cannot import unreviewed rows; bulk acceptance is count-confirmed with distinct accepted_without_individual_review provenance.",
+      "WP-16-EXIT": "Ignored suggestions never enter persistence; accepted Review nodes persist; counts and ring are truthful.",
+      "WP-17-EXIT": "Trial output is visibly non-editable and never counts as reviewed; retained test PHI obeys purge policy; review corrections persist with provenance.",
+      "WP-18-EXIT": "_commit_review_terminal stays sidecar-only; no non-POC edge or API path bypasses the WP-15 gate.",
+      "WP-19-EXIT": "No egress witness means no bytes; incomplete review exports only the accepted subset; no server path accepted or returned.",
+      "WP-20-EXIT": "Projection SQL cannot mutate or escape the allowlist; references survive reload/fork; output inherits Data-node review/PHI/egress constraints.",
+      "WP-21-EXIT": "Import region passes the layout- and state-faithful fidelity protocol (structural assertions first, SSIM as review trigger).",
+      "WP-22-EXIT": "Process/review region passes the fidelity protocol including D29 strip states and Try-settings differentiation.",
+      "WP-23-EXIT": "Chrome region passes the fidelity protocol including D30 column-scoped top bars at supported viewports.",
+      "WP-24-EXIT": "Export region passes the fidelity protocol communicating gates, exclusions, provenance, and PHI plainly.",
+      "WP-25-EXIT": "EV-E2E-01/02 pass from fresh databases; full venv pytest, standalone-boundary, doc checks, and scan_export_phi.sh pass."
+    },
+    "functionality_tests": [
+      {
+        "argv": [
+          "/Users/kirillzaslavsky/claudeprojects/Retinology/.venv/bin/pytest",
+          "-q",
+          "tests"
+        ],
+        "required_paths": [],
+        "timeout_seconds": 7200.0
+      },
+      {
+        "argv": [
+          "bash",
+          "scripts/scan_export_phi.sh"
+        ],
+        "required_paths": [],
+        "timeout_seconds": 900.0
+      },
+      {
+        "argv": [
+          "/Users/kirillzaslavsky/claudeprojects/Retinology/.venv/bin/pytest",
+          "-q",
+          "tests/test_l2_standalone_boundary.py"
+        ],
+        "required_paths": [],
+        "timeout_seconds": 1800.0
+      },
+      {
+        "argv": [
+          "python3",
+          "scripts/check_doc_status.py"
+        ],
+        "required_paths": [],
+        "timeout_seconds": 600.0
+      },
+      {
+        "argv": [
+          "python3",
+          "scripts/check_doc_links.py"
+        ],
+        "required_paths": [],
+        "timeout_seconds": 600.0
+      }
+    ],
+    "plan": "Flow_Editor_work/Flow_Editor_13AUG26_UISTREAMLINE/Flow_Editor_UISTREAMLINE_plan.md",
+    "plan_sections": {
+      "WP-00": "Added by graphrun_readiness_review_15AUG26.md finding F1 (eval substrate must precede the packages whose exit gates consume it); fixture definitions in ui_evals.md Scope and conventions.",
+      "WP-01": "dependency_graph_plan.md section 1, WP-01 - Finalize ADR-A and ADR-B",
+      "WP-02": "dependency_graph_plan.md section 1, WP-02 - Failure visibility and empty-scope truthfulness",
+      "WP-03": "dependency_graph_plan.md section 1, WP-03 - On-card editing and palette policy repair",
+      "WP-04": "dependency_graph_plan.md section 1, WP-04 - CSRF coverage for mutating verbs",
+      "WP-05": "dependency_graph_plan.md section 1, WP-05 - Unified definition-store server migration",
+      "WP-06": "dependency_graph_plan.md section 1, WP-06 - Unified clients, autosave, run pinning, ordered Test-N",
+      "WP-07": "dependency_graph_plan.md section 1, WP-07 - Project-scoped definitions and multi-entry graph semantics",
+      "WP-08": "dependency_graph_plan.md section 1, WP-08 - Honest source counts and POC classification",
+      "WP-09": "dependency_graph_plan.md section 1, WP-09 - Transactional cutover-receipt regeneration",
+      "WP-10": "dependency_graph_plan.md section 1, WP-10 - Incremental admission ledger and registration worker",
+      "WP-11": "dependency_graph_plan.md section 1, WP-11 - Typed registry and inert source/sink lifecycle",
+      "WP-12": "dependency_graph_plan.md section 1, WP-12 - Editor chrome, pipeline controls, layout grammar",
+      "WP-13": "dependency_graph_plan.md section 1, WP-13 - Import-node authoring and source UI",
+      "WP-14": "dependency_graph_plan.md section 1, WP-14 - Process-card behavior, Fields-to-extract strip, edge stubs",
+      "WP-15": "dependency_graph_plan.md section 1, WP-15 - Reviewed-write gate and bulk-accept provenance",
+      "WP-16": "dependency_graph_plan.md section 1, WP-16 - Review circle and suggested-review graph behavior",
+      "WP-17": "dependency_graph_plan.md section 1, WP-17 - Shared Review/Try-settings interface",
+      "WP-18": "dependency_graph_plan.md section 1, WP-18 - Add-to-clinical-database node",
+      "WP-19": "dependency_graph_plan.md section 1, WP-19 - Reviewed Data download",
+      "WP-20": "dependency_graph_plan.md section 1, WP-20 - Saved-view Projection node",
+      "WP-21": "dependency_graph_plan.md section 1, WP-21 - Import-region visual-fidelity gate",
+      "WP-22": "dependency_graph_plan.md section 1, WP-22 - Process/review visual-fidelity gate",
+      "WP-23": "dependency_graph_plan.md section 1, WP-23 - Chrome/palette visual-fidelity gate",
+      "WP-24": "dependency_graph_plan.md section 1, WP-24 - Export-region visual-fidelity gate",
+      "WP-25": "dependency_graph_plan.md section 1, WP-25 - Full integration, grumpy path, and release gate"
+    },
+    "protocol": "plan-graph-plan/1",
+    "referenced_artifacts": [
+      "CLAUDE.md",
+      "Flow_Editor_work/Flow_Editor_13AUG26_UISTREAMLINE/Flow_Editor_UISTREAMLINE_plan.md",
+      "Flow_Editor_work/Flow_Editor_13AUG26_UISTREAMLINE/LAUNCH.md",
+      "Flow_Editor_work/Flow_Editor_13AUG26_UISTREAMLINE/PACKAGE_MANIFEST.md",
+      "Flow_Editor_work/Flow_Editor_13AUG26_UISTREAMLINE/adr_drafts_14AUG26.md",
+      "Flow_Editor_work/Flow_Editor_13AUG26_UISTREAMLINE/dependency_graph_plan.md",
+      "Flow_Editor_work/Flow_Editor_13AUG26_UISTREAMLINE/graphrun_readiness_review_15AUG26.md",
+      "Flow_Editor_work/Flow_Editor_13AUG26_UISTREAMLINE/import_node_feasibility.md",
+      "Flow_Editor_work/Flow_Editor_13AUG26_UISTREAMLINE/initial_fable_assessment.md",
+      "Flow_Editor_work/Flow_Editor_13AUG26_UISTREAMLINE/mockup_v10.html",
+      "Flow_Editor_work/Flow_Editor_13AUG26_UISTREAMLINE/multilens_review_14AUG26.md",
+      "Flow_Editor_work/Flow_Editor_13AUG26_UISTREAMLINE/ui_evals.md",
+      "SECURITY.md",
+      "docs/architecture/L1_L2_CONTRACT.md",
+      "docs/architecture/L2_INTAKE_CONTRACT.md",
+      "learnings/PITFALLS.md"
+    ],
+    "runs": [
+      {
+        "allowed_paths": [
+          "tests/fixtures",
+          "tests/conftest.py",
+          "tests/test_flow_eval_substrate.py"
+        ],
+        "criteria": [
+          "WP-00-EXIT",
+          "PL-3",
+          "PL-4"
+        ],
+        "depends_on": [],
+        "id": "WP-00",
+        "objective": "Eval substrate: synthetic fixture factory and inference stub. Build the shared eval substrate the exit gates depend on: a synthetic fixture factory producing SYN-OR-{01..20}.png, SYN-TXT-{01..05}.txt, a SYN-L1.db builder (document_extraction + patient_extraction with fabricated filenums and NULL-text_path rows), a POC envelope helper, and a deterministic loopback inference stub backend for gate runs (PL-3). No PHI anywhere; everything reproducible from code.",
+        "path_intents": [
+          {
+            "action": "create",
+            "path": "tests/fixtures/flow_editor_synthetic.py"
+          },
+          {
+            "action": "create",
+            "path": "tests/fixtures/flow_inference_stub.py"
+          },
+          {
+            "action": "create",
+            "path": "tests/test_flow_eval_substrate.py"
+          }
+        ],
+        "plan_sections": [
+          "WP-00"
+        ],
+        "verification_argv": [
+          "/Users/kirillzaslavsky/claudeprojects/Retinology/.venv/bin/pytest",
+          "-q",
+          "tests/test_flow_eval_substrate.py"
+        ],
+        "verification_required_paths": [],
+        "verification_timeout_seconds": 900.0
+      },
+      {
+        "allowed_paths": [
+          "docs/architecture",
+          "Flow_Editor_work/Flow_Editor_13AUG26_UISTREAMLINE"
+        ],
+        "criteria": [
+          "WP-01-EXIT",
+          "PL-2"
+        ],
+        "depends_on": [],
+        "id": "WP-01",
+        "objective": "Finalize ADR-A and ADR-B. Promote the two accepted ADR drafts from the handoff package into the docs/architecture ADR series, settling schema, migration, replay, admission-ledger, transactional receipt, and project-scoped identity details, updating only indexes ADR policy requires.",
+        "path_intents": [
+          {
+            "action": "create",
+            "path": "docs/architecture/ADR-0007-incremental-run-scoping.md"
+          },
+          {
+            "action": "create",
+            "path": "docs/architecture/ADR-0008-pipeline-dekeying-from-document-type.md"
+          }
+        ],
+        "plan_sections": [
+          "WP-01"
+        ],
+        "verification_argv": [
+          "python3",
+          "scripts/check_doc_status.py"
+        ],
+        "verification_required_paths": [],
+        "verification_timeout_seconds": 600.0
+      },
+      {
+        "allowed_paths": [
+          "retinology/web/_l2_batch.py",
+          "retinology/web/routes/l2_pipelines.py",
+          "retinology/web/static/js/flow",
+          "retinology/web/static/css/flow_editor.css",
+          "tests"
+        ],
+        "criteria": [
+          "WP-02-EXIT",
+          "EV-PROCESS-06",
+          "EV-PROCESS-07"
+        ],
+        "depends_on": [],
+        "id": "WP-02",
+        "objective": "Failure visibility and empty-scope truthfulness. Expose cutover-gate refusals through run status, catch all four top-level boot awaits with a visible failure banner, and render a loud warning for zero execution contexts, per D28 clinician-language error surfaces. Empty-scope evals at this stage use existing doctype scoping (the Import node does not exist yet).",
+        "path_intents": [
+          {
+            "action": "modify",
+            "path": "retinology/web/_l2_batch.py"
+          },
+          {
+            "action": "modify",
+            "path": "retinology/web/routes/l2_pipelines.py"
+          }
+        ],
+        "plan_sections": [
+          "WP-02"
+        ],
+        "verification_argv": [
+          "/Users/kirillzaslavsky/claudeprojects/Retinology/.venv/bin/pytest",
+          "-q",
+          "tests/test_l2_batch.py",
+          "tests/test_l2_run_routes.py",
+          "tests/test_l2_run_store.py",
+          "tests/test_l2_process_run_monitor.py",
+          "tests/test_l2_flow_editor.py"
+        ],
+        "verification_required_paths": [],
+        "verification_timeout_seconds": 2400.0
+      },
+      {
+        "allowed_paths": [
+          "retinology/web/static/css/flow_editor.css",
+          "retinology/web/static/js/flow",
+          "retinology/web/_l2_palette.py",
+          "retinology/web/templates/l2_flow_editor.html",
+          "tests"
+        ],
+        "criteria": [
+          "WP-03-EXIT",
+          "EV-PROCESS-01"
+        ],
+        "depends_on": [],
+        "id": "WP-03",
+        "objective": "On-card editing and palette policy repair. Remove the delegated/inspector-editing read-only policy, split the CSS selector while keeping Inspect hidden, fix the draft placeholder and drawer dismiss interims, fix palette order, and add the palette-visibility flag hiding vlm/transform/confidence_router while keeping all kinds saveable/executable; merge the Review pill into the process button group per D31.",
+        "path_intents": [
+          {
+            "action": "modify",
+            "path": "retinology/web/static/css/flow_editor.css"
+          },
+          {
+            "action": "modify",
+            "path": "retinology/web/static/js/flow/canvas.js"
+          },
+          {
+            "action": "modify",
+            "path": "retinology/web/_l2_palette.py"
+          }
+        ],
+        "plan_sections": [
+          "WP-03"
+        ],
+        "verification_argv": [
+          "/Users/kirillzaslavsky/claudeprojects/Retinology/.venv/bin/pytest",
+          "-q",
+          "tests/test_l2_flow_editor.py",
+          "tests/test_l2_flow_editor_palette.py",
+          "tests/test_flow_parity_oracle.py"
+        ],
+        "verification_required_paths": [],
+        "verification_timeout_seconds": 2400.0
+      },
+      {
+        "allowed_paths": [
+          "retinology/web/_app_common.py",
+          "retinology/web/routes",
+          "tests"
+        ],
+        "criteria": [
+          "WP-04-EXIT"
+        ],
+        "depends_on": [],
+        "id": "WP-04",
+        "objective": "CSRF coverage for mutating verbs. Extend the fail-closed CSRF rule from POST to PUT and DELETE across route middleware/dependencies with tests, before autosave issues PUTs.",
+        "path_intents": [
+          {
+            "action": "modify",
+            "path": "retinology/web/_app_common.py"
+          }
+        ],
+        "plan_sections": [
+          "WP-04"
+        ],
+        "verification_argv": [
+          "/Users/kirillzaslavsky/claudeprojects/Retinology/.venv/bin/pytest",
+          "-q",
+          "tests/test_l2_login.py",
+          "tests/test_l2_route.py"
+        ],
+        "verification_required_paths": [],
+        "verification_timeout_seconds": 1800.0
+      },
+      {
+        "allowed_paths": [
+          "retinology/web/_l2_pipelines.py",
+          "retinology/web/routes/l2_pipelines.py",
+          "tests"
+        ],
+        "criteria": [
+          "WP-05-EXIT"
+        ],
+        "depends_on": [
+          "WP-02",
+          "WP-11"
+        ],
+        "id": "WP-05",
+        "objective": "Unified definition-store server migration. Forward-migrate every legacy draft/lock row to named definitions/revisions, prove completeness including get_or_default_pipeline and lock short-circuit cases, then move readiness, save_chain, preview, and execution readers to the unified store.",
+        "path_intents": [
+          {
+            "action": "modify",
+            "path": "retinology/web/_l2_pipelines.py"
+          },
+          {
+            "action": "modify",
+            "path": "retinology/web/routes/l2_pipelines.py"
+          }
+        ],
+        "plan_sections": [
+          "WP-05"
+        ],
+        "verification_argv": [
+          "/Users/kirillzaslavsky/claudeprojects/Retinology/.venv/bin/pytest",
+          "-q",
+          "tests/test_l2_pipelines.py",
+          "tests/test_flow_multi_draft_migration.py",
+          "tests/test_flow_definition_selection.py",
+          "tests/test_flow_named_chains.py",
+          "tests/test_flow_node_locks.py",
+          "tests/test_l2_p6_editable_pipeline.py",
+          "tests/test_l2_run_routes.py"
+        ],
+        "verification_required_paths": [],
+        "verification_timeout_seconds": 3600.0
+      },
+      {
+        "allowed_paths": [
+          "retinology/web/static/js",
+          "retinology/web/templates",
+          "tests"
+        ],
+        "criteria": [
+          "WP-06-EXIT",
+          "EV-PROCESS-02"
+        ],
+        "depends_on": [
+          "WP-00",
+          "WP-03",
+          "WP-04",
+          "WP-05"
+        ],
+        "id": "WP-06",
+        "objective": "Unified clients, autosave, run pinning, ordered Test-N. Repoint legacy client calls across the five JS bundles to the unified store, autosave drafts, silently pin a revision on Run, remove user-facing lock ceremony, and implement choose-then-press Test-N against the unified preview path.",
+        "path_intents": [
+          {
+            "action": "modify",
+            "path": "retinology/web/static/js/flow/persistence.js"
+          },
+          {
+            "action": "modify",
+            "path": "retinology/web/static/js/flow/api.js"
+          },
+          {
+            "action": "modify",
+            "path": "retinology/web/static/js/flow/run_menu.js"
+          }
+        ],
+        "plan_sections": [
+          "WP-06"
+        ],
+        "verification_argv": [
+          "/Users/kirillzaslavsky/claudeprojects/Retinology/.venv/bin/pytest",
+          "-q",
+          "tests/test_l2_flow_editor.py",
+          "tests/test_l2_flow_editor_nav.py",
+          "tests/test_l2_minimalist_ui.py",
+          "tests/test_l2_review_testmode.py",
+          "tests/test_l2_test_parse.py",
+          "tests/test_flow_definition_selection.py"
+        ],
+        "verification_required_paths": [],
+        "verification_timeout_seconds": 3600.0
+      },
+      {
+        "allowed_paths": [
+          "retinology/web/_l2_pipelines.py",
+          "retinology/web/_l2_lanes.py",
+          "retinology/web/routes/l2_pipelines.py",
+          "tests"
+        ],
+        "criteria": [
+          "WP-07-EXIT"
+        ],
+        "depends_on": [
+          "WP-01",
+          "WP-05"
+        ],
+        "id": "WP-07",
+        "objective": "Project-scoped definitions and multi-entry graph semantics. Remove run/pipeline document_type keying per ADR-B: uniqueness becomes (project_id, name), doctype moves to import-node config, all three root checks covered, import-fed in-degree relaxed, and all six execution-context call sites updated.",
+        "path_intents": [
+          {
+            "action": "modify",
+            "path": "retinology/web/_l2_pipelines.py"
+          },
+          {
+            "action": "modify",
+            "path": "retinology/web/_l2_lanes.py"
+          }
+        ],
+        "plan_sections": [
+          "WP-07"
+        ],
+        "verification_argv": [
+          "/Users/kirillzaslavsky/claudeprojects/Retinology/.venv/bin/pytest",
+          "-q",
+          "tests/test_l2_pipelines.py",
+          "tests/test_l2_lanes.py",
+          "tests/test_l2_dag_phase3a.py",
+          "tests/test_l2_dag_phase3b.py",
+          "tests/test_l2_batch_rerun.py",
+          "tests/test_l2_p1_project_scope.py",
+          "tests/test_flow_named_chains.py"
+        ],
+        "verification_required_paths": [],
+        "verification_timeout_seconds": 3600.0
+      },
+      {
+        "allowed_paths": [
+          "retinology/web/_l2_upstream_import.py",
+          "retinology/web/_l2_poc_capture.py",
+          "retinology/web/_l2_document_catalog.py",
+          "retinology/web/routes/l2_upstream.py",
+          "tests"
+        ],
+        "criteria": [
+          "WP-08-EXIT"
+        ],
+        "depends_on": [],
+        "id": "WP-08",
+        "objective": "Honest source counts and POC classification. Thread L1 document_type through upstream selection, add the selectable-row count endpoint, expose origin counts, reclassify new POC captures as POC_NOTE, and document/migrate existing routing behavior.",
+        "path_intents": [
+          {
+            "action": "modify",
+            "path": "retinology/web/_l2_upstream_import.py"
+          },
+          {
+            "action": "modify",
+            "path": "retinology/web/_l2_poc_capture.py"
+          }
+        ],
+        "plan_sections": [
+          "WP-08"
+        ],
+        "verification_argv": [
+          "/Users/kirillzaslavsky/claudeprojects/Retinology/.venv/bin/pytest",
+          "-q",
+          "tests/test_q6_upstream_connector.py",
+          "tests/test_q6_upstream_import.py",
+          "tests/test_q6_upstream_selection.py",
+          "tests/test_l2_document_catalog.py",
+          "tests/test_l2_poc_capture.py",
+          "tests/test_q5_no_l1_poc.py"
+        ],
+        "verification_required_paths": [],
+        "verification_timeout_seconds": 2400.0
+      },
+      {
+        "allowed_paths": [
+          "retinology/web/_l2_document_catalog.py",
+          "retinology/web/_l2_upstream_import.py",
+          "tests"
+        ],
+        "criteria": [
+          "WP-09-EXIT"
+        ],
+        "depends_on": [
+          "WP-01"
+        ],
+        "id": "WP-09",
+        "objective": "Transactional cutover-receipt regeneration. Make intake registration regenerate the cutover receipt inside the same transaction per ADR-A, with focused concurrency and idempotency tests; precedes every new registration path.",
+        "path_intents": [
+          {
+            "action": "modify",
+            "path": "retinology/web/_l2_document_catalog.py"
+          },
+          {
+            "action": "modify",
+            "path": "retinology/web/_l2_upstream_import.py"
+          }
+        ],
+        "plan_sections": [
+          "WP-09"
+        ],
+        "verification_argv": [
+          "/Users/kirillzaslavsky/claudeprojects/Retinology/.venv/bin/pytest",
+          "-q",
+          "tests/test_l2_custody_lane_cutover.py",
+          "tests/test_l2_import_idempotent.py",
+          "tests/test_l2_import_roundtrip.py",
+          "tests/test_q2_intake_foundation.py"
+        ],
+        "verification_required_paths": [],
+        "verification_timeout_seconds": 2400.0
+      },
+      {
+        "allowed_paths": [
+          "retinology/web/_l2_batch.py",
+          "retinology/web/_l2_run_store.py",
+          "retinology/web/_l2_lanes.py",
+          "retinology/web/_l2_upstream_import.py",
+          "retinology/web/_l2_upstream_retain.py",
+          "retinology/web/_l2_document_catalog.py",
+          "retinology/web/routes",
+          "tests"
+        ],
+        "criteria": [
+          "WP-10-EXIT",
+          "PL-1"
+        ],
+        "depends_on": [
+          "WP-01",
+          "WP-07",
+          "WP-09"
+        ],
+        "id": "WP-10",
+        "objective": "Incremental admission ledger and registration worker. Implement the append-only per-run admission ledger and per-import registration workers per ADR-A: per-document idempotency, prefetch, pause/resume, rerun-from-ledger, actionable needs-match records, PHI-safe failures. Subject resolution per the PL-1 ruling: join the L1 manifest's patient_extraction_id against L2's mirrored identity rows (Phase-2 mirror, identity_source set) and resolve-or-mint the intake subject; never read L1 identity columns on the run path; unmirrored/unlinked/conflicting documents park to the needs-patient-match worklist.",
+        "path_intents": [
+          {
+            "action": "modify",
+            "path": "retinology/web/_l2_batch.py"
+          },
+          {
+            "action": "modify",
+            "path": "retinology/web/_l2_run_store.py"
+          }
+        ],
+        "plan_sections": [
+          "WP-10"
+        ],
+        "verification_argv": [
+          "/Users/kirillzaslavsky/claudeprojects/Retinology/.venv/bin/pytest",
+          "-q",
+          "tests/test_l2_batch.py",
+          "tests/test_l2_batch_resume.py",
+          "tests/test_l2_batch_rerun.py",
+          "tests/test_l2_run_store.py",
+          "tests/test_l2_lanes.py",
+          "tests/test_q11_upstream_work_set.py",
+          "tests/test_intake_subjectless_terminal.py",
+          "tests/test_l2_replay.py"
+        ],
+        "verification_required_paths": [],
+        "verification_timeout_seconds": 3600.0
+      },
+      {
+        "allowed_paths": [
+          "retinology/web/_l2_node_registry.py",
+          "retinology/web/_l2_pipelines.py",
+          "retinology/web/_l2_lanes.py",
+          "retinology/web/_l2_palette.py",
+          "tests"
+        ],
+        "criteria": [
+          "WP-11-EXIT"
+        ],
+        "depends_on": [],
+        "id": "WP-11",
+        "objective": "Typed registry and inert source/sink lifecycle. Add mandatory accepts/emits plus declared handles to the node registry, real OCR image/binary inputs, union semantics for Import sources, plain-language incompatibility codes, and explicit no-op execution registration for source/sink kinds.",
+        "path_intents": [
+          {
+            "action": "modify",
+            "path": "retinology/web/_l2_node_registry.py"
+          },
+          {
+            "action": "modify",
+            "path": "retinology/web/_l2_lanes.py"
+          }
+        ],
+        "plan_sections": [
+          "WP-11"
+        ],
+        "verification_argv": [
+          "/Users/kirillzaslavsky/claudeprojects/Retinology/.venv/bin/pytest",
+          "-q",
+          "tests/test_l2_node_registry.py",
+          "tests/test_l2_pipelines.py",
+          "tests/test_l2_lanes.py",
+          "tests/test_flow_node_coverage.py",
+          "tests/test_flow_node_actions.py",
+          "tests/test_flow_node_schema_binding.py"
+        ],
+        "verification_required_paths": [],
+        "verification_timeout_seconds": 2400.0
+      },
+      {
+        "allowed_paths": [
+          "retinology/web/templates/l2_flow_editor.html",
+          "retinology/web/static/css/flow_editor.css",
+          "retinology/web/static/js/flow",
+          "tests"
+        ],
+        "criteria": [
+          "WP-12-EXIT",
+          "EV-CHROME-01",
+          "EV-CHROME-02",
+          "EV-CHROME-03",
+          "EV-CHROME-04",
+          "EV-CHROME-05"
+        ],
+        "depends_on": [
+          "WP-06"
+        ],
+        "id": "WP-12",
+        "objective": "Editor chrome, pipeline controls, layout grammar. Rewire the footer Save Canvas directly before deleting the toolbar; add pipeline chip, History, Fork; build left/top/right panes with D30 column-scoped top bars; add results-card target and explicit Connect-steps mode with live connectivity feedback; reserve stable mount points for later node packages.",
+        "path_intents": [
+          {
+            "action": "modify",
+            "path": "retinology/web/templates/l2_flow_editor.html"
+          },
+          {
+            "action": "modify",
+            "path": "retinology/web/static/css/flow_editor.css"
+          },
+          {
+            "action": "modify",
+            "path": "retinology/web/static/js/flow/canvas.js"
+          }
+        ],
+        "plan_sections": [
+          "WP-12"
+        ],
+        "verification_argv": [
+          "/Users/kirillzaslavsky/claudeprojects/Retinology/.venv/bin/pytest",
+          "-q",
+          "tests/test_l2_flow_editor.py",
+          "tests/test_l2_flow_editor_nav.py",
+          "tests/test_flow_editor_authoring_contract.py",
+          "tests/test_flow_parity_oracle.py",
+          "tests/test_l2_dark_mode.py",
+          "tests/test_l2_xyflow_vendor.py"
+        ],
+        "verification_required_paths": [],
+        "verification_timeout_seconds": 3600.0
+      },
+      {
+        "allowed_paths": [
+          "retinology/web/static/js/flow",
+          "retinology/web/static/css/flow_editor.css",
+          "retinology/web/templates/l2_flow_editor.html",
+          "retinology/web/routes",
+          "retinology/web/_l2_upstream_import.py",
+          "tests"
+        ],
+        "criteria": [
+          "WP-13-EXIT",
+          "EV-IMPORT-01",
+          "EV-IMPORT-02",
+          "EV-IMPORT-04",
+          "EV-IMPORT-05",
+          "EV-IMPORT-06",
+          "EV-IMPORT-07",
+          "EV-IMPORT-08",
+          "EV-IMPORT-09",
+          "EV-IMPORT-10"
+        ],
+        "depends_on": [
+          "WP-00",
+          "WP-07",
+          "WP-08",
+          "WP-10",
+          "WP-11",
+          "WP-12",
+          "WP-14"
+        ],
+        "id": "WP-13",
+        "objective": "Import-node authoring and source UI. Implement Import-node authoring: empty rail, add/auto-select doctype, circle+rectangle card, ghost sources, L1 multi-select with counts, upload folder/batch UUID persistence, POC Scan/Form gates, preparation strip, and needs-patient-match worklist; endpoints as adapters only.",
+        "path_intents": [
+          {
+            "action": "modify",
+            "path": "retinology/web/static/js/flow/canvas.js"
+          },
+          {
+            "action": "modify",
+            "path": "retinology/web/static/js/flow/state.js"
+          },
+          {
+            "action": "modify",
+            "path": "retinology/web/static/js/flow/api.js"
+          }
+        ],
+        "plan_sections": [
+          "WP-13"
+        ],
+        "verification_argv": [
+          "/Users/kirillzaslavsky/claudeprojects/Retinology/.venv/bin/pytest",
+          "-q",
+          "tests/test_l2_doctypes.py",
+          "tests/test_l2_unified_doctypes.py",
+          "tests/test_q6_upstream_ui.py",
+          "tests/test_l2_p8_ingest.py",
+          "tests/test_l2_flow_editor.py",
+          "tests/test_q5_no_l1_poc.py",
+          "tests/test_l2_artifacts.py"
+        ],
+        "verification_required_paths": [],
+        "verification_timeout_seconds": 3600.0
+      },
+      {
+        "allowed_paths": [
+          "retinology/web/static/js/flow",
+          "retinology/web/static/css/flow_editor.css",
+          "tests"
+        ],
+        "criteria": [
+          "WP-14-EXIT",
+          "EV-IMPORT-03",
+          "EV-PROCESS-03",
+          "EV-PROCESS-04",
+          "EV-PROCESS-05",
+          "EV-CHROME-06",
+          "EV-CHROME-07",
+          "EV-CHROME-08"
+        ],
+        "depends_on": [
+          "WP-00",
+          "WP-03",
+          "WP-06",
+          "WP-11",
+          "WP-12"
+        ],
+        "id": "WP-14",
+        "objective": "Process-card behavior, Fields-to-extract strip, edge stubs. Implement process-card expand-on-run/prompt, on-card persistent results with dismiss, freeze-visible running config, the always-present Fields-to-extract strip with D29 neutral/binding styles, per-node schema assignment, arrowheads/input provenance, and typed auto-edge stubs.",
+        "path_intents": [
+          {
+            "action": "modify",
+            "path": "retinology/web/static/js/flow/canvas.js"
+          },
+          {
+            "action": "modify",
+            "path": "retinology/web/static/js/flow/config_panel.js"
+          },
+          {
+            "action": "modify",
+            "path": "retinology/web/static/js/flow/schema_binding.js"
+          }
+        ],
+        "plan_sections": [
+          "WP-14"
+        ],
+        "verification_argv": [
+          "/Users/kirillzaslavsky/claudeprojects/Retinology/.venv/bin/pytest",
+          "-q",
+          "tests/test_l2_flow_editor.py",
+          "tests/test_flow_node_schema_binding.py",
+          "tests/test_l2_process_allview.py",
+          "tests/test_l2_process_chart_bubble.py",
+          "tests/test_l2_process_run_monitor.py",
+          "tests/test_flow_parity_oracle.py"
+        ],
+        "verification_required_paths": [],
+        "verification_timeout_seconds": 3600.0
+      },
+      {
+        "allowed_paths": [
+          "retinology/web/routes/note_review.py",
+          "retinology/web/_l2_provenance.py",
+          "tests"
+        ],
+        "criteria": [
+          "WP-15-EXIT"
+        ],
+        "depends_on": [],
+        "id": "WP-15",
+        "objective": "Reviewed-write gate and bulk-accept provenance. Enforce reviewed status server-side on the note-review import route with explicit override logging, record accepted_without_individual_review provenance, and provide reviewed/bulk/rejected/unreviewed counts.",
+        "path_intents": [
+          {
+            "action": "modify",
+            "path": "retinology/web/routes/note_review.py"
+          },
+          {
+            "action": "modify",
+            "path": "retinology/web/_l2_provenance.py"
+          }
+        ],
+        "plan_sections": [
+          "WP-15"
+        ],
+        "verification_argv": [
+          "/Users/kirillzaslavsky/claudeprojects/Retinology/.venv/bin/pytest",
+          "-q",
+          "tests/test_note_review_import.py",
+          "tests/test_note_review_detail.py",
+          "tests/test_l2_review_terminal.py",
+          "tests/test_l2_provenance.py",
+          "tests/test_l2_note_review_scrub.py"
+        ],
+        "verification_required_paths": [],
+        "verification_timeout_seconds": 2400.0
+      },
+      {
+        "allowed_paths": [
+          "retinology/web/static/js/flow",
+          "retinology/web/static/css/flow_editor.css",
+          "tests"
+        ],
+        "criteria": [
+          "WP-16-EXIT",
+          "EV-REVIEW-01"
+        ],
+        "depends_on": [
+          "WP-11",
+          "WP-14"
+        ],
+        "id": "WP-16",
+        "objective": "Review circle and suggested-review graph behavior. Implement the circular Review node: progress ring, yellow/green non-color-only status, actions, and transient suggested-ghost placement and acceptance semantics.",
+        "path_intents": [
+          {
+            "action": "modify",
+            "path": "retinology/web/static/js/flow/canvas.js"
+          },
+          {
+            "action": "modify",
+            "path": "retinology/web/static/css/flow_editor.css"
+          }
+        ],
+        "plan_sections": [
+          "WP-16"
+        ],
+        "verification_argv": [
+          "/Users/kirillzaslavsky/claudeprojects/Retinology/.venv/bin/pytest",
+          "-q",
+          "tests/test_l2_review_stage.py",
+          "tests/test_l2_review_terminal.py",
+          "tests/test_l2_flow_editor.py",
+          "tests/test_l2_pipelines.py"
+        ],
+        "verification_required_paths": [],
+        "verification_timeout_seconds": 2400.0
+      },
+      {
+        "allowed_paths": [
+          "retinology/web/static/js/flow",
+          "retinology/web/routes/note_review.py",
+          "retinology/web/_l2_test_runs.py",
+          "retinology/web/templates",
+          "tests"
+        ],
+        "criteria": [
+          "WP-17-EXIT",
+          "EV-REVIEW-02",
+          "EV-REVIEW-03",
+          "EV-REVIEW-04",
+          "EV-REVIEW-05",
+          "EV-REVIEW-06",
+          "EV-REVIEW-07",
+          "EV-REVIEW-08"
+        ],
+        "depends_on": [
+          "WP-06",
+          "WP-15",
+          "WP-16"
+        ],
+        "id": "WP-17",
+        "objective": "Shared Review/Try-settings interface. Replace test_parse.js and the test drawer with the shared two-mode Review/Try-settings interface: per-kind renderers, tracked edits, Accept/Reject, same-N rerun, Keep settings, generation/AbortController invalidation, DOM clearing, no storage/console/SSE PHI, and safe-delete supersession/TTL reaper.",
+        "path_intents": [
+          {
+            "action": "modify",
+            "path": "retinology/web/static/js/flow/test_parse.js"
+          },
+          {
+            "action": "modify",
+            "path": "retinology/web/_l2_test_runs.py"
+          }
+        ],
+        "plan_sections": [
+          "WP-17"
+        ],
+        "verification_argv": [
+          "/Users/kirillzaslavsky/claudeprojects/Retinology/.venv/bin/pytest",
+          "-q",
+          "tests/test_l2_test_parse.py",
+          "tests/test_l2_review_testmode.py",
+          "tests/test_l2_test_runs.py",
+          "tests/test_note_review_detail.py",
+          "tests/test_l2_note_review_scrub.py"
+        ],
+        "verification_required_paths": [],
+        "verification_timeout_seconds": 3600.0
+      },
+      {
+        "allowed_paths": [
+          "retinology/web/routes/note_review.py",
+          "retinology/web/_l2_batch.py",
+          "retinology/web/_l2_node_registry.py",
+          "retinology/web/static/js/flow",
+          "tests"
+        ],
+        "criteria": [
+          "WP-18-EXIT",
+          "EV-EXPORT-01",
+          "EV-EXPORT-02"
+        ],
+        "depends_on": [
+          "WP-07",
+          "WP-11",
+          "WP-15",
+          "WP-17"
+        ],
+        "id": "WP-18",
+        "objective": "Add-to-clinical-database node. Surface the existing pending-sidecar flow as the Add-to-clinical-database node through the hardened import route, with reviewed/bulk/rejected/waiting counts and the verified-at-capture POC exception.",
+        "path_intents": [
+          {
+            "action": "modify",
+            "path": "retinology/web/routes/note_review.py"
+          },
+          {
+            "action": "modify",
+            "path": "retinology/web/static/js/flow/canvas.js"
+          }
+        ],
+        "plan_sections": [
+          "WP-18"
+        ],
+        "verification_argv": [
+          "/Users/kirillzaslavsky/claudeprojects/Retinology/.venv/bin/pytest",
+          "-q",
+          "tests/test_note_review_import.py",
+          "tests/test_l2_review_terminal.py",
+          "tests/test_l2_batch.py",
+          "tests/test_l2_lanes.py",
+          "tests/test_l2_node_registry.py"
+        ],
+        "verification_required_paths": [],
+        "verification_timeout_seconds": 2400.0
+      },
+      {
+        "allowed_paths": [
+          "retinology/web/routes",
+          "retinology/web/_l2_egress_witness.py",
+          "retinology/web/static/js/flow",
+          "tests"
+        ],
+        "criteria": [
+          "WP-19-EXIT",
+          "EV-EXPORT-03",
+          "EV-EXPORT-04",
+          "EV-EXPORT-05"
+        ],
+        "depends_on": [
+          "WP-04",
+          "WP-11",
+          "WP-15",
+          "WP-17",
+          "WP-18"
+        ],
+        "id": "WP-19",
+        "objective": "Reviewed Data download. Build the reviewed Data download: remote-client refusal before DB access, no-store, CSRF POST browser download, pre-byte egress witness, reviewed-only SQL, safe basename, PHI warning, and N-of-M metadata.",
+        "path_intents": [
+          {
+            "action": "create",
+            "path": "retinology/web/routes/l2_export.py"
+          },
+          {
+            "action": "modify",
+            "path": "retinology/web/_l2_egress_witness.py"
+          }
+        ],
+        "plan_sections": [
+          "WP-19"
+        ],
+        "verification_argv": [
+          "/Users/kirillzaslavsky/claudeprojects/Retinology/.venv/bin/pytest",
+          "-q",
+          "tests/test_l2_egress_policy.py",
+          "tests/test_l2_egress_witness.py",
+          "tests/test_l2_egress_scrub.py",
+          "tests/test_l2_egress_default_off.py",
+          "tests/test_l2_backend_bind_fence.py",
+          "tests/test_l2_standalone_boundary.py"
+        ],
+        "verification_required_paths": [],
+        "verification_timeout_seconds": 2400.0
+      },
+      {
+        "allowed_paths": [
+          "retinology/web/routes",
+          "retinology/web/_l2_readonly.py",
+          "retinology/web/static/js/flow",
+          "tests"
+        ],
+        "criteria": [
+          "WP-20-EXIT",
+          "EV-EXPORT-06",
+          "EV-EXPORT-07"
+        ],
+        "depends_on": [
+          "WP-07",
+          "WP-11",
+          "WP-18",
+          "WP-19"
+        ],
+        "id": "WP-20",
+        "objective": "Saved-view Projection node. Build the Saved-view Projection node: read-only L2 DB connection with SQLite authorizer, parsed-statement allowlist, by-reference (pipeline_ref, field_selector) inputs, preview/download route reusing the egress witness.",
+        "path_intents": [
+          {
+            "action": "create",
+            "path": "retinology/web/routes/l2_projection.py"
+          },
+          {
+            "action": "modify",
+            "path": "retinology/web/_l2_readonly.py"
+          }
+        ],
+        "plan_sections": [
+          "WP-20"
+        ],
+        "verification_argv": [
+          "/Users/kirillzaslavsky/claudeprojects/Retinology/.venv/bin/pytest",
+          "-q",
+          "tests/test_l2_readonly_guard.py",
+          "tests/test_web/test_l2_sql_builder.py",
+          "tests/test_l2_egress_policy.py",
+          "tests/test_l2_egress_witness.py"
+        ],
+        "verification_required_paths": [],
+        "verification_timeout_seconds": 2400.0
+      },
+      {
+        "allowed_paths": [
+          "tests",
+          "retinology/web/static/css/flow_editor.css",
+          "retinology/web/static/js/flow"
+        ],
+        "criteria": [
+          "WP-21-EXIT"
+        ],
+        "depends_on": [
+          "WP-13"
+        ],
+        "id": "WP-21",
+        "objective": "Import-region visual-fidelity gate. Author Playwright screenshot specs and reference-crop metadata for the Import region; targeted fixes go back to WP-13-owned CSS/layout per the section-4 fidelity protocol.",
+        "path_intents": [
+          {
+            "action": "create",
+            "path": "tests/test_flow_visual_import_region.py"
+          }
+        ],
+        "plan_sections": [
+          "WP-21"
+        ],
+        "verification_argv": [
+          "/Users/kirillzaslavsky/claudeprojects/Retinology/.venv/bin/pytest",
+          "-q",
+          "tests/test_flow_visual_import_region.py",
+          "tests/test_flow_parity_oracle.py",
+          "tests/test_l2_dark_mode.py"
+        ],
+        "verification_required_paths": [],
+        "verification_timeout_seconds": 2400.0
+      },
+      {
+        "allowed_paths": [
+          "tests",
+          "retinology/web/static/css/flow_editor.css",
+          "retinology/web/static/js/flow"
+        ],
+        "criteria": [
+          "WP-22-EXIT"
+        ],
+        "depends_on": [
+          "WP-14",
+          "WP-16",
+          "WP-17"
+        ],
+        "id": "WP-22",
+        "objective": "Process/review visual-fidelity gate. Author Playwright reference-region checks for process cards, suggested/circular Review, and both shared-interface modes; targeted fixes return to WP-14/16/17 ownership.",
+        "path_intents": [
+          {
+            "action": "create",
+            "path": "tests/test_flow_visual_process_review_region.py"
+          }
+        ],
+        "plan_sections": [
+          "WP-22"
+        ],
+        "verification_argv": [
+          "/Users/kirillzaslavsky/claudeprojects/Retinology/.venv/bin/pytest",
+          "-q",
+          "tests/test_flow_visual_process_review_region.py",
+          "tests/test_flow_parity_oracle.py",
+          "tests/test_l2_dark_mode.py"
+        ],
+        "verification_required_paths": [],
+        "verification_timeout_seconds": 2400.0
+      },
+      {
+        "allowed_paths": [
+          "tests",
+          "retinology/web/static/css/flow_editor.css",
+          "retinology/web/static/js/flow"
+        ],
+        "criteria": [
+          "WP-23-EXIT"
+        ],
+        "depends_on": [
+          "WP-12",
+          "WP-14"
+        ],
+        "id": "WP-23",
+        "objective": "Chrome/palette visual-fidelity gate. Author Playwright region checks for chrome: pipeline chip, pane grammar, palettes, Connect-steps, arrowheads, provenance, responsive/focus states; fixes return to WP-12/WP-14.",
+        "path_intents": [
+          {
+            "action": "create",
+            "path": "tests/test_flow_visual_chrome_region.py"
+          }
+        ],
+        "plan_sections": [
+          "WP-23"
+        ],
+        "verification_argv": [
+          "/Users/kirillzaslavsky/claudeprojects/Retinology/.venv/bin/pytest",
+          "-q",
+          "tests/test_flow_visual_chrome_region.py",
+          "tests/test_flow_parity_oracle.py",
+          "tests/test_l2_dark_mode.py"
+        ],
+        "verification_required_paths": [],
+        "verification_timeout_seconds": 2400.0
+      },
+      {
+        "allowed_paths": [
+          "tests",
+          "retinology/web/static/css/flow_editor.css",
+          "retinology/web/static/js/flow"
+        ],
+        "criteria": [
+          "WP-24-EXIT"
+        ],
+        "depends_on": [
+          "WP-18",
+          "WP-19",
+          "WP-20"
+        ],
+        "id": "WP-24",
+        "objective": "Export-region visual-fidelity gate. Author Playwright region checks for the export region: right palette, three export card families, PHI/download warnings, partial-review states, Saved-view inputs; fixes return to WP-18/19/20.",
+        "path_intents": [
+          {
+            "action": "create",
+            "path": "tests/test_flow_visual_export_region.py"
+          }
+        ],
+        "plan_sections": [
+          "WP-24"
+        ],
+        "verification_argv": [
+          "/Users/kirillzaslavsky/claudeprojects/Retinology/.venv/bin/pytest",
+          "-q",
+          "tests/test_flow_visual_export_region.py",
+          "tests/test_flow_parity_oracle.py",
+          "tests/test_l2_dark_mode.py"
+        ],
+        "verification_required_paths": [],
+        "verification_timeout_seconds": 2400.0
+      },
+      {
+        "allowed_paths": [
+          "tests",
+          "scripts",
+          ".github"
+        ],
+        "criteria": [
+          "WP-25-EXIT",
+          "EV-E2E-01",
+          "EV-E2E-02"
+        ],
+        "depends_on": [
+          "WP-02",
+          "WP-21",
+          "WP-22",
+          "WP-23",
+          "WP-24"
+        ],
+        "id": "WP-25",
+        "objective": "Full integration, grumpy path, and release gate. Wire full E2E: EV-E2E-01/02 Playwright specs from fresh databases, CI wiring, PHI scan; fixes go to the owning package rather than accumulating here.",
+        "path_intents": [
+          {
+            "action": "create",
+            "path": "tests/test_flow_e2e_streamline.py"
+          }
+        ],
+        "plan_sections": [
+          "WP-25"
+        ],
+        "verification_argv": [
+          "/Users/kirillzaslavsky/claudeprojects/Retinology/.venv/bin/pytest",
+          "-q",
+          "tests"
+        ],
+        "verification_required_paths": [],
+        "verification_timeout_seconds": 7200.0
+      }
+    ]
+  },
+  "plan_path": "Flow_Editor_work/Flow_Editor_13AUG26_UISTREAMLINE/Flow_Editor_UISTREAMLINE_plan.md",
+  "plan_sha256": "8137cb6f272f210dc1102d4f87b3d9243687579fba49a8555be5b2d43c7f03cb",
+  "protocol": "plan-refinement-fixture/1",
+  "repository_id": "c0b291e5-f6e7-4203-bc95-29c7f4e5707b",
+  "source": "logs/registration/flow-editor-uistreamline.json (flow-editor-uistreamline campaign)"
+}
