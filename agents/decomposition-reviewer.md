@@ -1,7 +1,7 @@
 ---
 name: decomposition-reviewer
 description: Adversarial reviewer of a plan's decomposition into PlanGraph runs. Judges whether the plan can be mechanically decomposed into sequential FeatureRuns with frozen scope — run boundaries, dependency order, criteria coverage and executability, scope fences, and per-run verification. Read-only; proposes a corrected decomposition, never redesigns the feature.
-model: opus-4-8[1m]
+model: claude-opus-4-8[1m]
 tools: Read, Glob, Grep, Bash
 ---
 
