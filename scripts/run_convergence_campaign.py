@@ -51,6 +51,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from harness_labs.core.controller_results import FINDING_SEVERITIES  # noqa: E402
 from harness_labs.plangraph.convergence_campaign import (  # noqa: E402
     CONFIG_AMENDMENT_RATIO_THRESHOLD_KEY,
+    CONFIG_RECALL_REPORT_DIGEST_KEY,
     CONFIG_RECALL_THRESHOLD_KEY,
     CONFIG_SANITIZER_KEY,
     CampaignArtifactStore,
@@ -1798,7 +1799,7 @@ class ConvergenceCampaignDriver:
         *,
         required_cells: Sequence[str] = (),
         new_required_findings: int | None = None,
-        inspector_recall: float = 0.0,
+        inspector_recall: float | None = None,
         amendment_ratio_acknowledged: bool = False,
         emit: Callable[[str], None] = print,
         _state: Mapping[str, Any] | None = None,
@@ -1814,6 +1815,16 @@ class ConvergenceCampaignDriver:
         still override it, but the gate no longer defaults to declaring away
         a required finding the campaign's own ledger already recorded.
 
+        ``inspector_recall`` defaults to the score sealed in the campaign's
+        own ``recall_report_digest`` artifact (``dtr-mc``:
+        ``scripts/commission_measurer.py recall``'s output, read back via
+        ``self.artifacts``) rather than a hardcoded ``0.0`` -- the calibrated
+        number this way actually reaches the recall-threshold gate. A caller
+        passing ``inspector_recall`` explicitly still wins over the sealed
+        value; a config with no ``recall_report_digest`` at all (a
+        ``commissioning_override`` campaign) falls back to ``0.0``, same as
+        before this field existed.
+
         ``_state`` is the same close()-supplied in-memory state bypass
         :meth:`measure` accepts, and for the same reason: :meth:`close` may
         chain into this immediately after adopting a new base, before that
@@ -1825,6 +1836,8 @@ class ConvergenceCampaignDriver:
         if new_required_findings is None:
             new_required_findings = int(state.get("last_ingest_new_required_findings", 0))
         config = campaign_config(self.ledger)
+        if inspector_recall is None:
+            inspector_recall = self._sealed_inspector_recall(config)
         report = evaluate_success_termination(
             ledger=self.ledger,
             required_cells=required_cells,
@@ -1839,6 +1852,18 @@ class ConvergenceCampaignDriver:
             state["termination"] = report.as_mapping()
             self._save(lifecycle="succeeded", state=state)
         return report
+
+    def _sealed_inspector_recall(self, config: Mapping[str, Any]) -> float:
+        """Read the calibrated recall score back out of the sealed recall
+        report named by the config's ``recall_report_digest`` (``dtr-mc``),
+        or ``0.0`` when the campaign carries none (a
+        ``commissioning_override`` campaign)."""
+
+        digest = config.get(CONFIG_RECALL_REPORT_DIGEST_KEY)
+        if not digest:
+            return 0.0
+        report = json.loads(self.artifacts.open_bytes(digest))
+        return float(report.get("recall", 0.0))
 
     # -- resume ------------------------------------------------------------
 

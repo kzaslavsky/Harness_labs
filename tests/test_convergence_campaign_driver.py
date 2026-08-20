@@ -19,6 +19,7 @@ import sys
 import tempfile
 import unittest
 
+from harness_labs.plangraph.convergence_campaign import ConvergenceCampaignError
 from harness_labs.plangraph.convergence_ledger import ConvergenceLedger
 from harness_labs.plangraph.plan_graph import FeatureRunOutcome, PlanGraph, register_plan_graph
 
@@ -214,6 +215,15 @@ class _RepoFixture(unittest.TestCase):
             ),
             "recall_threshold": 0.8,
             "amendment_ratio_threshold": 0.2,
+            # DTR-MC's campaign-open commissioning checklist
+            # (build_campaign_config) refuses a config lacking
+            # stability_report_digest/recall_report_digest absent an
+            # explicit, reasoned override; this fixture's default campaigns
+            # exercise no real commissioning artifacts, so they carry one.
+            # Tests of the checklist itself (AC-MC-4) override this back out.
+            "commissioning_override": {
+                "reason": "driver test fixture; commissioning artifacts not exercised here",
+            },
         }
         arguments.update(overrides)
         return driver.open_campaign(**arguments)
@@ -1696,6 +1706,32 @@ class CampaignOpenRefusalTests(_RepoFixture):
         record = self.open_campaign(driver)
         self.assertEqual(record["type"], "campaign_opened")
 
+    def test_open_campaign_refuses_without_commissioning_artifacts_or_override(self) -> None:
+        """``dtr-mc``, AC-MC-4: ``pin_target`` cannot record ``campaign_opened``
+        without ``stability_report_digest``/``recall_report_digest`` (or an
+        explicit ``commissioning_override``) -- the checklist lands at the
+        real seat ``build_campaign_config`` sits behind."""
+
+        driver = self.driver()
+        with self.assertRaises(ConvergenceCampaignError) as ctx:
+            self.open_campaign(driver, commissioning_override=None)
+        message = str(ctx.exception)
+        self.assertIn("stability_report_digest", message)
+        self.assertIn("recall_report_digest", message)
+        self.assertEqual(list(driver.ledger.records()), [])
+
+    def test_open_campaign_succeeds_with_real_commissioning_digests(self) -> None:
+        driver = self.driver()
+        record = self.open_campaign(
+            driver,
+            commissioning_override=None,
+            stability_report_digest="s" * 64,
+            recall_report_digest="r" * 64,
+        )
+        self.assertEqual(record["type"], "campaign_opened")
+        self.assertEqual(record["config"]["stability_report_digest"], "s" * 64)
+        self.assertEqual(record["config"]["recall_report_digest"], "r" * 64)
+
 
 class ResumeDirectiveTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -1978,6 +2014,78 @@ class DriverCloseTerminationWiringTests(_RepoFixture):
             termination_kwargs={"inspector_recall": 1.0, "new_required_findings": 0},
         )
         self.assertTrue(closed_override["termination"]["zero_new_required_findings"])
+
+
+class DriverCloseTerminationRecallFromSealedReportTests(_RepoFixture):
+    """``dtr-mc``, AC-MC-6: ``close``'s termination step derives
+    ``inspector_recall`` from the campaign's sealed
+    ``recall_report_digest`` artifact when the caller does not supply one;
+    an explicit caller value still wins."""
+
+    def _seal_recall_report(self, driver: ConvergenceCampaignDriver, recall: float) -> str:
+        report = {
+            "protocol": "measurer-commissioning-recall-report/1",
+            "seed_count": 1,
+            "matched": [["a.py", "s1"]] if recall >= 1.0 else [],
+            "missed": [] if recall >= 1.0 else [["a.py", "s1"]],
+            "recall": recall,
+        }
+        report_path = self.root / f"recall-report-{recall}.json"
+        report_path.write_text(json.dumps(report), encoding="utf-8")
+        record = driver.artifacts.seal(report_path, media_type="application/json")
+        return record.digest
+
+    def test_close_termination_derives_inspector_recall_from_the_sealed_recall_report(self) -> None:
+        driver = self.driver()
+        digest = self._seal_recall_report(driver, 1.0)
+        self.open_campaign(
+            driver, recall_threshold=0.8,
+            recall_report_digest=digest, stability_report_digest="s" * 64,
+            commissioning_override=None,
+        )
+        driver.ingest(audit_result=_audit("d1"))
+
+        closed = driver.close(
+            run_result={"status": "succeeded", "candidate_commit": "a" * 40},
+            termination_kwargs={},
+        )
+        self.assertTrue(closed["termination"]["recall_ok"])
+        self.assertTrue(closed["termination"]["success"])
+
+    def test_close_termination_explicit_inspector_recall_overrides_the_sealed_report(self) -> None:
+        driver = self.driver()
+        # The sealed report scores 0.0 -- below the 0.8 threshold -- but the
+        # caller's own explicit inspector_recall of 1.0 must still win.
+        digest = self._seal_recall_report(driver, 0.0)
+        self.open_campaign(
+            driver, recall_threshold=0.8,
+            recall_report_digest=digest, stability_report_digest="s" * 64,
+            commissioning_override=None,
+        )
+        driver.ingest(audit_result=_audit("d1"))
+
+        closed = driver.close(
+            run_result={"status": "succeeded", "candidate_commit": "a" * 40},
+            termination_kwargs={"inspector_recall": 1.0},
+        )
+        self.assertTrue(closed["termination"]["recall_ok"])
+        self.assertTrue(closed["termination"]["success"])
+
+    def test_close_termination_falls_back_to_zero_recall_with_no_sealed_report(self) -> None:
+        """A ``commissioning_override`` campaign (no ``recall_report_digest``
+        at all) falls back to the pre-DTR-MC hardcoded ``0.0`` -- unchanged
+        behavior for a campaign that opted out of commissioning."""
+
+        driver = self.driver()
+        self.open_campaign(driver, recall_threshold=0.0)  # fixture default: commissioning_override, no digest
+        driver.ingest(audit_result=_audit("d1"))
+
+        closed = driver.close(
+            run_result={"status": "succeeded", "candidate_commit": "a" * 40},
+            termination_kwargs={},
+        )
+        self.assertTrue(closed["termination"]["recall_ok"])
+        self.assertTrue(closed["termination"]["success"])
 
 
 class DriverBlockedTerminationAmendmentRatioTests(_RepoFixture):

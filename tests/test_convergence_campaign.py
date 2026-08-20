@@ -21,12 +21,24 @@ from harness_labs.plangraph.convergence_campaign import (
     CampaignCheckpointSequenceError,
     CampaignCheckpointStore,
     CHECKPOINT_PROTOCOL,
+    CONFIG_COMMISSIONING_OVERRIDE_KEY,
+    CONFIG_RECALL_REPORT_DIGEST_KEY,
+    CONFIG_STABILITY_REPORT_DIGEST_KEY,
     ConvergenceCampaignError,
     build_campaign_config,
     pin_target,
     reject_target_grant,
 )
 from harness_labs.plangraph.convergence_ledger import ConvergenceLedger
+
+# DTR-MC's campaign-open commissioning checklist (build_campaign_config)
+# refuses a config lacking both commissioning digests unless it carries an
+# explicit, reasoned override; tests below that are not themselves about
+# that checklist use this override so they keep exercising their own
+# unrelated behavior unchanged.
+_COMMISSIONING_OVERRIDE = {
+    "reason": "pre-DTR-MC test fixture; commissioning artifacts not exercised here",
+}
 
 
 class CampaignTestCase(unittest.TestCase):
@@ -384,6 +396,8 @@ class CampaignConfigTests(unittest.TestCase):
             pre_journal_sanitizer="harness_labs.sanitizers:redact_secrets",
             recall_threshold=0.9,
             amendment_ratio_threshold=0.2,
+            stability_report_digest="s" * 64,
+            recall_report_digest="r" * 64,
         )
         self.assertEqual(
             config,
@@ -391,8 +405,71 @@ class CampaignConfigTests(unittest.TestCase):
                 "pre_journal_sanitizer": "harness_labs.sanitizers:redact_secrets",
                 "inspector_recall_threshold": 0.9,
                 "amendment_ratio_threshold": 0.2,
+                "stability_report_digest": "s" * 64,
+                "recall_report_digest": "r" * 64,
             },
         )
+
+
+# -- dtr-mc: campaign-open commissioning checklist ---------------------------
+
+
+class CampaignCommissioningChecklistTests(unittest.TestCase):
+    """``build_campaign_config`` gains ``stability_report_digest`` and
+    ``recall_report_digest`` keys and refuses a config lacking them absent
+    ``commissioning_override: {"reason": ...}`` (``dtr-mc``, AC-MC-4)."""
+
+    def _kwargs(self, **overrides) -> dict:
+        kwargs = dict(
+            pre_journal_sanitizer="mod:fn",
+            recall_threshold=0.9,
+            amendment_ratio_threshold=0.2,
+        )
+        kwargs.update(overrides)
+        return kwargs
+
+    def test_refuses_a_config_missing_both_commissioning_digests(self) -> None:
+        with self.assertRaises(ConvergenceCampaignError) as ctx:
+            build_campaign_config(**self._kwargs())
+        message = str(ctx.exception)
+        self.assertIn("stability_report_digest", message)
+        self.assertIn("recall_report_digest", message)
+
+    def test_refuses_a_config_missing_only_the_recall_digest_and_names_it(self) -> None:
+        with self.assertRaises(ConvergenceCampaignError) as ctx:
+            build_campaign_config(**self._kwargs(stability_report_digest="s" * 64))
+        message = str(ctx.exception)
+        self.assertIn("recall_report_digest", message)
+        self.assertNotIn("stability_report_digest", message)
+
+    def test_refuses_a_config_missing_only_the_stability_digest_and_names_it(self) -> None:
+        with self.assertRaises(ConvergenceCampaignError) as ctx:
+            build_campaign_config(**self._kwargs(recall_report_digest="r" * 64))
+        message = str(ctx.exception)
+        self.assertIn("stability_report_digest", message)
+        self.assertNotIn("recall_report_digest", message)
+
+    def test_commissioning_override_admits_a_config_missing_both_digests(self) -> None:
+        config = build_campaign_config(**self._kwargs(commissioning_override=_COMMISSIONING_OVERRIDE))
+        self.assertNotIn(CONFIG_STABILITY_REPORT_DIGEST_KEY, config)
+        self.assertNotIn(CONFIG_RECALL_REPORT_DIGEST_KEY, config)
+        self.assertEqual(config[CONFIG_COMMISSIONING_OVERRIDE_KEY], _COMMISSIONING_OVERRIDE)
+
+    def test_commissioning_override_with_an_empty_reason_is_rejected(self) -> None:
+        with self.assertRaises(ConvergenceCampaignError):
+            build_campaign_config(**self._kwargs(commissioning_override={"reason": "   "}))
+
+    def test_commissioning_override_missing_reason_key_is_rejected(self) -> None:
+        with self.assertRaises(ConvergenceCampaignError):
+            build_campaign_config(**self._kwargs(commissioning_override={}))
+
+    def test_both_digests_present_admits_the_config_without_an_override(self) -> None:
+        config = build_campaign_config(
+            **self._kwargs(stability_report_digest="s" * 64, recall_report_digest="r" * 64)
+        )
+        self.assertEqual(config[CONFIG_STABILITY_REPORT_DIGEST_KEY], "s" * 64)
+        self.assertEqual(config[CONFIG_RECALL_REPORT_DIGEST_KEY], "r" * 64)
+        self.assertNotIn(CONFIG_COMMISSIONING_OVERRIDE_KEY, config)
 
     def test_config_rejects_empty_sanitizer_hook(self) -> None:
         with self.assertRaises(ConvergenceCampaignError):
@@ -441,16 +518,20 @@ class SanitizerMediaTypePolicyConfigTests(unittest.TestCase):
             pre_journal_sanitizer="harness_labs.sanitizers:redact_secrets",
             recall_threshold=0.9,
             amendment_ratio_threshold=0.2,
+            commissioning_override=_COMMISSIONING_OVERRIDE,
         )
-        # Same shape build_campaign_config produced before this change: the
-        # sanitizer key still carries the bare string, not a mapping --
-        # existing journals re-fold identically (dtr-risks).
+        # Same shape build_campaign_config produced before this change (plus
+        # DTR-MC's own commissioning_override key, since this test supplies
+        # no commissioning artifacts): the sanitizer key still carries the
+        # bare string, not a mapping -- existing journals re-fold
+        # identically (dtr-risks).
         self.assertEqual(
             config,
             {
                 "pre_journal_sanitizer": "harness_labs.sanitizers:redact_secrets",
                 "inspector_recall_threshold": 0.9,
                 "amendment_ratio_threshold": 0.2,
+                "commissioning_override": _COMMISSIONING_OVERRIDE,
             },
         )
         self.assertIsInstance(config["pre_journal_sanitizer"], str)
@@ -462,6 +543,7 @@ class SanitizerMediaTypePolicyConfigTests(unittest.TestCase):
 
         config = build_campaign_config(
             pre_journal_sanitizer="mod:fn", recall_threshold=0.9, amendment_ratio_threshold=0.2,
+            commissioning_override=_COMMISSIONING_OVERRIDE,
         )
         reloaded = json.loads(json.dumps(config, sort_keys=True))
         self.assertEqual(reloaded, config)
@@ -475,6 +557,7 @@ class SanitizerMediaTypePolicyConfigTests(unittest.TestCase):
             },
             recall_threshold=0.9,
             amendment_ratio_threshold=0.2,
+            commissioning_override=_COMMISSIONING_OVERRIDE,
         )
         self.assertEqual(
             config["pre_journal_sanitizer"],
@@ -486,6 +569,7 @@ class SanitizerMediaTypePolicyConfigTests(unittest.TestCase):
             pre_journal_sanitizer={"text": "mod:fn"},
             recall_threshold=0.9,
             amendment_ratio_threshold=0.2,
+            commissioning_override=_COMMISSIONING_OVERRIDE,
         )
         self.assertEqual(config["pre_journal_sanitizer"], {"text": "mod:fn", "binary": {}})
 
@@ -556,6 +640,7 @@ class TargetPinTests(CampaignTestCase):
             pre_journal_sanitizer="mod:fn",
             recall_threshold=0.9,
             amendment_ratio_threshold=0.2,
+            commissioning_override=_COMMISSIONING_OVERRIDE,
         )
         kwargs.update(overrides)
         return pin_target(self.ledger, **kwargs)
@@ -586,8 +671,11 @@ class TargetPinTests(CampaignTestCase):
 
     def test_pin_with_legacy_string_sanitizer_folds_byte_identical_config(self) -> None:
         """AC-SN-1: a campaign pinned with the legacy string form folds the
-        exact same ``campaign_opened.config`` mapping this run produced
-        before the mapping form existed -- no drift for existing journals."""
+        same ``pre_journal_sanitizer``/threshold shape this run produced
+        before the mapping form existed -- no drift for existing journals.
+        DTR-MC's ``commissioning_override`` key is additive (this test's own
+        ``_pin`` default, since it exercises no real commissioning
+        artifacts) and does not disturb that guarantee."""
 
         record = self._pin(pre_journal_sanitizer="harness_labs.sanitizers:redact_secrets")
         self.assertEqual(
@@ -596,6 +684,7 @@ class TargetPinTests(CampaignTestCase):
                 "pre_journal_sanitizer": "harness_labs.sanitizers:redact_secrets",
                 "inspector_recall_threshold": 0.9,
                 "amendment_ratio_threshold": 0.2,
+                "commissioning_override": _COMMISSIONING_OVERRIDE,
             },
         )
         reloaded_ledger = ConvergenceLedger(self.root / "ledger.jsonl")
@@ -663,6 +752,7 @@ class TargetAmendmentBlockedStateTests(CampaignTestCase):
             pre_journal_sanitizer="mod:fn",
             recall_threshold=0.9,
             amendment_ratio_threshold=0.2,
+            commissioning_override=_COMMISSIONING_OVERRIDE,
         )
 
     def test_amendment_without_scope_sets_blocked_state(self) -> None:

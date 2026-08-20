@@ -59,6 +59,9 @@ ARTIFACT_STORE_PROTOCOL = "convergence-campaign-artifact-store/1"
 CONFIG_SANITIZER_KEY = "pre_journal_sanitizer"
 CONFIG_RECALL_THRESHOLD_KEY = "inspector_recall_threshold"
 CONFIG_AMENDMENT_RATIO_THRESHOLD_KEY = "amendment_ratio_threshold"
+CONFIG_STABILITY_REPORT_DIGEST_KEY = "stability_report_digest"
+CONFIG_RECALL_REPORT_DIGEST_KEY = "recall_report_digest"
+CONFIG_COMMISSIONING_OVERRIDE_KEY = "commissioning_override"
 
 _DEFAULT_MEDIA_TYPE = "application/octet-stream"
 _DEFAULT_RETENTION = "campaign"
@@ -438,11 +441,27 @@ def _validate_sanitizer_config(
     )
 
 
+def _validate_commissioning_override(override: Mapping[str, Any]) -> dict[str, Any]:
+    if not isinstance(override, Mapping):
+        raise ConvergenceCampaignError(
+            "campaign config commissioning_override must be a mapping"
+        )
+    reason = override.get("reason")
+    if not isinstance(reason, str) or not reason.strip():
+        raise ConvergenceCampaignError(
+            "campaign config commissioning_override must carry a non-empty 'reason'"
+        )
+    return {"reason": reason}
+
+
 def build_campaign_config(
     *,
     pre_journal_sanitizer: str | Mapping[str, Any],
     recall_threshold: float,
     amendment_ratio_threshold: float,
+    stability_report_digest: str | None = None,
+    recall_report_digest: str | None = None,
+    commissioning_override: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Validate and assemble the campaign config surface.
 
@@ -450,6 +469,15 @@ def build_campaign_config(
     invokes; this module only validates and carries it) and the two
     calibration thresholds referenced at ``bounds-termination``: inspector
     recall and amendment ratio.
+
+    Campaign-open commissioning checklist (``dtr-mc``): a config must also
+    carry ``stability_report_digest`` and ``recall_report_digest`` --
+    ``scripts/commission_measurer.py``'s two sealed reports, proving the
+    measurer was calibrated before the campaign opened -- unless it carries
+    ``commissioning_override: {"reason": <non-empty>}``. Refusing here (the
+    one place ``pin_target`` builds the config it hands to
+    :meth:`ConvergenceLedger.open_campaign`) means ``campaign_opened`` can
+    never be recorded without them or an explicit, reasoned override.
     """
 
     sanitizer_config = _validate_sanitizer_config(pre_journal_sanitizer)
@@ -465,11 +493,48 @@ def build_campaign_config(
             raise ConvergenceCampaignError(
                 f"campaign config {field} must be a number between 0 and 1"
             )
-    return {
+
+    missing_artifacts = [
+        name
+        for name, digest in (
+            ("stability_report_digest", stability_report_digest),
+            ("recall_report_digest", recall_report_digest),
+        )
+        if not digest
+    ]
+    validated_override: dict[str, Any] | None = None
+    if missing_artifacts:
+        if commissioning_override is None:
+            raise ConvergenceCampaignError(
+                "campaign config is missing required commissioning artifacts: "
+                f"{', '.join(missing_artifacts)}; supply them (from "
+                "scripts/commission_measurer.py) or an explicit "
+                "commissioning_override: {'reason': <non-empty>}"
+            )
+        validated_override = _validate_commissioning_override(commissioning_override)
+    elif commissioning_override is not None:
+        validated_override = _validate_commissioning_override(commissioning_override)
+
+    config: dict[str, Any] = {
         CONFIG_SANITIZER_KEY: sanitizer_config,
         CONFIG_RECALL_THRESHOLD_KEY: float(recall_threshold),
         CONFIG_AMENDMENT_RATIO_THRESHOLD_KEY: float(amendment_ratio_threshold),
     }
+    if stability_report_digest:
+        if not isinstance(stability_report_digest, str):
+            raise ConvergenceCampaignError(
+                "campaign config stability_report_digest must be a non-empty string"
+            )
+        config[CONFIG_STABILITY_REPORT_DIGEST_KEY] = stability_report_digest
+    if recall_report_digest:
+        if not isinstance(recall_report_digest, str):
+            raise ConvergenceCampaignError(
+                "campaign config recall_report_digest must be a non-empty string"
+            )
+        config[CONFIG_RECALL_REPORT_DIGEST_KEY] = recall_report_digest
+    if validated_override is not None:
+        config[CONFIG_COMMISSIONING_OVERRIDE_KEY] = validated_override
+    return config
 
 
 def pin_target(
@@ -484,6 +549,9 @@ def pin_target(
     pre_journal_sanitizer: str | Mapping[str, Any],
     recall_threshold: float,
     amendment_ratio_threshold: float,
+    stability_report_digest: str | None = None,
+    recall_report_digest: str | None = None,
+    commissioning_override: Mapping[str, Any] | None = None,
     merge_base: str | None = None,
     predecessor_graph_id: str | None = None,
     seed_audit_digest: str | None = None,
@@ -499,6 +567,12 @@ def pin_target(
     ledger's required ``kind``/``digest``/``snapshot_path`` -- the ledger
     passes extra target keys through unvalidated, and :func:`reject_target_grant`
     reads it back to refuse the target as a repair-node grant.
+
+    ``stability_report_digest``/``recall_report_digest``/
+    ``commissioning_override`` pass straight through to
+    :func:`build_campaign_config`, which refuses to build a config missing
+    the two digests absent the override -- so this function cannot pin a
+    target and record ``campaign_opened`` without them either (``dtr-mc``).
     """
 
     source_path = Path(source_path)
@@ -524,6 +598,9 @@ def pin_target(
         pre_journal_sanitizer=pre_journal_sanitizer,
         recall_threshold=recall_threshold,
         amendment_ratio_threshold=amendment_ratio_threshold,
+        stability_report_digest=stability_report_digest,
+        recall_report_digest=recall_report_digest,
+        commissioning_override=commissioning_override,
     )
     target = {
         "kind": target_kind,

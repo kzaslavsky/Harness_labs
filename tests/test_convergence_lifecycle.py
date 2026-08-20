@@ -578,6 +578,15 @@ class ConvergenceLifecycleTests(unittest.TestCase):
             pre_journal_sanitizer="scripts.run_convergence_campaign:identity_pre_journal_sanitizer",
             recall_threshold=0.0,
             amendment_ratio_threshold=1.0,
+            # DTR-MC's campaign-open commissioning checklist
+            # (build_campaign_config) refuses a config lacking
+            # stability_report_digest/recall_report_digest absent an
+            # explicit, reasoned override; this lifecycle fixture exercises
+            # the real measure/ingest/rule/plan/approve/run/close machine,
+            # not measurer commissioning itself, so it carries the override.
+            commissioning_override={
+                "reason": "CC-05 lifecycle proof; commissioning artifacts not exercised here",
+            },
         )
 
         # -- round 1: measure (real subprocess: scripts/ui_fidelity_capture.py,
