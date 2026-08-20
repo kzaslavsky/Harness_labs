@@ -18,6 +18,7 @@ from unittest.mock import patch
 from harness_labs.core.audit import AuditError
 from harness_labs.plangraph.plan_graph import (
     ESCALATION_JUDGMENT_PROTOCOL,
+    EscalationJudgeUnavailable,
     FEATURE_RUN_REQUEST_PROTOCOL,
     FeatureRunOutcome,
     FeatureRunRequest,
@@ -694,6 +695,19 @@ class _RecordingJudge:
         }
 
 
+class _UnavailableJudge:
+    """A seat that cannot answer: the graph-level refusal channel (a model
+    outage, a transport failure, or a reply that never satisfied the schema)."""
+
+    def __init__(self, identity: str = "graph-escalation-judge") -> None:
+        self.identity = identity
+        self.calls = 0
+
+    def __call__(self, packet):
+        self.calls += 1
+        raise EscalationJudgeUnavailable("backend failure: transport died")
+
+
 class _RaisingJudge:
     """An EscalationJudge stub that proves routing never consults a model."""
 
@@ -931,6 +945,115 @@ class PlanGraphEscalationTests(unittest.TestCase):
         with self.assertRaisesRegex(PlanGraphError, "independent of the reviewer"):
             graph._resolve_escalations(run_b, outcome, {"a": "a-commit"}, audit)
         self.assertEqual(judge.calls, 0)
+
+
+    # -- judge refusal: a judgment the seat could not make ------------------
+
+    def test_judge_refusal_blocks_without_a_verdict_or_a_spent_decision(self) -> None:
+        """A seat that cannot answer must not have its silence read as a
+        verdict. ``confirm`` would unseal a sealed node on no evidence;
+        ``reject`` would permanently poison the finding key for the whole
+        lineage (``prior_escalation_verdict``). Only an operator block is
+        undoable, so that is what a refusal becomes."""
+
+        registration = self._chain_registration(
+            logical_id="judge-unavailable",
+            automatic_recovery={
+                "protocol": "plan-graph-automatic-recovery/1",
+                "allowed_actions": ["transfer_ownership"],
+                "max_extra_node_launches": 0, "max_structural_decisions": 1,
+            },
+        )
+        judge = _UnavailableJudge()
+        graph = self.graph(
+            lambda request: FeatureRunOutcome("failed"),
+            registration=registration, escalation_judge=judge,
+        )
+        audit = graph._audit_for_run()
+        run_b = next(run for run in graph.plan.runs if run.id == "b")
+        record = self._escalated_record("consumer.py:needs-producer", ["producer.py"])
+        outcome = FeatureRunOutcome(
+            "succeeded", "b-commit",
+            evidence={"review_fix": {"escalated_findings": [record]}},
+        )
+        before = graph.budget.deviation_records()
+
+        disposition = graph._resolve_escalations(run_b, outcome, {"a": "a-commit"}, audit)
+
+        self.assertEqual(judge.calls, 1)
+        self.assertIsNotNone(disposition.judge_unavailable)
+        self.assertEqual(disposition.judge_unavailable["finding_key"], record["key"])
+        self.assertEqual(disposition.judge_unavailable["owner_node"], "a")
+        self.assertIn("transport died", disposition.judge_unavailable["reason"])
+        self.assertEqual(disposition.advances, ())
+        self.assertEqual(disposition.escalations_payload, ())
+        self.assertEqual(disposition.retry_frontier_prefix, ())
+        # No verdict was journaled, so nothing poisons the key for a retry.
+        self.assertIsNone(audit.prior_escalation_verdict(record["key"]))
+        # No structural transfer_ownership decision was spent on a
+        # judgment that never happened.
+        self.assertEqual(graph.budget.deviation_records(), before)
+
+    def test_judge_refusal_blocks_the_attempt_rather_than_crashing_the_graph(self) -> None:
+        registration = self._chain_registration(
+            logical_id="judge-unavailable-run",
+            automatic_recovery={
+                "protocol": "plan-graph-automatic-recovery/1",
+                "allowed_actions": ["transfer_ownership"],
+                "max_extra_node_launches": 0, "max_structural_decisions": 1,
+            },
+        )
+        judge = _UnavailableJudge()
+        record = self._escalated_record("consumer.py:needs-producer", ["producer.py"])
+
+        def launcher(request):
+            if request.run.id == "b":
+                return FeatureRunOutcome(
+                    "succeeded", "b-commit",
+                    evidence={"review_fix": {"escalated_findings": [record]}},
+                )
+            return FeatureRunOutcome("succeeded", f"{request.run.id}-commit")
+
+        graph = self.graph(
+            launcher, registration=registration, escalation_judge=judge,
+        )
+        result = graph.run()
+
+        self.assertEqual(result.status, "blocked")
+        escalation = json.loads(
+            (self.root / "runs" / graph.graph_run_id / "escalation.json")
+            .read_text(encoding="utf-8")
+        )
+        self.assertIn("escalation judge could not judge", escalation["reason"])
+        self.assertIn(record["key"], escalation["reason"])
+        self.assertNotIn(
+            "escalations", escalation,
+            "a refusal produced no verdict, so there is none to report",
+        )
+        events = [
+            json.loads(line)
+            for line in graph._audit_for_run().journal.events_path
+            .read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        self.assertEqual(
+            [event["event_type"] for event in events
+             if event["event_type"] == "plan_graph_escalation_judged"], [],
+        )
+
+    def test_sealed_node_ids_reports_the_live_sealed_set(self) -> None:
+        """The graph-level seat's dynamic context: which nodes are sealed at
+        the moment of judgment, not at the moment the seat was built."""
+
+        registration = self._chain_registration(logical_id="sealed-node-ids")
+        graph = self.graph(
+            lambda request: FeatureRunOutcome("succeeded", f"{request.run.id}-commit"),
+            registration=registration,
+        )
+
+        self.assertEqual(graph.sealed_node_ids(), ())
+        graph.run()
+        self.assertEqual(graph.sealed_node_ids(), ("a", "b", "d"))
 
     # -- AC-CC08-8: reject write-back ---------------------------------------
 

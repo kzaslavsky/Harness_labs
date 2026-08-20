@@ -77,6 +77,27 @@ class PlanGraphError(ValueError):
     """Raised when a PlanGraph cannot be registered or executed safely."""
 
 
+class EscalationJudgeUnavailable(PlanGraphError):
+    """An :class:`EscalationJudge` declined to answer, without a verdict.
+
+    The judgment protocol has exactly two verdicts and both are consequential:
+    ``confirm`` spends a structural ``transfer_ownership`` decision (or injects
+    an unreviewed obligation into a queued node) and ``reject`` is permanent
+    for that finding key in this lineage (see
+    ``PlanGraphAudit.prior_escalation_verdict``). A seat whose model is
+    unreachable, whose transport failed, or whose reply never satisfied
+    ``plan-graph-escalation-judgment/1`` therefore has no safe verdict to
+    fabricate: it raises this instead, and
+    :meth:`PlanGraph._resolve_escalations` turns it into an ordinary operator
+    block -- the same disposition an unrouted finding gets.
+
+    Only this exact type is caught. Any other exception out of a judge --
+    including a plain :class:`PlanGraphError` from a third-party judge or from
+    :meth:`PlanGraph._validate_judgment` -- still propagates exactly as it did
+    before this type existed, so no existing judge's behaviour changes.
+    """
+
+
 @dataclass(frozen=True)
 class RequiredPath:
     """One repository path needed by a verification command."""
@@ -571,10 +592,11 @@ class _EscalationDisposition:
     node itself, a confirm targets the resolved owner. ``escalations_payload``
     feeds the block-escalation artifact's optional ``escalations`` array.
     ``unrouted`` (zero or ambiguous owners), ``budget_error`` (structural
-    recovery allowance exhausted on unseal), and ``already_rejected`` (this
+    recovery allowance exhausted on unseal), ``already_rejected`` (this
     exact finding_key was already judged and rejected earlier in this graph
-    attempt) each force this attempt to block regardless of the launch's own
-    outcome. ``retry_frontier_prefix`` is non-empty only when a confirm
+    attempt) and ``judge_unavailable`` (the configured judge raised
+    :class:`EscalationJudgeUnavailable` rather than returning a verdict) each
+    force this attempt to block regardless of the launch's own outcome. ``retry_frontier_prefix`` is non-empty only when a confirm
     unsealed at least one completed owner, and is
     ``[*unsealed_owners, escalating_node]`` in plan-declaration order.
     """
@@ -585,6 +607,7 @@ class _EscalationDisposition:
     unrouted: Mapping[str, object] | None = None
     budget_error: str | None = None
     already_rejected: Mapping[str, object] | None = None
+    judge_unavailable: Mapping[str, object] | None = None
 
 
 @dataclass(frozen=True)
@@ -650,6 +673,10 @@ class EscalationJudge(Protocol):
     (``plan-graph-escalation-judgment/1``): ``protocol``, ``verdict`` in
     ``{"confirm", "reject"}``, a non-empty ``rationale``, and
     ``evidence_refs``.
+
+    A judge that cannot answer must raise :class:`EscalationJudgeUnavailable`
+    rather than guess: both verdicts are consequential and irreversible in
+    different ways, so "no answer" is routed to the operator as a block.
     """
 
     identity: str
@@ -1663,6 +1690,7 @@ class PlanGraph:
                 or escalation.budget_error is not None
                 or escalation.retry_frontier_prefix
                 or escalation.already_rejected is not None
+                or escalation.judge_unavailable is not None
             )
             status = (
                 "blocked" if (outcome.status == "blocked" or escalation_forces_block)
@@ -1701,7 +1729,8 @@ class PlanGraph:
             escalation_disposition = (
                 escalation
                 if (escalation.escalations_payload or escalation.unrouted
-                    or escalation.budget_error or escalation.already_rejected)
+                    or escalation.budget_error or escalation.already_rejected
+                    or escalation.judge_unavailable)
                 else None
             )
             if status == "blocked":
@@ -1719,6 +1748,12 @@ class PlanGraph:
                     reason = (
                         f"escalated finding {escalation.already_rejected['finding_key']} "
                         "was already rejected by the escalation judge"
+                    )
+                elif escalation.judge_unavailable is not None:
+                    reason = (
+                        f"escalation judge could not judge finding "
+                        f"{escalation.judge_unavailable['finding_key']}: "
+                        f"{escalation.judge_unavailable['reason']}"
                     )
                 else:
                     reason = "in-graph escalation unsealed a completed node"
@@ -1764,6 +1799,7 @@ class PlanGraph:
             or escalation.budget_error is not None
             or escalation.retry_frontier_prefix
             or escalation.already_rejected is not None
+            or escalation.judge_unavailable is not None
         ):
             # An unresolved escalation, an exhausted structural allowance, a
             # confirmed unseal, or an already-rejected repeat all force this
@@ -1784,6 +1820,12 @@ class PlanGraph:
                 reason = (
                     f"escalated finding {escalation.already_rejected['finding_key']} "
                     "was already rejected by the escalation judge"
+                )
+            elif escalation.judge_unavailable is not None:
+                reason = (
+                    f"escalation judge could not judge finding "
+                    f"{escalation.judge_unavailable['finding_key']}: "
+                    f"{escalation.judge_unavailable['reason']}"
                 )
             else:
                 reason = "in-graph escalation unsealed a completed node"
@@ -2319,6 +2361,22 @@ class PlanGraph:
             except (AuditError, OSError, ValueError) as exc:
                 raise PlanGraphError(f"could not open PlanGraph audit: {exc}") from exc
         return self._audit
+
+    def sealed_node_ids(self) -> tuple[str, ...]:
+        """Node ids sealed so far in this attempt, from the audit checkpoint.
+
+        Read-only and side-effect free: it reads the already-open audit rather
+        than opening one, so calling it before or outside a run yields ``()``
+        instead of creating checkpoint state.  Exists for a graph-level seat
+        (see ``harness_labs/graphrun/escalation_judge.py``) that must know
+        which nodes are sealed at the moment it judges, not at the moment it
+        was constructed.
+        """
+
+        audit = self._audit
+        if audit is None:
+            return ()
+        return tuple(sorted(self._load_audit_completed(audit)))
 
     @staticmethod
     def _load_audit_completed(audit: PlanGraphAudit) -> dict[str, str]:
@@ -2884,7 +2942,24 @@ class PlanGraph:
                 "origin_reviewer_id": origin_reviewer_id,
                 "owner_node": owner,
             }
-            judgment = self._validate_judgment(self.escalation_judge(packet))
+            try:
+                judgment = self._validate_judgment(self.escalation_judge(packet))
+            except EscalationJudgeUnavailable as exc:
+                # No verdict is recorded, no budget is spent and no finding
+                # key is poisoned: an unanswerable escalation is an operator
+                # question, exactly like an unrouted one.  Judgment is the
+                # one step of this pipeline with no deterministic fallback,
+                # so failing closed here is the only disposition that cannot
+                # be wrong in a way the graph is unable to undo.
+                return _EscalationDisposition(
+                    advances=tuple(advances),
+                    escalations_payload=tuple(escalations_payload),
+                    judge_unavailable={
+                        "finding_key": key,
+                        "owner_node": owner,
+                        "reason": str(exc),
+                    },
+                )
             judgment_ref = audit.record_escalation_judged(run.id, key, judgment)
             if judgment["verdict"] == "reject":
                 rejected = dict(record)
@@ -3696,6 +3771,9 @@ def _target_for_path(path: str, targets: Mapping[str, str]) -> str | None:
 
 
 __all__ = [
+    "ESCALATION_JUDGMENT_PROTOCOL",
+    "EscalationJudge",
+    "EscalationJudgeUnavailable",
     "FEATURE_RUN_REQUEST_PROTOCOL",
     "PLAN_GRAPH_PROTOCOL",
     "REGISTRATION_PROTOCOL",

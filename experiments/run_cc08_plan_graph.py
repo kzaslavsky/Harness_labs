@@ -53,6 +53,9 @@ from harness_labs.graphrun.agent_mixture import (  # noqa: E402
     build_coordinator_session,
     build_role_profiles,
 )
+from harness_labs.graphrun.escalation_judge import (  # noqa: E402
+    GraphEscalationJudgeSeat,
+)
 from harness_labs.core.agent_sessions import AgentSession  # noqa: E402
 from harness_labs.core.claude_task_executor import (  # noqa: E402
     ClaudeSemanticTaskExecutor,
@@ -85,6 +88,7 @@ from harness_labs.plangraph.plan_graph import (  # noqa: E402
     RepairResumeDirective,
     load_registration,
     persist_registration,
+    plan_from_registration,
     register_plan_graph,
 )
 
@@ -96,6 +100,13 @@ COORDINATOR_SPEC = "claude:claude-opus-4-8[1m]@medium"
 # The coordinator sits silent inside task.dispatch while its worker runs, so
 # this must exceed the longest worker runtime (600–900s killed real builds).
 COORDINATOR_TIMEOUT_SECONDS = 7200.0
+# The escalation judge is a coordinator-class seat, not a worker: it reads the
+# whole plan and decides one consequential question, so it takes the same
+# operator-fixed coordinator spec rather than a cheaper worker model. It is a
+# single non-interactive question per escalation, so its timeout is an order of
+# magnitude below the coordinator's silent-wait budget.
+JUDGE_SPEC = COORDINATOR_SPEC
+JUDGE_TIMEOUT_SECONDS = 900.0
 IMPLEMENTER_SPEC = "claude:claude-sonnet-5@high"
 IMPLEMENTER_MODEL = "claude-sonnet-5"
 REVIEWER_MODEL = "claude-opus-5"
@@ -618,6 +629,23 @@ def _launcher(base_branch: str):
     return lambda request: _launch_node(request, acceptance, base_branch)
 
 
+def _escalation_judge(registration) -> GraphEscalationJudgeSeat:
+    """One graph-level judgment seat for the whole attempt (ADR 0007 / CC-08).
+
+    Built once per graph run, reused across every judgment, and bound to the
+    live graph's sealed set by the caller so it judges against the graph as it
+    is at that moment. Never the stub judge: a real campaign that confirmed
+    every escalation unexamined would unseal sealed nodes on no evidence.
+    """
+
+    return GraphEscalationJudgeSeat(
+        JUDGE_SPEC,
+        plan=plan_from_registration(registration),
+        executable=CLAUDE,
+        timeout_seconds=JUDGE_TIMEOUT_SECONDS,
+    )
+
+
 def run_graph(receipt_path: Path, graph_attempt_id: str, run_root: Path) -> int:
     admission = PlanApprovalAdmission(repository=REPO, receipt_path=receipt_path)
     approved = admission.validate()
@@ -644,6 +672,7 @@ def run_graph(receipt_path: Path, graph_attempt_id: str, run_root: Path) -> int:
         registration=registration,
     )
     print(json.dumps({"registration": str(registration_path)}))
+    judge = _escalation_judge(registration)
     graph = PlanGraph(
         REPO,
         registration,
@@ -656,7 +685,9 @@ def run_graph(receipt_path: Path, graph_attempt_id: str, run_root: Path) -> int:
         # is 1 regardless; declared as 2 rather than 5 so the ceiling states
         # the graph's real shape.
         max_parallelism=2,
+        escalation_judge=judge,
     )
+    judge.sealed_nodes = graph.sealed_node_ids
     result = graph.run()
     print(
         json.dumps(
@@ -696,6 +727,7 @@ def resume_graph(
         retry_frontier=tuple(frontier),
         blocker_evidence_ref=blocker,
     )
+    judge = _escalation_judge(registration)
     graph = PlanGraph.resume(
         REPO,
         registration,
@@ -704,7 +736,9 @@ def resume_graph(
         directive=directive,
         approval_validator=admission.approval_validator(),
         max_parallelism=5,
+        escalation_judge=judge,
     )
+    judge.sealed_nodes = graph.sealed_node_ids
     result = graph.run()
     print(
         json.dumps(
