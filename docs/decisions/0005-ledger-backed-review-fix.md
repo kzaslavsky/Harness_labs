@@ -1,6 +1,7 @@
 # 0005 — Ledger-backed review/fix gate
 
 Status: accepted
+Concerns-paths: harness_labs/featurerun/review_fix.py, harness_labs/featurerun/feature_run.py
 Date: 2026-08-04
 Owners: harness controller
 

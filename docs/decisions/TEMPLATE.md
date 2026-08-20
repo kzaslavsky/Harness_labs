@@ -1,6 +1,9 @@
 # NNNN — Decision title
 
 Status: proposed
+Supersedes: decision id, if applicable
+Concerns-paths: repo-relative path prefixes this decision governs, if applicable
+Valid-from-commit: commit hash this decision's scope binds to, if applicable
 Date: YYYY-MM-DD
 Owners: role or name
 Run: run identifier, if applicable

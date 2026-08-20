@@ -1,6 +1,7 @@
 # 0006 — Repository-bound PlanGraph approval
 
 Status: accepted
+Concerns-paths: harness_labs/plangraph/plan_approval.py, docs/development/plan-approval-design.md
 Date: 2026-08-10
 Owners: harness controller
 
