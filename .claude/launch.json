@@ -12,6 +12,12 @@
       "runtimeExecutable": "python3",
       "runtimeArgs": ["scripts/run_dashboard.py", "--audit-root", "logs/runs/cc-graph", "--assets-root", "dashboard/plan-graph/dist", "--port", "8322", "--refresh-seconds", "10"],
       "port": 8322
+    },
+    {
+      "name": "em-dashboard",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["scripts/run_dashboard.py", "--audit-root", "logs/runs/em-graph", "--assets-root", "dashboard/plan-graph/dist", "--port", "8323", "--refresh-seconds", "10"],
+      "port": 8323
     }
   ]
 }
