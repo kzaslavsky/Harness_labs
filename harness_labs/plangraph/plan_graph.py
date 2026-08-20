@@ -2927,6 +2927,31 @@ class PlanGraph:
             # ledger finding record carries is the node whose review-fix loop
             # raised it -- there is no separate reviewer-session field on the
             # record -- so that is the identity the judge must not share.
+            #
+            # Read what this guard actually compares before changing either
+            # side of it. ``origin_reviewer_id`` is a *node* id, not a
+            # reviewer identity, so today the rule reads "the judge must not
+            # be this node" and a graph-level seat can never collide: the
+            # refusal is correct but cannot fire. ADR 0007 states the rule in
+            # session-level language, and the two agree only while
+            # ``ReviewLedger._new_record`` has no reviewer field.
+            #
+            # Give a finding record a real reviewer identity -- a session id,
+            # a seat name, a model -- and this line should start reading it
+            # instead of ``run.id``; the comparison then means something new,
+            # and can collide for the first time (a seat and a reviewer
+            # configured to the same name or model). It raises mid-attempt,
+            # after the escalation is already journaled, so a spurious
+            # collision blocks a run rather than degrading. The seat's own
+            # constructor-time check will not catch it either: that one
+            # screens the identity against plan *node* ids.
+            #
+            # It also cuts against why the seat's identity is a fixed name
+            # rather than derived from its backend spec (see
+            # ``graphrun.escalation_judge``): that choice keeps a provider
+            # swap from silently changing independence semantics, and
+            # model-derived reviewer ids would reintroduce exactly that from
+            # the other side.
             origin_reviewer_id = run.id
             if self.escalation_judge.identity == origin_reviewer_id:
                 raise PlanGraphError(

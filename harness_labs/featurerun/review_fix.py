@@ -699,6 +699,13 @@ class ReviewLedger:
             "scope_screening": self.scope_screening(),
         }
 
+    # A finding record carries no reviewer identity, only ``origin_node``.
+    # That is load-bearing beyond this class: ``PlanGraph._resolve_escalations``
+    # falls back to the node id for ADR 0007's reviewer-independence refusal
+    # precisely because there is nothing better here. Adding a reviewer field
+    # -- session id, seat name, model -- is not a local change; read the guard
+    # at that call site first, because it silently changes what the refusal
+    # compares and can make it fire where it never has.
     def _new_record(
         self,
         key: str,
