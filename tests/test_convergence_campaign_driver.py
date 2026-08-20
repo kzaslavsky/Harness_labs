@@ -19,8 +19,11 @@ import sys
 import tempfile
 import unittest
 
+from harness_labs.plangraph.convergence_campaign import ConvergenceCampaignError
 from harness_labs.plangraph.convergence_ledger import ConvergenceLedger
+from harness_labs.plangraph.plan_approval import PlanApprovalError
 from harness_labs.plangraph.plan_graph import FeatureRunOutcome, PlanGraph, register_plan_graph
+from harness_labs.plangraph.plan_synthesis import plan_synthesis
 
 from scripts.run_convergence_campaign import (
     ApprovalPacket,
@@ -49,6 +52,7 @@ from scripts.run_convergence_campaign import (
     render_approval_packet,
     render_findings_owners_paths_table,
     resume_directive_from_escalation,
+    sanitize_before_journaling,
     sibling_overlap_warnings_from_gate_evidence,
     tag_regression_suspects,
     unacknowledged_warnings,
@@ -117,6 +121,17 @@ def _fake_capture_argv(
     if skip_receipt:
         argv.append("--skip-receipt")
     return argv
+
+
+def _uppercasing_pre_journal_sanitizer(text: str) -> str:
+    """A transforming (non-identity) ``pre_journal_sanitizer`` hook, used to
+    prove a resolved hook actually ran rather than merely resolving without
+    being invoked: ``.upper()`` leaves JSON's structural characters and
+    lowercase ``true``/``false``/``null`` keywords untouched, so it is safe
+    to run over a JSON receipt that carries no booleans or nulls, while
+    still visibly changing every letter it does carry."""
+
+    return text.upper()
 
 
 # ---------------------------------------------------------------------------
@@ -202,6 +217,15 @@ class _RepoFixture(unittest.TestCase):
             ),
             "recall_threshold": 0.8,
             "amendment_ratio_threshold": 0.2,
+            # DTR-MC's campaign-open commissioning checklist
+            # (build_campaign_config) refuses a config lacking
+            # stability_report_digest/recall_report_digest absent an
+            # explicit, reasoned override; this fixture's default campaigns
+            # exercise no real commissioning artifacts, so they carry one.
+            # Tests of the checklist itself (AC-MC-4) override this back out.
+            "commissioning_override": {
+                "reason": "driver test fixture; commissioning artifacts not exercised here",
+            },
         }
         arguments.update(overrides)
         return driver.open_campaign(**arguments)
@@ -556,6 +580,309 @@ class ApprovalPacketTests(_RepoFixture):
         self.assertTrue(referenced.exists())
         validated = PlanApprovalAdmission(repository=self.repository, receipt_path=receipt_path).validate()
         self.assertEqual(validated.subject_sha256, sha256_json(subject))
+
+
+# ---------------------------------------------------------------------------
+# DTR-LK-SYN (AC-LK-6): the plan step invokes plan_synthesis, and the
+# approve path threads an identical enforce value through render_approval_
+# packet and issue_approval, with the issue-side TOCTOU re-derivation
+# refusing on drift.
+# ---------------------------------------------------------------------------
+
+
+class PlanSynthesisDriverWiringTests(_RepoFixture):
+    def _seed_open_findings(self, driver: ConvergenceCampaignDriver, findings) -> None:
+        self.open_campaign(driver)
+        driver.ledger.ingest_audit(_audit("seed-1", findings=findings))
+
+    def _commit_plan_for(self, decomposition: dict) -> Path:
+        (self.repository / "docs").mkdir(exist_ok=True)
+        lines = ["## Section 1"]
+        for run in decomposition["runs"]:
+            lines.append(run["objective"])
+            for path in run["allowed_paths"]:
+                # Every "modify" path intent must already exist at
+                # base_commit (a "create" intent, like the join run's report
+                # file, need not).
+                intent_actions = {
+                    intent["path"]: intent["action"] for intent in run["path_intents"]
+                }
+                target = self.repository / path
+                if intent_actions.get(path) == "modify" and not target.exists():
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_text("# seeded for the finding this run repairs\n", encoding="utf-8")
+        (self.repository / "docs" / "plan.md").write_text(
+            "\n".join(lines) + "\n", encoding="utf-8",
+        )
+        decomposition_path = self.repository / "decomposition.json"
+        decomposition_path.write_text(
+            json.dumps(decomposition, sort_keys=True) + "\n", encoding="utf-8",
+        )
+        self._git("add", ".")
+        self._git("commit", "-m", "add plan and synthesized decomposition")
+        return decomposition_path
+
+    def test_plan_step_invokes_synthesis_when_no_decomposition_is_given(self) -> None:
+        driver = self.driver()
+        self._seed_open_findings(driver, [
+            _finding("a/x.py", "missing-null-check"),
+            _finding("b/y.py", "unhandled-error"),
+        ])
+        result = driver.plan(
+            synthesis={
+                "plan_path": "docs/plan.md",
+                "plan_section_id": "1",
+                "plan_section_heading": "## Section 1",
+            }
+        )
+        self.assertIn("join_regression_node_id", result)
+        state = driver.state()
+        self.assertEqual(state["join_regression_node_id"], result["join_regression_node_id"])
+        # Two disjoint required_paths synthesize two repair runs plus the
+        # join, and prior_repair_grants carries both repair grants forward.
+        self.assertEqual(set(state["prior_repair_grants"]), {"a/x.py", "b/y.py"})
+
+    def test_plan_step_still_accepts_an_explicit_decomposition_unchanged(self) -> None:
+        """Backward compatibility: a caller holding a hand-authored
+        decomposition keeps passing it (and findings_by_run) explicitly, and
+        synthesis never runs."""
+
+        driver = self.driver()
+        self.open_campaign(driver)
+        decomposition = {
+            "runs": [{"id": "solo", "depends_on": [], "allowed_paths": ["x.py"]}],
+        }
+        findings_by_run = {"solo": [_finding("x.py", "s1")]}
+        result = driver.plan(decomposition=decomposition, findings_by_run=findings_by_run)
+        self.assertEqual(result["join_regression_node_id"], "solo")
+
+    def test_plan_step_refuses_with_neither_decomposition_nor_synthesis(self) -> None:
+        driver = self.driver()
+        self.open_campaign(driver)
+        with self.assertRaises(ConvergenceCampaignDriverError):
+            driver.plan()
+
+    def test_plan_step_commits_synthesized_objectives_giving_a_real_path_to_approve(
+        self,
+    ) -> None:
+        """A driver configured with a repository commits every synthesized
+        run's objective into the plan document itself, so the round reaches
+        ``approve_prepare`` with no operator hand-writing its objectives into
+        the plan doc first (contrast ``_commit_plan_for`` above, which exists
+        only because ``plan_synthesis`` called directly has no repository to
+        commit into)."""
+
+        (self.repository / "docs").mkdir()
+        (self.repository / "docs" / "plan.md").write_text("## Section 1\n", encoding="utf-8")
+        (self.repository / "a").mkdir()
+        (self.repository / "a" / "x.py").write_text("# seed\n", encoding="utf-8")
+        (self.repository / "b").mkdir()
+        (self.repository / "b" / "y.py").write_text("# seed\n", encoding="utf-8")
+        self._git("add", ".")
+        self._git("commit", "-m", "seed plan doc and repair targets")
+        seed_head = self._git("rev-parse", "HEAD")
+
+        driver = self.driver(repository=self.repository)
+        self.open_campaign(driver, base_commit=seed_head)
+        driver.ledger.ingest_audit(_audit("seed-1", findings=[
+            _finding("a/x.py", "missing-null-check"),
+            _finding("b/y.py", "unhandled-error"),
+        ]))
+        result = driver.plan(
+            synthesis={
+                "plan_path": "docs/plan.md",
+                "plan_section_id": "1",
+                "plan_section_heading": "## Section 1",
+            }
+        )
+        self.assertTrue(result["plan_commit"]["committed"])
+        # The plan-step commit leaves the worktree pristine again.
+        self.assertEqual(self._git("status", "--porcelain"), "")
+
+        decomposition = json.loads(
+            Path(result["decomposition_path"]).read_text(encoding="utf-8")
+        )
+        plan_text = (self.repository / "docs" / "plan.md").read_text(encoding="utf-8")
+        for run in decomposition["runs"]:
+            self.assertIn(run["objective"], plan_text)
+        self.assertEqual(
+            check_objective_in_plan_text(decomposition, plan_text), (),
+        )
+
+        findings_by_run = json.loads(
+            Path(result["findings_by_run_path"]).read_text(encoding="utf-8")
+        )
+        # A fresh, repository-unconfigured driver reading the same
+        # checkpoint for the approve step: staleness verification
+        # (AC-CC04-7) is a separate concern from this fix, and is exercised
+        # on its own elsewhere.
+        output = self.root / "approval"
+        packet = self.driver().approve_prepare(
+            repository=self.repository,
+            decomposition_path=Path(result["decomposition_path"]),
+            output_directory=output,
+            findings_by_run=findings_by_run,
+        )
+        self.assertIsInstance(packet, ApprovalPacket)
+
+    def _synthesized_approval_fixture(self):
+        driver = self.driver()
+        self._seed_open_findings(driver, [
+            _finding("a/x.py", "missing-null-check"),
+            _finding("b/y.py", "unhandled-error"),
+        ])
+        result = plan_synthesis(
+            driver.ledger, plan_path="docs/plan.md", plan_section_id="1",
+            plan_section_heading="## Section 1",
+        )
+        decomposition_path = self._commit_plan_for(result.decomposition)
+        return driver, result, decomposition_path
+
+    def test_approve_prepare_and_issue_thread_the_same_enforce_value_end_to_end(
+        self,
+    ) -> None:
+        """A fully-conformant synthesized plan, admitted with ``enforce=True``
+        threaded identically through both prepare and issue, reaches a valid
+        receipt -- ``enforce=True`` does not itself block a plan carrying no
+        S1-S10 violation."""
+
+        from harness_labs.plangraph.plan_approval import (
+            OPERATOR_APPROVAL_PROTOCOL,
+            warning_identity,
+        )
+        from harness_labs.plangraph.plan_graph_contract import sha256_json
+
+        driver, result, decomposition_path = self._synthesized_approval_fixture()
+        output = self.root / "approval"
+        packet = driver.approve_prepare(
+            repository=self.repository, decomposition_path=decomposition_path,
+            output_directory=output, findings_by_run=result.findings_by_run,
+            enforce=True,
+        )
+        self.assertIsInstance(packet, ApprovalPacket)
+        gate_evidence = json.loads((output / "gate-evidence.json").read_text(encoding="utf-8"))
+        self.assertTrue(gate_evidence["conformance_report"]["enforced"])
+        self.assertEqual(gate_evidence["conformance_report"]["findings"], [])
+
+        subject = json.loads((output / "subject.json").read_text(encoding="utf-8"))
+        operator_approval_path = output / "operator-approval.json"
+        operator_approval_path.write_text(
+            json.dumps({
+                "protocol": OPERATOR_APPROVAL_PROTOCOL,
+                "subject_sha256": sha256_json(subject),
+                "actor": "operator",
+                "approved_at": "2026-01-01T00:00:00Z",
+                "statement": "approved",
+                "warning_acknowledgements": [],
+            }, sort_keys=True),
+            encoding="utf-8",
+        )
+        receipt_path = driver.approve_issue(
+            repository=self.repository, subject_path=output / "subject.json",
+            gate_evidence_path=output / "gate-evidence.json",
+            operator_approval_path=operator_approval_path,
+            receipt_path=output / "receipt.json",
+            enforce=True,
+        )
+        self.assertTrue(receipt_path.exists())
+
+    def test_a_synthesized_plan_with_an_s5_violation_is_refused_at_approve_when_enforced(
+        self,
+    ) -> None:
+        driver, result, decomposition_path = self._synthesized_approval_fixture()
+        decomposition = json.loads(decomposition_path.read_text(encoding="utf-8"))
+        first_criterion_id = next(iter(decomposition["acceptance_criteria"]))
+        decomposition["acceptance_criteria"][first_criterion_id] = (
+            "this criterion carries no machine-readable observable at all"
+        )
+        decomposition_path.write_text(
+            json.dumps(decomposition, sort_keys=True) + "\n", encoding="utf-8",
+        )
+        self._git("add", ".")
+        self._git("commit", "-m", "strip the observable annotation (S5 violation)")
+
+        output = self.root / "approval"
+        with self.assertRaises(PlanApprovalError):
+            driver.approve_prepare(
+                repository=self.repository, decomposition_path=decomposition_path,
+                output_directory=output, findings_by_run=result.findings_by_run,
+                enforce=True,
+            )
+
+    def test_the_unmodified_synthesized_plan_is_admitted_without_an_enforce_override(
+        self,
+    ) -> None:
+        """The unmodified synthesized plan carries no S5 violation, and is
+        conformance-aware and enforced by construction (every criterion
+        already carries an OBSERVABLE annotation) even with ``enforce`` left
+        at its default. This is the control for the S5 violation test above:
+        it shows the *unmodified* plan is admitted with no ``enforce``
+        override at all, so that test's refusal is attributable to the S5
+        violation itself, not to the absence of an explicit ``enforce``."""
+
+        driver, result, decomposition_path = self._synthesized_approval_fixture()
+        output = self.root / "approval"
+        packet = driver.approve_prepare(
+            repository=self.repository, decomposition_path=decomposition_path,
+            output_directory=output, findings_by_run=result.findings_by_run,
+        )
+        self.assertIsInstance(packet, ApprovalPacket)
+        gate_evidence = json.loads((output / "gate-evidence.json").read_text(encoding="utf-8"))
+        # Conformance-aware by construction (every criterion already carries
+        # an OBSERVABLE annotation), so enforcement is active even though no
+        # explicit enforce was passed here.
+        self.assertTrue(gate_evidence["conformance_report"]["conformance_aware"])
+        self.assertTrue(gate_evidence["conformance_report"]["enforced"])
+
+    def test_issue_refuses_when_its_enforce_value_drifts_from_prepares(self) -> None:
+        """``enforce=True`` at prepare and ``enforce=False`` at issue must
+        disagree on the recomputed conformance report's own ``enforced``
+        flag even when the plan carries zero S1-S10 findings either way --
+        so the issue-side freshness check (which compares the whole
+        ``conformance_report`` field) refuses the drift outright, rather
+        than silently using whichever value it was locally given."""
+
+        from harness_labs.plangraph.plan_approval import OPERATOR_APPROVAL_PROTOCOL
+        from harness_labs.plangraph.plan_graph_contract import sha256_json
+
+        driver, result, decomposition_path = self._synthesized_approval_fixture()
+        output = self.root / "approval"
+        driver.approve_prepare(
+            repository=self.repository, decomposition_path=decomposition_path,
+            output_directory=output, findings_by_run=result.findings_by_run,
+            enforce=True,
+        )
+        subject = json.loads((output / "subject.json").read_text(encoding="utf-8"))
+        operator_approval_path = output / "operator-approval.json"
+        operator_approval_path.write_text(
+            json.dumps({
+                "protocol": OPERATOR_APPROVAL_PROTOCOL,
+                "subject_sha256": sha256_json(subject),
+                "actor": "operator",
+                "approved_at": "2026-01-01T00:00:00Z",
+                "statement": "approved",
+                "warning_acknowledgements": [],
+            }, sort_keys=True),
+            encoding="utf-8",
+        )
+        with self.assertRaises(PlanApprovalError):
+            driver.approve_issue(
+                repository=self.repository, subject_path=output / "subject.json",
+                gate_evidence_path=output / "gate-evidence.json",
+                operator_approval_path=operator_approval_path,
+                receipt_path=output / "receipt.json",
+                enforce=False,
+            )
+
+    def test_scripts_approve_plan_never_mentions_enforce(self) -> None:
+        """``dtr-lk``: "the enforce path is driver-only;
+        scripts/approve_plan.py is unchanged." A literal source scan, not
+        merely "we didn't edit it in this change"."""
+
+        approve_plan_source = (
+            Path(__file__).resolve().parent.parent / "scripts" / "approve_plan.py"
+        ).read_text(encoding="utf-8")
+        self.assertNotIn("enforce", approve_plan_source)
 
 
 # ---------------------------------------------------------------------------
@@ -1185,6 +1512,102 @@ class MeasureReceiptContractTests(_RepoFixture):
         self.assertEqual(sealed, self._PAYLOAD)
 
 
+class SanitizerMediaTypePolicyDriverTests(_RepoFixture):
+    """AC-SN-4: ``sanitize_before_journaling`` resolves the ``text`` hook out
+    of the mapping config form exactly as the legacy string form applies it,
+    and raises :class:`SanitizerFailure` -- never ``AttributeError`` -- on a
+    mapping with no ``text`` entry."""
+
+    _HOOK_REFERENCE = "scripts.run_convergence_campaign:identity_pre_journal_sanitizer"
+    _TRANSFORM_HOOK_REFERENCE = (
+        "tests.test_convergence_campaign_driver:_uppercasing_pre_journal_sanitizer"
+    )
+
+    def test_mapping_form_resolves_text_hook_exactly_like_the_legacy_string(self) -> None:
+        """Uses a transforming hook (not the identity hook) so the assertion
+        actually exercises hook application: an implementation that resolved
+        the mapping form's ``text`` entry but never invoked it would leave
+        ``text`` unchanged and fail the ``assertNotEqual`` below."""
+
+        legacy_config = {"pre_journal_sanitizer": self._TRANSFORM_HOOK_REFERENCE}
+        mapping_config = {
+            "pre_journal_sanitizer": {"text": self._TRANSFORM_HOOK_REFERENCE, "binary": {}},
+        }
+        text = "some journaled text"
+        mapping_result = sanitize_before_journaling(mapping_config, text)
+        legacy_result = sanitize_before_journaling(legacy_config, text)
+        self.assertEqual(mapping_result, legacy_result)
+        self.assertNotEqual(mapping_result, text)
+
+    def test_mapping_form_without_text_entry_raises_sanitizer_failure_not_attribute_error(
+        self,
+    ) -> None:
+        config = {"pre_journal_sanitizer": {"binary": {"screenshot": "reject"}}}
+        with self.assertRaises(SanitizerFailure):
+            sanitize_before_journaling(config, "text")
+
+    def test_mapping_form_with_non_string_text_entry_raises_sanitizer_failure(self) -> None:
+        config = {"pre_journal_sanitizer": {"text": 7, "binary": {}}}
+        with self.assertRaises(SanitizerFailure):
+            sanitize_before_journaling(config, "text")
+
+    def test_a_bare_non_string_non_mapping_sanitizer_value_raises_sanitizer_failure(self) -> None:
+        config = {"pre_journal_sanitizer": 7}
+        with self.assertRaises(SanitizerFailure):
+            sanitize_before_journaling(config, "text")
+
+    def test_driver_measure_threads_the_mapping_form_through_open_campaign(self) -> None:
+        """The mapping form survives the full ``open_campaign`` ->
+        ``campaign_config`` -> ``measure`` path, not just direct calls to
+        ``sanitize_before_journaling``. Uses the transforming hook so the
+        assertion proves the hook actually ran on the threaded receipt text
+        rather than merely being resolved and skipped: an implementation
+        that dropped the hook along this path would return ``payload``
+        unchanged and fail the comparison below."""
+
+        driver = self.driver()
+        self.open_campaign(
+            driver,
+            pre_journal_sanitizer={"text": self._TRANSFORM_HOOK_REFERENCE, "binary": {}},
+        )
+        payload = {
+            "digest": "d-mapping", "findings": [], "verdicts": [],
+            "confirmed_good": [], "capture_coverage": {},
+        }
+        out_dir = self.root / "capture-out-mapping"
+        argv = _fake_capture_argv(out_dir, payload)
+
+        result = driver.measure(capture_argv=argv, out_dir=out_dir)
+
+        expected = json.loads(json.dumps(payload).upper())
+        self.assertEqual(result["audit_result"], expected)
+        self.assertNotEqual(result["audit_result"], payload)
+
+    def test_config_reads_a_textless_mapping_and_raises_sanitizer_failure(self) -> None:
+        """``build_campaign_config``/``pin_target`` already refuse a textless
+        mapping at config-build time (AC-SN-1's config-surface validation);
+        this exercises the config-read path (``campaign_config``) directly
+        against a raw ``ConvergenceLedger.open_campaign`` record -- the
+        "checkpoint state built outside build_campaign_config" case
+        ``sanitize_before_journaling``'s own docstring names -- proving the
+        read path itself, not only the write-time gate, fails closed with
+        ``SanitizerFailure`` rather than an ``AttributeError``.
+        """
+
+        from scripts.run_convergence_campaign import campaign_config
+
+        driver = self.driver()
+        driver.ledger.open_campaign(
+            domain="ui-fidelity",
+            target={"kind": "design-doc", "digest": "e" * 64, "snapshot_path": "target.md"},
+            base_commit="0" * 40,
+            config={"pre_journal_sanitizer": {"binary": {"screenshot": "reject"}}},
+        )
+
+        with self.assertRaises(SanitizerFailure):
+            sanitize_before_journaling(campaign_config(driver.ledger), "some text")
+
+
 class DriverRunStepPreconditionsTests(_RepoFixture):
     """``driver-steps`` step 6: ``run`` refuses to dispatch a round with no
     ``--on-block-argv`` block hook, and refuses a named ``--registration``
@@ -1588,6 +2011,32 @@ class CampaignOpenRefusalTests(_RepoFixture):
         record = self.open_campaign(driver)
         self.assertEqual(record["type"], "campaign_opened")
 
+    def test_open_campaign_refuses_without_commissioning_artifacts_or_override(self) -> None:
+        """``dtr-mc``, AC-MC-4: ``pin_target`` cannot record ``campaign_opened``
+        without ``stability_report_digest``/``recall_report_digest`` (or an
+        explicit ``commissioning_override``) -- the checklist lands at the
+        real seat ``build_campaign_config`` sits behind."""
+
+        driver = self.driver()
+        with self.assertRaises(ConvergenceCampaignError) as ctx:
+            self.open_campaign(driver, commissioning_override=None)
+        message = str(ctx.exception)
+        self.assertIn("stability_report_digest", message)
+        self.assertIn("recall_report_digest", message)
+        self.assertEqual(list(driver.ledger.records()), [])
+
+    def test_open_campaign_succeeds_with_real_commissioning_digests(self) -> None:
+        driver = self.driver()
+        record = self.open_campaign(
+            driver,
+            commissioning_override=None,
+            stability_report_digest="s" * 64,
+            recall_report_digest="r" * 64,
+        )
+        self.assertEqual(record["type"], "campaign_opened")
+        self.assertEqual(record["config"]["stability_report_digest"], "s" * 64)
+        self.assertEqual(record["config"]["recall_report_digest"], "r" * 64)
+
 
 class ResumeDirectiveTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -1870,6 +2319,78 @@ class DriverCloseTerminationWiringTests(_RepoFixture):
             termination_kwargs={"inspector_recall": 1.0, "new_required_findings": 0},
         )
         self.assertTrue(closed_override["termination"]["zero_new_required_findings"])
+
+
+class DriverCloseTerminationRecallFromSealedReportTests(_RepoFixture):
+    """``dtr-mc``, AC-MC-6: ``close``'s termination step derives
+    ``inspector_recall`` from the campaign's sealed
+    ``recall_report_digest`` artifact when the caller does not supply one;
+    an explicit caller value still wins."""
+
+    def _seal_recall_report(self, driver: ConvergenceCampaignDriver, recall: float) -> str:
+        report = {
+            "protocol": "measurer-commissioning-recall-report/1",
+            "seed_count": 1,
+            "matched": [["a.py", "s1"]] if recall >= 1.0 else [],
+            "missed": [] if recall >= 1.0 else [["a.py", "s1"]],
+            "recall": recall,
+        }
+        report_path = self.root / f"recall-report-{recall}.json"
+        report_path.write_text(json.dumps(report), encoding="utf-8")
+        record = driver.artifacts.seal(report_path, media_type="application/json")
+        return record.digest
+
+    def test_close_termination_derives_inspector_recall_from_the_sealed_recall_report(self) -> None:
+        driver = self.driver()
+        digest = self._seal_recall_report(driver, 1.0)
+        self.open_campaign(
+            driver, recall_threshold=0.8,
+            recall_report_digest=digest, stability_report_digest="s" * 64,
+            commissioning_override=None,
+        )
+        driver.ingest(audit_result=_audit("d1"))
+
+        closed = driver.close(
+            run_result={"status": "succeeded", "candidate_commit": "a" * 40},
+            termination_kwargs={},
+        )
+        self.assertTrue(closed["termination"]["recall_ok"])
+        self.assertTrue(closed["termination"]["success"])
+
+    def test_close_termination_explicit_inspector_recall_overrides_the_sealed_report(self) -> None:
+        driver = self.driver()
+        # The sealed report scores 0.0 -- below the 0.8 threshold -- but the
+        # caller's own explicit inspector_recall of 1.0 must still win.
+        digest = self._seal_recall_report(driver, 0.0)
+        self.open_campaign(
+            driver, recall_threshold=0.8,
+            recall_report_digest=digest, stability_report_digest="s" * 64,
+            commissioning_override=None,
+        )
+        driver.ingest(audit_result=_audit("d1"))
+
+        closed = driver.close(
+            run_result={"status": "succeeded", "candidate_commit": "a" * 40},
+            termination_kwargs={"inspector_recall": 1.0},
+        )
+        self.assertTrue(closed["termination"]["recall_ok"])
+        self.assertTrue(closed["termination"]["success"])
+
+    def test_close_termination_falls_back_to_zero_recall_with_no_sealed_report(self) -> None:
+        """A ``commissioning_override`` campaign (no ``recall_report_digest``
+        at all) falls back to the pre-DTR-MC hardcoded ``0.0`` -- unchanged
+        behavior for a campaign that opted out of commissioning."""
+
+        driver = self.driver()
+        self.open_campaign(driver, recall_threshold=0.0)  # fixture default: commissioning_override, no digest
+        driver.ingest(audit_result=_audit("d1"))
+
+        closed = driver.close(
+            run_result={"status": "succeeded", "candidate_commit": "a" * 40},
+            termination_kwargs={},
+        )
+        self.assertTrue(closed["termination"]["recall_ok"])
+        self.assertTrue(closed["termination"]["success"])
 
 
 class DriverBlockedTerminationAmendmentRatioTests(_RepoFixture):

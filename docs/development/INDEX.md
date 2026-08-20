@@ -57,6 +57,12 @@ Status: active
   [`cc08-escalation-decomposition.json`](cc08-escalation-decomposition.json),
   and the implementer handoff
   [`SESSION_HANDOFF_CC08_ESCALATION_20260819.md`](SESSION_HANDOFF_CC08_ESCALATION_20260819.md)
+- Delta-to-run pipeline (finding intake, sanitizer media-type policy,
+  measurer commissioning, launcher kit and plan synthesis):
+  [`delta-to-run-plan.md`](delta-to-run-plan.md), its five-node decomposition
+  [`delta-to-run-decomposition.json`](delta-to-run-decomposition.json), and
+  the session handoff
+  [`SESSION_HANDOFF_DELTA_TO_RUN_20260820.md`](SESSION_HANDOFF_DELTA_TO_RUN_20260820.md)
 
 ## Seed implementation records
 

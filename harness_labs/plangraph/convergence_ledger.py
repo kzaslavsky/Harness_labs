@@ -106,6 +106,17 @@ _CONFIRMED_GOOD_ASSERTION_KINDS = frozenset(
     {"file", "test_id", "selector", "command"}
 )
 
+#: The twelve-field ``_validate_finding`` envelope shape, in the order
+#: :meth:`ConvergenceLedger.open_findings` projects a folded key's stored
+#: finding down to -- dropping any journal bookkeeping fields
+#: (``type``/``key``/``digest``) a replayed ``finding_opened`` record also
+#: carries alongside them.
+_FINDING_ENVELOPE_FIELDS = (
+    "file", "subject", "required_paths", "confidence", "supersedes_key",
+    "id", "statement", "category", "severity", "requires_disposition",
+    "evidence_refs", "source_finding_ids",
+)
+
 
 class ConvergenceLedgerError(ValueError):
     """Raised on a malformed ingest, ruling, or a corrupt journal."""
@@ -496,6 +507,35 @@ class ConvergenceLedger:
             key for key, info in state["keys"].items()
             if info["status"] in _ACTIVE_STATUSES
         )
+
+    def open_findings(self) -> tuple[dict[str, Any], ...]:
+        """The folded finding envelope for each key in :meth:`open_set`, in
+        deterministic (sorted-key) order.
+
+        Replayed state stores the raw journaled ``finding_opened`` record
+        against each key (``type``/``key``/``digest`` mixed in alongside the
+        finding fields); this always re-projects it down to exactly the
+        twelve-field envelope (``_validate_finding``'s shape), so a caller
+        (``plan_synthesis``) never has to re-fold the journal itself to
+        recover what ``open_set``'s bare keys drop.
+        """
+
+        state = self._read_state()
+        envelopes: list[dict[str, Any]] = []
+        for key in sorted(state["keys"]):
+            info = state["keys"][key]
+            if info["status"] not in _ACTIVE_STATUSES:
+                continue
+            finding = info.get("finding")
+            if finding is None:
+                raise ConvergenceLedgerError(
+                    f"open key {key!r} has no associated finding envelope; "
+                    "the journal is corrupt"
+                )
+            envelopes.append(
+                {field: finding.get(field) for field in _FINDING_ENVELOPE_FIELDS}
+            )
+        return tuple(envelopes)
 
     def exclusion_set(self) -> frozenset[Key]:
         state = self._read_state()

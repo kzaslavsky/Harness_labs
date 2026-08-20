@@ -522,6 +522,279 @@ def test_sanitizer_runs_before_journaling_and_digesting(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# AC-SN-2 / AC-SN-3: sanitizer media-type policy (--sanitizer-policy,
+# --dry-run)
+# ---------------------------------------------------------------------------
+
+
+def _write_policy(tmp_path: Path, policy: dict, *, name: str = "policy.json") -> Path:
+    path = tmp_path / name
+    path.write_text(json.dumps(policy), encoding="utf-8")
+    return path
+
+
+def _tree_snapshot(directory: Path) -> dict[str, bytes]:
+    if not directory.exists():
+        return {}
+    return {
+        str(path.relative_to(directory)): path.read_bytes()
+        for path in sorted(directory.rglob("*"))
+        if path.is_file()
+    }
+
+
+def test_sanitizer_and_sanitizer_policy_are_mutually_exclusive(tmp_path):
+    policy_path = _write_policy(
+        tmp_path, {"text": f"{SANITIZERS}:identity_sanitizer", "binary": {}}
+    )
+    completed, _ = _run_capture(
+        tmp_path,
+        "--driver", "stub",
+        "--sanitizer", f"{SANITIZERS}:identity_sanitizer",
+        "--sanitizer-policy", str(policy_path),
+    )
+    assert completed.returncode == 2
+    assert "not allowed with argument" in completed.stderr
+
+
+def test_sanitizer_policy_text_kind_passes_through_the_declared_hook(tmp_path):
+    """A ``--sanitizer-policy`` mapping's ``text`` hook actually runs on
+    text-kind artifacts -- the same observable ``marking_sanitizer`` proof
+    ``test_sanitizer_runs_before_journaling_and_digesting`` uses for the
+    legacy ``--sanitizer`` path, now via the policy mapping (AC-SN-2)."""
+
+    policy_path = _write_policy(
+        tmp_path,
+        {"text": f"{SANITIZERS}:marking_sanitizer", "binary": {"screenshot": "scan"}},
+    )
+    completed, out_dir = _run_capture(
+        tmp_path, "--driver", "stub", "--sanitizer-policy", str(policy_path),
+    )
+    assert completed.returncode == 0, completed.stderr
+    receipt = _receipt(out_dir)
+    assert receipt["sanitizer"]["policy_path"] == str(policy_path)
+    cell = next(cell for cell in receipt["cells"] if cell["status"] == "ok")
+    persisted = _artifact_bytes(receipt, cell, "console_log")
+    assert persisted.endswith(b"<!-- sanitized -->")
+
+
+def test_sanitizer_policy_binary_scan_admits_the_artifact(tmp_path):
+    policy_path = _write_policy(
+        tmp_path,
+        {"text": f"{SANITIZERS}:identity_sanitizer", "binary": {"screenshot": "scan"}},
+    )
+    completed, out_dir = _run_capture(
+        tmp_path, "--driver", "stub", "--sanitizer-policy", str(policy_path),
+    )
+    assert completed.returncode == 0, completed.stderr
+    receipt = _receipt(out_dir)
+    assert any(cell["status"] == "ok" for cell in receipt["cells"])
+
+
+def test_sanitizer_policy_binary_admit_with_reason_admits_the_artifact(tmp_path):
+    policy_path = _write_policy(
+        tmp_path,
+        {
+            "text": f"{SANITIZERS}:identity_sanitizer",
+            "binary": {"screenshot": "admit:legal-approved"},
+        },
+    )
+    completed, out_dir = _run_capture(
+        tmp_path, "--driver", "stub", "--sanitizer-policy", str(policy_path),
+    )
+    assert completed.returncode == 0, completed.stderr
+    receipt = _receipt(out_dir)
+    assert any(cell["status"] == "ok" for cell in receipt["cells"])
+
+
+def _write_transforming_binary_sanitizer_module(tmp_path: Path) -> Path:
+    """A standalone ``text`` hook (loaded by path, not from ``SANITIZERS``)
+    that transforms every kind it sees, including a binary kind routed
+    through it -- used to prove ``scan`` actually dispatches through the
+    declared hook instead of admitting content unchanged like ``admit``."""
+
+    module_path = tmp_path / "transforming_sanitizer.py"
+    module_path.write_text(
+        "def transforming_sanitizer(kind, content):\n"
+        "    return content + b'<!-- scanned -->'\n",
+        encoding="utf-8",
+    )
+    return module_path
+
+
+def test_sanitizer_policy_binary_scan_routes_through_the_declared_text_hook(tmp_path):
+    """``scan`` is not a silent pass-through: it dispatches binary content
+    through the policy's declared ``text`` hook, so a scanned artifact is
+    observably different from an ``admit:<reason>`` one using the identical
+    hook (AC-SN-2)."""
+
+    module_path = _write_transforming_binary_sanitizer_module(tmp_path)
+    policy_path = _write_policy(
+        tmp_path,
+        {"text": f"{module_path}:transforming_sanitizer", "binary": {"screenshot": "scan"}},
+        name="scan-policy.json",
+    )
+    completed, out_dir = _run_capture(
+        tmp_path, "--driver", "stub", "--sanitizer-policy", str(policy_path),
+    )
+    assert completed.returncode == 0, completed.stderr
+    receipt = _receipt(out_dir)
+    cell = next(cell for cell in receipt["cells"] if cell["status"] == "ok")
+    persisted = _artifact_bytes(receipt, cell, "screenshot")
+    assert persisted.endswith(b"<!-- scanned -->")
+
+
+def test_sanitizer_policy_binary_admit_with_the_same_hook_leaves_the_artifact_unchanged(
+    tmp_path,
+):
+    """The same transforming hook, declared via ``admit:<reason>`` instead
+    of ``scan``, never runs -- ``admit`` is the explicit bypass, distinct
+    from ``scan``'s dispatch through the hook."""
+
+    module_path = _write_transforming_binary_sanitizer_module(tmp_path)
+    policy_path = _write_policy(
+        tmp_path,
+        {
+            "text": f"{module_path}:transforming_sanitizer",
+            "binary": {"screenshot": "admit:legal-approved"},
+        },
+        name="admit-policy.json",
+    )
+    completed, out_dir = _run_capture(
+        tmp_path, "--driver", "stub", "--sanitizer-policy", str(policy_path),
+    )
+    assert completed.returncode == 0, completed.stderr
+    receipt = _receipt(out_dir)
+    cell = next(cell for cell in receipt["cells"] if cell["status"] == "ok")
+    persisted = _artifact_bytes(receipt, cell, "screenshot")
+    assert not persisted.endswith(b"<!-- scanned -->")
+
+
+def test_sanitizer_policy_binary_entry_for_a_text_kind_is_rejected(tmp_path):
+    """A ``binary`` policy entry naming a text-media-type kind (here
+    ``dom_snapshot``) is refused at policy-resolution time rather than
+    silently ignored -- dispatch would never consult it, since it only
+    checks ``binary_policy`` for kinds already known to be binary (AC-SN-2)."""
+
+    policy_path = _write_policy(
+        tmp_path,
+        {"text": f"{SANITIZERS}:identity_sanitizer", "binary": {"dom_snapshot": "reject"}},
+    )
+    completed, out_dir = _run_capture(
+        tmp_path, "--driver", "stub", "--sanitizer-policy", str(policy_path),
+    )
+    assert completed.returncode != 0
+    receipt = _receipt(out_dir)
+    assert receipt["error"]["kind"] == "sanitizer_failure"
+    assert "dom_snapshot" in receipt["error"]["message"]
+
+
+def test_sanitizer_policy_binary_reject_aborts_the_run(tmp_path):
+    policy_path = _write_policy(
+        tmp_path,
+        {"text": f"{SANITIZERS}:identity_sanitizer", "binary": {"screenshot": "reject"}},
+    )
+    completed, out_dir = _run_capture(
+        tmp_path, "--driver", "stub", "--sanitizer-policy", str(policy_path),
+    )
+    assert completed.returncode != 0
+    receipt = _receipt(out_dir)
+    assert receipt["error"]["kind"] == "sanitizer_failure"
+    assert "binary.screenshot=reject" in receipt["error"]["message"]
+
+
+def test_sanitizer_policy_undeclared_binary_kind_fails_closed(tmp_path):
+    """An artifact kind the policy's ``binary`` mapping never names is
+    refused rather than silently admitted (AC-SN-2's fail-closed clause)."""
+
+    policy_path = _write_policy(
+        tmp_path, {"text": f"{SANITIZERS}:identity_sanitizer", "binary": {}}
+    )
+    completed, out_dir = _run_capture(
+        tmp_path, "--driver", "stub", "--sanitizer-policy", str(policy_path),
+    )
+    assert completed.returncode != 0
+    receipt = _receipt(out_dir)
+    assert receipt["error"]["kind"] == "sanitizer_failure"
+    assert "undeclared" in receipt["error"]["message"]
+
+
+def test_sanitizer_policy_missing_text_entry_fails_closed(tmp_path):
+    policy_path = _write_policy(tmp_path, {"binary": {"screenshot": "scan"}})
+    completed, out_dir = _run_capture(
+        tmp_path, "--driver", "stub", "--sanitizer-policy", str(policy_path),
+    )
+    assert completed.returncode != 0
+    receipt = _receipt(out_dir)
+    assert receipt["error"]["kind"] == "sanitizer_failure"
+    assert "text" in receipt["error"]["message"]
+
+
+def test_dry_run_reports_would_be_rejections_and_writes_no_journal(tmp_path):
+    policy_path = _write_policy(
+        tmp_path,
+        {"text": f"{SANITIZERS}:identity_sanitizer", "binary": {"screenshot": "reject"}},
+    )
+    completed, out_dir = _run_capture(
+        tmp_path, "--driver", "stub", "--sanitizer-policy", str(policy_path), "--dry-run",
+    )
+    assert completed.returncode == 0, completed.stderr
+    receipt = _receipt(out_dir)
+    assert receipt["dry_run"] is True
+    report_by_kind = {entry["kind"]: entry for entry in receipt["sanitizer_report"]}
+    assert set(report_by_kind) == {
+        "screenshot", "dom_snapshot", "computed_styles",
+        "aria_snapshot", "console_log", "network_log",
+    }
+    screenshot_entry = report_by_kind["screenshot"]
+    assert screenshot_entry["would_reject"] is True
+    assert "binary.screenshot=reject" in screenshot_entry["reason"]
+    for kind in ("dom_snapshot", "computed_styles", "aria_snapshot", "console_log", "network_log"):
+        assert report_by_kind[kind]["would_reject"] is False
+    # Nothing was journaled: no capture ran at all, so the audit journal
+    # directory was never opened (AC-SN-3: "absent ... after the run").
+    assert not (out_dir / "audit").exists()
+
+
+def test_dry_run_with_no_sanitizer_configured_reports_no_rejections(tmp_path):
+    completed, out_dir = _run_capture(tmp_path, "--driver", "stub", "--dry-run")
+    assert completed.returncode == 0, completed.stderr
+    receipt = _receipt(out_dir)
+    assert receipt["dry_run"] is True
+    assert all(not entry["would_reject"] for entry in receipt["sanitizer_report"])
+    assert not (out_dir / "audit").exists()
+
+
+def test_dry_run_leaves_a_prior_journal_byte_identical(tmp_path):
+    """AC-SN-3's other branch: when the journal already exists (a prior real
+    capture into the same ``--out``), ``--dry-run`` leaves it byte-identical
+    rather than absent."""
+
+    completed, out_dir = _run_capture(tmp_path, "--driver", "stub")
+    assert completed.returncode == 0, completed.stderr
+    before = _tree_snapshot(out_dir / "audit")
+    assert before  # the prior real capture actually journaled artifacts
+
+    policy_path = _write_policy(
+        tmp_path,
+        {"text": f"{SANITIZERS}:identity_sanitizer", "binary": {"screenshot": "reject"}},
+    )
+    dry_run_completed = subprocess.run(
+        [
+            sys.executable, str(CAPTURE_SCRIPT),
+            "--out", str(out_dir),
+            "--driver", "stub",
+            "--sanitizer-policy", str(policy_path),
+            "--dry-run",
+        ],
+        capture_output=True, text=True, timeout=120, env=_subprocess_env(),
+    )
+    assert dry_run_completed.returncode == 0, dry_run_completed.stderr
+    after = _tree_snapshot(out_dir / "audit")
+    assert after == before
+
+
+# ---------------------------------------------------------------------------
 # AC-CC03-5: inspector output validator, mandatory per-key verdicts
 # ---------------------------------------------------------------------------
 
