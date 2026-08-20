@@ -1,0 +1,202 @@
+{
+  "protocol": "plan-graph-plan/1",
+  "plan": "docs/development/in-graph-escalation-unsealing-plan.md",
+  "referenced_artifacts": [
+    "docs/development/in-graph-escalation-unsealing-plan.md",
+    "docs/decisions/0007-in-graph-escalation-bounded-unsealing.md",
+    "docs/decisions/0005-ledger-backed-review-fix.md",
+    "docs/decisions/0006-parallel-plangraph-contract.md",
+    "docs/development/SESSION_HANDOFF_CC08_ESCALATION_20260819.md",
+    "docs/development/plangraph-node-sizing-review.md"
+  ],
+  "acceptance_criteria": {
+    "AC-CC08-1": "With `ReviewFixPolicy(escalation_enabled=False)` (the default), `ReviewFixLoop.run()` over the existing `tests/test_review_fix.py` fixtures produces a `ReviewFixResult.as_dict()` identical to the pre-change output except for one added key `\"escalated_findings\": []`; no ledger record gains an `escalation_reason` value other than `\"\"`.",
+    "AC-CC08-2": "With escalation enabled, a first-cycle review finding carrying `requires_disposition: true` and a `required_paths` entry outside `allowed_paths`, for which `finding_transfer_targets` resolves no owner, ends that cycle with `outcome == \"escalated\"` and `escalation_reason == \"required_paths_outside_grant\"`; the recording executor factory is never invoked with `stage == \"fix\"` for that key.",
+    "AC-CC08-3": "When `finding_transfer_targets` does resolve a unique downstream owner for the same finding, `transfer_scope_expanding` still claims it: `outcome == \"transferred\"`, `transferred_to == <owner>`, and `escalation_reason == \"\"`. Transfer takes precedence over escalation.",
+    "AC-CC08-4": "A `review-fix-fix/1` result whose `unresolvable_finding_keys` is a subset of its `fix_finding_keys` marks exactly those keys `escalated` with `escalation_reason == \"fixer_declared_unresolvable\"`; a key outside `fix_finding_keys` raises `ReviewFixError` whose message names the offending key.",
+    "AC-CC08-5": "`ReviewFixLoop(bounded_fix_only=True, seeded_fix_keys=(\"k\",), inherited_findings=(<record for k>,))` invokes its executor factory exactly twice, with `stage == \"fix\"` then `stage == \"verify\"`, both carrying `fix_finding_keys == [\"k\"]`; no attempt id matches `*/review-fix/c*/review`; the resulting ledger's `findings` mapping has exactly one key; `ReviewFixResult.cycles == 1`.",
+    "AC-CC08-6": "`PlanGraph._owner_for_paths((\"scripts/run_convergence_campaign.py\",))` returns the node whose `allowed_paths` covers it by longest prefix, including when that node is a *predecessor* of the escalating node; it returns `None` for a path no node claims and for a path two distinct nodes claim at equal prefix length. A judge stub that raises on call proves routing consults no model.",
+    "AC-CC08-7": "A `PlanGraph` configured with an `escalation_judge` whose identity equals the packet's `origin_reviewer_id` raises `PlanGraphError` naming reviewer independence before the judge is invoked.",
+    "AC-CC08-8": "A `reject` judgment writes the key back to `finding_obligations[<escalating node>]` with `outcome == \"open\"` and the judge rationale contained in `outcome_reason`; `RetryBudgetLedger.deviation_records()` is unchanged before and after, proving no structural decision was spent.",
+    "AC-CC08-9": "A `confirm` judgment whose owner has status `queued` appends the record to `finding_obligations[<owner>]`; that node's next `FeatureRunRequest` has `inherited_ledger_frozen is True` and `bounded_fix_only is False`; `deviation_records()` is unchanged.",
+    "AC-CC08-10": "A `confirm` judgment whose owner is sealed appends exactly one `recovery_decision` event with `action == \"transfer_ownership\"`, `target == <escalating node>`, `payload == {\"receiving_node\": <owner>}`, followed by one `obligation_transferred` event; the folded `automatic_recovery_structural_decisions` increases by exactly one. A second unseal against `max_structural_decisions == 1` raises `BudgetError(\"structural recovery allowance exhausted\")` and the graph blocks with `decision_request.required is True`.",
+    "AC-CC08-11": "The obligation record written for an unsealed owner carries `bounded_fix_only: true`; `PlanGraph._request_for_run` sets `FeatureRunRequest.bounded_fix_only=True` for that node and `False` for every other node in the same attempt.",
+    "AC-CC08-12": "The emitted `escalation.json` validates against `schemas/block-escalation.json`; its `escalations[0]` contains `finding_key`, `origin_node`, `owner_node`, `required_paths`, and a `judgment_ref` matching `artifact:sha256:[0-9a-f]{64}`; its `resume_directive_template.retry_frontier` equals `[<owner>, <escalating node>]` in plan-declaration order.",
+    "AC-CC08-13": "The graph journal contains `plan_graph_finding_escalated`, `plan_graph_escalation_judged`, and `plan_graph_node_unsealed` in that order, each payload carrying the same `finding_key`; re-opening the lineage's `RetryBudgetLedger` and folding it raises nothing, proving no new budget event kind was introduced.",
+    "AC-CC08-14": "An escalated finding whose `required_paths` resolve to zero owners, or to two distinct owners, produces a block whose `decision_request.requested_action == \"assign_finding_owner\"` and whose `candidate_actions` lists the candidate owner ids (empty list for the zero-owner case); `deviation_records()` is unchanged and no judge is invoked.",
+    "AC-CC08-15": "After resuming with `retry_frontier == [<owner>, <escalating node>]`, `PlanGraphAudit.repair_selection` returns every transitive dependent of `<owner>` in `invalidated_node_ids` and omits each of them from `reused_completed`.",
+    "AC-CC08-16": "`python3 -m pytest tests/test_import_boundaries.py -q` passes: no module added or modified under `harness_labs/core/` appears in the plangraph layer's import closure, and `feature_run`'s static import closure remains free of plangraph-layer modules.",
+    "AC-CC08-17": "`python3 -m pytest tests/ -q` passes at the finalize gate with no test skipped for reasons introduced by this change."
+  },
+  "functionality_tests": [
+    {
+      "argv": [
+        "python3",
+        "-m",
+        "pytest",
+        "tests/",
+        "-q"
+      ],
+      "required_paths": [],
+      "timeout_seconds": 3600.0
+    }
+  ],
+  "plan_sections": {
+    "cc08-authority": "### Bounds, authority, audit [cc08-authority]",
+    "cc08-build-order": "## Build order [cc08-build-order]",
+    "cc08-cascade": "### Stated cascade consequence [cc08-cascade]",
+    "cc08-criteria": "## Acceptance criteria [cc08-criteria]",
+    "cc08-deferred": "## Deferred, with triggers [cc08-deferred]",
+    "cc08-design": "## Design [cc08-design]",
+    "cc08-disposition": "### Disposition on confirm [cc08-disposition]",
+    "cc08-judgment": "### Judgment [cc08-judgment]",
+    "cc08-node-1": "### CC-08-1 Review-fix escalation primitives [cc08-node-1]",
+    "cc08-node-2": "### CC-08-2 Bounded fix-only loop [cc08-node-2]",
+    "cc08-node-3": "### CC-08-3 Routing, judgment, and packet [cc08-node-3]",
+    "cc08-node-4": "### CC-08-4 Unseal, authority, and cascade [cc08-node-4]",
+    "cc08-packet": "### Packet [cc08-packet]",
+    "cc08-problem": "## Problem and current behaviour [cc08-problem]",
+    "cc08-recognition": "### Recognition [cc08-recognition]",
+    "cc08-risks": "## Risks [cc08-risks]",
+    "cc08-rollout": "## Rollout and defaults [cc08-rollout]",
+    "cc08-routing": "### Routing [cc08-routing]",
+    "cc08-runtime-contracts": "## Runtime contracts [cc08-runtime-contracts]",
+    "cc08-tests": "## Tests [cc08-tests]"
+  },
+  "runs": [
+    {
+      "id": "CC08-A",
+      "objective": "Implement the featurerun-layer half of ADR 0007: the review-fix escalation primitives and the bounded fix-only loop. Adds ReviewFixPolicy.escalation_enabled, the escalated outcome and escalation_reason record field, ReviewLedger.escalate_out_of_grant, optional unresolvable_finding_keys in the fix stage contract, ReviewFixResult.escalated_findings, and the bounded_fix_only / seeded_fix_keys path through ReviewFixLoop.run that seeds a ledger, freezes discovery, and runs one fix and one verify stage with no review stage and no ingest call. Wires FeatureRunRequest.bounded_fix_only into run_feature_worktree's ReviewFixLoop construction. This node emits data only: all routing, judgment and unsealing logic belongs to CC08-B, because feature_run's static import closure must stay free of plangraph-layer modules.",
+      "criteria": [
+        "AC-CC08-1",
+        "AC-CC08-2",
+        "AC-CC08-3",
+        "AC-CC08-4",
+        "AC-CC08-5",
+        "AC-CC08-16"
+      ],
+      "allowed_paths": [
+        "harness_labs/featurerun/review_fix.py",
+        "harness_labs/featurerun/feature_run.py",
+        "tests/test_review_fix.py",
+        "tests/test_feature_run.py"
+      ],
+      "path_intents": [
+        {
+          "action": "modify",
+          "path": "harness_labs/featurerun/review_fix.py"
+        },
+        {
+          "action": "modify",
+          "path": "harness_labs/featurerun/feature_run.py"
+        },
+        {
+          "action": "modify",
+          "path": "tests/test_review_fix.py"
+        },
+        {
+          "action": "modify",
+          "path": "tests/test_feature_run.py"
+        }
+      ],
+      "depends_on": [],
+      "plan_sections": [
+        "cc08-problem",
+        "cc08-design",
+        "cc08-recognition",
+        "cc08-node-1",
+        "cc08-node-2",
+        "cc08-tests",
+        "cc08-rollout"
+      ],
+      "verification_argv": [
+        "python3",
+        "-m",
+        "pytest",
+        "tests/test_review_fix.py",
+        "tests/test_feature_run.py",
+        "tests/test_import_boundaries.py",
+        "-q"
+      ],
+      "verification_required_paths": [],
+      "verification_timeout_seconds": 1800.0
+    },
+    {
+      "id": "CC08-B",
+      "objective": "Implement the plangraph-layer half of ADR 0007: routing, judgment, packet, unseal and cascade. Adds PlanGraph._escalated_findings and _owner_for_paths (a separate full-plan longest-prefix lookup, leaving _transfer_targets_for's dependents-only BFS untouched), the EscalationJudge protocol and escalation_judge kwarg, the judgment validator and its reviewer-independence refusal, the reject write-back path, the escalations array in the block-escalation payload, schemas/plan-graph-escalation-judgment.json, the three PlanGraphAudit journal events, the escalation-only relaxation of _advance_finding_obligations' completed-target refusal, one transfer_ownership structural decision per unseal, the resume_directive_template retry frontier, and bounded_fix_only propagation through _request_for_run. Consumes the escalated_findings and the bounded loop CC08-A emits. Adds no new retry-budget-ledger/1 event kind.",
+      "criteria": [
+        "AC-CC08-6",
+        "AC-CC08-7",
+        "AC-CC08-8",
+        "AC-CC08-9",
+        "AC-CC08-10",
+        "AC-CC08-11",
+        "AC-CC08-12",
+        "AC-CC08-13",
+        "AC-CC08-14",
+        "AC-CC08-15",
+        "AC-CC08-17"
+      ],
+      "allowed_paths": [
+        "harness_labs/plangraph/plan_graph.py",
+        "harness_labs/plangraph/plan_graph_audit.py",
+        "schemas/plan-graph-escalation-judgment.json",
+        "schemas/block-escalation.json",
+        "tests/test_plan_graph.py",
+        "tests/test_plan_graph_budget.py"
+      ],
+      "path_intents": [
+        {
+          "action": "modify",
+          "path": "harness_labs/plangraph/plan_graph.py"
+        },
+        {
+          "action": "modify",
+          "path": "harness_labs/plangraph/plan_graph_audit.py"
+        },
+        {
+          "action": "create",
+          "path": "schemas/plan-graph-escalation-judgment.json"
+        },
+        {
+          "action": "modify",
+          "path": "schemas/block-escalation.json"
+        },
+        {
+          "action": "modify",
+          "path": "tests/test_plan_graph.py"
+        },
+        {
+          "action": "modify",
+          "path": "tests/test_plan_graph_budget.py"
+        }
+      ],
+      "depends_on": [
+        "CC08-A"
+      ],
+      "plan_sections": [
+        "cc08-packet",
+        "cc08-judgment",
+        "cc08-routing",
+        "cc08-disposition",
+        "cc08-authority",
+        "cc08-cascade",
+        "cc08-runtime-contracts",
+        "cc08-node-3",
+        "cc08-node-4",
+        "cc08-tests",
+        "cc08-risks"
+      ],
+      "verification_argv": [
+        "python3",
+        "-m",
+        "pytest",
+        "tests/test_plan_graph.py",
+        "tests/test_plan_graph_budget.py",
+        "-q"
+      ],
+      "verification_required_paths": [],
+      "verification_timeout_seconds": 1800.0
+    }
+  ]
+}

@@ -142,6 +142,28 @@ dependents-only map to the whole plan. Zero owners, or two or more distinct
 owners, is not an LLM question either: it escalates to the human operator
 through the ordinary block path.
 
+**Amendment, 2026-08-20 — a judge that cannot answer is a third refusal.**
+This decision as first written offered the controller only `CONFIRM` and
+`REJECT`, which is complete only while the judge always answers. A real seat
+does not: a backend can fail, a reply can be unparseable, a schema check can
+fail every retry. Neither verdict is safe to invent there. `CONFIRM` spends a
+structural decision and unseals a node on no evidence; `REJECT` is permanent,
+because a repeat escalation of the same finding key is forced to an operator
+block rather than re-judged, so a fabricated `REJECT` poisons that key for the
+whole lineage. Only a block is undoable.
+
+So the judge seat may also refuse. The controller treats refusal exactly as it
+treats zero-or-ambiguous owners: this attempt blocks for a human, with no
+verdict journaled, no authority spent, and no key poisoned. Refusal is a
+distinct, typed channel — not an exception escaping into the graph, and not a
+verdict — so a third-party judge's own errors keep propagating unchanged.
+
+The human is the backup for everything the layers below cannot resolve, and
+this completes that ladder: the node fixes what it owns, the graph seat judges
+what crosses node boundaries, and the operator sees only what neither could
+settle — an unroutable owner, an already-rejected repeat, an exhausted
+allowance, or a judge that could not answer.
+
 ### (d) On CONFIRM: inject, or unseal with bounded scope
 
 - **Owner has not yet run.** The finding record is appended to that node's

@@ -71,7 +71,14 @@ def main() -> int:
     )
     parser.add_argument("--timeout", type=float, default=700.0,
                         help="per-phase pytest timeout in seconds")
+    parser.add_argument("--red-timeout", type=float, default=None,
+                        help="red-phase pytest timeout in seconds "
+                             "(default: the --timeout value)")
     arguments = parser.parse_args()
+    red_timeout = (
+        arguments.red_timeout if arguments.red_timeout is not None
+        else arguments.timeout
+    )
 
     worktree = Path.cwd().resolve()
     for test in arguments.finding_tests:
@@ -102,7 +109,7 @@ def main() -> int:
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(worktree / test, target)
 
-        red = run_pytest(list(arguments.finding_tests), base_root, arguments.timeout)
+        red = run_pytest(list(arguments.finding_tests), base_root, red_timeout)
         verdict["red"] = red
         if red["timed_out"]:
             verdict["verdict"] = "red-phase-timeout"

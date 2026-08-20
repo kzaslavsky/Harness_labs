@@ -155,6 +155,10 @@ class PlanGraphFeatureRunBinding:
     origin_node_id: str = ""
     inherited_ledger_frozen: bool = False
     verification_gates: tuple[VerificationGate, ...] = ()
+    # True only for a node reopened by an in-graph escalation unseal: its
+    # review/fix loop must run bounded to exactly finding_obligations, never
+    # a fresh review. See ADR 0007 / CC-08.
+    bounded_fix_only: bool = False
 
     def __post_init__(self) -> None:
         if not all(
@@ -220,6 +224,12 @@ class PlanGraphFeatureRunBinding:
             raise ValueError("PlanGraph origin_node_id must be a string")
         if not isinstance(self.inherited_ledger_frozen, bool):
             raise ValueError("PlanGraph inherited_ledger_frozen must be a boolean")
+        if not isinstance(self.bounded_fix_only, bool):
+            raise ValueError("PlanGraph bounded_fix_only must be a boolean")
+        if self.bounded_fix_only and not self.finding_obligations:
+            raise ValueError(
+                "PlanGraph bounded_fix_only requires at least one finding_obligations entry"
+            )
         briefing_paths = self.build_briefing.get("allowed_paths")
         if briefing_paths is not None and tuple(briefing_paths) != self.allowed_paths:
             raise ValueError("build briefing allowed_paths do not match approved grant")
@@ -740,6 +750,7 @@ def run_feature_worktree(
     review_finding_transfer_targets: Mapping[str, str] | None = None,
     review_origin_node_id: str = "",
     review_inherited_ledger_frozen: bool = False,
+    review_bounded_fix_only: bool = False,
     verification_argv: tuple[str, ...] = (),
     verification_gates: tuple[VerificationGate, ...] = (),
     verification_repair_executor_factory: (
@@ -768,6 +779,10 @@ def run_feature_worktree(
 
     if review_fix_policy.enabled and review_fix_executor_factory is None:
         raise ValueError("enabled review_fix_policy requires an executor factory")
+    if review_bounded_fix_only and not review_finding_obligations:
+        raise ValueError(
+            "review_bounded_fix_only requires at least one review_finding_obligations entry"
+        )
     if verification_argv and verification_gates:
         raise ValueError(
             "verification_argv and verification_gates are mutually exclusive"
@@ -1062,6 +1077,16 @@ def run_feature_worktree(
                 assert review_fix_executor_factory is not None
                 snapshot = workspace_snapshot(transaction.worktree_path)
                 pre_review_workspace = snapshot
+                # Bounded means no ingest call: the fix-only path is drawn
+                # from the seeded obligations' own keys, never rediscovered.
+                review_seeded_fix_keys = (
+                    tuple(
+                        str(finding.get("key", ""))
+                        for finding in review_finding_obligations
+                    )
+                    if review_bounded_fix_only
+                    else ()
+                )
                 review_loop = ReviewFixLoop(
                     run_id=contract.run_id,
                     objective=contract.objective,
@@ -1077,6 +1102,8 @@ def run_feature_worktree(
                     finding_transfer_targets=review_finding_transfer_targets or {},
                     origin_node_id=review_origin_node_id,
                     inherited_ledger_frozen=review_inherited_ledger_frozen,
+                    bounded_fix_only=review_bounded_fix_only,
+                    seeded_fix_keys=review_seeded_fix_keys,
                 )
                 review_fix_result = review_loop.run()
                 _remember_review_transfers(
@@ -1097,6 +1124,40 @@ def run_feature_worktree(
                         detail=_review_stage_detail(review_loop, review_fix_result),
                     ):
                         break
+                    if review_bounded_fix_only:
+                        # A bounded loop never resumes a predecessor ledger
+                        # (that would require a fresh review stage to widen
+                        # its own bound). Recovery retries the same bounded
+                        # fix+verify attempt over the same seeded obligations
+                        # instead, keeping the no-review, no-ingest guarantee.
+                        review_loop = ReviewFixLoop(
+                            run_id=contract.run_id,
+                            objective=contract.objective,
+                            acceptance_criteria=contract.criteria,
+                            allowed_paths=allowed_paths,
+                            changed_paths=tuple(
+                                workspace_snapshot(transaction.worktree_path)[
+                                    "changed_paths"
+                                ]
+                            ),
+                            executor_factory=review_fix_executor_factory,
+                            evidence=evidence,
+                            audit=audit,
+                            policy=review_fix_policy,
+                            inherited_findings=review_finding_obligations,
+                            finding_transfer_targets=review_finding_transfer_targets
+                            or {},
+                            origin_node_id=review_origin_node_id,
+                            inherited_ledger_frozen=review_inherited_ledger_frozen,
+                            bounded_fix_only=True,
+                            seeded_fix_keys=review_seeded_fix_keys,
+                        )
+                        review_fix_result = review_loop.run()
+                        _remember_review_transfers(
+                            review_transfers, review_fix_result.transferred_findings
+                        )
+                        status = review_fix_result.status
+                        continue
                     # Continue the same ledger rather than restarting discovery:
                     # the recovered loop resumes after the cycle that stopped and
                     # spends an explicit additional cycle grant on findings whose
@@ -1573,6 +1634,7 @@ def run_plan_graph_feature_worktree(
         review_finding_transfer_targets=binding.finding_transfer_targets,
         review_origin_node_id=binding.origin_node_id or binding.plan_node_id,
         review_inherited_ledger_frozen=binding.inherited_ledger_frozen,
+        review_bounded_fix_only=binding.bounded_fix_only,
         verification_argv=binding.verification_argv,
         verification_timeout_seconds=binding.verification_timeout_seconds,
         verification_gates=binding.verification_gates,

@@ -246,6 +246,67 @@ class RetryBudgetLedgerTests(unittest.TestCase):
             (stale,),
         )
 
+    def test_transfer_ownership_unseal_exhausts_and_lineage_still_folds(self) -> None:
+        """AC-CC08-10 / AC-CC08-13 at the ledger level CC-08 escalation reuses
+        rather than reimplements: one ``transfer_ownership`` recovery
+        decision appends exactly ``recovery_decision`` then
+        ``obligation_transferred`` and folds
+        ``automatic_recovery_structural_decisions`` by exactly one; a second
+        one against ``max_structural_decisions == 1`` raises
+        ``BudgetError('structural recovery allowance exhausted')``; and no
+        new event kind was introduced for it -- re-opening this exact
+        lineage and folding it raises nothing.
+        """
+
+        ledger = RetryBudgetLedger(self.root, "unseal-lineage", BudgetConfig())
+        ledger.register(
+            plan_sha256="a" * 64,
+            gates={"owner": "gate", "escalating": "gate"},
+            automatic_recovery={
+                "protocol": "plan-graph-automatic-recovery/1",
+                "allowed_actions": ["transfer_ownership"],
+                "max_extra_node_launches": 0,
+                "max_structural_decisions": 1,
+            },
+        )
+        decision = {
+            "protocol": "plan-graph-recovery-decision/1",
+            "action": "transfer_ownership",
+            "target": "escalating",
+            "expected_prior_digest": "a" * 64,
+            "payload": {"receiving_node": "owner"},
+        }
+
+        before_lines = ledger.path.read_text(encoding="utf-8").splitlines()
+        ledger.apply_recovery_decision(decision, prior_digest="a" * 64)
+        after_lines = ledger.path.read_text(encoding="utf-8").splitlines()
+        new_events = [json.loads(line) for line in after_lines[len(before_lines):]]
+        self.assertEqual(
+            [event["event"] for event in new_events],
+            ["recovery_decision", "obligation_transferred"],
+        )
+        self.assertEqual(new_events[0]["decision"]["action"], "transfer_ownership")
+        self.assertEqual(new_events[0]["decision"]["target"], "escalating")
+        self.assertEqual(
+            new_events[0]["decision"]["payload"], {"receiving_node": "owner"},
+        )
+        self.assertEqual(new_events[1]["source_node"], "escalating")
+        self.assertEqual(new_events[1]["receiving_node"], "owner")
+        self.assertTrue(new_events[1]["reverification_required"])
+
+        with ledger._locked(shared=True) as handle:
+            state = ledger._fold(handle)
+        self.assertEqual(state["automatic_recovery_structural_decisions"], 1)
+
+        with self.assertRaisesRegex(BudgetError, "structural recovery allowance exhausted"):
+            ledger.apply_recovery_decision(decision, prior_digest="a" * 64)
+
+        # No new retry-budget-ledger/1 event kind was introduced: a fresh
+        # instance re-opening this exact lineage folds without raising.
+        reopened = RetryBudgetLedger(self.root, "unseal-lineage", BudgetConfig())
+        with reopened._locked(shared=True) as handle:
+            reopened._fold(handle)
+
     def test_structured_child_evidence_is_classified_and_imported_once(self) -> None:
         evidence = {
             "verification": {
