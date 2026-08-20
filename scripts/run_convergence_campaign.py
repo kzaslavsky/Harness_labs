@@ -78,6 +78,10 @@ from harness_labs.plangraph.plan_refinement import (  # noqa: E402
     RefinementOutcome,
     refine_repository_decomposition,
 )
+from harness_labs.plangraph.plan_synthesis import (  # noqa: E402
+    PlanSynthesisError,
+    plan_synthesis,
+)
 
 from scripts.plan_graph_autoresume import (  # noqa: E402
     _RESUMABLE_ATTEMPT_STATUSES,
@@ -544,6 +548,98 @@ def commit_findings_owners_paths_table(
     return {"committed": True, "path": relative_table_path}
 
 
+def _text_with_synthesized_objectives(text: str, decomposition: Mapping[str, Any]) -> str:
+    """``text`` with every synthesized run's objective appended under the
+    heading its own ``plan_sections`` entry names (an objective already
+    present in its section's body is not duplicated)."""
+
+    sections_map = decomposition.get("plan_sections") or {}
+
+    for heading in sections_map.values():
+        heading = str(heading)
+        if any(line.strip() == heading.strip() for line in text.splitlines()):
+            continue
+        if text and not text.endswith("\n"):
+            text += "\n"
+        text += ("\n" if text else "") + heading + "\n"
+
+    for run in decomposition.get("runs") or ():
+        objective = str(run.get("objective") or "")
+        if not objective.strip():
+            continue
+        for slug in run.get("plan_sections") or ():
+            heading = sections_map.get(slug)
+            if heading is None or objective in extract_plan_section(text, str(heading)):
+                continue
+            lines = text.splitlines()
+            heading_stripped = str(heading).strip()
+            index = next(
+                (i for i, line in enumerate(lines) if line.strip() == heading_stripped), None,
+            )
+            if index is None:
+                continue
+            lines.insert(index + 1, objective)
+            text = "\n".join(lines) + "\n"
+
+    return text
+
+
+def commit_synthesized_plan(
+    *, repository: Path, decomposition: Mapping[str, Any], decomposition_path: Path,
+) -> dict[str, Any]:
+    """Write the synthesized ``decomposition`` to ``decomposition_path``
+    (inside ``repository``) and append every synthesized run's objective
+    into the committed plan document at ``decomposition["plan"]``, then
+    commit both together.
+
+    Both are required for a synthesized round to have any path from plan to
+    approve at all: ``commit_findings_owners_paths_table`` (run at approve)
+    requires ``decomposition_path`` to already resolve relative to
+    ``repository``, and ``check_objective_in_plan_text`` requires every run
+    objective already committed at base -- ``plan_synthesis``'s
+    auto-generated objectives never already exist in a hand-authored plan
+    document. Idempotent: a decomposition/plan pair identical to what is
+    already committed makes no new commit.
+    """
+
+    repository = repository.resolve()
+    decomposition_path = decomposition_path.resolve()
+    relative_decomposition = str(decomposition_path.relative_to(repository))
+    decomposition_path.parent.mkdir(parents=True, exist_ok=True)
+    decomposition_path.write_text(
+        json.dumps(decomposition, sort_keys=True) + "\n", encoding="utf-8",
+    )
+
+    relative_paths = [relative_decomposition]
+    plan_path = decomposition.get("plan")
+    if isinstance(plan_path, str):
+        target = repository / plan_path
+        text = target.read_text(encoding="utf-8") if target.exists() else ""
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(_text_with_synthesized_objectives(text, decomposition), encoding="utf-8")
+        relative_paths.append(plan_path)
+
+    status = subprocess.run(
+        ["git", "-C", str(repository), "status", "--porcelain", "--", *relative_paths],
+        capture_output=True, text=True, check=True,
+    )
+    if not status.stdout.strip():
+        return {"committed": False, "paths": relative_paths}
+
+    subprocess.run(
+        ["git", "-C", str(repository), "add", *relative_paths],
+        check=True, capture_output=True, text=True,
+    )
+    subprocess.run(
+        [
+            "git", "-C", str(repository), "commit", "-m",
+            "convergence campaign: synthesized plan and decomposition",
+        ],
+        check=True, capture_output=True, text=True,
+    )
+    return {"committed": True, "paths": relative_paths}
+
+
 def render_approval_packet(
     *,
     repository: Path,
@@ -553,8 +649,16 @@ def render_approval_packet(
     warning_acknowledgements: Sequence[Mapping[str, Any]] = (),
     criteria_texts_by_run: Mapping[str, Sequence[Mapping[str, str]]] | None = None,
     plan_text: str | None = None,
+    enforce: bool | None = None,
+    overrides: Sequence[Mapping[str, object]] = (),
 ) -> ApprovalPacket:
     """Run admission (``prepare_approval``) and render the operator packet.
+
+    ``enforce``/``overrides`` reach ``prepare_approval`` unchanged, which
+    forwards them to the decomposition-conformance analyzer (DTR-LK-SYN):
+    a caller driving a synthesized round passes ``enforce=True`` here and
+    the identical value to :func:`issue_approval`, so the issue-side
+    freshness re-derivation cannot diverge from what this step pinned.
 
     In order: the base worktree must be pristine (untracked files
     included); the byte-identity checks -- a run's quoted criteria text
@@ -618,6 +722,8 @@ def render_approval_packet(
         repository=repository,
         decomposition_path=decomposition_path,
         output_directory=output_directory,
+        enforce=enforce,
+        overrides=overrides,
     )
     gate_evidence = _read_json(prepared.gate_evidence_path) or {}
 
@@ -647,6 +753,8 @@ def issue_approval(
     gate_evidence_path: Path,
     operator_approval_path: Path,
     receipt_path: Path,
+    enforce: bool | None = None,
+    overrides: Sequence[Mapping[str, object]] = (),
 ) -> Path:
     """Issue the receipt once a human has written the approval file.
 
@@ -670,6 +778,14 @@ def issue_approval(
     all-severity gate above -- ``issue_receipt`` raises its own
     ``PlanApprovalError`` rather than this driver quietly working around
     that narrower contract by authoring a substitute file.
+
+    ``enforce``/``overrides`` reach ``issue_receipt`` unchanged, which
+    recomputes the conformance report fresh from them and refuses
+    (``PlanApprovalError``) when it disagrees with what
+    :func:`render_approval_packet` pinned into ``gate_evidence_path`` -- a
+    caller that threads a different ``enforce`` value here than it passed
+    there hits that same TOCTOU refusal, not a silently downgraded gate
+    (DTR-LK-SYN).
     """
 
     if not operator_approval_path.exists():
@@ -694,6 +810,8 @@ def issue_approval(
         gate_evidence_path=gate_evidence_path,
         operator_approval_path=operator_approval_path,
         receipt_path=receipt_path,
+        enforce=enforce,
+        overrides=overrides,
     )
 
 
@@ -1531,11 +1649,55 @@ class ConvergenceCampaignDriver:
     def plan(
         self,
         *,
-        decomposition: Mapping[str, Any],
-        findings_by_run: Mapping[str, Sequence[Mapping[str, Any]]],
+        decomposition: Mapping[str, Any] | None = None,
+        findings_by_run: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
+        synthesis: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Register the round's own decomposition, bounded by the repair-round
-        budget (``AC-CC04-3``) and refused on a stall (``AC-CC04-6``)."""
+        budget (``AC-CC04-3``) and refused on a stall (``AC-CC04-6``).
+
+        When ``decomposition`` is omitted, this step invokes
+        ``plan_synthesis`` itself (DTR-LK-SYN) against the ledger's own open
+        findings -- ``synthesis`` carries that function's keyword arguments
+        (``plan_path``/``plan_section_id``/``plan_section_heading`` and any
+        of its other optional knobs); ``repository``/``base_commit`` are
+        filled in from this driver's own configured repository and its
+        current HEAD (the same ``base_commit`` ``plan_approval.prepare_approval``
+        re-derives at approve time -- ``_git(repository, "rev-parse", "HEAD")``,
+        not the checkpointed ``current_base_commit``) unless ``synthesis``
+        already names them, so synthesized ``path_intents`` resolve against
+        the real base commit rather than a static guess. ``findings_by_run`` is then
+        taken directly from the synthesis result, so
+        :func:`validate_round_grants` below checks synthesis's own ownership
+        computation, never a second, possibly-diverging copy of it. A caller
+        that already holds a hand-authored decomposition keeps passing
+        ``decomposition`` and ``findings_by_run`` explicitly, unchanged from
+        before.
+
+        The synthesized ``findings_by_run`` is written to
+        ``campaign_root/plans/round-<n>-findings-by-run.json`` and its path
+        is both returned and checkpointed. The synthesized ``decomposition``
+        itself is handled differently depending on whether this driver is
+        configured with a ``repository`` (the same one ``synthesis``'s
+        ``repository``/``base_commit`` are filled in from above): with one,
+        it is written inside the repository (under ``.harness/campaign-plans``)
+        and committed together with every synthesized run's auto-generated
+        objective, appended into the committed plan document at
+        ``decomposition["plan"]`` under the heading its own
+        ``plan_sections`` entry names (:func:`commit_synthesized_plan`) --
+        both are required for the round to reach ``approve prepare`` at all:
+        ``commit_findings_owners_paths_table`` needs ``decomposition_path``
+        to resolve relative to ``repository``, and
+        ``check_objective_in_plan_text`` needs every objective already
+        committed at base, which ``plan_synthesis``'s auto-generated
+        objectives never already are in a hand-authored plan document.
+        Without a configured ``repository`` neither can be done here, and
+        the decomposition is written to ``campaign_root/plans`` instead, for
+        a caller to commit (with its plan text) itself. Either way the
+        returned/checkpointed ``decomposition_path`` is what a caller driving
+        the round through the CLI hands to ``approve prepare`` as
+        ``--decomposition``.
+        """
 
         state = self.state()
         budget = RepairRoundBudget(self.max_repair_rounds, int(state.get("repair_rounds_used", 0)))
@@ -1547,6 +1709,25 @@ class ConvergenceCampaignDriver:
             self._save(lifecycle="blocked", state=state)
             raise
         self._save(lifecycle="planning", state=state)
+        synthesized = decomposition is None
+        if synthesized:
+            if synthesis is None:
+                raise ConvergenceCampaignDriverError(
+                    "plan requires either an explicit decomposition (with "
+                    "findings_by_run) or synthesis keyword arguments for "
+                    "plan_synthesis"
+                )
+            synthesis_kwargs = dict(synthesis)
+            if self.repository is not None:
+                synthesis_kwargs.setdefault("repository", self.repository)
+                synthesis_kwargs.setdefault("base_commit", self._repository_head())
+            result = plan_synthesis(self.ledger, **synthesis_kwargs)
+            decomposition = result.decomposition
+            findings_by_run = result.findings_by_run
+        elif findings_by_run is None:
+            raise ConvergenceCampaignDriverError(
+                "plan requires findings_by_run alongside an explicit decomposition"
+            )
         join_node_id = join_regression_node_id(decomposition["runs"])
         validate_round_grants(decomposition, findings_by_run, join_node_id)
         budget.record_plan_step()
@@ -1558,16 +1739,52 @@ class ConvergenceCampaignDriver:
         # round repaired is just as much a regression suspect as one under
         # this round's own grants (``AC-CC04-6``).
         all_repair_grants = set(state.get("prior_repair_grants", ())) | repair_grants
+        round_number = int(state.get("round", 0)) + 1
+        result_payload: dict[str, Any] = {
+            "join_regression_node_id": join_node_id, "round": round_number,
+        }
+        if synthesized:
+            plans_directory = self.campaign_root / "plans"
+            plans_directory.mkdir(parents=True, exist_ok=True)
+            findings_by_run_path = plans_directory / f"round-{round_number}-findings-by-run.json"
+            findings_by_run_path.write_text(
+                json.dumps(findings_by_run, sort_keys=True) + "\n", encoding="utf-8",
+            )
+            if self.repository is not None:
+                # commit_findings_owners_paths_table (run at approve) needs
+                # decomposition_path to resolve relative to repository, so a
+                # synthesized decomposition is written inside it, not to
+                # campaign_root/plans -- and committed there together with
+                # every synthesized objective, giving the round an actual
+                # path from plan to approve (check_objective_in_plan_text).
+                decomposition_path = (
+                    self.repository / ".harness" / "campaign-plans"
+                    / f"round-{round_number}-decomposition.json"
+                )
+                result_payload["plan_commit"] = commit_synthesized_plan(
+                    repository=self.repository,
+                    decomposition=decomposition,
+                    decomposition_path=decomposition_path,
+                )
+            else:
+                decomposition_path = plans_directory / f"round-{round_number}-decomposition.json"
+                decomposition_path.write_text(
+                    json.dumps(decomposition, sort_keys=True) + "\n", encoding="utf-8",
+                )
+            state["decomposition_path"] = str(decomposition_path)
+            state["findings_by_run_path"] = str(findings_by_run_path)
+            result_payload["decomposition_path"] = str(decomposition_path)
+            result_payload["findings_by_run_path"] = str(findings_by_run_path)
         state.update(
             {
-                "round": int(state.get("round", 0)) + 1,
+                "round": round_number,
                 "repair_rounds_used": budget.repair_rounds_used,
                 "join_regression_node_id": join_node_id,
                 "prior_repair_grants": sorted(all_repair_grants),
             }
         )
         self._save(lifecycle="planned", state=state)
-        return {"join_regression_node_id": join_node_id, "round": state["round"]}
+        return result_payload
 
     # -- approve ---------------------------------------------------------------
 
@@ -1922,8 +2139,17 @@ def _parser() -> argparse.ArgumentParser:
     rule.add_argument("--dispositions-file", type=Path, required=True)
 
     plan_cmd = subparsers.add_parser("plan")
-    plan_cmd.add_argument("--decomposition", type=Path, required=True)
-    plan_cmd.add_argument("--findings-by-run-file", type=Path, required=True)
+    plan_cmd.add_argument("--decomposition", type=Path, default=None)
+    plan_cmd.add_argument("--findings-by-run-file", type=Path, default=None)
+    plan_cmd.add_argument(
+        "--synthesis-config", type=Path, default=None,
+        help="a JSON object of plan_synthesis's own keyword arguments "
+        "(plan_path/plan_section_id/plan_section_heading and any of its "
+        "other optional knobs); when given, the plan step invokes "
+        "plan_synthesis itself against the ledger's own open findings "
+        "instead of reading --decomposition/--findings-by-run-file "
+        "(DTR-LK-SYN, mutually exclusive with them)",
+    )
 
     approve = subparsers.add_parser("approve")
     approve_steps = approve.add_subparsers(dest="approve_step", required=True)
@@ -1941,12 +2167,24 @@ def _parser() -> argparse.ArgumentParser:
         "when omitted, the check runs against the decomposition's own "
         "runs/acceptance_criteria (a tautology -- see check_criteria_byte_identity)",
     )
+    approve_prepare.add_argument(
+        "--enforce", action="store_true", default=None,
+        help="force decomposition-conformance enforcement regardless of "
+        "whether the decomposition is conformance-aware (DTR-LK-SYN); pass "
+        "the identical flag to 'approve issue' or its fresh re-derivation "
+        "refuses on drift",
+    )
     approve_issue = approve_steps.add_parser("issue")
     approve_issue.add_argument("--repository", type=Path, required=True)
     approve_issue.add_argument("--subject", type=Path, required=True)
     approve_issue.add_argument("--gate-evidence", type=Path, required=True)
     approve_issue.add_argument("--operator-approval", type=Path, required=True)
     approve_issue.add_argument("--receipt", type=Path, required=True)
+    approve_issue.add_argument(
+        "--enforce", action="store_true", default=None,
+        help="must match the value 'approve prepare' was given, or the "
+        "fresh conformance re-derivation refuses on drift (DTR-LK-SYN)",
+    )
 
     run_cmd = subparsers.add_parser("run")
     run_cmd.add_argument("--argv", nargs="+", required=True)
@@ -1999,6 +2237,14 @@ def _dispatch(arguments: argparse.Namespace, driver: ConvergenceCampaignDriver) 
         dispositions = _load_json_or_default(arguments.dispositions_file, [])
         return driver.rule(dispositions=dispositions)
     if step == "plan":
+        if arguments.synthesis_config is not None:
+            synthesis = json.loads(arguments.synthesis_config.read_text(encoding="utf-8"))
+            return driver.plan(synthesis=synthesis)
+        if arguments.decomposition is None or arguments.findings_by_run_file is None:
+            raise ConvergenceCampaignDriverError(
+                "plan requires either --synthesis-config or both "
+                "--decomposition and --findings-by-run-file"
+            )
         decomposition = json.loads(arguments.decomposition.read_text(encoding="utf-8"))
         findings_by_run = json.loads(arguments.findings_by_run_file.read_text(encoding="utf-8"))
         return driver.plan(decomposition=decomposition, findings_by_run=findings_by_run)
@@ -2011,6 +2257,7 @@ def _dispatch(arguments: argparse.Namespace, driver: ConvergenceCampaignDriver) 
             output_directory=arguments.output_directory, findings_by_run=findings_by_run,
             warning_acknowledgements=acknowledgements,
             criteria_texts_by_run=criteria_texts_by_run,
+            enforce=arguments.enforce,
         )
         return packet.as_mapping()
     if step == "approve" and arguments.approve_step == "issue":
@@ -2018,6 +2265,7 @@ def _dispatch(arguments: argparse.Namespace, driver: ConvergenceCampaignDriver) 
             repository=arguments.repository, subject_path=arguments.subject,
             gate_evidence_path=arguments.gate_evidence,
             operator_approval_path=arguments.operator_approval, receipt_path=arguments.receipt,
+            enforce=arguments.enforce,
         )
         return {"receipt": str(receipt)}
     if step == "run":
@@ -2057,6 +2305,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         ConvergenceCampaignError,
         ConvergenceLedgerError,
         AutoresumeError,
+        PlanSynthesisError,
     ) as exc:
         print(str(exc), file=sys.stderr)
         return 1

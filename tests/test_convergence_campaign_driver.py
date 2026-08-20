@@ -21,7 +21,9 @@ import unittest
 
 from harness_labs.plangraph.convergence_campaign import ConvergenceCampaignError
 from harness_labs.plangraph.convergence_ledger import ConvergenceLedger
+from harness_labs.plangraph.plan_approval import PlanApprovalError
 from harness_labs.plangraph.plan_graph import FeatureRunOutcome, PlanGraph, register_plan_graph
+from harness_labs.plangraph.plan_synthesis import plan_synthesis
 
 from scripts.run_convergence_campaign import (
     ApprovalPacket,
@@ -578,6 +580,309 @@ class ApprovalPacketTests(_RepoFixture):
         self.assertTrue(referenced.exists())
         validated = PlanApprovalAdmission(repository=self.repository, receipt_path=receipt_path).validate()
         self.assertEqual(validated.subject_sha256, sha256_json(subject))
+
+
+# ---------------------------------------------------------------------------
+# DTR-LK-SYN (AC-LK-6): the plan step invokes plan_synthesis, and the
+# approve path threads an identical enforce value through render_approval_
+# packet and issue_approval, with the issue-side TOCTOU re-derivation
+# refusing on drift.
+# ---------------------------------------------------------------------------
+
+
+class PlanSynthesisDriverWiringTests(_RepoFixture):
+    def _seed_open_findings(self, driver: ConvergenceCampaignDriver, findings) -> None:
+        self.open_campaign(driver)
+        driver.ledger.ingest_audit(_audit("seed-1", findings=findings))
+
+    def _commit_plan_for(self, decomposition: dict) -> Path:
+        (self.repository / "docs").mkdir(exist_ok=True)
+        lines = ["## Section 1"]
+        for run in decomposition["runs"]:
+            lines.append(run["objective"])
+            for path in run["allowed_paths"]:
+                # Every "modify" path intent must already exist at
+                # base_commit (a "create" intent, like the join run's report
+                # file, need not).
+                intent_actions = {
+                    intent["path"]: intent["action"] for intent in run["path_intents"]
+                }
+                target = self.repository / path
+                if intent_actions.get(path) == "modify" and not target.exists():
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_text("# seeded for the finding this run repairs\n", encoding="utf-8")
+        (self.repository / "docs" / "plan.md").write_text(
+            "\n".join(lines) + "\n", encoding="utf-8",
+        )
+        decomposition_path = self.repository / "decomposition.json"
+        decomposition_path.write_text(
+            json.dumps(decomposition, sort_keys=True) + "\n", encoding="utf-8",
+        )
+        self._git("add", ".")
+        self._git("commit", "-m", "add plan and synthesized decomposition")
+        return decomposition_path
+
+    def test_plan_step_invokes_synthesis_when_no_decomposition_is_given(self) -> None:
+        driver = self.driver()
+        self._seed_open_findings(driver, [
+            _finding("a/x.py", "missing-null-check"),
+            _finding("b/y.py", "unhandled-error"),
+        ])
+        result = driver.plan(
+            synthesis={
+                "plan_path": "docs/plan.md",
+                "plan_section_id": "1",
+                "plan_section_heading": "## Section 1",
+            }
+        )
+        self.assertIn("join_regression_node_id", result)
+        state = driver.state()
+        self.assertEqual(state["join_regression_node_id"], result["join_regression_node_id"])
+        # Two disjoint required_paths synthesize two repair runs plus the
+        # join, and prior_repair_grants carries both repair grants forward.
+        self.assertEqual(set(state["prior_repair_grants"]), {"a/x.py", "b/y.py"})
+
+    def test_plan_step_still_accepts_an_explicit_decomposition_unchanged(self) -> None:
+        """Backward compatibility: a caller holding a hand-authored
+        decomposition keeps passing it (and findings_by_run) explicitly, and
+        synthesis never runs."""
+
+        driver = self.driver()
+        self.open_campaign(driver)
+        decomposition = {
+            "runs": [{"id": "solo", "depends_on": [], "allowed_paths": ["x.py"]}],
+        }
+        findings_by_run = {"solo": [_finding("x.py", "s1")]}
+        result = driver.plan(decomposition=decomposition, findings_by_run=findings_by_run)
+        self.assertEqual(result["join_regression_node_id"], "solo")
+
+    def test_plan_step_refuses_with_neither_decomposition_nor_synthesis(self) -> None:
+        driver = self.driver()
+        self.open_campaign(driver)
+        with self.assertRaises(ConvergenceCampaignDriverError):
+            driver.plan()
+
+    def test_plan_step_commits_synthesized_objectives_giving_a_real_path_to_approve(
+        self,
+    ) -> None:
+        """A driver configured with a repository commits every synthesized
+        run's objective into the plan document itself, so the round reaches
+        ``approve_prepare`` with no operator hand-writing its objectives into
+        the plan doc first (contrast ``_commit_plan_for`` above, which exists
+        only because ``plan_synthesis`` called directly has no repository to
+        commit into)."""
+
+        (self.repository / "docs").mkdir()
+        (self.repository / "docs" / "plan.md").write_text("## Section 1\n", encoding="utf-8")
+        (self.repository / "a").mkdir()
+        (self.repository / "a" / "x.py").write_text("# seed\n", encoding="utf-8")
+        (self.repository / "b").mkdir()
+        (self.repository / "b" / "y.py").write_text("# seed\n", encoding="utf-8")
+        self._git("add", ".")
+        self._git("commit", "-m", "seed plan doc and repair targets")
+        seed_head = self._git("rev-parse", "HEAD")
+
+        driver = self.driver(repository=self.repository)
+        self.open_campaign(driver, base_commit=seed_head)
+        driver.ledger.ingest_audit(_audit("seed-1", findings=[
+            _finding("a/x.py", "missing-null-check"),
+            _finding("b/y.py", "unhandled-error"),
+        ]))
+        result = driver.plan(
+            synthesis={
+                "plan_path": "docs/plan.md",
+                "plan_section_id": "1",
+                "plan_section_heading": "## Section 1",
+            }
+        )
+        self.assertTrue(result["plan_commit"]["committed"])
+        # The plan-step commit leaves the worktree pristine again.
+        self.assertEqual(self._git("status", "--porcelain"), "")
+
+        decomposition = json.loads(
+            Path(result["decomposition_path"]).read_text(encoding="utf-8")
+        )
+        plan_text = (self.repository / "docs" / "plan.md").read_text(encoding="utf-8")
+        for run in decomposition["runs"]:
+            self.assertIn(run["objective"], plan_text)
+        self.assertEqual(
+            check_objective_in_plan_text(decomposition, plan_text), (),
+        )
+
+        findings_by_run = json.loads(
+            Path(result["findings_by_run_path"]).read_text(encoding="utf-8")
+        )
+        # A fresh, repository-unconfigured driver reading the same
+        # checkpoint for the approve step: staleness verification
+        # (AC-CC04-7) is a separate concern from this fix, and is exercised
+        # on its own elsewhere.
+        output = self.root / "approval"
+        packet = self.driver().approve_prepare(
+            repository=self.repository,
+            decomposition_path=Path(result["decomposition_path"]),
+            output_directory=output,
+            findings_by_run=findings_by_run,
+        )
+        self.assertIsInstance(packet, ApprovalPacket)
+
+    def _synthesized_approval_fixture(self):
+        driver = self.driver()
+        self._seed_open_findings(driver, [
+            _finding("a/x.py", "missing-null-check"),
+            _finding("b/y.py", "unhandled-error"),
+        ])
+        result = plan_synthesis(
+            driver.ledger, plan_path="docs/plan.md", plan_section_id="1",
+            plan_section_heading="## Section 1",
+        )
+        decomposition_path = self._commit_plan_for(result.decomposition)
+        return driver, result, decomposition_path
+
+    def test_approve_prepare_and_issue_thread_the_same_enforce_value_end_to_end(
+        self,
+    ) -> None:
+        """A fully-conformant synthesized plan, admitted with ``enforce=True``
+        threaded identically through both prepare and issue, reaches a valid
+        receipt -- ``enforce=True`` does not itself block a plan carrying no
+        S1-S10 violation."""
+
+        from harness_labs.plangraph.plan_approval import (
+            OPERATOR_APPROVAL_PROTOCOL,
+            warning_identity,
+        )
+        from harness_labs.plangraph.plan_graph_contract import sha256_json
+
+        driver, result, decomposition_path = self._synthesized_approval_fixture()
+        output = self.root / "approval"
+        packet = driver.approve_prepare(
+            repository=self.repository, decomposition_path=decomposition_path,
+            output_directory=output, findings_by_run=result.findings_by_run,
+            enforce=True,
+        )
+        self.assertIsInstance(packet, ApprovalPacket)
+        gate_evidence = json.loads((output / "gate-evidence.json").read_text(encoding="utf-8"))
+        self.assertTrue(gate_evidence["conformance_report"]["enforced"])
+        self.assertEqual(gate_evidence["conformance_report"]["findings"], [])
+
+        subject = json.loads((output / "subject.json").read_text(encoding="utf-8"))
+        operator_approval_path = output / "operator-approval.json"
+        operator_approval_path.write_text(
+            json.dumps({
+                "protocol": OPERATOR_APPROVAL_PROTOCOL,
+                "subject_sha256": sha256_json(subject),
+                "actor": "operator",
+                "approved_at": "2026-01-01T00:00:00Z",
+                "statement": "approved",
+                "warning_acknowledgements": [],
+            }, sort_keys=True),
+            encoding="utf-8",
+        )
+        receipt_path = driver.approve_issue(
+            repository=self.repository, subject_path=output / "subject.json",
+            gate_evidence_path=output / "gate-evidence.json",
+            operator_approval_path=operator_approval_path,
+            receipt_path=output / "receipt.json",
+            enforce=True,
+        )
+        self.assertTrue(receipt_path.exists())
+
+    def test_a_synthesized_plan_with_an_s5_violation_is_refused_at_approve_when_enforced(
+        self,
+    ) -> None:
+        driver, result, decomposition_path = self._synthesized_approval_fixture()
+        decomposition = json.loads(decomposition_path.read_text(encoding="utf-8"))
+        first_criterion_id = next(iter(decomposition["acceptance_criteria"]))
+        decomposition["acceptance_criteria"][first_criterion_id] = (
+            "this criterion carries no machine-readable observable at all"
+        )
+        decomposition_path.write_text(
+            json.dumps(decomposition, sort_keys=True) + "\n", encoding="utf-8",
+        )
+        self._git("add", ".")
+        self._git("commit", "-m", "strip the observable annotation (S5 violation)")
+
+        output = self.root / "approval"
+        with self.assertRaises(PlanApprovalError):
+            driver.approve_prepare(
+                repository=self.repository, decomposition_path=decomposition_path,
+                output_directory=output, findings_by_run=result.findings_by_run,
+                enforce=True,
+            )
+
+    def test_the_unmodified_synthesized_plan_is_admitted_without_an_enforce_override(
+        self,
+    ) -> None:
+        """The unmodified synthesized plan carries no S5 violation, and is
+        conformance-aware and enforced by construction (every criterion
+        already carries an OBSERVABLE annotation) even with ``enforce`` left
+        at its default. This is the control for the S5 violation test above:
+        it shows the *unmodified* plan is admitted with no ``enforce``
+        override at all, so that test's refusal is attributable to the S5
+        violation itself, not to the absence of an explicit ``enforce``."""
+
+        driver, result, decomposition_path = self._synthesized_approval_fixture()
+        output = self.root / "approval"
+        packet = driver.approve_prepare(
+            repository=self.repository, decomposition_path=decomposition_path,
+            output_directory=output, findings_by_run=result.findings_by_run,
+        )
+        self.assertIsInstance(packet, ApprovalPacket)
+        gate_evidence = json.loads((output / "gate-evidence.json").read_text(encoding="utf-8"))
+        # Conformance-aware by construction (every criterion already carries
+        # an OBSERVABLE annotation), so enforcement is active even though no
+        # explicit enforce was passed here.
+        self.assertTrue(gate_evidence["conformance_report"]["conformance_aware"])
+        self.assertTrue(gate_evidence["conformance_report"]["enforced"])
+
+    def test_issue_refuses_when_its_enforce_value_drifts_from_prepares(self) -> None:
+        """``enforce=True`` at prepare and ``enforce=False`` at issue must
+        disagree on the recomputed conformance report's own ``enforced``
+        flag even when the plan carries zero S1-S10 findings either way --
+        so the issue-side freshness check (which compares the whole
+        ``conformance_report`` field) refuses the drift outright, rather
+        than silently using whichever value it was locally given."""
+
+        from harness_labs.plangraph.plan_approval import OPERATOR_APPROVAL_PROTOCOL
+        from harness_labs.plangraph.plan_graph_contract import sha256_json
+
+        driver, result, decomposition_path = self._synthesized_approval_fixture()
+        output = self.root / "approval"
+        driver.approve_prepare(
+            repository=self.repository, decomposition_path=decomposition_path,
+            output_directory=output, findings_by_run=result.findings_by_run,
+            enforce=True,
+        )
+        subject = json.loads((output / "subject.json").read_text(encoding="utf-8"))
+        operator_approval_path = output / "operator-approval.json"
+        operator_approval_path.write_text(
+            json.dumps({
+                "protocol": OPERATOR_APPROVAL_PROTOCOL,
+                "subject_sha256": sha256_json(subject),
+                "actor": "operator",
+                "approved_at": "2026-01-01T00:00:00Z",
+                "statement": "approved",
+                "warning_acknowledgements": [],
+            }, sort_keys=True),
+            encoding="utf-8",
+        )
+        with self.assertRaises(PlanApprovalError):
+            driver.approve_issue(
+                repository=self.repository, subject_path=output / "subject.json",
+                gate_evidence_path=output / "gate-evidence.json",
+                operator_approval_path=operator_approval_path,
+                receipt_path=output / "receipt.json",
+                enforce=False,
+            )
+
+    def test_scripts_approve_plan_never_mentions_enforce(self) -> None:
+        """``dtr-lk``: "the enforce path is driver-only;
+        scripts/approve_plan.py is unchanged." A literal source scan, not
+        merely "we didn't edit it in this change"."""
+
+        approve_plan_source = (
+            Path(__file__).resolve().parent.parent / "scripts" / "approve_plan.py"
+        ).read_text(encoding="utf-8")
+        self.assertNotIn("enforce", approve_plan_source)
 
 
 # ---------------------------------------------------------------------------
