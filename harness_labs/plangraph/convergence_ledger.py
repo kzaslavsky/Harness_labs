@@ -72,6 +72,14 @@ already-``fixed``/``fix_claimed`` key); ``open``/``fix_claimed`` ->
 Every prior ``open``/``fix_claimed`` key the audit's ``verdicts`` do not
 mention is folded into that ingest's ``unobserved`` set automatically —
 callers never author ``unobserved`` entries themselves.
+
+Record kinds are also exported as named module-level constants
+(``RECORD_KIND_*``) so outside consumers — notably
+``harness_labs.plangraph.finding_history`` (em-history) — never need a
+record-kind string literal of their own. :meth:`ConvergenceLedger.key_lineage`
+is the public read-only per-key view those consumers fold: every record
+touching a finding key, grouped by key, each annotated with its journal
+ordinal.
 """
 
 from __future__ import annotations
@@ -92,6 +100,25 @@ from harness_labs.core.convergence_contract import (
 Key = tuple[str, str]
 
 PROTOCOL = "convergence-campaign-ledger/1"
+
+# -- record-kind constants (em-history) --------------------------------
+#
+# Named so consumers outside this module (``harness_labs.plangraph.
+# finding_history``, EM-B) never need to spell a record-kind string
+# literal themselves. No kind here is new: this is the same vocabulary
+# ``RECORD_TYPES`` has always enforced, merely given names.
+
+RECORD_KIND_CAMPAIGN_OPENED = "campaign_opened"
+RECORD_KIND_FINDING_OPENED = "finding_opened"
+RECORD_KIND_FINDING_FIX_CLAIMED = "finding_fix_claimed"
+RECORD_KIND_FINDING_FIXED = "finding_fixed"
+RECORD_KIND_FINDING_REOPENED = "finding_reopened"
+RECORD_KIND_FINDING_INVALIDATED = "finding_invalidated"
+RECORD_KIND_FINDING_RULED = "finding_ruled"
+RECORD_KIND_CONFIRMED_GOOD = "confirmed_good"
+RECORD_KIND_TARGET_AMENDED = "target_amended"
+RECORD_KIND_CAPTURE_COVERAGE = "capture_coverage"
+RECORD_KIND_AUDIT_INGESTED = "audit_ingested"
 
 _BASE_REBASE_REASON = "base_rebase"
 _REPAIR_CLAIM_FAILED_REASON = "repair_claim_failed"
@@ -117,10 +144,12 @@ class ConvergenceLedger:
     protocol = PROTOCOL
 
     RECORD_TYPES = frozenset({
-        "campaign_opened", "finding_opened", "finding_fix_claimed",
-        "finding_fixed", "finding_reopened", "finding_invalidated",
-        "finding_ruled", "confirmed_good", "target_amended",
-        "capture_coverage", "audit_ingested",
+        RECORD_KIND_CAMPAIGN_OPENED, RECORD_KIND_FINDING_OPENED,
+        RECORD_KIND_FINDING_FIX_CLAIMED, RECORD_KIND_FINDING_FIXED,
+        RECORD_KIND_FINDING_REOPENED, RECORD_KIND_FINDING_INVALIDATED,
+        RECORD_KIND_FINDING_RULED, RECORD_KIND_CONFIRMED_GOOD,
+        RECORD_KIND_TARGET_AMENDED, RECORD_KIND_CAPTURE_COVERAGE,
+        RECORD_KIND_AUDIT_INGESTED,
     })
 
     def __init__(self, path: Path) -> None:
@@ -575,6 +604,23 @@ class ConvergenceLedger:
         state = self._read_state()
         return tuple(state["journal"])
 
+    def key_lineage(self) -> dict[Key, tuple[dict[str, Any], ...]]:
+        """Public read-only per-key lineage (em-history): every record
+        touching each finding key, grouped by key, in journal order. Each
+        returned record is a copy of the journal record annotated with an
+        ``"ordinal"`` field -- its index into :meth:`records`, i.e. the
+        when-learned order this ledger replays by.
+
+        Adds no record kind and appends nothing; this only regroups the
+        same records :meth:`records` already exposes.
+        """
+
+        grouped: dict[Key, list[dict[str, Any]]] = {}
+        for ordinal, record in enumerate(self.records()):
+            for key in _record_keys(record):
+                grouped.setdefault(key, []).append({**record, "ordinal": ordinal})
+        return {key: tuple(items) for key, items in grouped.items()}
+
     def _read_state(self) -> dict[str, Any]:
         with self._locked(shared=True) as handle:
             return self._fold(handle)
@@ -715,6 +761,25 @@ class ConvergenceLedger:
         if handle.journal_was_missing:
             _fsync_directory(self.path.parent)
             handle.journal_was_missing = False
+
+
+def _record_keys(record: Mapping[str, Any]) -> tuple[Key, ...]:
+    """The finding key(s) one journal record pertains to, if any.
+
+    Every per-key record kind carries a ``"key"`` field except the one
+    ``base_rebase`` variant of ``finding_reopened``, which carries
+    ``"affected_keys"`` instead (CC-01); campaign-level records
+    (``campaign_opened``, ``capture_coverage``, ``target_amended``,
+    ``audit_ingested``) carry neither and touch no key.
+    """
+
+    raw_key = record.get("key")
+    if raw_key is not None:
+        return (tuple(raw_key),)
+    affected = record.get("affected_keys")
+    if affected:
+        return tuple(tuple(item) for item in affected)
+    return ()
 
 
 def _fsync_directory(directory: Path) -> None:

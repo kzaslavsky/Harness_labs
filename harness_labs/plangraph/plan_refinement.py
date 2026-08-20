@@ -57,6 +57,7 @@ from harness_labs.plangraph.plan_approval import (
     UNCLAIMED_GRANT_WARNING,
     _git,
     _git_artifact,
+    _impact_warnings_and_notices,
     _load_json_bytes,
     _relative_repository_path,
     _sibling_overlap_warnings,
@@ -615,6 +616,7 @@ def refine_decomposition(
     judge: RefinementJudge | None = None,
     max_rounds: int = 8,
     no_progress_threshold: int = 2,
+    advisories: Sequence[Mapping[str, object]] = (),
 ) -> RefinementOutcome:
     """Revise ``decomposition`` until its HIGH overlap warnings are resolved.
 
@@ -622,6 +624,14 @@ def refine_decomposition(
     removes grants the run never declared any intent to use -- and reports
     every finding it could not settle that way as a proposal, leaving the plan
     otherwise as the operator wrote it. See the module docstring.
+
+    ``advisories`` (EM-D2) is a caller-supplied, keyword-with-default input --
+    typically the impact assessments ``refine_repository_decomposition``
+    computes once against ``base_commit`` -- that is only ever reported
+    alongside the admission-derived advisories already carried in the
+    outcome, never repaired: it plays no part in round selection or the
+    no-progress guard, so passing nothing (the default) reproduces
+    pre-existing behaviour exactly.
     """
 
     if max_rounds < 1:
@@ -712,7 +722,10 @@ def refine_decomposition(
         # Advisories are reported from the *original* plan, not the refined
         # one: their whole purpose is to say what the plan declared before the
         # loop acted, so a reader can see which narrowing each one predicted.
-        advisories=original.advisories,
+        # The caller-supplied ``advisories`` (impact assessments, computed
+        # once by ``refine_repository_decomposition``) are appended, not
+        # merged into anything the loop selects on.
+        advisories=original.advisories + tuple(dict(item) for item in advisories),
         initial_plan_graph_digest=original.digest,
         final_plan_graph_digest=final.digest,
         initial_warnings=counts,
@@ -914,6 +927,13 @@ def refine_repository_decomposition(
     The metadata is derived exactly as ``prepare_approval`` derives it, so the
     per-round PlanGraph digest is the identity the approval subject will carry
     once the refined decomposition is committed.
+
+    Impact assessments (``harness_labs.plangraph.impact_analysis``, via
+    ``plan_approval._impact_warnings_and_notices``) are computed here exactly
+    once, against ``base_commit``, and forwarded to :func:`refine_decomposition`
+    as its ``advisories`` input -- reported in the outcome, never repaired;
+    making the judge consume them is deferred (see the plan's ``em-deferred``
+    section).
     """
 
     repository = repository.resolve()
@@ -934,14 +954,28 @@ def refine_repository_decomposition(
     except PlanGraphContractError as exc:
         raise PlanRefinementError(str(exc)) from exc
     plan_record, _ = _git_artifact(repository, base_commit, str(canonical["plan"]))
+    plan_sha256 = str(plan_record["sha256"])
+    try:
+        plan = plan_from_mapping(
+            canonical,
+            base_commit=base_commit,
+            repository_id=repository_id,
+            plan_sha256=plan_sha256,
+        )
+    except (PlanGraphContractError, PlanGraphError) as exc:
+        raise PlanRefinementError(str(exc)) from exc
+    impact_warnings, impact_notices = _impact_warnings_and_notices(
+        repository, base_commit, plan
+    )
     return refine_decomposition(
         canonical,
         base_commit=base_commit,
         repository_id=repository_id,
-        plan_sha256=str(plan_record["sha256"]),
+        plan_sha256=plan_sha256,
         judge=judge,
         max_rounds=max_rounds,
         no_progress_threshold=no_progress_threshold,
+        advisories=tuple(impact_warnings) + tuple(impact_notices),
     )
 
 

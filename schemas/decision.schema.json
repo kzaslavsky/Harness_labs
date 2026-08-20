@@ -21,7 +21,7 @@
     "status"
   ],
   "properties": {
-    "schema_version": { "const": "1.0" },
+    "schema_version": { "enum": ["1.0", "1.1"] },
     "decision_id": { "type": "string", "minLength": 1 },
     "run_id": { "type": "string", "minLength": 1 },
     "timestamp": { "type": "string", "format": "date-time" },
@@ -43,6 +43,27 @@
       "items": { "type": "string", "minLength": 1 }
     },
     "reversible": { "type": "boolean" },
-    "status": { "enum": ["proposed", "accepted", "rejected", "superseded"] }
-  }
+    "status": { "enum": ["proposed", "accepted", "rejected", "superseded"] },
+    "supersedes": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "concerns_paths": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "valid_from_commit": { "type": "string", "minLength": 1 }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "schema_version": { "const": "1.0" } } },
+      "then": {
+        "properties": {
+          "supersedes": { "not": {} },
+          "concerns_paths": { "not": {} },
+          "valid_from_commit": { "not": {} }
+        }
+      }
+    }
+  ]
 }

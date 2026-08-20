@@ -30,7 +30,10 @@ from harness_labs.plangraph.plan_graph import (
     plan_from_mapping,
     validate_plan_graph_plan,
 )
-from harness_labs.plangraph.plan_graph_contract import canonical_plan_graph_payload
+from harness_labs.plangraph.plan_graph_contract import (
+    canonical_plan_graph_payload,
+    sha256_json,
+)
 from harness_labs.plangraph.plan_refinement import (
     NoProgressGuard,
     PlanRefinementError,
@@ -45,6 +48,31 @@ FIXTURE = (
     / "plan_graph"
     / "flow-editor-uistreamline-decomposition.json"
 )
+
+#: Digests of ``outcome.decomposition`` (``plan_graph_contract.sha256_json``)
+#: captured from pre-change behaviour -- ``refine_decomposition`` called
+#: exactly as ``PreChangeRevisionDigestTests`` below calls it, with the new
+#: ``advisories`` input omitted and
+#: ``judge=None`` -- before EM-D2 added the ``advisories`` keyword-with-default
+#: input to ``refine_decomposition`` and wired impact-assessment computation
+#: into ``refine_repository_decomposition``. ``judge=None`` still applies its
+#: intent-aware narrowing (see the module docstring); the invariant these
+#: pin is "no drift", not "no-op" -- each of these three fixtures already
+#: exercises a distinct judge-less path: a real defective plan left
+#: ``report_only`` with 13 narrowings applied, a plan with nothing to fix
+#: passed through unrevised, and a directory-grant plan where narrowing
+#: actually fires and reaches ``clean``.
+PRE_CHANGE_REVISION_DIGESTS = {
+    "flow_editor_no_judge": (
+        "31badeeabd52e357b112187495e228b3a2be0b9574f91d0b7129e957fbe0f973"
+    ),
+    "clean_plan_no_judge": (
+        "0b133be65a5f8b8e814128b1c042967c6b6b89e5a8ed4e6ae017ff9062ecf493"
+    ),
+    "directory_grant_kept_no_judge": (
+        "ffa3fb152b6012867a22c27a3a98f4bdc513f1f9f5d2d4379a22ec69ca30a0c6"
+    ),
+}
 
 
 def _serializing_judge(reason: str = "shared file grant; no ownership split available"):
@@ -857,6 +885,306 @@ class RefinedPlanReachesAReceiptTests(unittest.TestCase):
     @staticmethod
     def _write(path: Path, payload) -> None:
         path.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# AC-EM-19: no-drift invariant for the pre-change revision digests
+# ---------------------------------------------------------------------------
+
+
+class PreChangeRevisionDigestTests(unittest.TestCase):
+    """With the new ``advisories`` input omitted and ``judge=None``, revised
+    plans over these fixtures must hash identically to
+    ``PRE_CHANGE_REVISION_DIGESTS`` -- captured from pre-change behaviour
+    before EM-D2 wired impact-assessment advisories into this module. This
+    is a no-drift check, not a no-op check: every fixture below already
+    applies ``judge=None``'s intent-aware narrowing."""
+
+    @staticmethod
+    def _flow_editor_digest() -> str:
+        fixture = json.loads(FIXTURE.read_text(encoding="utf-8"))
+        decomposition = fixture["canonical_decomposition"]
+        outcome = refine_decomposition(
+            decomposition,
+            base_commit=fixture["base_commit"],
+            repository_id=fixture["repository_id"],
+            plan_sha256=fixture["plan_sha256"],
+        )
+        return sha256_json(outcome.decomposition)
+
+    @staticmethod
+    def _decomposition(runs, criteria=("AC-1",)):
+        return {
+            "protocol": "plan-graph-plan/1",
+            "plan": "docs/plan.md",
+            "plan_sections": {"1": "section"},
+            "acceptance_criteria": {name: f"{name} holds" for name in criteria},
+            "runs": [
+                {
+                    "id": run_id,
+                    "objective": f"objective {run_id}",
+                    "plan_sections": ["1"],
+                    "criteria": list(run_criteria),
+                    "depends_on": list(depends_on),
+                    "allowed_paths": list(allowed_paths),
+                    "path_intents": [],
+                    "verification_argv": [sys.executable, "-c", "pass"],
+                    "verification_timeout_seconds": 30,
+                    "verification_required_paths": [],
+                }
+                for run_id, depends_on, allowed_paths, run_criteria in runs
+            ],
+            "functionality_tests": [],
+            "referenced_artifacts": [],
+        }
+
+    @classmethod
+    def _clean_plan_digest(cls) -> str:
+        decomposition = cls._decomposition(
+            [
+                ("A", (), ("src/a.py", "tests"), ("AC-1",)),
+                ("B", (), ("src/b.py", "tests"), ("AC-2",)),
+            ],
+            criteria=("AC-1", "AC-2"),
+        )
+        outcome = refine_decomposition(
+            decomposition,
+            base_commit="0" * 40,
+            repository_id="refinement-tests",
+            plan_sha256="a" * 64,
+        )
+        return sha256_json(outcome.decomposition)
+
+    @classmethod
+    def _directory_grant_kept_digest(cls) -> str:
+        decomposition = cls._decomposition(
+            [
+                ("A", (), ("src/pkg", "src/shared.py", "src/a.py"), ("AC-1",)),
+                ("B", (), ("src/pkg", "src/shared.py"), ("AC-1",)),
+            ]
+        )
+        for run, paths in (
+            ("A", ("src/pkg/mod.py", "src/a.py")),
+            ("B", ("src/shared.py", "src/pkg/other.py")),
+        ):
+            entry = next(r for r in decomposition["runs"] if r["id"] == run)
+            for path in paths:
+                entry["path_intents"].append({"path": path, "action": "modify"})
+        outcome = refine_decomposition(
+            decomposition,
+            base_commit="0" * 40,
+            repository_id="refinement-tests",
+            plan_sha256="a" * 64,
+        )
+        return sha256_json(outcome.decomposition)
+
+    def test_flow_editor_revision_does_not_drift(self) -> None:
+        self.assertEqual(
+            self._flow_editor_digest(),
+            PRE_CHANGE_REVISION_DIGESTS["flow_editor_no_judge"],
+        )
+
+    def test_clean_plan_revision_does_not_drift(self) -> None:
+        self.assertEqual(
+            self._clean_plan_digest(),
+            PRE_CHANGE_REVISION_DIGESTS["clean_plan_no_judge"],
+        )
+
+    def test_directory_grant_kept_revision_does_not_drift(self) -> None:
+        self.assertEqual(
+            self._directory_grant_kept_digest(),
+            PRE_CHANGE_REVISION_DIGESTS["directory_grant_kept_no_judge"],
+        )
+
+
+# ---------------------------------------------------------------------------
+# AC-EM-19: the new advisories input
+# ---------------------------------------------------------------------------
+
+
+class RefinementAdvisoriesInputTests(unittest.TestCase):
+    """``refine_decomposition``'s new ``advisories`` keyword-with-default is
+    reported, never repaired: it is appended to the outcome's own advisories
+    and plays no part in round selection."""
+
+    @staticmethod
+    def _decomposition() -> dict:
+        return {
+            "protocol": "plan-graph-plan/1",
+            "plan": "docs/plan.md",
+            "plan_sections": {"1": "section"},
+            "acceptance_criteria": {"AC-1": "AC-1 holds"},
+            "runs": [
+                {
+                    "id": "A",
+                    "objective": "objective A",
+                    "plan_sections": ["1"],
+                    "criteria": ["AC-1"],
+                    "depends_on": [],
+                    "allowed_paths": ["src/a.py"],
+                    "path_intents": [{"path": "src/a.py", "action": "modify"}],
+                    "verification_argv": [sys.executable, "-c", "pass"],
+                    "verification_timeout_seconds": 30,
+                    "verification_required_paths": [],
+                }
+            ],
+            "functionality_tests": [],
+            "referenced_artifacts": [],
+        }
+
+    def test_supplied_advisories_are_reported_and_never_repaired(self) -> None:
+        supplied = (
+            {
+                "kind": "required-paths-impact-gap",
+                "severity": "high",
+                "runs": ["A"],
+                "paths": ["src/importer.py"],
+                "missing": [{"path": "src/importer.py", "edge_kind": "imported_by"}],
+                "note": "static import analysis found an uncovered importer",
+            },
+        )
+
+        def judge(_request):
+            raise AssertionError(
+                "an impact-assessment advisory is never actionable; it must "
+                "not reach the judge"
+            )
+
+        outcome = refine_decomposition(
+            self._decomposition(),
+            base_commit="0" * 40,
+            repository_id="refinement-tests",
+            plan_sha256="a" * 64,
+            judge=judge,
+            advisories=supplied,
+        )
+
+        self.assertEqual(outcome.status, "clean")
+        self.assertEqual(outcome.applied, ())
+        kinds = {item["kind"] for item in outcome.advisories}
+        self.assertIn("required-paths-impact-gap", kinds)
+        as_mapping = outcome.as_mapping()
+        impact_entries = [
+            item for item in as_mapping["advisories"]
+            if item["kind"] == "required-paths-impact-gap"
+        ]
+        self.assertEqual(len(impact_entries), 1)
+        self.assertTrue(impact_entries[0]["warning_sha256"])
+
+    def test_omitted_advisories_defaults_to_no_extra_reporting(self) -> None:
+        outcome = refine_decomposition(
+            self._decomposition(),
+            base_commit="0" * 40,
+            repository_id="refinement-tests",
+            plan_sha256="a" * 64,
+        )
+        self.assertEqual(
+            [item["kind"] for item in outcome.advisories],
+            [],
+            "a decomposition with a fully-covered intent has no admission "
+            "advisory of its own, and nothing was supplied",
+        )
+
+
+class RepositoryRefinementImpactAdvisoriesTests(unittest.TestCase):
+    """``refine_repository_decomposition`` computes impact assessments once
+    (git-blob-backed at ``base_commit``) and forwards them as
+    ``refine_decomposition``'s ``advisories`` input."""
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.repository = self.root / "repository"
+        self.repository.mkdir()
+        self._git("init", "-b", "main")
+        self._git("config", "user.email", "test@example.com")
+        self._git("config", "user.name", "Plan Refinement Test")
+        (self.repository / ".harness").mkdir()
+        self._write(
+            self.repository / ".harness" / "repository.json",
+            {
+                "protocol": "harness-repository-identity/1",
+                "repository_id": "plan-refinement-impact-test-repository",
+            },
+        )
+        (self.repository / "docs").mkdir()
+        (self.repository / "docs" / "plan.md").write_text(
+            "AC-1: impact_target.py works.\n", encoding="utf-8"
+        )
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def _git(self, *arguments: str) -> str:
+        return subprocess.run(
+            ["git", "-C", str(self.repository), *arguments],
+            text=True,
+            capture_output=True,
+            check=True,
+        ).stdout.strip()
+
+    @staticmethod
+    def _write(path: Path, payload) -> None:
+        path.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
+
+    def _commit(self, decomposition: dict) -> Path:
+        (self.repository / "impact_target.py").write_text(
+            "VALUE = 1\n", encoding="utf-8"
+        )
+        (self.repository / "impact_importer.py").write_text(
+            "import impact_target\n\n\ndef use():\n    return impact_target.VALUE\n",
+            encoding="utf-8",
+        )
+        decomposition_path = self.repository / "decomposition.json"
+        self._write(decomposition_path, decomposition)
+        self._git("add", ".")
+        self._git("commit", "-m", "add plan and impact fixture")
+        return decomposition_path
+
+    def _decomposition(self) -> dict:
+        return {
+            "protocol": "plan-graph-plan/1",
+            "plan": "docs/plan.md",
+            "plan_sections": {"1": "AC-1: impact_target.py works."},
+            "acceptance_criteria": {"AC-1": "impact_target.py works."},
+            "runs": [
+                {
+                    "id": "A",
+                    "objective": "Modify impact_target.py",
+                    "plan_sections": ["1"],
+                    "criteria": ["AC-1"],
+                    "depends_on": [],
+                    "allowed_paths": ["impact_target.py"],
+                    "path_intents": [
+                        {"path": "impact_target.py", "action": "modify"}
+                    ],
+                    "verification_argv": [sys.executable, "-c", "pass"],
+                    "verification_timeout_seconds": 30,
+                    "verification_required_paths": [],
+                }
+            ],
+            "functionality_tests": [],
+            "referenced_artifacts": [],
+        }
+
+    def test_impact_gap_surfaces_as_an_advisory_on_the_refined_outcome(self) -> None:
+        decomposition_path = self._commit(self._decomposition())
+        outcome = refine_repository_decomposition(
+            repository=self.repository, decomposition_path=decomposition_path,
+        )
+        impact_advisories = [
+            item for item in outcome.advisories
+            if item["kind"] == "required-paths-impact-gap"
+        ]
+        self.assertEqual(len(impact_advisories), 1)
+        self.assertEqual(impact_advisories[0]["runs"], ["A"])
+        self.assertEqual(impact_advisories[0]["paths"], ["impact_importer.py"])
+        # _prepare's own protocol is untouched: a single-run plan with no
+        # sibling-overlap findings still reaches "clean", and the impact
+        # advisory never became actionable (it played no part in reaching
+        # that status).
+        self.assertEqual(outcome.status, "clean")
+        self.assertEqual(outcome.applied, ())
 
 
 if __name__ == "__main__":

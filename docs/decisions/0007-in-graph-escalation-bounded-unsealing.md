@@ -1,6 +1,7 @@
 # 0007 — In-graph escalation of out-of-scope review findings with bounded unsealing
 
 Status: accepted
+Concerns-paths: harness_labs/featurerun/review_fix.py, harness_labs/plangraph/plan_graph.py, schemas/plan-graph-escalation-judgment.json, schemas/block-escalation.json
 Date: 2026-08-19
 Owners: PlanGraph controller
 Run: `cc-graph/convergence-campaign-harness` (attempts 1–3), logical graph
