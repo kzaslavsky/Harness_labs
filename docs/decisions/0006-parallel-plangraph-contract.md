@@ -1,6 +1,7 @@
 # 0006 — Parallel PlanGraph admission and recovery contract
 
 Status: accepted
+Concerns-paths: harness_labs/plangraph/plan_graph.py, harness_labs/plangraph/plan_graph_join.py, harness_labs/plangraph/plan_graph_authority.py, schemas/plan-graph-parallel-decomposition.schema.json
 Date: 2026-08-10
 Owners: PlanGraph controller
 

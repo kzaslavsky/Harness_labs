@@ -1,6 +1,7 @@
 # 0002 — Controller-owned parallel child batches
 
 Status: accepted
+Concerns-paths: harness_labs/core/composition.py, harness_labs/core/controller_scheduler.py
 Date: 2026-08-02
 Owners: harness controller
 
