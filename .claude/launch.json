@@ -12,6 +12,12 @@
       "runtimeExecutable": "python3",
       "runtimeArgs": ["scripts/run_dashboard.py", "--audit-root", "logs/runs/cc-graph", "--assets-root", "dashboard/plan-graph/dist", "--port", "8322", "--refresh-seconds", "10"],
       "port": 8322
+    },
+    {
+      "name": "dtr-dashboard",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["scripts/run_dashboard.py", "--audit-root", "logs/runs/dtr-graph", "--assets-root", "dashboard/plan-graph/dist", "--port", "8123", "--refresh-seconds", "2"],
+      "port": 8123
     }
   ]
 }
