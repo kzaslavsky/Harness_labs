@@ -17,6 +17,8 @@ from unittest.mock import patch
 
 from harness_labs.core.audit import AuditError
 from harness_labs.plangraph.plan_graph import (
+    ESCALATION_JUDGMENT_PROTOCOL,
+    EscalationJudgeUnavailable,
     FEATURE_RUN_REQUEST_PROTOCOL,
     FeatureRunOutcome,
     FeatureRunRequest,
@@ -35,6 +37,7 @@ from harness_labs.plangraph.plan_graph import (
     registration_bytes,
     verify_registration,
 )
+from harness_labs.plangraph.plan_graph_budget import RetryBudgetLedger
 
 
 def git(repository: Path, *arguments: str) -> str:
@@ -670,6 +673,1132 @@ class PlanGraphTests(unittest.TestCase):
         )
         self.assertEqual(completed.returncode, 2)
         self.assertIn("incompatible", completed.stderr)
+
+
+class _RecordingJudge:
+    """An EscalationJudge stub that returns a fixed, schema-valid verdict."""
+
+    def __init__(self, *, identity: str, verdict: str, rationale: str, evidence_refs=()) -> None:
+        self.identity = identity
+        self.verdict = verdict
+        self.rationale = rationale
+        self.evidence_refs = tuple(evidence_refs)
+        self.calls: list[dict] = []
+
+    def __call__(self, packet):
+        self.calls.append(dict(packet))
+        return {
+            "protocol": ESCALATION_JUDGMENT_PROTOCOL,
+            "verdict": self.verdict,
+            "rationale": self.rationale,
+            "evidence_refs": list(self.evidence_refs),
+        }
+
+
+class _UnavailableJudge:
+    """A seat that cannot answer: the graph-level refusal channel (a model
+    outage, a transport failure, or a reply that never satisfied the schema)."""
+
+    def __init__(self, identity: str = "graph-escalation-judge") -> None:
+        self.identity = identity
+        self.calls = 0
+
+    def __call__(self, packet):
+        self.calls += 1
+        raise EscalationJudgeUnavailable("backend failure: transport died")
+
+
+class _RaisingJudge:
+    """An EscalationJudge stub that proves routing never consults a model."""
+
+    def __init__(self, identity: str = "judge-raises") -> None:
+        self.identity = identity
+        self.calls = 0
+
+    def __call__(self, packet):
+        self.calls += 1
+        raise AssertionError("escalation judge must not be invoked for this scenario")
+
+
+def _schema_assert(testcase: unittest.TestCase, instance: object, schema: dict) -> None:
+    """A minimal, dependency-free structural check against a JSON Schema.
+
+    Not a general validator -- it only understands the subset
+    ``schemas/block-escalation.json`` and
+    ``schemas/plan-graph-escalation-judgment.json`` actually use (object
+    required/properties, array items, string pattern, const, enum) -- but it
+    walks the real schema file on disk rather than re-asserting a hand-copied
+    shape, so a schema/code drift would be caught here.
+    """
+
+    schema_type = schema.get("type")
+    if schema_type == "object":
+        testcase.assertIsInstance(instance, dict)
+        for key in schema.get("required", ()):
+            testcase.assertIn(key, instance)
+        for key, subschema in schema.get("properties", {}).items():
+            if key in instance:
+                _schema_assert(testcase, instance[key], subschema)
+    elif schema_type == "array":
+        testcase.assertIsInstance(instance, list)
+        item_schema = schema.get("items")
+        if item_schema:
+            for item in instance:
+                _schema_assert(testcase, item, item_schema)
+    elif schema_type == "string":
+        testcase.assertIsInstance(instance, str)
+        pattern = schema.get("pattern")
+        if pattern:
+            testcase.assertRegex(instance, pattern)
+    if "const" in schema:
+        testcase.assertEqual(instance, schema["const"])
+    if "enum" in schema:
+        testcase.assertIn(instance, schema["enum"])
+
+
+class PlanGraphEscalationTests(unittest.TestCase):
+    """CC-08 / ADR 0007: in-graph escalation routing, judgment, packet, unseal, cascade."""
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.repository = self.root / "repository"
+        self.repository.mkdir()
+        git(self.repository, "init")
+        git(self.repository, "config", "user.email", "tests@example.com")
+        git(self.repository, "config", "user.name", "Tests")
+        plan = self.repository / "docs" / "approved-plan.md"
+        plan.parent.mkdir()
+        plan.write_text("Approved PlanGraph plan\n", encoding="utf-8")
+        git(self.repository, "add", "docs/approved-plan.md")
+        git(self.repository, "commit", "-m", "approved plan")
+        self.base_commit = git(self.repository, "rev-parse", "HEAD")
+        self.payload = decomposition(self.base_commit)
+        self.counter = 0
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def graph(self, launcher, *, registration, **options) -> PlanGraph:
+        self.counter += 1
+
+        def correlated(request):
+            outcome = launcher(request)
+            if outcome.status != "succeeded":
+                return outcome
+            return replace(
+                outcome,
+                plan_graph_id=request.plan_graph_id,
+                plan_node_id=request.plan_node_id,
+                feature_run_id=request.feature_run_id,
+                run_dir=str(request.run_dir),
+            )
+
+        return PlanGraph(
+            self.repository,
+            registration,
+            correlated,
+            run_root=self.root / "runs",
+            graph_run_id=f"escalation-attempt-{self.counter}",
+            **options,
+        )
+
+    def _chain_registration(self, *, logical_id: str, automatic_recovery=None):
+        """``a`` (predecessor/owner) with two dependents: ``d`` (an
+        independent sibling of the escalating node, unrelated to any
+        escalation) and ``b`` (the escalating node). ``d`` is declared before
+        ``b``, so ``_ordered_runs`` schedules and seals it first -- the shape
+        AC-CC08-15's cascade assertion needs to prove ``d`` gets swept into
+        invalidation solely because it depends on the unsealed owner ``a``,
+        not because ``d`` itself had anything to do with the escalation.
+        """
+
+        payload = dict(self.payload)
+        payload["runs"] = [
+            {
+                "id": "a", "objective": "Build A", "plan_sections": ["1"],
+                "criteria": ["AC-1"], "depends_on": [],
+                "verification_argv": ["python3", "-m", "unittest"],
+                "allowed_paths": ["producer.py"],
+            },
+            {
+                "id": "d", "objective": "Build D", "plan_sections": ["1"],
+                "criteria": ["AC-1"], "depends_on": ["a"],
+                "verification_argv": ["python3", "-m", "unittest"],
+                "allowed_paths": ["sibling.py"],
+            },
+            {
+                "id": "b", "objective": "Build B", "plan_sections": ["2"],
+                "criteria": ["AC-2"], "depends_on": ["a"],
+                "verification_argv": ["python3", "-m", "unittest"],
+                "allowed_paths": ["consumer.py"],
+            },
+        ]
+        return register_plan_graph(
+            repository=self.repository,
+            logical_graph_id=logical_id,
+            decomposition=payload,
+            automatic_recovery=automatic_recovery,
+        )
+
+    @staticmethod
+    def _escalated_record(key: str, required_paths, **overrides) -> dict:
+        record = {
+            "key": key,
+            "file": required_paths[0],
+            "anchor_path": required_paths[0],
+            "line": None,
+            "end_line": None,
+            "subject": "out of grant",
+            "statement": "This finding needs a path outside my grant.",
+            "category": "review",
+            "severity": "critical",
+            "score": 90,
+            "fix_cost": "local",
+            "protects": "AC-2",
+            "requires_disposition": True,
+            "contract_violation": False,
+            "scope_expanding": True,
+            "outcome": "escalated",
+            "outcome_reason": "escalated: required_paths_outside_grant",
+            "escalation_reason": "required_paths_outside_grant",
+            "cycles_seen": [1],
+            "occurrences": 1,
+            "source_finding_ids": [key],
+            "evidence_refs": [],
+            "fix_attempts": [],
+            "reopened_count": 0,
+            "origin_node": "",
+            "transferred_to": "",
+            "transfer_eligible": True,
+            "required_paths": list(required_paths),
+            "anchor_out_of_grant": False,
+            "scope_screen_class": "",
+            "inherited": False,
+        }
+        record.update(overrides)
+        return record
+
+    # -- AC-CC08-6: full-plan routing, including predecessors -------------
+
+    def test_owner_for_paths_resolves_full_plan_including_predecessors(self) -> None:
+        registration = self._chain_registration(logical_id="owner-lookup")
+        judge = _RaisingJudge()
+        graph = self.graph(
+            lambda request: FeatureRunOutcome("failed"),
+            registration=registration, escalation_judge=judge,
+        )
+
+        # "a" is a *predecessor* of no node in this plan and a common
+        # ancestor of "b"/"d" -- _transfer_targets_for(b) (dependents-only)
+        # would never resolve it, but _owner_for_paths walks the whole plan.
+        self.assertEqual(graph._owner_for_paths(("producer.py",)), "a")
+        self.assertIsNone(graph._owner_for_paths(("nobody/owns/this.py",)))
+        self.assertEqual(judge.calls, 0, "routing must never consult the judge")
+
+    def test_owner_for_paths_refuses_equal_depth_ambiguity(self) -> None:
+        payload = dict(self.payload)
+        payload["runs"] = [
+            dict(payload["runs"][0], allowed_paths=["shared/thing.py"]),
+            dict(
+                payload["runs"][1], id="z", depends_on=[],
+                allowed_paths=["shared/thing.py"],
+            ),
+        ]
+        registration = register_plan_graph(
+            repository=self.repository, logical_graph_id="owner-ambiguous",
+            decomposition=payload,
+        )
+        graph = self.graph(
+            lambda request: FeatureRunOutcome("failed"), registration=registration,
+        )
+        self.assertIsNone(graph._owner_for_paths(("shared/thing.py",)))
+
+    # -- AC-CC08-7: reviewer-independence refusal --------------------------
+
+    def test_reviewer_independence_refusal_before_judge_invoked(self) -> None:
+        registration = self._chain_registration(
+            logical_id="reviewer-independence",
+            automatic_recovery={
+                "protocol": "plan-graph-automatic-recovery/1",
+                "allowed_actions": ["transfer_ownership"],
+                "max_extra_node_launches": 0, "max_structural_decisions": 1,
+            },
+        )
+        # Configured identity equals the escalating node's own id: the only
+        # reviewer identity a review-ledger record carries is the node whose
+        # review-fix loop raised it.
+        judge = _RaisingJudge(identity="b")
+        graph = self.graph(
+            lambda request: FeatureRunOutcome("failed"),
+            registration=registration, escalation_judge=judge,
+        )
+        audit = graph._audit_for_run()
+        run_b = next(run for run in graph.plan.runs if run.id == "b")
+        outcome = FeatureRunOutcome(
+            "succeeded", "b-commit",
+            evidence={"review_fix": {"escalated_findings": [
+                self._escalated_record("consumer.py:needs-producer", ["producer.py"])
+            ]}},
+        )
+
+        with self.assertRaisesRegex(PlanGraphError, "independent of the reviewer"):
+            graph._resolve_escalations(run_b, outcome, {"a": "a-commit"}, audit)
+        self.assertEqual(judge.calls, 0)
+
+
+    # -- judge refusal: a judgment the seat could not make ------------------
+
+    def test_judge_refusal_blocks_without_a_verdict_or_a_spent_decision(self) -> None:
+        """A seat that cannot answer must not have its silence read as a
+        verdict. ``confirm`` would unseal a sealed node on no evidence;
+        ``reject`` would permanently poison the finding key for the whole
+        lineage (``prior_escalation_verdict``). Only an operator block is
+        undoable, so that is what a refusal becomes."""
+
+        registration = self._chain_registration(
+            logical_id="judge-unavailable",
+            automatic_recovery={
+                "protocol": "plan-graph-automatic-recovery/1",
+                "allowed_actions": ["transfer_ownership"],
+                "max_extra_node_launches": 0, "max_structural_decisions": 1,
+            },
+        )
+        judge = _UnavailableJudge()
+        graph = self.graph(
+            lambda request: FeatureRunOutcome("failed"),
+            registration=registration, escalation_judge=judge,
+        )
+        audit = graph._audit_for_run()
+        run_b = next(run for run in graph.plan.runs if run.id == "b")
+        record = self._escalated_record("consumer.py:needs-producer", ["producer.py"])
+        outcome = FeatureRunOutcome(
+            "succeeded", "b-commit",
+            evidence={"review_fix": {"escalated_findings": [record]}},
+        )
+        before = graph.budget.deviation_records()
+
+        disposition = graph._resolve_escalations(run_b, outcome, {"a": "a-commit"}, audit)
+
+        self.assertEqual(judge.calls, 1)
+        self.assertIsNotNone(disposition.judge_unavailable)
+        self.assertEqual(disposition.judge_unavailable["finding_key"], record["key"])
+        self.assertEqual(disposition.judge_unavailable["owner_node"], "a")
+        self.assertIn("transport died", disposition.judge_unavailable["reason"])
+        self.assertEqual(disposition.advances, ())
+        self.assertEqual(disposition.escalations_payload, ())
+        self.assertEqual(disposition.retry_frontier_prefix, ())
+        # No verdict was journaled, so nothing poisons the key for a retry.
+        self.assertIsNone(audit.prior_escalation_verdict(record["key"]))
+        # No structural transfer_ownership decision was spent on a
+        # judgment that never happened.
+        self.assertEqual(graph.budget.deviation_records(), before)
+
+    def test_judge_refusal_blocks_the_attempt_rather_than_crashing_the_graph(self) -> None:
+        registration = self._chain_registration(
+            logical_id="judge-unavailable-run",
+            automatic_recovery={
+                "protocol": "plan-graph-automatic-recovery/1",
+                "allowed_actions": ["transfer_ownership"],
+                "max_extra_node_launches": 0, "max_structural_decisions": 1,
+            },
+        )
+        judge = _UnavailableJudge()
+        record = self._escalated_record("consumer.py:needs-producer", ["producer.py"])
+
+        def launcher(request):
+            if request.run.id == "b":
+                return FeatureRunOutcome(
+                    "succeeded", "b-commit",
+                    evidence={"review_fix": {"escalated_findings": [record]}},
+                )
+            return FeatureRunOutcome("succeeded", f"{request.run.id}-commit")
+
+        graph = self.graph(
+            launcher, registration=registration, escalation_judge=judge,
+        )
+        result = graph.run()
+
+        self.assertEqual(result.status, "blocked")
+        escalation = json.loads(
+            (self.root / "runs" / graph.graph_run_id / "escalation.json")
+            .read_text(encoding="utf-8")
+        )
+        self.assertIn("escalation judge could not judge", escalation["reason"])
+        self.assertIn(record["key"], escalation["reason"])
+        self.assertNotIn(
+            "escalations", escalation,
+            "a refusal produced no verdict, so there is none to report",
+        )
+        events = [
+            json.loads(line)
+            for line in graph._audit_for_run().journal.events_path
+            .read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        self.assertEqual(
+            [event["event_type"] for event in events
+             if event["event_type"] == "plan_graph_escalation_judged"], [],
+        )
+
+    def test_sealed_node_ids_reports_the_live_sealed_set(self) -> None:
+        """The graph-level seat's dynamic context: which nodes are sealed at
+        the moment of judgment, not at the moment the seat was built."""
+
+        registration = self._chain_registration(logical_id="sealed-node-ids")
+        graph = self.graph(
+            lambda request: FeatureRunOutcome("succeeded", f"{request.run.id}-commit"),
+            registration=registration,
+        )
+
+        self.assertEqual(graph.sealed_node_ids(), ())
+        graph.run()
+        self.assertEqual(graph.sealed_node_ids(), ("a", "b", "d"))
+
+    # -- AC-CC08-8: reject write-back ---------------------------------------
+
+    def test_reject_judgment_writes_back_to_escalating_node(self) -> None:
+        registration = self._chain_registration(logical_id="reject-writeback")
+        judge = _RecordingJudge(
+            identity="judge-1", verdict="reject",
+            rationale="not a real cross-node dependency",
+        )
+        graph = self.graph(
+            lambda request: FeatureRunOutcome("failed"),
+            registration=registration, escalation_judge=judge,
+        )
+        audit = graph._audit_for_run()
+        run_b = next(run for run in graph.plan.runs if run.id == "b")
+        record = self._escalated_record("consumer.py:needs-producer", ["producer.py"])
+        outcome = FeatureRunOutcome(
+            "succeeded", "b-commit",
+            evidence={"review_fix": {"escalated_findings": [record]}},
+        )
+        before = graph.budget.deviation_records()
+
+        disposition = graph._resolve_escalations(run_b, outcome, {"a": "a-commit"}, audit)
+        after = graph.budget.deviation_records()
+
+        self.assertEqual(len(disposition.advances), 1)
+        target, rejected = disposition.advances[0]
+        self.assertEqual(target, "b")
+        self.assertEqual(rejected["outcome"], "open")
+        self.assertIn("not a real cross-node dependency", rejected["outcome_reason"])
+        self.assertEqual(len(judge.calls), 1)
+        self.assertEqual(after, before, "reject spends no structural decision")
+
+        # Drive the record through the same write _seal_outcome uses (not
+        # just inspect the in-memory disposition) into
+        # finding_obligations['b'], as the queued-confirm test below does for
+        # its own advance.
+        finding_obligations = graph._apply_escalation_advances({}, disposition.advances)
+        self.assertIn("b", finding_obligations)
+        self.assertEqual(len(finding_obligations["b"]), 1)
+        self.assertEqual(finding_obligations["b"][0]["key"], record["key"])
+        # origin_node must stay "b": this finding is self-carried, not
+        # transferred, so b's own retry must not freeze discovery on it.
+        self.assertEqual(finding_obligations["b"][0]["origin_node"], "b")
+
+        request = graph._request_for_run(
+            run_b, self.base_commit, tuple(finding_obligations["b"]),
+        )
+        self.assertIs(request.inherited_ledger_frozen, False)
+        self.assertIs(request.bounded_fix_only, False)
+
+    def test_rejected_escalation_is_not_re_litigated_on_the_next_launch(self) -> None:
+        """A rejected finding is reopened clean by review_fix.py's own ingest
+        on the escalating node's next retry and re-escalated with no memory
+        of the earlier judgment -- so the durable closure has to come from
+        this attempt's own journal, not from anything review_fix.py carries.
+        A second escalation of the identical finding_key must not reach the
+        judge again and must instead force an ordinary operator block."""
+
+        registration = self._chain_registration(logical_id="reject-no-reloop")
+        judge = _RecordingJudge(
+            identity="judge-1", verdict="reject",
+            rationale="not a real cross-node dependency",
+        )
+        graph = self.graph(
+            lambda request: FeatureRunOutcome("failed"),
+            registration=registration, escalation_judge=judge,
+        )
+        audit = graph._audit_for_run()
+        run_b = next(run for run in graph.plan.runs if run.id == "b")
+        record = self._escalated_record("consumer.py:needs-producer", ["producer.py"])
+        outcome = FeatureRunOutcome(
+            "succeeded", "b-commit",
+            evidence={"review_fix": {"escalated_findings": [record]}},
+        )
+
+        first = graph._resolve_escalations(run_b, outcome, {"a": "a-commit"}, audit)
+        self.assertEqual(len(judge.calls), 1)
+        self.assertIsNone(first.already_rejected)
+
+        # review_fix.py's seed_transferred + _escalate_out_of_grant reopen
+        # this exact finding_key clean and re-escalate it verbatim on b's
+        # next launch -- simulated here by resolving the same record again.
+        before = graph.budget.deviation_records()
+        second = graph._resolve_escalations(run_b, outcome, {"a": "a-commit"}, audit)
+        after = graph.budget.deviation_records()
+
+        self.assertEqual(len(judge.calls), 1, "the judge must not be asked again")
+        self.assertEqual(after, before, "no structural decision is spent on a repeat")
+        self.assertIsNotNone(second.already_rejected)
+        self.assertEqual(second.already_rejected["finding_key"], record["key"])
+        self.assertEqual(second.already_rejected["owner_node"], "a")
+
+    def test_rejected_escalation_stays_closed_across_a_repair_resume(self) -> None:
+        """The reopened, verbatim re-escalation review_fix.py produces on the
+        escalating node's next launch is never in the same graph attempt --
+        a launch that isn't "succeeded" finalizes the attempt, so the next
+        launch of "b" can only happen in a repair successor with its own,
+        otherwise-empty ``finding_obligations``. The durable closure has to
+        survive that attempt boundary."""
+
+        registration = self._chain_registration(logical_id="reject-no-reloop-resume")
+        judge1 = _RecordingJudge(
+            identity="judge-1", verdict="reject",
+            rationale="not a real cross-node dependency",
+        )
+        record = self._escalated_record("consumer.py:needs-producer", ["producer.py"])
+
+        def launcher1(request):
+            if request.run.id == "b":
+                return FeatureRunOutcome(
+                    "blocked",
+                    evidence={"review_fix": {"escalated_findings": [record]}},
+                )
+            return FeatureRunOutcome("succeeded", f"{request.run.id}-commit")
+
+        graph1 = self.graph(launcher1, registration=registration, escalation_judge=judge1)
+        result1 = graph1.run()
+        self.assertEqual(result1.status, "blocked")
+        self.assertEqual(len(judge1.calls), 1)
+
+        checkpoint_state = json.loads(
+            (self.root / "runs" / graph1.graph_run_id / "checkpoint.json")
+            .read_text(encoding="utf-8")
+        )["state"]
+        blocker_ref = checkpoint_state["block_escalation_ref"]
+
+        # review_fix.py's ingest reopened the rejected record clean and
+        # re-escalated the identical finding_key -- same key, same owner.
+        record2 = self._escalated_record("consumer.py:needs-producer", ["producer.py"])
+        judge2 = _RaisingJudge()
+
+        def launcher2(request):
+            if request.run.id == "b":
+                return FeatureRunOutcome(
+                    "failed",
+                    evidence={"review_fix": {"escalated_findings": [record2]}},
+                )
+            return FeatureRunOutcome(
+                "succeeded", f"{request.run.id}-commit-2",
+                plan_graph_id=request.plan_graph_id, plan_node_id=request.plan_node_id,
+                feature_run_id=request.feature_run_id, run_dir=str(request.run_dir),
+            )
+
+        graph2 = PlanGraph.resume(
+            self.repository, registration, launcher2,
+            run_root=self.root / "runs",
+            directive=RepairResumeDirective(
+                None, graph1.graph_run_id, ("b",), blocker_ref,
+            ),
+            escalation_judge=judge2,
+        )
+        result2 = graph2.run()
+
+        self.assertEqual(result2.status, "blocked")
+        self.assertEqual(judge2.calls, 0, "a rejected finding_key must not reach the judge again")
+        escalation2_path = self.root / "runs" / graph2.graph_run_id / "escalation.json"
+        escalation2 = json.loads(escalation2_path.read_text(encoding="utf-8"))
+        self.assertIs(escalation2["decision_request"]["required"], True)
+        self.assertIn("already rejected", escalation2["reason"])
+
+    # -- AC-CC08-9: confirm into a queued owner -----------------------------
+
+    def test_confirm_into_queued_owner_injects_obligation_without_authority(self) -> None:
+        registration = self._chain_registration(logical_id="confirm-queued")
+        judge = _RecordingJudge(
+            identity="judge-1", verdict="confirm",
+            rationale="legitimate cross-node dependency",
+        )
+        graph = self.graph(
+            lambda request: FeatureRunOutcome("failed"),
+            registration=registration, escalation_judge=judge,
+        )
+        audit = graph._audit_for_run()
+        run_a = next(run for run in graph.plan.runs if run.id == "a")
+        run_b = next(run for run in graph.plan.runs if run.id == "b")
+        record = self._escalated_record("consumer.py:needs-producer", ["producer.py"])
+        outcome = FeatureRunOutcome(
+            "succeeded", "b-commit",
+            evidence={"review_fix": {"escalated_findings": [record]}},
+        )
+        before = graph.budget.deviation_records()
+
+        # "a" has not run yet in this attempt: it is queued, not sealed.
+        disposition = graph._resolve_escalations(run_b, outcome, {}, audit)
+        after = graph.budget.deviation_records()
+
+        self.assertEqual(len(disposition.advances), 1)
+        target, confirmed = disposition.advances[0]
+        self.assertEqual(target, "a")
+        self.assertFalse(confirmed["bounded_fix_only"])
+        self.assertEqual(after, before)
+
+        request = graph._request_for_run(run_a, self.base_commit, (confirmed,))
+        self.assertIs(request.inherited_ledger_frozen, True)
+        self.assertIs(request.bounded_fix_only, False)
+
+    # -- AC-CC08-10 / AC-CC08-11: confirm into a sealed owner (unseal) ------
+
+    def test_confirm_into_sealed_owner_unseals_with_exact_budget_events(self) -> None:
+        registration = self._chain_registration(
+            logical_id="confirm-sealed",
+            automatic_recovery={
+                "protocol": "plan-graph-automatic-recovery/1",
+                "allowed_actions": ["transfer_ownership"],
+                "max_extra_node_launches": 0, "max_structural_decisions": 1,
+            },
+        )
+        judge = _RecordingJudge(
+            identity="judge-1", verdict="confirm",
+            rationale="legitimate cross-node dependency",
+        )
+        graph = self.graph(
+            lambda request: FeatureRunOutcome("failed"),
+            registration=registration, escalation_judge=judge,
+        )
+        audit = graph._audit_for_run()
+        run_a = next(run for run in graph.plan.runs if run.id == "a")
+        run_b = next(run for run in graph.plan.runs if run.id == "b")
+        with graph.budget._locked(shared=True) as handle:
+            before_state = graph.budget._fold(handle)
+        record = self._escalated_record("consumer.py:needs-producer", ["producer.py"])
+        outcome = FeatureRunOutcome(
+            "succeeded", "b-commit",
+            evidence={"review_fix": {"escalated_findings": [record]}},
+        )
+        before_lines = graph.budget.path.read_text(encoding="utf-8").splitlines()
+
+        disposition = graph._resolve_escalations(run_b, outcome, {"a": "a-commit"}, audit)
+
+        after_lines = graph.budget.path.read_text(encoding="utf-8").splitlines()
+        new_events = [json.loads(line) for line in after_lines[len(before_lines):]]
+        self.assertEqual(
+            [event["event"] for event in new_events],
+            ["recovery_decision", "obligation_transferred"],
+        )
+        decision = new_events[0]["decision"]
+        self.assertEqual(decision["action"], "transfer_ownership")
+        self.assertEqual(decision["target"], "b")
+        self.assertEqual(decision["payload"], {"receiving_node": "a"})
+        self.assertEqual(new_events[1]["source_node"], "b")
+        self.assertEqual(new_events[1]["receiving_node"], "a")
+
+        with graph.budget._locked(shared=True) as handle:
+            after_state = graph.budget._fold(handle)
+        self.assertEqual(
+            after_state["automatic_recovery_structural_decisions"],
+            before_state["automatic_recovery_structural_decisions"] + 1,
+        )
+
+        self.assertEqual(disposition.retry_frontier_prefix, ("a", "b"))
+        self.assertEqual(len(disposition.advances), 1)
+        target, confirmed = disposition.advances[0]
+        self.assertEqual(target, "a")
+        self.assertIs(confirmed["bounded_fix_only"], True)  # AC-CC08-11
+
+        request = graph._request_for_run(run_a, self.base_commit, (confirmed,))
+        self.assertIs(request.bounded_fix_only, True)
+        other_request = graph._request_for_run(run_b, self.base_commit, ())
+        self.assertIs(other_request.bounded_fix_only, False)
+
+        # A second unseal against max_structural_decisions == 1 raises
+        # BudgetError, which _resolve_escalations turns into a block rather
+        # than an uncaught exception.
+        record2 = self._escalated_record(
+            "consumer.py:needs-producer-2", ["producer.py"],
+        )
+        outcome2 = FeatureRunOutcome(
+            "succeeded", "b-commit-2",
+            evidence={"review_fix": {"escalated_findings": [record2]}},
+        )
+        disposition2 = graph._resolve_escalations(run_b, outcome2, {"a": "a-commit"}, audit)
+        self.assertIsNotNone(disposition2.budget_error)
+        self.assertIn("structural recovery allowance exhausted", disposition2.budget_error)
+
+    def test_failed_launch_and_non_first_terminal_preserve_escalation_disposition(
+        self,
+    ) -> None:
+        """A confirmed unseal must still surface through escalation.json when
+        the triggering launch's own outcome is "failed" (not "blocked" or
+        "succeeded"), and it must not be discarded when an unrelated sibling
+        terminalizes first within the same ready-set attempt."""
+
+        registration = self._chain_registration(
+            logical_id="failed-terminal-escalation",
+            automatic_recovery={
+                "protocol": "plan-graph-automatic-recovery/1",
+                "allowed_actions": ["transfer_ownership"],
+                "max_extra_node_launches": 0, "max_structural_decisions": 1,
+            },
+        )
+        judge = _RecordingJudge(
+            identity="judge-1", verdict="confirm",
+            rationale="a's file is a genuine cross-node dependency",
+        )
+        record = self._escalated_record("consumer.py:needs-producer", ["producer.py"])
+
+        def launcher(request):
+            if request.run.id == "a":
+                return FeatureRunOutcome("succeeded", "a-commit")
+            if request.run.id == "d":
+                # An unrelated sibling failure with no escalation of its
+                # own -- terminalizing first must not bury b's escalation.
+                return FeatureRunOutcome("failed", evidence={"error": "unrelated"})
+            # "b": a *failed* launch (not "blocked") that also escalated a
+            # finding requiring producer.py, owned by the already-sealed
+            # "a" -- and it is admitted concurrently with "d" so it
+            # terminalizes second.
+            time.sleep(0.05)
+            return FeatureRunOutcome(
+                "failed",
+                evidence={"review_fix": {"escalated_findings": [record]}},
+            )
+
+        graph = self.graph(
+            launcher, registration=registration, escalation_judge=judge,
+            max_parallelism=2,
+        )
+        result = graph.run()
+
+        self.assertEqual(result.status, "blocked")
+        self.assertEqual(len(judge.calls), 1)
+
+        escalation_path = self.root / "runs" / graph.graph_run_id / "escalation.json"
+        self.assertTrue(
+            escalation_path.exists(),
+            "a failed (non-blocked) launch's confirmed unseal must still "
+            "produce escalation.json",
+        )
+        escalation = json.loads(escalation_path.read_text(encoding="utf-8"))
+        self.assertEqual(len(escalation["escalations"]), 1)
+        self.assertEqual(escalation["escalations"][0]["finding_key"], record["key"])
+        self.assertEqual(
+            escalation["resume_directive_template"]["retry_frontier"], ["a", "b"],
+        )
+
+    def test_every_confirmed_unseal_in_one_launch_resolves_in_one_attempt(self) -> None:
+        """Two sealed owners, one launch, one multi-node frontier.
+
+        The first implementation returned after a single confirmed unseal,
+        on the reasoning that only one retry frontier could describe an
+        attempt's block.  ``ee6ee25`` removed that premise -- the recovery
+        path accepts a frontier of any width -- and serialising unseals is
+        expensive: each extra attempt relaunches the escalating node, its
+        owner, and every transitive dependent the cascade invalidates.
+        """
+
+        registration = self._chain_registration(
+            logical_id="confirm-two-sealed",
+            automatic_recovery={
+                "protocol": "plan-graph-automatic-recovery/1",
+                "allowed_actions": ["transfer_ownership"],
+                "max_extra_node_launches": 0, "max_structural_decisions": 2,
+            },
+        )
+        judge = _RecordingJudge(
+            identity="judge-1", verdict="confirm", rationale="both are real",
+        )
+        graph = self.graph(
+            lambda request: FeatureRunOutcome("failed"),
+            registration=registration, escalation_judge=judge,
+        )
+        audit = graph._audit_for_run()
+        run_b = next(run for run in graph.plan.runs if run.id == "b")
+        outcome = FeatureRunOutcome(
+            "succeeded", "b-commit",
+            evidence={"review_fix": {"escalated_findings": [
+                self._escalated_record("consumer.py:needs-producer", ["producer.py"]),
+                self._escalated_record("consumer.py:needs-sibling", ["sibling.py"]),
+            ]}},
+        )
+        before = graph.budget.path.read_text(encoding="utf-8").splitlines()
+
+        disposition = graph._resolve_escalations(
+            run_b, outcome, {"a": "a-commit", "d": "d-commit"}, audit
+        )
+
+        after = graph.budget.path.read_text(encoding="utf-8").splitlines()
+        events = [json.loads(line) for line in after[len(before):]]
+        self.assertEqual(
+            [event["event"] for event in events],
+            ["recovery_decision", "obligation_transferred"] * 2,
+            "each unseal must still spend exactly one transfer_ownership decision",
+        )
+        self.assertEqual(
+            sorted(node_id for node_id, _ in disposition.advances), ["a", "d"]
+        )
+        self.assertEqual(
+            [item["finding_key"] for item in disposition.escalations_payload],
+            ["consumer.py:needs-producer", "consumer.py:needs-sibling"],
+        )
+        # Plan-declaration order is a, d, b -- both owners and the escalating
+        # node, in one frontier rather than one attempt apiece.
+        self.assertEqual(disposition.retry_frontier_prefix, ("a", "d", "b"))
+        for _, record in disposition.advances:
+            self.assertTrue(record["bounded_fix_only"])
+
+    def test_queued_owner_injections_do_not_stop_the_pass(self) -> None:
+        """A queued injection blocks nothing, so it must not end the pass.
+
+        It writes an obligation, spends no authority and needs no frontier.
+        Returning after the first one dropped every later escalation of the
+        same launch, recovering it only when the escalating node relaunched
+        and rediscovered it -- a whole graph attempt to deliver a record the
+        controller already had in hand.
+        """
+
+        registration = self._chain_registration(logical_id="confirm-two-queued")
+        judge = _RecordingJudge(
+            identity="judge-1", verdict="confirm", rationale="both are real",
+        )
+        graph = self.graph(
+            lambda request: FeatureRunOutcome("failed"),
+            registration=registration, escalation_judge=judge,
+        )
+        audit = graph._audit_for_run()
+        run_b = next(run for run in graph.plan.runs if run.id == "b")
+        outcome = FeatureRunOutcome(
+            "succeeded", "b-commit",
+            evidence={"review_fix": {"escalated_findings": [
+                self._escalated_record("consumer.py:needs-producer", ["producer.py"]),
+                self._escalated_record("consumer.py:needs-sibling", ["sibling.py"]),
+            ]}},
+        )
+        before = graph.budget.path.read_text(encoding="utf-8").splitlines()
+
+        disposition = graph._resolve_escalations(run_b, outcome, {}, audit)
+
+        self.assertEqual(
+            sorted(node_id for node_id, _ in disposition.advances), ["a", "d"]
+        )
+        for _, record in disposition.advances:
+            self.assertFalse(record["bounded_fix_only"])
+        self.assertEqual(disposition.retry_frontier_prefix, ())
+        self.assertEqual(
+            graph.budget.path.read_text(encoding="utf-8").splitlines(), before,
+            "a queued injection must spend no structural authority",
+        )
+
+    def test_second_unseal_against_exhausted_budget_blocks_with_required_decision(
+        self,
+    ) -> None:
+        """AC-CC08-10's exhaustion clause, proven through a real block on a
+        resumed attempt rather than only on the ``_EscalationDisposition``
+        object: the structural allowance is shared across attempts by the
+        plan lineage, so a first attempt's unseal spends it and a resumed
+        attempt's second unseal must hit the ordinary graph-blocking path
+        with ``decision_request.required is True``."""
+
+        registration = self._chain_registration(
+            logical_id="confirm-sealed-exhausted",
+            automatic_recovery={
+                "protocol": "plan-graph-automatic-recovery/1",
+                "allowed_actions": ["transfer_ownership"],
+                "max_extra_node_launches": 0, "max_structural_decisions": 1,
+            },
+        )
+        judge = _RecordingJudge(
+            identity="judge-1", verdict="confirm",
+            rationale="a's file is a genuine cross-node dependency",
+        )
+        record1 = self._escalated_record("consumer.py:needs-producer-1", ["producer.py"])
+
+        def launcher1(request):
+            if request.run.id == "b":
+                return FeatureRunOutcome(
+                    "succeeded", "b-commit-1",
+                    evidence={"review_fix": {"escalated_findings": [record1]}},
+                )
+            return FeatureRunOutcome("succeeded", f"{request.run.id}-commit-1")
+
+        graph1 = self.graph(launcher1, registration=registration, escalation_judge=judge)
+        result1 = graph1.run()
+        self.assertEqual(result1.status, "blocked")
+        self.assertEqual(len(judge.calls), 1)
+
+        checkpoint_state = json.loads(
+            (self.root / "runs" / graph1.graph_run_id / "checkpoint.json")
+            .read_text(encoding="utf-8")
+        )["state"]
+        blocker_ref = checkpoint_state["block_escalation_ref"]
+
+        record2 = self._escalated_record("consumer.py:needs-producer-2", ["producer.py"])
+
+        def launcher2(request):
+            if request.run.id == "b":
+                evidence = {"review_fix": {"escalated_findings": [record2]}}
+                commit = "b-commit-2"
+            else:
+                evidence = {}
+                commit = f"{request.run.id}-commit-2"
+            return FeatureRunOutcome(
+                "succeeded", commit, evidence=evidence,
+                plan_graph_id=request.plan_graph_id, plan_node_id=request.plan_node_id,
+                feature_run_id=request.feature_run_id, run_dir=str(request.run_dir),
+            )
+
+        graph2 = PlanGraph.resume(
+            self.repository, registration, launcher2,
+            run_root=self.root / "runs",
+            directive=RepairResumeDirective(
+                None, graph1.graph_run_id, ("a", "b"), blocker_ref,
+            ),
+            escalation_judge=judge,
+        )
+        result2 = graph2.run()
+
+        self.assertEqual(result2.status, "blocked")
+        self.assertEqual(len(judge.calls), 2)
+        escalation2_path = self.root / "runs" / graph2.graph_run_id / "escalation.json"
+        self.assertTrue(escalation2_path.exists())
+        escalation2 = json.loads(escalation2_path.read_text(encoding="utf-8"))
+        self.assertIn("structural recovery allowance exhausted", escalation2["reason"])
+        self.assertIs(escalation2["decision_request"]["required"], True)
+
+    # -- AC-CC08-12 / AC-CC08-13 / AC-CC08-15: full-run unseal, artifact,
+    #    journal order, and cascade -----------------------------------------
+
+    def test_unseal_produces_valid_artifact_journal_order_and_cascade(self) -> None:
+        registration = self._chain_registration(
+            logical_id="unseal-integration",
+            automatic_recovery={
+                "protocol": "plan-graph-automatic-recovery/1",
+                "allowed_actions": ["transfer_ownership"],
+                "max_extra_node_launches": 0, "max_structural_decisions": 1,
+            },
+        )
+        judge = _RecordingJudge(
+            identity="judge-1", verdict="confirm",
+            rationale="a's file is a genuine cross-node dependency",
+        )
+        record = self._escalated_record("consumer.py:needs-producer", ["producer.py"])
+
+        def launcher(request):
+            if request.run.id == "b":
+                return FeatureRunOutcome(
+                    "succeeded", "b-commit",
+                    evidence={"review_fix": {"escalated_findings": [record]}},
+                )
+            return FeatureRunOutcome("succeeded", f"{request.run.id}-commit")
+
+        graph = self.graph(launcher, registration=registration, escalation_judge=judge)
+        result = graph.run()
+
+        self.assertEqual(result.status, "blocked")
+        self.assertEqual(result.failed_run_id, "b")
+        self.assertIn("a", result.completed)
+        self.assertIn("d", result.completed)
+        self.assertNotIn("b", result.completed)
+        self.assertEqual(len(judge.calls), 1)
+
+        escalation_path = self.root / "runs" / graph.graph_run_id / "escalation.json"
+        escalation = json.loads(escalation_path.read_text(encoding="utf-8"))
+        schema = json.loads(
+            (Path(__file__).resolve().parents[1] / "schemas" / "block-escalation.json")
+            .read_text(encoding="utf-8")
+        )
+        _schema_assert(self, escalation, schema)  # AC-CC08-12
+
+        self.assertEqual(len(escalation["escalations"]), 1)
+        item = escalation["escalations"][0]
+        self.assertEqual(item["finding_key"], record["key"])
+        self.assertEqual(item["origin_node"], "b")
+        self.assertEqual(item["owner_node"], "a")
+        self.assertEqual(item["required_paths"], ["producer.py"])
+        self.assertRegex(item["judgment_ref"], r"^artifact:sha256:[0-9a-f]{64}$")
+        self.assertEqual(
+            escalation["resume_directive_template"]["retry_frontier"], ["a", "b"],
+        )
+
+        judgment_schema = json.loads(
+            (Path(__file__).resolve().parents[1] / "schemas"
+             / "plan-graph-escalation-judgment.json").read_text(encoding="utf-8")
+        )
+        audit = graph._audit_for_run()
+        judgment_artifact = next(
+            path for path in (self.root / "runs" / graph.graph_run_id / "artifacts").glob("*.json")
+            if "escalation-judgment" in path.name
+        )
+        _schema_assert(self, json.loads(judgment_artifact.read_text(encoding="utf-8")), judgment_schema)
+
+        # AC-CC08-13: journal order and finding_key identity.
+        events = [
+            json.loads(line)
+            for line in audit.journal.events_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        escalation_events = [
+            event for event in events
+            if event["event_type"] in {
+                "plan_graph_finding_escalated",
+                "plan_graph_escalation_judged",
+                "plan_graph_node_unsealed",
+            }
+        ]
+        self.assertEqual(
+            [event["event_type"] for event in escalation_events],
+            [
+                "plan_graph_finding_escalated",
+                "plan_graph_escalation_judged",
+                "plan_graph_node_unsealed",
+            ],
+        )
+        self.assertTrue(
+            all(event["payload"]["finding_key"] == record["key"] for event in escalation_events)
+        )
+
+        # No new retry-budget-ledger/1 event kind: re-opening the lineage's
+        # ledger and folding it must raise nothing.
+        reopened_ledger = RetryBudgetLedger(graph.run_root, registration.plan_lineage_id)
+        with reopened_ledger._locked(shared=True) as handle:
+            reopened_ledger._fold(handle)
+
+        # AC-CC08-15: resuming with retry_frontier == [owner, escalating]
+        # invalidates every transitive dependent of the owner "a", including
+        # "d" -- a sibling of "b" that already sealed successfully this
+        # attempt and has nothing to do with the escalation, swept in solely
+        # because it depends on the unsealed owner.
+        checkpoint_state = json.loads(
+            (self.root / "runs" / graph.graph_run_id / "checkpoint.json")
+            .read_text(encoding="utf-8")
+        )["state"]
+        blocker_ref = checkpoint_state["block_escalation_ref"]
+        selection = audit.repair_selection(
+            retry_frontier=("a", "b"), blocker_evidence_ref=blocker_ref,
+        )
+        self.assertEqual(set(selection["invalidated_node_ids"]), {"a", "b", "d"})
+        self.assertNotIn("d", selection["reused_completed"])
+        self.assertNotIn("a", selection["reused_completed"])
+        self.assertNotIn("b", selection["reused_completed"])
+
+    # -- AC-CC08-14: unrouted escalation blocks for operator assignment -----
+
+    def test_zero_owner_escalation_blocks_for_operator_assignment(self) -> None:
+        registration = self._chain_registration(logical_id="unrouted-zero")
+        judge = _RaisingJudge()
+        record = self._escalated_record(
+            "consumer.py:orphan", ["totally/unclaimed/path.py"],
+        )
+
+        def launcher(request):
+            if request.run.id == "b":
+                return FeatureRunOutcome(
+                    "succeeded", "b-commit",
+                    evidence={"review_fix": {"escalated_findings": [record]}},
+                )
+            return FeatureRunOutcome("succeeded", f"{request.run.id}-commit")
+
+        graph = self.graph(launcher, registration=registration, escalation_judge=judge)
+        before = graph.budget.deviation_records()
+        result = graph.run()
+        after = graph.budget.deviation_records()
+
+        self.assertEqual(result.status, "blocked")
+        self.assertEqual(judge.calls, 0)
+        self.assertEqual(after, before)
+
+        escalation = json.loads(
+            (self.root / "runs" / graph.graph_run_id / "escalation.json")
+            .read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            escalation["decision_request"]["requested_action"], "assign_finding_owner",
+        )
+        self.assertEqual(escalation["decision_request"]["candidate_actions"], [])
+
+    def test_ambiguous_owner_escalation_lists_candidates(self) -> None:
+        payload = dict(self.payload)
+        payload["runs"] = [
+            {
+                "id": "a", "objective": "Build A", "plan_sections": ["1"],
+                "criteria": ["AC-1"], "depends_on": [],
+                "verification_argv": ["python3", "-m", "unittest"],
+                "allowed_paths": ["shared/thing.py"],
+            },
+            {
+                "id": "z", "objective": "Build Z", "plan_sections": ["1"],
+                "criteria": ["AC-1"], "depends_on": [],
+                "verification_argv": ["python3", "-m", "unittest"],
+                "allowed_paths": ["shared/thing.py"],
+            },
+            {
+                "id": "b", "objective": "Build B", "plan_sections": ["2"],
+                "criteria": ["AC-2"], "depends_on": ["a", "z"],
+                "verification_argv": ["python3", "-m", "unittest"],
+                "allowed_paths": ["consumer.py"],
+            },
+        ]
+        registration = register_plan_graph(
+            repository=self.repository, logical_graph_id="ambiguous-owner",
+            decomposition=payload,
+        )
+        judge = _RaisingJudge()
+        record = self._escalated_record("consumer.py:ambiguous", ["shared/thing.py"])
+
+        def launcher(request):
+            if request.run.id == "b":
+                return FeatureRunOutcome(
+                    "succeeded", "b-commit",
+                    evidence={"review_fix": {"escalated_findings": [record]}},
+                )
+            return FeatureRunOutcome("succeeded", f"{request.run.id}-commit")
+
+        graph = self.graph(launcher, registration=registration, escalation_judge=judge)
+        result = graph.run()
+
+        self.assertEqual(result.status, "blocked")
+        self.assertEqual(judge.calls, 0)
+        escalation = json.loads(
+            (self.root / "runs" / graph.graph_run_id / "escalation.json")
+            .read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            escalation["decision_request"]["requested_action"], "assign_finding_owner",
+        )
+        self.assertEqual(
+            sorted(escalation["decision_request"]["candidate_actions"]), ["a", "z"],
+        )
+
+    # -- Default-off byte identity ------------------------------------------
+
+    def test_escalation_judge_none_is_a_pure_no_op(self) -> None:
+        """AC-CC08-1's contract at this layer: escalation_judge=None (the
+        default) never routes, judges, or spends authority, regardless of
+        what evidence a child reports."""
+
+        registration = self._chain_registration(logical_id="feature-off")
+        record = self._escalated_record("consumer.py:needs-producer", ["producer.py"])
+        graph = self.graph(
+            lambda request: FeatureRunOutcome("failed"), registration=registration,
+        )
+        audit = graph._audit_for_run()
+        run_b = next(run for run in graph.plan.runs if run.id == "b")
+        outcome = FeatureRunOutcome(
+            "succeeded", "b-commit",
+            evidence={"review_fix": {"escalated_findings": [record]}},
+        )
+
+        disposition = graph._resolve_escalations(run_b, outcome, {"a": "a-commit"}, audit)
+
+        self.assertEqual(disposition.advances, ())
+        self.assertEqual(disposition.escalations_payload, ())
+        self.assertIsNone(disposition.unrouted)
+        self.assertIsNone(disposition.budget_error)
+        self.assertEqual(disposition.retry_frontier_prefix, ())
 
 
 class _RecordingGateAudit:

@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PlanGraph escalation judgment",
+  "description": "The one genuinely new versioned record ADR 0007 / CC-08 adds: an EscalationJudge's return value for one escalated review finding. Everything else the escalation packet carries reuses existing protocols (the review-ledger finding record and plan-graph-block-escalation/1) rather than minting a second schema.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["protocol", "verdict", "rationale", "evidence_refs"],
+  "properties": {
+    "protocol": {"const": "plan-graph-escalation-judgment/1"},
+    "verdict": {
+      "enum": ["confirm", "reject"],
+      "description": "confirm routes the finding to its resolved owner (injecting into a queued node's obligations, or unsealing a completed one); reject writes the finding back to the escalating node's own obligations with the rationale in outcome_reason."
+    },
+    "rationale": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Carried into outcome_reason on reject, and into the confirmed obligation record's outcome_reason on confirm."
+    },
+    "evidence_refs": {
+      "type": "array",
+      "items": {"type": "string"}
+    }
+  }
+}
