@@ -13,14 +13,19 @@ from pathlib import Path, PurePosixPath
 import subprocess
 import tempfile
 import threading
-from typing import Callable, Mapping, Sequence
+from typing import Callable, Mapping, Protocol, Sequence
 from uuid import uuid4
 
 from harness_labs.core.audit import AuditError
-from harness_labs.core.git_transaction import owner_for_path
+from harness_labs.core.git_transaction import owner_for_path, paths_outside_scope
 from harness_labs.plangraph.plan_graph_audit import PlanGraphAudit, validate_plan_graph_id
 from harness_labs.plangraph.plan_graph_budget import BudgetError, RetryBudgetLedger, gate_digest
-from harness_labs.plangraph.plan_graph_authority import AutomaticRecoveryAuthority, RecoveryAuthorityError
+from harness_labs.plangraph.plan_graph_authority import (
+    AutomaticRecoveryAuthority,
+    RecoveryAuthorityError,
+    digest as recovery_decision_digest,
+    DECISION_PROTOCOL as RECOVERY_DECISION_PROTOCOL,
+)
 from harness_labs.plangraph.plan_graph_join import (
     JoinConflictResolutionStore,
     JoinResolutionError,
@@ -40,6 +45,11 @@ REGISTRATION_PROTOCOL = "plan-graph-registration/2"
 RECOVERY_REGISTRATION_PROTOCOL = "plan-graph-registration/3"
 LEGACY_PLAN_PROTOCOL = "component-plan/0"
 FEATURE_RUN_REQUEST_PROTOCOL = "plan-graph-feature-run-request/1"
+# The one genuinely new versioned record CC-08 adds (ADR 0007 [cc08-packet]):
+# an EscalationJudge's return value.  Everything else the escalation packet
+# carries reuses existing protocols -- the review-ledger finding record and
+# plan-graph-block-escalation/1 -- rather than minting a second schema.
+ESCALATION_JUDGMENT_PROTOCOL = "plan-graph-escalation-judgment/1"
 # Opt-in switch for continuing to admit independent ready nodes after one
 # node reaches a terminal outcome.  Set to exactly "1" to enable without
 # threading the constructor flag through a runner script.
@@ -513,6 +523,10 @@ class FeatureRunRequest:
     finding_obligations: tuple[Mapping[str, object], ...] = ()
     finding_transfer_targets: Mapping[str, str] | None = None
     inherited_ledger_frozen: bool = False
+    # True only for the node an in-graph escalation unseal reopened this
+    # attempt.  False for every other node launched in the same attempt
+    # (AC-CC08-11).  See ADR 0007 / CC-08 [cc08-disposition].
+    bounded_fix_only: bool = False
     verification_gate_slot: "GateSlotHold | None" = None
 
     def __post_init__(self) -> None:
@@ -520,6 +534,8 @@ class FeatureRunRequest:
             raise ValueError("unsupported PlanGraph FeatureRun request protocol")
         if not isinstance(self.inherited_ledger_frozen, bool):
             raise ValueError("inherited_ledger_frozen must be a boolean")
+        if not isinstance(self.bounded_fix_only, bool):
+            raise ValueError("bounded_fix_only must be a boolean")
 
 
 @dataclass(frozen=True)
@@ -543,6 +559,32 @@ class _SealDecision:
     evidence: object | None = None
     evidence_ref: str | None = None
     finding_obligations: "dict[str, list[Mapping[str, object]]] | None" = None
+    escalation_disposition: "_EscalationDisposition | None" = None
+
+
+@dataclass(frozen=True)
+class _EscalationDisposition:
+    """What :meth:`PlanGraph._resolve_escalations` decided for one launch.
+
+    ``advances`` are (target_node_id, obligation_record) pairs to fold into
+    ``finding_obligations`` -- a reject write-back targets the escalating
+    node itself, a confirm targets the resolved owner. ``escalations_payload``
+    feeds the block-escalation artifact's optional ``escalations`` array.
+    ``unrouted`` (zero or ambiguous owners), ``budget_error`` (structural
+    recovery allowance exhausted on unseal), and ``already_rejected`` (this
+    exact finding_key was already judged and rejected earlier in this graph
+    attempt) each force this attempt to block regardless of the launch's own
+    outcome. ``retry_frontier_prefix`` is non-empty only when a confirm
+    unsealed a completed owner, and is ``[owner, escalating_node]`` in
+    plan-declaration order.
+    """
+
+    advances: tuple[tuple[str, Mapping[str, object]], ...] = ()
+    escalations_payload: tuple[dict[str, object], ...] = ()
+    retry_frontier_prefix: tuple[str, ...] = ()
+    unrouted: Mapping[str, object] | None = None
+    budget_error: str | None = None
+    already_rejected: Mapping[str, object] | None = None
 
 
 @dataclass(frozen=True)
@@ -589,6 +631,30 @@ class RepairResumeDirective:
 FeatureRunLauncher = Callable[[FeatureRunRequest], FeatureRunOutcome]
 FunctionalityTestRunner = Callable[[FunctionalityCommand | str, str], None]
 ApprovalValidator = Callable[[], ApprovalEvidence]
+
+
+class EscalationJudge(Protocol):
+    """A coordinator seat or fresh session independent of a finding's reviewer.
+
+    ``identity`` must be stable and comparable to the escalating node's id --
+    the only reviewer identity a review-ledger finding record carries is the
+    node whose review-fix loop raised it (``ReviewLedger._new_record`` has no
+    reviewer field of its own). :meth:`PlanGraph._resolve_escalations`
+    refuses to call ``__call__`` at all when ``identity`` equals the
+    escalating node's id (AC-CC08-7): the independence check is a hard
+    refusal in code, not prompt guidance.
+
+    ``__call__`` receives the packet (the verbatim review-ledger finding
+    record plus routing context) and must return a mapping matching
+    ``schemas/plan-graph-escalation-judgment.json``
+    (``plan-graph-escalation-judgment/1``): ``protocol``, ``verdict`` in
+    ``{"confirm", "reject"}``, a non-empty ``rationale``, and
+    ``evidence_refs``.
+    """
+
+    identity: str
+
+    def __call__(self, packet: Mapping[str, object]) -> Mapping[str, object]: ...
 
 
 class SubprocessFeatureRunLauncher:
@@ -650,6 +716,7 @@ class SubprocessFeatureRunLauncher:
                 request.finding_transfer_targets or {}
             ),
             "inherited_ledger_frozen": request.inherited_ledger_frozen,
+            "bounded_fix_only": request.bounded_fix_only,
         }
         try:
             completed = subprocess.run(
@@ -1160,6 +1227,7 @@ class PlanGraph:
         on_block_argv: Sequence[str] | None = None,
         max_parallelism: int = 1,
         continue_independent_after_block: bool = False,
+        escalation_judge: "EscalationJudge | None" = None,
     ) -> None:
         if run_root is None:
             raise PlanGraphError("run_root is required for audited PlanGraph execution")
@@ -1230,6 +1298,17 @@ class PlanGraph:
         )
         self.on_block_argv = tuple(on_block_argv or ())
         self.on_block_hook: dict[str, object] | None = None
+        # Off by default (AC-CC08-1/rollout): None means every escalation
+        # code path in _resolve_escalations short-circuits before touching
+        # routing, judgment, or authority, so behaviour is byte-identical to
+        # before CC-08 existed. When set, its ``identity`` must be a string
+        # so the reviewer-independence refusal (AC-CC08-7) has something
+        # comparable to the escalating node's id.
+        if escalation_judge is not None and not isinstance(
+            getattr(escalation_judge, "identity", None), str
+        ):
+            raise PlanGraphError("escalation_judge must expose a string identity")
+        self.escalation_judge = escalation_judge
         self.join_resolutions = JoinConflictResolutionStore(
             self.run_root, registration.plan_lineage_id, self.repository
         )
@@ -1529,6 +1608,7 @@ class PlanGraph:
                     reason=decision.reason,
                     evidence=decision.evidence,
                     evidence_ref=decision.evidence_ref,
+                    escalation_disposition=decision.escalation_disposition,
                 )
             audit.finalize(
                 decision.result.status, self._result_payload(decision.result)
@@ -1565,32 +1645,87 @@ class PlanGraph:
                 )
             except BudgetError as exc:
                 raise PlanGraphError(str(exc)) from exc
+        # Read regardless of this launch's own outcome: a non-required
+        # escalated finding can sit alongside an otherwise-succeeded launch,
+        # and a required one can be the very reason this launch is blocked.
+        # A no-op with escalation_judge=None (AC-CC08-1).
+        escalation = self._resolve_escalations(run, outcome, completed, audit)
         if outcome.status != "succeeded":
-            self.budget.completed(reservation, outcome.status if outcome.status == "blocked" else "failed")
+            # An unrouted escalation, an exhausted structural allowance, or a
+            # confirmed unseal all force this attempt to stop here even
+            # though this launch's own outcome was merely "failed" rather
+            # than "blocked": the spent transfer_ownership decision and the
+            # owner's obligation must still surface through escalation.json,
+            # exactly as the succeeded-outcome branch below already forces
+            # for a launch that completed cleanly.
+            escalation_forces_block = bool(
+                escalation.unrouted is not None
+                or escalation.budget_error is not None
+                or escalation.retry_frontier_prefix
+                or escalation.already_rejected is not None
+            )
+            status = (
+                "blocked" if (outcome.status == "blocked" or escalation_forces_block)
+                else "failed"
+            )
+            self.budget.completed(reservation, status)
             result = self._with_deviation_records(PlanGraphResult(
-                status=outcome.status if outcome.status == "blocked" else "failed",
+                status=status,
                 candidate_commit=None,
                 completed=dict(completed),
                 failed_run_id=run.id,
             ))
             carried = self._carried_finding_obligations(run, outcome, finding_obligations)
-            if carried is not None:
+            merged = carried
+            if escalation.advances:
+                source = carried if carried is not None else finding_obligations
+                base = {
+                    node_id: [dict(item) for item in items]
+                    for node_id, items in source.items()
+                    if node_id != run.id or carried is not None
+                }
+                merged = self._apply_escalation_advances(base, escalation.advances)
+            if merged is not None:
                 # A ready-set peer that seals after this failure rewrites the
                 # whole obligations state from its in-memory copy, so adopt
                 # the carry-forward here or the next sibling erases it.
                 finding_obligations.clear()
-                finding_obligations.update(carried)
+                finding_obligations.update(merged)
             audit.node_failed(
                 run.id,
-                result.status,
+                status,
                 outcome.evidence,
-                finding_obligations=carried,
+                finding_obligations=merged,
                 scope_screening=self._scope_screening(outcome),
             )
-            if result.status == "blocked":
+            escalation_disposition = (
+                escalation
+                if (escalation.escalations_payload or escalation.unrouted
+                    or escalation.budget_error or escalation.already_rejected)
+                else None
+            )
+            if status == "blocked":
+                if outcome.status == "blocked":
+                    reason = "FeatureRun reported blocked"
+                elif escalation.unrouted is not None:
+                    reason = (
+                        f"escalated finding {escalation.unrouted['finding_key']} "
+                        f"resolves to {len(escalation.unrouted['candidate_owner_ids'])} "
+                        "candidate owners"
+                    )
+                elif escalation.budget_error is not None:
+                    reason = escalation.budget_error
+                elif escalation.already_rejected is not None:
+                    reason = (
+                        f"escalated finding {escalation.already_rejected['finding_key']} "
+                        "was already rejected by the escalation judge"
+                    )
+                else:
+                    reason = "in-graph escalation unsealed a completed node"
                 return _SealDecision(
                     "blocked", result=result,
-                    reason="FeatureRun reported blocked", evidence=outcome.evidence,
+                    reason=reason, evidence=outcome.evidence,
+                    escalation_disposition=escalation_disposition,
                 )
             return _SealDecision("failed", result=result)
         if not outcome.candidate_commit:
@@ -1610,6 +1745,7 @@ class PlanGraph:
                 outcome,
                 finding_obligations,
                 completed,
+                escalation_advances=escalation.advances,
             )
         except PlanGraphError as exc:
             self.budget.completed(reservation, "blocked")
@@ -1622,6 +1758,47 @@ class PlanGraph:
             ))
             return _SealDecision(
                 "blocked", result=result, reason=str(exc), evidence_ref=conflict_ref
+            )
+        if (
+            escalation.unrouted is not None
+            or escalation.budget_error is not None
+            or escalation.retry_frontier_prefix
+            or escalation.already_rejected is not None
+        ):
+            # An unresolved escalation, an exhausted structural allowance, a
+            # confirmed unseal, or an already-rejected repeat all force this
+            # attempt to stop here even though run.id's own launch succeeded:
+            # a sealed owner cannot be relaunched in place, and an unrouted,
+            # budget-exhausted, or already-rejected finding needs an operator
+            # decision this attempt cannot make.
+            self.budget.completed(reservation, "blocked")
+            if escalation.unrouted is not None:
+                reason = (
+                    f"escalated finding {escalation.unrouted['finding_key']} "
+                    f"resolves to {len(escalation.unrouted['candidate_owner_ids'])} "
+                    "candidate owners"
+                )
+            elif escalation.budget_error is not None:
+                reason = escalation.budget_error
+            elif escalation.already_rejected is not None:
+                reason = (
+                    f"escalated finding {escalation.already_rejected['finding_key']} "
+                    "was already rejected by the escalation judge"
+                )
+            else:
+                reason = "in-graph escalation unsealed a completed node"
+            conflict_ref = audit.transfer_conflict_blocked(
+                run.id, reason, finding_obligations=finding_obligations,
+            )
+            result = self._with_deviation_records(PlanGraphResult(
+                status="blocked",
+                candidate_commit=outcome.candidate_commit,
+                completed=dict(completed),
+                failed_run_id=run.id,
+            ))
+            return _SealDecision(
+                "blocked", result=result, reason=reason, evidence_ref=conflict_ref,
+                escalation_disposition=escalation,
             )
         completed[run.id] = outcome.candidate_commit
         self.budget.completed(reservation, "succeeded")
@@ -1841,6 +2018,17 @@ class PlanGraph:
                     withheld.add(node_id)
                     if terminal is None:
                         terminal = decision
+                    elif (
+                        terminal.escalation_disposition is None
+                        and decision.escalation_disposition is not None
+                    ):
+                        # An unrelated sibling can terminalize first (e.g. an
+                        # ordinary product failure) and would otherwise bury
+                        # a later sibling's escalation -- a spent
+                        # transfer_ownership decision or an unrouted finding
+                        # -- that this attempt must still surface through
+                        # escalation.json.
+                        terminal = decision
         if deferred_error is not None and terminal is None:
             raise deferred_error
         if terminal is not None:
@@ -1851,6 +2039,7 @@ class PlanGraph:
                     reason=terminal.reason or "FeatureRun reported blocked",
                     evidence=terminal.evidence,
                     evidence_ref=terminal.evidence_ref,
+                    escalation_disposition=terminal.escalation_disposition,
                 )
             audit.finalize(result.status, self._result_payload(result))
             return result
@@ -2183,6 +2372,14 @@ class PlanGraph:
                 str(item.get("origin_node", "")) != run.id
                 for item in finding_obligations
             ),
+            # Only an obligation record written for an unsealed owner carries
+            # this (AC-CC08-11); every other node's obligations never set it,
+            # so this is False for every node but the one this attempt
+            # unsealed.
+            bounded_fix_only=any(
+                bool(item.get("bounded_fix_only", False))
+                for item in finding_obligations
+            ),
             verification_gate_slot=verification_gate_slot,
         )
 
@@ -2254,6 +2451,8 @@ class PlanGraph:
         outcome: FeatureRunOutcome,
         current: Mapping[str, list[Mapping[str, object]]],
         completed: Mapping[str, str],
+        *,
+        escalation_advances: Sequence[tuple[str, Mapping[str, object]]] = (),
     ) -> dict[str, list[Mapping[str, object]]]:
         pending = {
             node_id: [dict(item) for item in findings]
@@ -2293,6 +2492,27 @@ class PlanGraph:
                     f"duplicate transferred finding {key} for node {target}"
                 )
             destination.append(dict(finding))
+        # Escalation-only relaxation: a confirmed escalation may target a
+        # *completed* owner to unseal it, and a rejected escalation targets
+        # the escalating node (``run.id``) itself to hand the finding back.
+        # Both are pre-validated by _owner_for_paths and the escalation
+        # judge in _resolve_escalations, never by the dependents-only
+        # ``targets`` map above, so the completed/self refusal that guards
+        # ordinary transfers above does not apply to either of them.
+        return self._apply_escalation_advances(pending, escalation_advances)
+
+    @staticmethod
+    def _apply_escalation_advances(
+        pending: dict[str, list[Mapping[str, object]]],
+        advances: Sequence[tuple[str, Mapping[str, object]]],
+    ) -> dict[str, list[Mapping[str, object]]]:
+        for target, record in advances:
+            destination = pending.setdefault(target, [])
+            if any(item.get("key") == record.get("key") for item in destination):
+                raise PlanGraphError(
+                    f"duplicate escalation-routed finding {record.get('key')} for node {target}"
+                )
+            destination.append(dict(record))
         return pending
 
     def _carried_finding_obligations(
@@ -2412,6 +2632,31 @@ class PlanGraph:
             raise PlanGraphError("transferred_findings must be a list of objects")
         return tuple(dict(item) for item in raw)
 
+    @staticmethod
+    def _escalated_findings(
+        outcome: FeatureRunOutcome,
+    ) -> tuple[Mapping[str, object], ...]:
+        """Read the escalated review findings a child reported this launch.
+
+        ``ReviewFixResult.escalated_findings`` (CC08-A) always exists and is
+        empty with ``escalation_enabled=False``, which is why this reader
+        needs no policy flag of its own to stay byte-identical by default
+        (AC-CC08-1): an empty list here is simply a no-op in
+        :meth:`_resolve_escalations`.
+        """
+
+        if not isinstance(outcome.evidence, Mapping):
+            return ()
+        review_fix = outcome.evidence.get("review_fix")
+        if not isinstance(review_fix, Mapping):
+            return ()
+        raw = review_fix.get("escalated_findings", ())
+        if not isinstance(raw, (list, tuple)) or not all(
+            isinstance(item, Mapping) for item in raw
+        ):
+            return ()
+        return tuple(dict(item) for item in raw)
+
     def _transfer_targets_for(self, run: PlanRun) -> dict[str, str]:
         """Resolve each downstream path grant to its nearest unique owner."""
 
@@ -2440,6 +2685,279 @@ class PlanGraph:
             if len(nearest) == 1:
                 targets[path] = next(iter(nearest))
         return targets
+
+    def _deepest_claimants(self, path: str) -> frozenset[str]:
+        """Every node whose grant matches ``path`` at the deepest prefix depth.
+
+        The shared primitive behind both :meth:`_owner_for_path` (which
+        collapses this to a single id or ``None`` on a tie) and
+        :meth:`_candidate_owners_for_paths` (which needs the tied candidates
+        themselves, not just the fact that they tied).
+        """
+
+        matches = [
+            (len(PurePosixPath(grant).parts), run.id)
+            for run in self.plan.runs
+            for grant in run.allowed_paths
+            if not paths_outside_scope((path,), (grant,))
+        ]
+        if not matches:
+            return frozenset()
+        deepest = max(depth for depth, _ in matches)
+        return frozenset(node_id for depth, node_id in matches if depth == deepest)
+
+    def _owner_for_path(self, path: str) -> str | None:
+        """Full-plan longest-prefix owner lookup, predecessors included.
+
+        A separate lookup from :meth:`_transfer_targets_for`'s
+        dependents-only BFS (pinned by existing tests, untouched here): this
+        walks every ``PlanRun.allowed_paths`` in the whole plan regardless of
+        dependency direction, so an escalated finding can route to a node
+        upstream of the one that raised it (AC-CC08-6). A pure lookup over
+        the approved registration's grants -- no judge, no model call.
+        """
+
+        claimants = self._deepest_claimants(path)
+        return next(iter(claimants)) if len(claimants) == 1 else None
+
+    def _owner_for_paths(self, paths: Sequence[str]) -> str | None:
+        """Resolve every required path to one, single, full-plan owner.
+
+        Mirrors the strictness ``_advance_finding_obligations`` already
+        applies to an ordinary transfer's ``required_paths``: the finding
+        routes only when *every* path independently resolves and every
+        resolution agrees. A single unclaimed or ambiguous path makes the
+        whole finding unrouted, not silently partial.
+        """
+
+        owners = {self._owner_for_path(path) for path in paths}
+        if len(owners) == 1 and None not in owners:
+            return next(iter(owners))
+        return None
+
+    def _candidate_owners_for_paths(self, paths: Sequence[str]) -> tuple[str, ...]:
+        """Every distinct claimed owner across ``paths``, for an unrouted block.
+
+        Used only when :meth:`_owner_for_paths` returns ``None``, to report
+        *why*: empty for a wholly unclaimed finding, or the competing ids for
+        an ambiguous one (AC-CC08-14) -- including both sides of an
+        equal-depth tie, which the collapsed :meth:`_owner_for_path` result
+        alone cannot distinguish from "unclaimed".
+        """
+
+        owners: set[str] = set()
+        for path in paths:
+            owners |= self._deepest_claimants(path)
+        return tuple(sorted(owners))
+
+    def _plan_declaration_order(self, node_ids: Sequence[str]) -> tuple[str, ...]:
+        """Order ``node_ids`` (deduplicated) by their position in the plan."""
+
+        order = {run.id: index for index, run in enumerate(self.plan.runs)}
+        return tuple(
+            sorted(dict.fromkeys(node_ids), key=lambda node_id: order[node_id])
+        )
+
+    @staticmethod
+    def _validate_judgment(raw: object) -> dict[str, object]:
+        """Validate one ``EscalationJudge`` return value against
+        ``schemas/plan-graph-escalation-judgment.json``
+        (``plan-graph-escalation-judgment/1``)."""
+
+        if not isinstance(raw, Mapping) or raw.get("protocol") != ESCALATION_JUDGMENT_PROTOCOL:
+            raise PlanGraphError(
+                "escalation judgment must carry protocol "
+                f"{ESCALATION_JUDGMENT_PROTOCOL!r}"
+            )
+        verdict = raw.get("verdict")
+        if verdict not in {"confirm", "reject"}:
+            raise PlanGraphError(
+                "escalation judgment verdict must be 'confirm' or 'reject'"
+            )
+        rationale = raw.get("rationale")
+        if not isinstance(rationale, str) or not rationale.strip():
+            raise PlanGraphError("escalation judgment requires a non-empty rationale")
+        evidence_refs = raw.get("evidence_refs", ())
+        if not isinstance(evidence_refs, (list, tuple)) or not all(
+            isinstance(item, str) for item in evidence_refs
+        ):
+            raise PlanGraphError(
+                "escalation judgment evidence_refs must be a list of strings"
+            )
+        return {
+            "protocol": ESCALATION_JUDGMENT_PROTOCOL,
+            "verdict": verdict,
+            "rationale": rationale,
+            "evidence_refs": list(evidence_refs),
+        }
+
+    def _resolve_escalations(
+        self,
+        run: PlanRun,
+        outcome: FeatureRunOutcome,
+        completed: Mapping[str, str],
+        audit: PlanGraphAudit,
+    ) -> "_EscalationDisposition":
+        """Route, judge, and disposition every finding this launch escalated.
+
+        A pure no-op with ``escalation_judge=None`` -- the default -- so the
+        feature stays byte-identical to before CC-08 existed even when a
+        caller has flipped ``ReviewFixPolicy.escalation_enabled`` on the
+        featurerun layer without wiring a judge here (AC-CC08-1). Processes
+        at most one confirmed unseal per call: unrouted and budget-exhausted
+        outcomes stop immediately (nothing further makes sense to route this
+        launch), and a confirmed unseal returns immediately once its single
+        ``transfer_ownership`` decision is spent, since only one retry
+        frontier can describe this attempt's block.
+        """
+
+        escalated = self._escalated_findings(outcome)
+        if self.escalation_judge is None or not escalated:
+            return _EscalationDisposition()
+        advances: list[tuple[str, Mapping[str, object]]] = []
+        escalations_payload: list[dict[str, object]] = []
+        for record in escalated:
+            key = record.get("key")
+            if not isinstance(key, str) or not key:
+                raise PlanGraphError("escalated finding is missing its key")
+            required_paths = record.get("required_paths")
+            if (
+                not isinstance(required_paths, list)
+                or not required_paths
+                or not all(isinstance(path, str) and path for path in required_paths)
+            ):
+                raise PlanGraphError(
+                    f"escalated finding {key} has invalid required_paths"
+                )
+            owner = self._owner_for_paths(required_paths)
+            if owner is None:
+                # AC-CC08-14: zero or ambiguous owners is not an LLM question.
+                # It escalates to the human operator through the ordinary
+                # block path; no judge is invoked.
+                return _EscalationDisposition(
+                    advances=tuple(advances),
+                    escalations_payload=tuple(escalations_payload),
+                    unrouted={
+                        "finding_key": key,
+                        "candidate_owner_ids": list(
+                            self._candidate_owners_for_paths(required_paths)
+                        ),
+                    },
+                )
+            # A rejected finding rides back to the escalating node as an
+            # ordinary open obligation (AC-CC08-8), and review_fix.py's
+            # ingest-time recognition reopens and re-escalates it with no
+            # memory of the earlier judgment (its own ledger session starts
+            # fresh every launch). This graph attempt's durable journal is
+            # what makes the earlier "no" stick: if this exact finding_key
+            # was already judged and rejected earlier in this attempt, do not
+            # ask the same-or-another judge the same question again -- force
+            # an ordinary operator block instead, the same way an unrouted
+            # finding does, so a reject verdict durably closes the loop
+            # rather than looping the judge forever.
+            if audit.prior_escalation_verdict(key) == "reject":
+                return _EscalationDisposition(
+                    advances=tuple(advances),
+                    escalations_payload=tuple(escalations_payload),
+                    already_rejected={"finding_key": key, "owner_node": owner},
+                )
+            # AC-CC08-7: the reviewer-independence refusal happens before the
+            # judge is ever invoked. The only reviewer identity a review-
+            # ledger finding record carries is the node whose review-fix loop
+            # raised it -- there is no separate reviewer-session field on the
+            # record -- so that is the identity the judge must not share.
+            origin_reviewer_id = run.id
+            if self.escalation_judge.identity == origin_reviewer_id:
+                raise PlanGraphError(
+                    "escalation judge must be independent of the reviewer "
+                    "whose finding is being judged"
+                )
+            audit.record_finding_escalated(
+                run.id, key, owner_node=owner, required_paths=required_paths,
+            )
+            packet = {
+                **dict(record),
+                "origin_node": run.id,
+                "origin_reviewer_id": origin_reviewer_id,
+                "owner_node": owner,
+            }
+            judgment = self._validate_judgment(self.escalation_judge(packet))
+            judgment_ref = audit.record_escalation_judged(run.id, key, judgment)
+            if judgment["verdict"] == "reject":
+                rejected = dict(record)
+                rejected["outcome"] = "open"
+                rejected["outcome_reason"] = judgment["rationale"]
+                rejected["escalation_reason"] = ""
+                # This record rides back to the node whose own launch raised
+                # it -- self-carried, not transferred (see
+                # _carried_finding_obligations) -- so it must stamp
+                # origin_node = run.id the same way a confirm's write to the
+                # owner does below.  Leaving the judge packet's inbound value
+                # (often "") would make _request_for_run's
+                # origin_node != run.id test freeze discovery on this node's
+                # own retry, exactly the outcome ruled out for self-carried
+                # obligations elsewhere in this module.
+                rejected["origin_node"] = run.id
+                advances.append((run.id, rejected))
+                escalations_payload.append({
+                    "finding_key": key, "origin_node": run.id, "owner_node": owner,
+                    "required_paths": list(required_paths),
+                    "judgment_ref": judgment_ref, "verdict": "reject",
+                })
+                continue
+            confirmed = dict(record)
+            confirmed["outcome"] = "open"
+            confirmed["outcome_reason"] = judgment["rationale"]
+            confirmed["escalation_reason"] = ""
+            confirmed["origin_node"] = run.id
+            confirmed["transferred_to"] = owner
+            escalations_payload.append({
+                "finding_key": key, "origin_node": run.id, "owner_node": owner,
+                "required_paths": list(required_paths),
+                "judgment_ref": judgment_ref, "verdict": "confirm",
+            })
+            if owner not in completed:
+                # Owner has not yet run: no authority is spent, the record
+                # rides the existing finding_obligations -> inherited_ledger
+                # channel to whichever launch reaches it (AC-CC08-9).
+                confirmed["bounded_fix_only"] = False
+                advances.append((owner, confirmed))
+                return _EscalationDisposition(
+                    advances=tuple(advances),
+                    escalations_payload=tuple(escalations_payload),
+                )
+            # Owner is sealed: unseal it. Exactly one transfer_ownership
+            # structural decision per unseal (AC-CC08-10); exhaustion raises
+            # BudgetError, which the caller turns into an ordinary block.
+            prior = recovery_decision_digest({"finding_key": key})
+            try:
+                self.budget.apply_recovery_decision(
+                    {
+                        "protocol": RECOVERY_DECISION_PROTOCOL,
+                        "action": "transfer_ownership",
+                        "target": run.id,
+                        "expected_prior_digest": prior,
+                        "payload": {"receiving_node": owner},
+                    },
+                    prior_digest=prior,
+                )
+            except BudgetError as exc:
+                return _EscalationDisposition(
+                    advances=tuple(advances),
+                    escalations_payload=tuple(escalations_payload),
+                    budget_error=str(exc),
+                )
+            confirmed["bounded_fix_only"] = True
+            audit.record_node_unsealed(owner, key, escalating_node=run.id)
+            advances.append((owner, confirmed))
+            return _EscalationDisposition(
+                advances=tuple(advances),
+                escalations_payload=tuple(escalations_payload),
+                retry_frontier_prefix=self._plan_declaration_order((owner, run.id)),
+            )
+        return _EscalationDisposition(
+            advances=tuple(advances), escalations_payload=tuple(escalations_payload),
+        )
 
     @staticmethod
     def _outcome_matches_reservation(
@@ -2525,6 +3043,7 @@ class PlanGraph:
         reason: str,
         evidence: object | None = None,
         evidence_ref: str | None = None,
+        escalation_disposition: "_EscalationDisposition | None" = None,
     ) -> PlanGraphResult:
         """Finalize every block through one checkpointed escalation transition."""
         result = self._with_deviation_records(result)
@@ -2620,7 +3139,13 @@ class PlanGraph:
         # decision about the artifact contract, not a side effect of this
         # feature; see docs/development/plan-graph-sibling-independent-node-relaunch.md.
         retry_frontier = [result.failed_run_id] if result.failed_run_id else []
-        if self.continue_independent_after_block:
+        if escalation_disposition is not None and escalation_disposition.retry_frontier_prefix:
+            # A confirmed unseal (AC-CC08-12): the reopened owner leads the
+            # frontier, in plan-declaration order, ahead of the escalating
+            # node -- overriding the single-element default above, which
+            # would otherwise only name the escalating node.
+            retry_frontier = list(escalation_disposition.retry_frontier_prefix)
+        elif self.continue_independent_after_block:
             # The primary blocker stays first, the remainder are sorted for a
             # stable artifact digest.
             retry_frontier += sorted(
@@ -2629,6 +3154,24 @@ class PlanGraph:
                 and node.get("status") in {"failed", "blocked"}
                 and node["node_id"] not in retry_frontier
             )
+        decision_request = {
+            "required": True,
+            "requested_action": "operator_review",
+            "rationale": reason,
+            "candidate_actions": ["resume", "extend_budget", "reset_budget"],
+        }
+        if escalation_disposition is not None and escalation_disposition.unrouted is not None:
+            # AC-CC08-14: an escalated finding with zero or ambiguous owners
+            # is not an LLM question and not an ordinary operator_review
+            # block -- it names the exact decision the operator must make.
+            decision_request = {
+                "required": True,
+                "requested_action": "assign_finding_owner",
+                "rationale": reason,
+                "candidate_actions": list(
+                    escalation_disposition.unrouted["candidate_owner_ids"]
+                ),
+            }
         escalation = {
             "protocol": "plan-graph-block-escalation/1",
             "graph_run_id": self.graph_run_id,
@@ -2645,12 +3188,7 @@ class PlanGraph:
                 "finding_keys": budget_state.get("finding_keys", {}),
             },
             "significance_guidance": dict(self.plan.acceptance_criteria),
-            "decision_request": {
-                "required": True,
-                "requested_action": "operator_review",
-                "rationale": reason,
-                "candidate_actions": ["resume", "extend_budget", "reset_budget"],
-            },
+            "decision_request": decision_request,
             "paths": {
                 "escalation": "escalation.json",
                 "budget_ledger": str(self.budget.path.relative_to(self.run_root)),
@@ -2663,6 +3201,14 @@ class PlanGraph:
                 "blocker_evidence_ref": "$this_escalation_artifact",
             },
         }
+        if escalation_disposition is not None and escalation_disposition.escalations_payload:
+            # One optional array added to the existing
+            # plan-graph-block-escalation/1 payload (AC-CC08-12); the schema
+            # declares `required` but not `additionalProperties: false`, so
+            # an escalation-free block's artifact is unchanged.
+            escalation["escalations"] = [
+                dict(item) for item in escalation_disposition.escalations_payload
+            ]
         blocker_ref = audit.record_block_escalation(escalation)
         payload = self._result_payload(result) | {"blocker_evidence_ref": blocker_ref}
         audit.finalize("blocked", payload)
