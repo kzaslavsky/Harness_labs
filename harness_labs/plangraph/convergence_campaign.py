@@ -380,9 +380,67 @@ class CampaignArtifactStore:
 # -- campaign config, target pin, and grant refusal (contracts-target) ------
 
 
+def _validate_sanitizer_config(
+    pre_journal_sanitizer: str | Mapping[str, Any],
+) -> str | dict[str, Any]:
+    """Validate the ``pre_journal_sanitizer`` config value.
+
+    Accepts either the legacy ``module:callable`` string (returned
+    unchanged, so a legacy config folds a byte-identical mapping into
+    ``campaign_opened.config`` -- ``dtr-sn``'s AC-SN-1) or the
+    ``{"text": <hook-ref>, "binary": {"<kind>": "scan"|"admit:<reason>"|"reject"}}``
+    mapping form the driver's :func:`~scripts.run_convergence_campaign.sanitize_before_journaling`
+    resolves the text hook out of. ``binary`` is optional and defaults to
+    ``{}`` (every binary kind then fails closed at the capture CLI, which
+    treats an undeclared kind as refused).
+    """
+
+    if isinstance(pre_journal_sanitizer, str):
+        if not pre_journal_sanitizer.strip():
+            raise ConvergenceCampaignError(
+                "campaign config pre_journal_sanitizer hook must be a non-empty string"
+            )
+        return pre_journal_sanitizer
+    if isinstance(pre_journal_sanitizer, Mapping):
+        text_hook = pre_journal_sanitizer.get("text")
+        if not isinstance(text_hook, str) or not text_hook.strip():
+            raise ConvergenceCampaignError(
+                "campaign config pre_journal_sanitizer mapping must carry a "
+                "non-empty 'text' hook reference"
+            )
+        binary_policy = pre_journal_sanitizer.get("binary", {})
+        if not isinstance(binary_policy, Mapping):
+            raise ConvergenceCampaignError(
+                "campaign config pre_journal_sanitizer mapping 'binary' entry "
+                "must be a mapping of artifact kind to policy verb"
+            )
+        for kind, verb in binary_policy.items():
+            if not isinstance(verb, str) or not verb.strip():
+                raise ConvergenceCampaignError(
+                    "campaign config pre_journal_sanitizer binary policy for "
+                    f"{kind!r} must be a non-empty string"
+                )
+            if not (
+                verb == "scan"
+                or verb == "reject"
+                or (verb.startswith("admit:") and len(verb) > len("admit:"))
+            ):
+                raise ConvergenceCampaignError(
+                    "campaign config pre_journal_sanitizer binary policy for "
+                    f"{kind!r} must be 'scan', 'admit:<reason>', or 'reject', "
+                    f"got {verb!r}"
+                )
+        return {"text": text_hook, "binary": dict(binary_policy)}
+    raise ConvergenceCampaignError(
+        "campaign config pre_journal_sanitizer hook must be a non-empty string "
+        "or a {'text': ..., 'binary': {...}} mapping, got "
+        f"{type(pre_journal_sanitizer).__name__}"
+    )
+
+
 def build_campaign_config(
     *,
-    pre_journal_sanitizer: str,
+    pre_journal_sanitizer: str | Mapping[str, Any],
     recall_threshold: float,
     amendment_ratio_threshold: float,
 ) -> dict[str, Any]:
@@ -394,10 +452,7 @@ def build_campaign_config(
     recall and amendment ratio.
     """
 
-    if not isinstance(pre_journal_sanitizer, str) or not pre_journal_sanitizer.strip():
-        raise ConvergenceCampaignError(
-            "campaign config pre_journal_sanitizer hook must be a non-empty string"
-        )
+    sanitizer_config = _validate_sanitizer_config(pre_journal_sanitizer)
     for field, value in (
         ("recall_threshold", recall_threshold),
         ("amendment_ratio_threshold", amendment_ratio_threshold),
@@ -411,7 +466,7 @@ def build_campaign_config(
                 f"campaign config {field} must be a number between 0 and 1"
             )
     return {
-        CONFIG_SANITIZER_KEY: pre_journal_sanitizer,
+        CONFIG_SANITIZER_KEY: sanitizer_config,
         CONFIG_RECALL_THRESHOLD_KEY: float(recall_threshold),
         CONFIG_AMENDMENT_RATIO_THRESHOLD_KEY: float(amendment_ratio_threshold),
     }
@@ -426,7 +481,7 @@ def pin_target(
     target_kind: str,
     snapshot_relative_path: str,
     base_commit: str,
-    pre_journal_sanitizer: str,
+    pre_journal_sanitizer: str | Mapping[str, Any],
     recall_threshold: float,
     amendment_ratio_threshold: float,
     merge_base: str | None = None,

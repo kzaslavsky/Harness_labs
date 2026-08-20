@@ -49,6 +49,7 @@ from scripts.run_convergence_campaign import (
     render_approval_packet,
     render_findings_owners_paths_table,
     resume_directive_from_escalation,
+    sanitize_before_journaling,
     sibling_overlap_warnings_from_gate_evidence,
     tag_regression_suspects,
     unacknowledged_warnings,
@@ -117,6 +118,17 @@ def _fake_capture_argv(
     if skip_receipt:
         argv.append("--skip-receipt")
     return argv
+
+
+def _uppercasing_pre_journal_sanitizer(text: str) -> str:
+    """A transforming (non-identity) ``pre_journal_sanitizer`` hook, used to
+    prove a resolved hook actually ran rather than merely resolving without
+    being invoked: ``.upper()`` leaves JSON's structural characters and
+    lowercase ``true``/``false``/``null`` keywords untouched, so it is safe
+    to run over a JSON receipt that carries no booleans or nulls, while
+    still visibly changing every letter it does carry."""
+
+    return text.upper()
 
 
 # ---------------------------------------------------------------------------
@@ -1183,6 +1195,102 @@ class MeasureReceiptContractTests(_RepoFixture):
         self.assertEqual(result["audit_result"], self._PAYLOAD)
         sealed = json.loads(driver.artifacts.open_bytes(result["digest"]))
         self.assertEqual(sealed, self._PAYLOAD)
+
+
+class SanitizerMediaTypePolicyDriverTests(_RepoFixture):
+    """AC-SN-4: ``sanitize_before_journaling`` resolves the ``text`` hook out
+    of the mapping config form exactly as the legacy string form applies it,
+    and raises :class:`SanitizerFailure` -- never ``AttributeError`` -- on a
+    mapping with no ``text`` entry."""
+
+    _HOOK_REFERENCE = "scripts.run_convergence_campaign:identity_pre_journal_sanitizer"
+    _TRANSFORM_HOOK_REFERENCE = (
+        "tests.test_convergence_campaign_driver:_uppercasing_pre_journal_sanitizer"
+    )
+
+    def test_mapping_form_resolves_text_hook_exactly_like_the_legacy_string(self) -> None:
+        """Uses a transforming hook (not the identity hook) so the assertion
+        actually exercises hook application: an implementation that resolved
+        the mapping form's ``text`` entry but never invoked it would leave
+        ``text`` unchanged and fail the ``assertNotEqual`` below."""
+
+        legacy_config = {"pre_journal_sanitizer": self._TRANSFORM_HOOK_REFERENCE}
+        mapping_config = {
+            "pre_journal_sanitizer": {"text": self._TRANSFORM_HOOK_REFERENCE, "binary": {}},
+        }
+        text = "some journaled text"
+        mapping_result = sanitize_before_journaling(mapping_config, text)
+        legacy_result = sanitize_before_journaling(legacy_config, text)
+        self.assertEqual(mapping_result, legacy_result)
+        self.assertNotEqual(mapping_result, text)
+
+    def test_mapping_form_without_text_entry_raises_sanitizer_failure_not_attribute_error(
+        self,
+    ) -> None:
+        config = {"pre_journal_sanitizer": {"binary": {"screenshot": "reject"}}}
+        with self.assertRaises(SanitizerFailure):
+            sanitize_before_journaling(config, "text")
+
+    def test_mapping_form_with_non_string_text_entry_raises_sanitizer_failure(self) -> None:
+        config = {"pre_journal_sanitizer": {"text": 7, "binary": {}}}
+        with self.assertRaises(SanitizerFailure):
+            sanitize_before_journaling(config, "text")
+
+    def test_a_bare_non_string_non_mapping_sanitizer_value_raises_sanitizer_failure(self) -> None:
+        config = {"pre_journal_sanitizer": 7}
+        with self.assertRaises(SanitizerFailure):
+            sanitize_before_journaling(config, "text")
+
+    def test_driver_measure_threads_the_mapping_form_through_open_campaign(self) -> None:
+        """The mapping form survives the full ``open_campaign`` ->
+        ``campaign_config`` -> ``measure`` path, not just direct calls to
+        ``sanitize_before_journaling``. Uses the transforming hook so the
+        assertion proves the hook actually ran on the threaded receipt text
+        rather than merely being resolved and skipped: an implementation
+        that dropped the hook along this path would return ``payload``
+        unchanged and fail the comparison below."""
+
+        driver = self.driver()
+        self.open_campaign(
+            driver,
+            pre_journal_sanitizer={"text": self._TRANSFORM_HOOK_REFERENCE, "binary": {}},
+        )
+        payload = {
+            "digest": "d-mapping", "findings": [], "verdicts": [],
+            "confirmed_good": [], "capture_coverage": {},
+        }
+        out_dir = self.root / "capture-out-mapping"
+        argv = _fake_capture_argv(out_dir, payload)
+
+        result = driver.measure(capture_argv=argv, out_dir=out_dir)
+
+        expected = json.loads(json.dumps(payload).upper())
+        self.assertEqual(result["audit_result"], expected)
+        self.assertNotEqual(result["audit_result"], payload)
+
+    def test_config_reads_a_textless_mapping_and_raises_sanitizer_failure(self) -> None:
+        """``build_campaign_config``/``pin_target`` already refuse a textless
+        mapping at config-build time (AC-SN-1's config-surface validation);
+        this exercises the config-read path (``campaign_config``) directly
+        against a raw ``ConvergenceLedger.open_campaign`` record -- the
+        "checkpoint state built outside build_campaign_config" case
+        ``sanitize_before_journaling``'s own docstring names -- proving the
+        read path itself, not only the write-time gate, fails closed with
+        ``SanitizerFailure`` rather than an ``AttributeError``.
+        """
+
+        from scripts.run_convergence_campaign import campaign_config
+
+        driver = self.driver()
+        driver.ledger.open_campaign(
+            domain="ui-fidelity",
+            target={"kind": "design-doc", "digest": "e" * 64, "snapshot_path": "target.md"},
+            base_commit="0" * 40,
+            config={"pre_journal_sanitizer": {"binary": {"screenshot": "reject"}}},
+        )
+
+        with self.assertRaises(SanitizerFailure):
+            sanitize_before_journaling(campaign_config(driver.ledger), "some text")
 
 
 class DriverRunStepPreconditionsTests(_RepoFixture):

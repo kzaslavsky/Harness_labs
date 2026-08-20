@@ -427,6 +427,115 @@ class CampaignConfigTests(unittest.TestCase):
             )
 
 
+# -- AC-SN-1: legacy string pre_journal_sanitizer stays byte-identical ------
+
+
+class SanitizerMediaTypePolicyConfigTests(unittest.TestCase):
+    """The legacy ``pre_journal_sanitizer`` string keeps unchanged semantics
+    and folds a byte-identical ``campaign_opened.config`` mapping now that
+    ``build_campaign_config`` also accepts the ``{"text": ..., "binary":
+    {...}}`` mapping form (``dtr-sn``)."""
+
+    def test_legacy_string_config_is_byte_identical_to_pre_dtr_sn_shape(self) -> None:
+        config = build_campaign_config(
+            pre_journal_sanitizer="harness_labs.sanitizers:redact_secrets",
+            recall_threshold=0.9,
+            amendment_ratio_threshold=0.2,
+        )
+        # Same shape build_campaign_config produced before this change: the
+        # sanitizer key still carries the bare string, not a mapping --
+        # existing journals re-fold identically (dtr-risks).
+        self.assertEqual(
+            config,
+            {
+                "pre_journal_sanitizer": "harness_labs.sanitizers:redact_secrets",
+                "inspector_recall_threshold": 0.9,
+                "amendment_ratio_threshold": 0.2,
+            },
+        )
+        self.assertIsInstance(config["pre_journal_sanitizer"], str)
+
+    def test_legacy_string_config_round_trips_through_json_unchanged(self) -> None:
+        """The exact byte-identity claim: serialize the config the way the
+        ledger journals it and confirm the sanitizer value round-trips as
+        the same string, not a mapping or any other shape."""
+
+        config = build_campaign_config(
+            pre_journal_sanitizer="mod:fn", recall_threshold=0.9, amendment_ratio_threshold=0.2,
+        )
+        reloaded = json.loads(json.dumps(config, sort_keys=True))
+        self.assertEqual(reloaded, config)
+        self.assertEqual(reloaded["pre_journal_sanitizer"], "mod:fn")
+
+    def test_mapping_form_accepted_and_carries_text_and_binary_entries(self) -> None:
+        config = build_campaign_config(
+            pre_journal_sanitizer={
+                "text": "mod:fn",
+                "binary": {"screenshot": "reject"},
+            },
+            recall_threshold=0.9,
+            amendment_ratio_threshold=0.2,
+        )
+        self.assertEqual(
+            config["pre_journal_sanitizer"],
+            {"text": "mod:fn", "binary": {"screenshot": "reject"}},
+        )
+
+    def test_mapping_form_defaults_binary_to_empty_when_omitted(self) -> None:
+        config = build_campaign_config(
+            pre_journal_sanitizer={"text": "mod:fn"},
+            recall_threshold=0.9,
+            amendment_ratio_threshold=0.2,
+        )
+        self.assertEqual(config["pre_journal_sanitizer"], {"text": "mod:fn", "binary": {}})
+
+    def test_mapping_form_without_text_entry_is_rejected(self) -> None:
+        with self.assertRaises(ConvergenceCampaignError):
+            build_campaign_config(
+                pre_journal_sanitizer={"binary": {"screenshot": "scan"}},
+                recall_threshold=0.9,
+                amendment_ratio_threshold=0.2,
+            )
+
+    def test_mapping_form_with_non_string_binary_verb_is_rejected(self) -> None:
+        with self.assertRaises(ConvergenceCampaignError):
+            build_campaign_config(
+                pre_journal_sanitizer={"text": "mod:fn", "binary": {"screenshot": 7}},
+                recall_threshold=0.9,
+                amendment_ratio_threshold=0.2,
+            )
+
+    def test_mapping_form_with_illegal_binary_verb_is_rejected(self) -> None:
+        """A binary verb outside ``scan``/``admit:<reason>``/``reject`` -- the
+        vocabulary ``scripts/ui_fidelity_capture.py`` enforces at
+        policy-resolution time -- must be refused here too, at config-build
+        time, so a campaign cannot be opened and journaled with a verb that
+        would only fail mid-capture (``dtr-sn``)."""
+
+        with self.assertRaises(ConvergenceCampaignError):
+            build_campaign_config(
+                pre_journal_sanitizer={"text": "mod:fn", "binary": {"screenshot": "allow"}},
+                recall_threshold=0.9,
+                amendment_ratio_threshold=0.2,
+            )
+
+    def test_mapping_form_with_bare_admit_verb_and_no_reason_is_rejected(self) -> None:
+        with self.assertRaises(ConvergenceCampaignError):
+            build_campaign_config(
+                pre_journal_sanitizer={"text": "mod:fn", "binary": {"screenshot": "admit:"}},
+                recall_threshold=0.9,
+                amendment_ratio_threshold=0.2,
+            )
+
+    def test_config_rejects_a_non_string_non_mapping_sanitizer_value(self) -> None:
+        with self.assertRaises(ConvergenceCampaignError):
+            build_campaign_config(
+                pre_journal_sanitizer=["mod:fn"],
+                recall_threshold=0.9,
+                amendment_ratio_threshold=0.2,
+            )
+
+
 class TargetPinTests(CampaignTestCase):
     def setUp(self) -> None:
         super().setUp()
@@ -474,6 +583,35 @@ class TargetPinTests(CampaignTestCase):
         self.assertEqual(state_campaign["config"]["pre_journal_sanitizer"], "mod:fn")
         self.assertEqual(state_campaign["config"]["inspector_recall_threshold"], 0.9)
         self.assertEqual(state_campaign["config"]["amendment_ratio_threshold"], 0.2)
+
+    def test_pin_with_legacy_string_sanitizer_folds_byte_identical_config(self) -> None:
+        """AC-SN-1: a campaign pinned with the legacy string form folds the
+        exact same ``campaign_opened.config`` mapping this run produced
+        before the mapping form existed -- no drift for existing journals."""
+
+        record = self._pin(pre_journal_sanitizer="harness_labs.sanitizers:redact_secrets")
+        self.assertEqual(
+            record["config"],
+            {
+                "pre_journal_sanitizer": "harness_labs.sanitizers:redact_secrets",
+                "inspector_recall_threshold": 0.9,
+                "amendment_ratio_threshold": 0.2,
+            },
+        )
+        reloaded_ledger = ConvergenceLedger(self.root / "ledger.jsonl")
+        self.assertEqual(
+            reloaded_ledger.records()[0]["config"]["pre_journal_sanitizer"],
+            "harness_labs.sanitizers:redact_secrets",
+        )
+
+    def test_pin_with_mapping_form_sanitizer_records_the_mapping(self) -> None:
+        record = self._pin(
+            pre_journal_sanitizer={"text": "mod:fn", "binary": {"screenshot": "scan"}},
+        )
+        self.assertEqual(
+            record["config"]["pre_journal_sanitizer"],
+            {"text": "mod:fn", "binary": {"screenshot": "scan"}},
+        )
 
     def test_pin_deleting_source_leaves_campaign_root_copy_intact(self) -> None:
         self._pin()

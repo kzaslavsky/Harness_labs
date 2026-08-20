@@ -206,6 +206,35 @@ def resolve_pre_journal_sanitizer(reference: str) -> Callable[[str], str]:
     return hook
 
 
+def _text_hook_reference(config: Mapping[str, Any]) -> str | None:
+    """Extract the ``module:callable`` text-hook reference from either the
+    legacy string form or the ``{"text": ..., "binary": {...}}`` mapping
+    form of ``CONFIG_SANITIZER_KEY`` (``dtr-sn``).
+
+    A mapping with no ``text`` entry raises :class:`SanitizerFailure` --
+    never the ``AttributeError`` a bare ``.partition(":")`` on a ``dict``
+    would raise (AC-SN-4).
+    """
+
+    reference = config.get(CONFIG_SANITIZER_KEY)
+    if reference is None or reference == "":
+        return None
+    if isinstance(reference, str):
+        return reference
+    if isinstance(reference, Mapping):
+        text_reference = reference.get("text")
+        if not isinstance(text_reference, str) or not text_reference.strip():
+            raise SanitizerFailure(
+                "pre_journal_sanitizer mapping config carries no non-empty "
+                f"'text' hook entry: {reference!r}"
+            )
+        return text_reference
+    raise SanitizerFailure(
+        "pre_journal_sanitizer config must be a string or a "
+        f"{{'text': ..., 'binary': {{...}}}} mapping, got {type(reference).__name__}"
+    )
+
+
 def sanitize_before_journaling(config: Mapping[str, Any], text: str) -> str:
     """Pass ``text`` through the configured hook before it is journaled,
     digested, or sealed (``measurer-requirements``).
@@ -215,10 +244,14 @@ def sanitize_before_journaling(config: Mapping[str, Any], text: str) -> str:
     non-empty string, but a checkpoint state built outside that helper may
     carry none). Any failure to resolve or run the hook is a
     :class:`SanitizerFailure`, one of ``bounds-termination``'s named blocked
-    end states, rather than a silent pass-through.
+    end states, rather than a silent pass-through. ``config``'s
+    ``CONFIG_SANITIZER_KEY`` may hold either the legacy string reference or
+    the mapping form -- :func:`_text_hook_reference` resolves the ``text``
+    hook out of the mapping exactly as the legacy string is applied
+    (``dtr-sn``, AC-SN-4).
     """
 
-    reference = config.get(CONFIG_SANITIZER_KEY)
+    reference = _text_hook_reference(config)
     if not reference:
         return text
     hook = resolve_pre_journal_sanitizer(reference)
