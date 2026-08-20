@@ -472,6 +472,40 @@ class DashboardApiTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body)["availability"]["state"], "available")
 
+    def test_pytest_scratch_symlinks_do_not_disqualify_a_run(self) -> None:
+        """The verification basetemp is pruned, but real evidence is not."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._run(root, "healthy-run")
+            scratch = root / "healthy-run" / "verification-tmp" / "post_implementation"
+            scratch.mkdir(parents=True)
+            (scratch / "stage0").mkdir()
+            # Exactly the bookkeeping symlink pytest plants beside its
+            # numbered basetemp directories.
+            (scratch / "stagecurrent").symlink_to(scratch / "stage0")
+            app = DashboardApplication(root, refresh_seconds=60)
+            status, body, _ = self._request(app, "GET", "/api/catalog")
+        self.assertEqual(status, 200)
+        payload = json.loads(body)
+        self.assertEqual(payload["availability"]["state"], "available")
+        self.assertEqual(payload["diagnostics"], [])
+
+    def test_symlinks_outside_the_verification_scratch_still_reject_the_run(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._run(root, "healthy-run")
+            (root / "healthy-run" / "artifacts").mkdir(exist_ok=True)
+            (root / "healthy-run" / "artifacts" / "escape").symlink_to(root)
+            app = DashboardApplication(root, refresh_seconds=60)
+            status, body, _ = self._request(app, "GET", "/api/catalog")
+        self.assertEqual(status, 200)
+        payload = json.loads(body)
+        self.assertEqual(
+            [item["message"] for item in payload["diagnostics"]],
+            ["run contains a symlink"],
+        )
+
 
 class PlanGraphMetricsEndpointTests(unittest.TestCase):
     """AC-DM04-1: GET /api/plan-graph-metrics/<id>."""

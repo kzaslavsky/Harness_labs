@@ -488,19 +488,54 @@ def _validate_audit_tree(root: Path) -> dict[str, str]:
     for entry in entries:
         if entry.is_symlink() or not entry.is_dir():
             continue
-        count = 0
-        for child in entry.rglob("*"):
+        violation = _scan_run_tree(entry)
+        if violation is not None:
+            excluded[entry.name] = violation
+    return excluded
+
+
+# pytest owns ``<run>/verification-tmp`` as the verification stages' basetemp
+# (harness_labs.featurerun.feature_run._verification_basetemp) and plants its
+# own ``<name>current -> <name>N`` bookkeeping symlinks inside it. Nothing ever
+# reads that tree: run_catalog reads a fixed set of files at the run root, and
+# resolves journal-referenced artifacts under its own containment guards
+# (resolve(strict=True) plus a run_dir-parent check). Walking the scratch tree
+# therefore only lets pytest's own symlinks disqualify an otherwise sound run
+# as "evidence unavailable", so prune it from the scan the way dot-prefixed
+# infrastructure directories are pruned at the audit root.
+VERIFICATION_SCRATCH_DIRNAME = "verification-tmp"
+
+
+def _scan_run_tree(run: Path) -> str | None:
+    """Return the bounding violation found in one run directory, else ``None``.
+
+    Traverses explicitly (rather than via ``rglob``) so the scratch directory
+    can be pruned before its contents are counted or symlink-checked.
+    """
+
+    count = 0
+    stack: list[tuple[Path, bool]] = [(run, True)]
+    while stack:
+        directory, at_run_root = stack.pop()
+        try:
+            children = list(os.scandir(directory))
+        except OSError:
+            # Parity with the previous rglob-based scan, which silently
+            # skipped directories it could not read.
+            continue
+        for child in children:
+            if at_run_root and child.name == VERIFICATION_SCRATCH_DIRNAME and not child.is_symlink():
+                continue
             count += 1
             if count > MAX_FILES_PER_RUN:
-                excluded[entry.name] = "run exceeds file-count limit"
-                break
+                return "run exceeds file-count limit"
             if child.is_symlink():
-                excluded[entry.name] = "run contains a symlink"
-                break
-            if child.is_file() and child.stat().st_size > MAX_FILE_BYTES:
-                excluded[entry.name] = "run contains an oversized file"
-                break
-    return excluded
+                return "run contains a symlink"
+            if child.is_dir(follow_symlinks=False):
+                stack.append((Path(child.path), False))
+            elif child.is_file(follow_symlinks=False) and child.stat(follow_symlinks=False).st_size > MAX_FILE_BYTES:
+                return "run contains an oversized file"
+    return None
 
 
 def _cap_diagnostics(value: Mapping[str, Any]) -> dict[str, Any]:
