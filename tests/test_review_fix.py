@@ -12,6 +12,8 @@ from harness_labs.core.audit import AuditActor, AuditJournal
 from harness_labs.core.controller_evidence import EvidenceCatalog
 from harness_labs.core.controller_results import semantic_payload
 from harness_labs.featurerun.review_fix import (
+    REVIEW_FIX_RESULT_PROTOCOL,
+    ReviewFixError,
     ReviewFixLoop,
     ReviewFixPolicy,
     ReviewLedger,
@@ -1178,6 +1180,80 @@ class ReviewFixLoopTests(unittest.TestCase):
         self.assertFalse(ledger["policy"]["targeted_verification_enabled"])
         self.assertFalse(ledger["policy"]["regression_review_enabled"])
 
+    def test_escalated_required_finding_blocks_without_regression_review(self):
+        """AC-CC08-2: escalation must still block when regression review is off.
+
+        Without ``regression_review_enabled``, the loop seals right after the
+        fix/verify pair (review_fix.py:1043-1058) instead of routing back
+        through the "no fix keys left" check at review_fix.py:968-987, so it
+        needs its own ``escalated_required`` guard.
+        """
+
+        escalated_finding = {
+            "id": "cross-node",
+            "statement": "Needs another node's file changed.",
+            "category": "integration",
+            "severity": "major",
+            "requires_disposition": True,
+            "file": "feature.txt",
+            "subject": "cross node fix",
+            "score": 90,
+            "fix_cost": "structural",
+            "protects": "AC integration",
+            "required_paths": ["other.py"],
+        }
+        fixable_finding = {
+            "id": "wrong",
+            "statement": "The value is reversed.",
+            "category": "correctness",
+            "severity": "major",
+            "requires_disposition": True,
+            "file": "feature.txt",
+            "subject": "wrong value",
+            "score": 90,
+            "fix_cost": "local",
+            "protects": "acceptance criterion correct",
+        }
+        escalated_key = "feature.txt:cross-node-fix"
+        fixable_key = "feature.txt:wrong-value"
+        factory = _Factory(
+            {
+                "review": [
+                    lambda attempt: result(
+                        attempt.attempt_id,
+                        "review-fix-review/1",
+                        findings=(escalated_finding, fixable_finding),
+                    )
+                ],
+                "fix": [
+                    lambda attempt: result(
+                        attempt.attempt_id,
+                        "review-fix-fix/1",
+                        details={"addressed_finding_keys": [fixable_key]},
+                    )
+                ],
+                "verify": [
+                    lambda attempt: result(
+                        attempt.attempt_id,
+                        "review-fix-verify/1",
+                        details={"verified_finding_keys": [fixable_key]},
+                    )
+                ],
+            }
+        )
+        policy = ReviewFixPolicy(
+            escalation_enabled=True, regression_review_enabled=False
+        )
+
+        outcome, _, evidence = self.run_loop(factory, policy=policy)
+
+        self.assertEqual(outcome.status, "blocked", outcome.reason)
+        self.assertEqual(len(outcome.escalated_findings), 1)
+        self.assertEqual(outcome.escalated_findings[0]["key"], escalated_key)
+        ledger = json.loads(evidence.open(outcome.ledger_ref))
+        self.assertEqual(ledger["findings"][escalated_key]["outcome"], "escalated")
+        self.assertEqual(ledger["findings"][fixable_key]["outcome"], "fixed")
+
     def test_closed_finding_is_not_readjudicated_without_new_evidence(self):
         def finding(identifier, subject):
             return {
@@ -1254,6 +1330,523 @@ class ReviewFixLoopTests(unittest.TestCase):
             [call[0] for call in factory.calls],
             ["review", "fix", "verify", "review", "fix", "verify", "review"],
         )
+
+
+    # -- CC-08: escalation primitives and the bounded fix-only loop --------
+
+    def test_escalation_disabled_by_default_adds_only_escalated_findings_key(self):
+        """AC-CC08-1: default policy output is unchanged but for one key."""
+
+        factory = _Factory(
+            {
+                "review": [
+                    lambda attempt: result(attempt.attempt_id, "review-fix-review/1"),
+                ]
+            }
+        )
+        outcome, _, _ = self.run_loop(factory)
+        self.assertFalse(ReviewFixPolicy().escalation_enabled)
+        payload = outcome.as_dict()
+        self.assertEqual(payload.pop("escalated_findings"), [])
+        self.assertEqual(
+            payload,
+            {
+                "protocol": REVIEW_FIX_RESULT_PROTOCOL,
+                "status": "succeeded",
+                "reason": "review cleared",
+                "cycles": 1,
+                "risk_tier": outcome.risk_tier,
+                "ledger_ref": outcome.ledger_ref,
+                "open_finding_keys": [],
+                "technical_debt_keys": [],
+                "transferred_findings": [],
+                "open_findings": [],
+                "stop_reason": "cleared",
+                "scope_screening": {
+                    "screened_count": 0,
+                    "screened_finding_keys": [],
+                    "by_class": {},
+                    "required_finding_keys": [],
+                },
+            },
+        )
+
+    def test_escalation_disabled_leaves_every_record_escalation_reason_empty(self):
+        """AC-CC08-1: no ledger record gains a non-empty escalation_reason."""
+
+        finding = {
+            "id": "wrong",
+            "statement": "The value is reversed.",
+            "category": "correctness",
+            "severity": "major",
+            "requires_disposition": True,
+            "file": "feature.txt",
+            "subject": "wrong value",
+            "score": 90,
+            "fix_cost": "local",
+            "protects": "acceptance criterion correct",
+        }
+        key = "feature.txt:wrong-value"
+        factory = _Factory(
+            {
+                "review": [
+                    lambda attempt: result(
+                        attempt.attempt_id, "review-fix-review/1", findings=(finding,)
+                    ),
+                    lambda attempt: result(attempt.attempt_id, "review-fix-review/1"),
+                ],
+                "fix": [
+                    lambda attempt: result(
+                        attempt.attempt_id,
+                        "review-fix-fix/1",
+                        details={"addressed_finding_keys": [key]},
+                    )
+                ],
+                "verify": [
+                    lambda attempt: result(
+                        attempt.attempt_id,
+                        "review-fix-verify/1",
+                        details={"verified_finding_keys": [key]},
+                    )
+                ],
+            }
+        )
+        outcome, _, evidence = self.run_loop(factory)
+        self.assertEqual(outcome.status, "succeeded")
+        self.assertEqual(outcome.escalated_findings, ())
+        ledger = json.loads(evidence.open(outcome.ledger_ref))
+        self.assertEqual(ledger["findings"][key]["escalation_reason"], "")
+        fix_context = next(
+            context for stage, context in factory.calls if stage == "fix"
+        )
+        self.assertNotIn(
+            "optional_details", fix_context["output_contract"]
+        )
+
+    def test_escalation_enabled_advertises_unresolvable_finding_keys_to_fixer(self):
+        """A fixer only sees the optional contract when escalation is on."""
+
+        finding = {
+            "id": "wrong",
+            "statement": "The value is reversed.",
+            "category": "correctness",
+            "severity": "major",
+            "requires_disposition": True,
+            "file": "feature.txt",
+            "subject": "wrong value",
+            "score": 90,
+            "fix_cost": "local",
+            "protects": "acceptance criterion correct",
+        }
+        key = "feature.txt:wrong-value"
+        factory = _Factory(
+            {
+                "review": [
+                    lambda attempt: result(
+                        attempt.attempt_id, "review-fix-review/1", findings=(finding,)
+                    ),
+                    lambda attempt: result(attempt.attempt_id, "review-fix-review/1"),
+                ],
+                "fix": [
+                    lambda attempt: result(
+                        attempt.attempt_id,
+                        "review-fix-fix/1",
+                        details={"addressed_finding_keys": [key]},
+                    )
+                ],
+                "verify": [
+                    lambda attempt: result(
+                        attempt.attempt_id,
+                        "review-fix-verify/1",
+                        details={"verified_finding_keys": [key]},
+                    )
+                ],
+            }
+        )
+        outcome, _, _ = self.run_loop(
+            factory, policy=ReviewFixPolicy(escalation_enabled=True)
+        )
+        self.assertEqual(outcome.status, "succeeded")
+        fix_context = next(
+            context for stage, context in factory.calls if stage == "fix"
+        )
+        self.assertEqual(
+            fix_context["output_contract"]["optional_details"],
+            {"unresolvable_finding_keys": "list[string]"},
+        )
+
+    def test_escalation_enabled_escalates_unrouted_required_path_finding(self):
+        """AC-CC08-2: no owner resolves -> escalated, fix never invoked."""
+
+        finding = {
+            "id": "cross-node",
+            "statement": "Needs another node's file changed.",
+            "category": "integration",
+            "severity": "major",
+            "requires_disposition": True,
+            "file": "feature.txt",
+            "subject": "cross node fix",
+            "score": 90,
+            "fix_cost": "structural",
+            "protects": "AC integration",
+            "required_paths": ["other.py"],
+        }
+        key = "feature.txt:cross-node-fix"
+        factory = _Factory(
+            {
+                "review": [
+                    lambda attempt: result(
+                        attempt.attempt_id, "review-fix-review/1", findings=(finding,)
+                    )
+                ]
+            }
+        )
+        outcome, _, evidence = self.run_loop(
+            factory,
+            policy=ReviewFixPolicy(escalation_enabled=True),
+        )
+        self.assertEqual(outcome.status, "blocked", outcome.reason)
+        self.assertEqual([call[0] for call in factory.calls], ["review"])
+        self.assertEqual(len(outcome.escalated_findings), 1)
+        escalated = outcome.escalated_findings[0]
+        self.assertEqual(escalated["key"], key)
+        self.assertEqual(escalated["outcome"], "escalated")
+        self.assertEqual(
+            escalated["escalation_reason"], "required_paths_outside_grant"
+        )
+        ledger = json.loads(evidence.open(outcome.ledger_ref))
+        self.assertEqual(ledger["findings"][key]["outcome"], "escalated")
+        self.assertNotIn(key, ledger["cycles"][0]["fix_keys"])
+
+    def test_transfer_takes_precedence_over_escalation(self):
+        """AC-CC08-3: a resolvable owner claims the finding before escalation."""
+
+        finding = {
+            "id": "cross-node",
+            "statement": "Needs another node's file changed.",
+            "category": "integration",
+            "severity": "major",
+            "requires_disposition": True,
+            "file": "feature.txt",
+            "subject": "cross node fix",
+            "score": 90,
+            "fix_cost": "structural",
+            "protects": "AC integration",
+            "required_paths": ["other.py"],
+        }
+        key = "feature.txt:cross-node-fix"
+        factory = _Factory(
+            {
+                "review": [
+                    lambda attempt: result(
+                        attempt.attempt_id, "review-fix-review/1", findings=(finding,)
+                    )
+                ]
+            }
+        )
+        outcome, _, _ = self.run_loop(
+            factory,
+            policy=ReviewFixPolicy(escalation_enabled=True),
+            finding_transfer_targets={"other.py": "B"},
+            origin_node_id="A",
+        )
+        self.assertEqual(outcome.status, "succeeded")
+        self.assertEqual(outcome.escalated_findings, ())
+        self.assertEqual(len(outcome.transferred_findings), 1)
+        transfer = outcome.transferred_findings[0]
+        self.assertEqual(transfer["key"], key)
+        self.assertEqual(transfer["outcome"], "transferred")
+        self.assertEqual(transfer["transferred_to"], "B")
+        self.assertEqual(transfer["escalation_reason"], "")
+
+    def test_fixer_declares_a_finding_unresolvable(self):
+        """AC-CC08-4: a declared-unresolvable key is escalated, not fixed."""
+
+        finding_a = {
+            "id": "cross-node",
+            "statement": "Needs another node's file changed.",
+            "category": "integration",
+            "severity": "major",
+            "requires_disposition": True,
+            "file": "feature.txt",
+            "subject": "cross node fix",
+            "score": 90,
+            "fix_cost": "structural",
+            "protects": "AC integration",
+        }
+        finding_b = {
+            "id": "wrong",
+            "statement": "The value is reversed.",
+            "category": "correctness",
+            "severity": "major",
+            "requires_disposition": True,
+            "file": "feature.txt",
+            "subject": "wrong value",
+            "score": 90,
+            "fix_cost": "local",
+            "protects": "acceptance criterion correct",
+        }
+        key_a = "feature.txt:cross-node-fix"
+        key_b = "feature.txt:wrong-value"
+        factory = _Factory(
+            {
+                "review": [
+                    lambda attempt: result(
+                        attempt.attempt_id,
+                        "review-fix-review/1",
+                        findings=(finding_a, finding_b),
+                    ),
+                    lambda attempt: result(attempt.attempt_id, "review-fix-review/1"),
+                ],
+                "fix": [
+                    lambda attempt: result(
+                        attempt.attempt_id,
+                        "review-fix-fix/1",
+                        details={
+                            "addressed_finding_keys": [key_b],
+                            "unresolvable_finding_keys": [key_a],
+                        },
+                    )
+                ],
+                "verify": [
+                    lambda attempt: result(
+                        attempt.attempt_id,
+                        "review-fix-verify/1",
+                        details={"verified_finding_keys": [key_b]},
+                    )
+                ],
+            }
+        )
+        outcome, _, evidence = self.run_loop(
+            factory,
+            policy=ReviewFixPolicy(escalation_enabled=True),
+        )
+        self.assertEqual(outcome.status, "blocked", outcome.reason)
+        self.assertEqual(len(outcome.escalated_findings), 1)
+        escalated = outcome.escalated_findings[0]
+        self.assertEqual(escalated["key"], key_a)
+        self.assertEqual(
+            escalated["escalation_reason"], "fixer_declared_unresolvable"
+        )
+        ledger = json.loads(evidence.open(outcome.ledger_ref))
+        self.assertEqual(ledger["findings"][key_a]["outcome"], "escalated")
+        self.assertEqual(ledger["findings"][key_b]["outcome"], "fixed")
+
+    def test_fixer_unresolvable_key_outside_fix_list_raises_named_error(self):
+        """AC-CC08-4: a key outside fix_finding_keys is a protocol violation."""
+
+        ledger = ReviewLedger(
+            ReviewFixPolicy(escalation_enabled=True),
+            "mechanical",
+            allowed_paths=("feature.txt",),
+        )
+        ledger.findings["feature.txt:known"] = {
+            "key": "feature.txt:known",
+            "outcome": "open",
+            "outcome_reason": "",
+            "escalation_reason": "",
+        }
+        with self.assertRaisesRegex(ReviewFixError, "feature.txt:unknown"):
+            ledger.mark_unresolvable(
+                ["feature.txt:known"], ["feature.txt:unknown"]
+            )
+
+    def test_bounded_fix_only_runs_exactly_fix_then_verify(self):
+        """AC-CC08-5: no review stage, no ingest, exactly two stage calls."""
+
+        key = "feature.txt:wrong-value"
+        inherited = {
+            "key": key,
+            "file": "feature.txt",
+            "subject": "wrong value",
+            "statement": "The value is reversed.",
+            "category": "correctness",
+            "severity": "major",
+            "score": 90,
+            "fix_cost": "local",
+            "protects": "acceptance criterion correct",
+            "requires_disposition": True,
+            "contract_violation": False,
+            "scope_expanding": False,
+            "required_paths": [],
+        }
+        factory = _Factory(
+            {
+                "fix": [
+                    lambda attempt: result(
+                        attempt.attempt_id,
+                        "review-fix-fix/1",
+                        details={"addressed_finding_keys": [key]},
+                    )
+                ],
+                "verify": [
+                    lambda attempt: result(
+                        attempt.attempt_id,
+                        "review-fix-verify/1",
+                        details={"verified_finding_keys": [key]},
+                    )
+                ],
+            }
+        )
+        outcome, _, evidence = self.run_loop(
+            factory,
+            bounded_fix_only=True,
+            seeded_fix_keys=(key,),
+            inherited_findings=(inherited,),
+        )
+        self.assertEqual(outcome.status, "succeeded", outcome.reason)
+        self.assertEqual(outcome.cycles, 1)
+        self.assertEqual([call[0] for call in factory.calls], ["fix", "verify"])
+        self.assertEqual(factory.calls[0][1]["fix_finding_keys"], [key])
+        self.assertEqual(factory.calls[1][1]["fix_finding_keys"], [key])
+        ledger = json.loads(evidence.open(outcome.ledger_ref))
+        self.assertEqual(list(ledger["findings"].keys()), [key])
+        self.assertEqual(ledger["findings"][key]["outcome"], "fixed")
+        self.assertNotIn("review_attempt_id", ledger["cycles"][0])
+        self.assertTrue(
+            all(
+                not str(value).endswith("/review")
+                for value in ledger["cycles"][0].values()
+                if isinstance(value, str)
+            )
+        )
+
+    def test_bounded_fix_only_escalated_required_finding_blocks(self):
+        """AC-CC08-2/AC-CC08-5: escalation must block the bounded fix-only exit.
+
+        ``_run_bounded_fix_only`` seals with its own ``open_required`` check
+        at review_fix.py:1171-1178, separate from the main loop's, so it
+        needs its own ``escalated_required`` guard too.
+        """
+
+        key = "feature.txt:wrong-value"
+        inherited = {
+            "key": key,
+            "file": "feature.txt",
+            "subject": "wrong value",
+            "statement": "The value is reversed.",
+            "category": "correctness",
+            "severity": "major",
+            "score": 90,
+            "fix_cost": "local",
+            "protects": "acceptance criterion correct",
+            "requires_disposition": True,
+            "contract_violation": False,
+            "scope_expanding": False,
+            "required_paths": [],
+        }
+        factory = _Factory(
+            {
+                "fix": [
+                    lambda attempt: result(
+                        attempt.attempt_id,
+                        "review-fix-fix/1",
+                        details={
+                            "addressed_finding_keys": [],
+                            "unresolvable_finding_keys": [key],
+                        },
+                    )
+                ],
+                "verify": [
+                    lambda attempt: result(
+                        attempt.attempt_id,
+                        "review-fix-verify/1",
+                        details={"verified_finding_keys": []},
+                    )
+                ],
+            }
+        )
+        outcome, _, evidence = self.run_loop(
+            factory,
+            policy=ReviewFixPolicy(escalation_enabled=True),
+            bounded_fix_only=True,
+            seeded_fix_keys=(key,),
+            inherited_findings=(inherited,),
+        )
+        self.assertEqual(outcome.status, "blocked", outcome.reason)
+        self.assertEqual(len(outcome.escalated_findings), 1)
+        self.assertEqual(outcome.escalated_findings[0]["key"], key)
+        ledger = json.loads(evidence.open(outcome.ledger_ref))
+        self.assertEqual(ledger["findings"][key]["outcome"], "escalated")
+
+    def test_cycle_limit_debt_sink_still_blocks_on_escalated_required_finding(self):
+        """AC-CC08-2: ``_limit_exit``'s debt-sink path needs its own guard too.
+
+        Its exit only consulted ``open_all()`` (review_fix.py:1359-1376),
+        which an escalated finding is not a member of, so a cycle-limit exit
+        could seal ``succeeded`` with an undischarged required obligation
+        the same way the "review cleared" paths used to.
+        """
+
+        escalated_finding = {
+            "id": "cross-node",
+            "statement": "Needs another node's file changed.",
+            "category": "integration",
+            "severity": "major",
+            "requires_disposition": True,
+            "file": "feature.txt",
+            "subject": "cross node fix",
+            "score": 90,
+            "fix_cost": "structural",
+            "protects": "AC integration",
+            "required_paths": ["other.py"],
+        }
+        optional_finding = {
+            "id": "optional-polish",
+            "statement": "The formatting is inconsistent.",
+            "category": "style",
+            "severity": "minor",
+            "requires_disposition": False,
+            "file": "feature.txt",
+            "subject": "polish formatting",
+            "score": 90,
+            "fix_cost": "local",
+            "protects": "style guide",
+        }
+        escalated_key = "feature.txt:cross-node-fix"
+        factory = _Factory(
+            {
+                "review": [
+                    lambda attempt: result(
+                        attempt.attempt_id,
+                        "review-fix-review/1",
+                        findings=(escalated_finding, optional_finding),
+                    )
+                ],
+            }
+        )
+        policy = ReviewFixPolicy(
+            escalation_enabled=True,
+            mechanical_cycle_limit=1,
+            technical_debt_sink_enabled=True,
+        )
+
+        outcome, _, evidence = self.run_loop(factory, policy=policy)
+
+        self.assertEqual(outcome.status, "blocked", outcome.reason)
+        self.assertEqual(len(outcome.escalated_findings), 1)
+        self.assertEqual(outcome.escalated_findings[0]["key"], escalated_key)
+        ledger = json.loads(evidence.open(outcome.ledger_ref))
+        self.assertEqual(
+            ledger["findings"][escalated_key]["outcome"], "escalated"
+        )
+        self.assertEqual(
+            ledger["findings"]["feature.txt:polish-formatting"]["outcome"], "debt"
+        )
+
+    def test_bounded_fix_only_requires_seeded_fix_keys(self):
+        with self.assertRaisesRegex(ValueError, "seeded_fix_keys"):
+            self.build_loop(
+                _Factory({}),
+                bounded_fix_only=True,
+            )
+
+    def test_seeded_fix_keys_requires_bounded_fix_only(self):
+        with self.assertRaisesRegex(ValueError, "bounded_fix_only"):
+            self.build_loop(
+                _Factory({}),
+                seeded_fix_keys=("feature.txt:x",),
+            )
 
 
 if __name__ == "__main__":

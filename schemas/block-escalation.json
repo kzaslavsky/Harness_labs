@@ -15,6 +15,21 @@
     "significance_guidance": {"type": "object"},
     "decision_request": {"type": "object", "required": ["required", "requested_action", "rationale", "candidate_actions"], "properties": {"required": {"type": "boolean"}, "requested_action": {"type": ["string", "null"]}, "rationale": {"type": "string"}, "candidate_actions": {"type": "array", "items": {"type": "string"}}}},
     "paths": {"type": "object", "required": ["escalation", "budget_ledger", "decision_log"], "properties": {"escalation": {"type": "string"}, "budget_ledger": {"type": "string"}, "decision_log": {"type": "string"}}},
-    "resume_directive_template": {"type": "object"}
+    "resume_directive_template": {"type": "object"},
+    "escalations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["finding_key", "origin_node", "owner_node", "required_paths", "judgment_ref"],
+        "properties": {
+          "finding_key": {"type": "string"},
+          "origin_node": {"type": "string"},
+          "owner_node": {"type": "string"},
+          "required_paths": {"type": "array", "items": {"type": "string"}},
+          "judgment_ref": {"type": "string", "pattern": "^artifact:sha256:[0-9a-f]{64}$"},
+          "verdict": {"enum": ["confirm", "reject"]}
+        }
+      }
+    }
   }
 }

@@ -681,8 +681,21 @@ class PlanGraphAudit:
         )
         return proof_ref
 
-    def transfer_conflict_blocked(self, node_id: str, reason: str) -> str:
-        """Block a transfer conflict while preserving the verified candidate."""
+    def transfer_conflict_blocked(
+        self,
+        node_id: str,
+        reason: str,
+        *,
+        finding_obligations: Mapping[str, object] | None = None,
+    ) -> str:
+        """Block a transfer conflict while preserving the verified candidate.
+
+        ``finding_obligations``, when supplied, is the complete cross-node
+        obligations mapping (as ``node_completed``/``node_failed`` already
+        accept it) -- an in-graph escalation confirmed after this node's own
+        candidate verified still needs its routed advance (reject write-back,
+        confirm injection, or unseal) durable before the graph blocks.
+        """
 
         state = self.state
         nodes = state.get("nodes")
@@ -710,8 +723,150 @@ class PlanGraphAudit:
                 "evidence": {"reason": reason, "evidence_ref": conflict_ref},
             },
             artifacts=(artifact,),
+            **(
+                {"finding_obligations": dict(finding_obligations)}
+                if finding_obligations is not None
+                else {}
+            ),
         )
         return conflict_ref
+
+    def record_finding_escalated(
+        self,
+        node_id: str,
+        finding_key: str,
+        *,
+        owner_node: str,
+        required_paths: Sequence[str],
+    ) -> None:
+        """Journal ``plan_graph_finding_escalated``: routing resolved, before
+        any judge runs (ADR 0007 / CC-08 [cc08-authority])."""
+
+        self.journal.append(
+            "plan_graph_finding_escalated",
+            status="running",
+            payload={
+                "plan_node_id": node_id,
+                "finding_key": finding_key,
+                "owner_node": owner_node,
+                "required_paths": list(required_paths),
+            },
+            actor=_ACTOR,
+        )
+
+    def record_escalation_judged(
+        self, node_id: str, finding_key: str, judgment: Mapping[str, object],
+    ) -> str:
+        """Content-address one ``plan-graph-escalation-judgment/1`` output and
+        journal ``plan_graph_escalation_judged``. Returns its
+        ``artifact:sha256:...`` reference."""
+
+        artifact = self.journal.write_artifact(
+            "plan-graph-escalation-judgment", dict(judgment),
+        )
+        judgment_ref = f"artifact:sha256:{artifact.sha256}"
+        self.journal.append(
+            "plan_graph_escalation_judged",
+            status="running",
+            payload={
+                "plan_node_id": node_id,
+                "finding_key": finding_key,
+                "verdict": judgment.get("verdict"),
+                "judgment_ref": judgment_ref,
+            },
+            actor=_ACTOR,
+            artifacts=(artifact,),
+        )
+        return judgment_ref
+
+    def record_node_unsealed(
+        self, unsealed_node_id: str, finding_key: str, *, escalating_node: str,
+    ) -> None:
+        """Journal ``plan_graph_node_unsealed`` after the ``transfer_ownership``
+        recovery decision lands on the retry budget ledger."""
+
+        self.journal.append(
+            "plan_graph_node_unsealed",
+            status="running",
+            payload={
+                "plan_node_id": unsealed_node_id,
+                "finding_key": finding_key,
+                "origin_node": escalating_node,
+            },
+            actor=_ACTOR,
+        )
+
+    def prior_escalation_verdict(self, finding_key: str) -> str | None:
+        """Return ``"reject"`` if any attempt in this graph's repair lineage
+        already journaled a reject verdict for ``finding_key``, else ``None``.
+
+        A rejected finding is reopened clean on the escalating node's own
+        next retry -- that fresh review-fix session has no memory of the
+        earlier judgment -- and that retry is never in *this* attempt (a
+        launch that reports anything other than "succeeded" finalizes the
+        attempt; only a repair successor, a new graph_run_id with its own
+        empty ``finding_obligations``, relaunches the node). So the only
+        durable place a repeat escalation of the same finding_key can be
+        told apart from a first-time one is this attempt's own event
+        journal *and* every finalized predecessor's, walked back through
+        ``predecessor_attempt_id`` -- each already immutable once repaired
+        past, so reading them needs no lock.
+        """
+
+        for events_path in self._lineage_event_journals():
+            try:
+                with events_path.open("r", encoding="utf-8") as handle:
+                    for line in handle:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        event = json.loads(line)
+                        if event.get("event_type") != "plan_graph_escalation_judged":
+                            continue
+                        payload = event.get("payload", {})
+                        if (
+                            payload.get("finding_key") == finding_key
+                            and payload.get("verdict") == "reject"
+                        ):
+                            return "reject"
+            except (OSError, ValueError):
+                continue
+        return None
+
+    def _lineage_event_journals(self) -> list[Path]:
+        """This attempt's ``events.jsonl``, then each finalized predecessor's
+        in turn, oldest last."""
+
+        paths = [self.journal.events_path]
+        seen = {self.graph_run_id}
+        predecessor_id = self.predecessor_attempt_id
+        while (
+            isinstance(predecessor_id, str)
+            and predecessor_id
+            and predecessor_id not in seen
+        ):
+            try:
+                validate_plan_graph_id(predecessor_id)
+            except ValueError:
+                break
+            seen.add(predecessor_id)
+            predecessor_dir = self.run_dir.parent / predecessor_id
+            events_path = predecessor_dir / "events.jsonl"
+            if not events_path.is_file():
+                break
+            paths.append(events_path)
+            try:
+                checkpoint = json.loads(
+                    (predecessor_dir / "checkpoint.json").read_text(encoding="utf-8")
+                )
+            except (OSError, ValueError):
+                break
+            predecessor_id = (
+                checkpoint.get("state", {})
+                .get("graph_attempt", {})
+                .get("predecessor_attempt_id")
+            )
+        return paths
 
     def reserve_successor_attempt(
         self,

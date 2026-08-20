@@ -97,6 +97,11 @@ class ReviewFixPolicy:
     targeted_verification_enabled: bool = True
     regression_review_enabled: bool = True
     cycle_limit_enabled: bool = True
+    # Off by default: with this switch unset, behaviour is byte-identical to
+    # before CC-08 existed (AC-CC08-1). It gates both escalation routes --
+    # the ingest-time required-paths set check and the fixer's own
+    # unresolvable declaration -- so neither fires unless a caller opts in.
+    escalation_enabled: bool = False
     risk_tiering_enabled: bool = True
     marginal_yield_stop_enabled: bool = True
     no_progress_stop_enabled: bool = True
@@ -148,6 +153,10 @@ class ReviewFixResult:
     # ``open_all``/``open_required`` by construction -- which is exactly why it
     # has to be reported rather than merely recorded.
     scope_screening: Mapping[str, Any] = _EMPTY_MAPPING
+    # Every finding this loop escalated, full record intact, so a caller can
+    # route or judge it without re-opening the ledger artifact. Always empty
+    # when ``escalation_enabled`` is off (AC-CC08-1).
+    escalated_findings: tuple[Mapping[str, Any], ...] = ()
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -165,6 +174,9 @@ class ReviewFixResult:
             "open_findings": [dict(item) for item in self.open_findings],
             "stop_reason": self.stop_reason,
             "scope_screening": dict(self.scope_screening),
+            "escalated_findings": [
+                dict(item) for item in self.escalated_findings
+            ],
         }
 
 
@@ -245,6 +257,10 @@ class ReviewLedger:
             record["transfer_eligible"] = bool(
                 record.get("transfer_eligible", False) and not source
             )
+            # A record inherited for a bounded unseal may carry escalation
+            # state from the node that raised it. This ledger has not
+            # dispositioned it yet, so the record is reopened clean.
+            record["escalation_reason"] = ""
             record.setdefault("origin_node", "")
             record.setdefault("cycles_seen", [])
             record.setdefault("occurrences", 1)
@@ -291,6 +307,7 @@ class ReviewLedger:
             record.setdefault("required_paths", [])
             record.setdefault("anchor_out_of_grant", False)
             record.setdefault("scope_screen_class", "")
+            record.setdefault("escalation_reason", "")
             record["inherited"] = True
             self._backfill_location(record)
             self.findings[key] = record
@@ -346,6 +363,45 @@ class ReviewLedger:
             for _, item in sorted(self.findings.items())
             if item["outcome"] == "transferred"
         )
+
+    def escalate_out_of_grant(self, key: str, reason: str) -> None:
+        """Move one finding to ``escalated``, recording why.
+
+        The single mutator both escalation routes share: the ingest-time
+        required-paths set check and the fixer's own unresolvable
+        declaration. Called only after :meth:`transfer_scope_expanding` has
+        had first claim on the finding (AC-CC08-3) -- this method does not
+        itself consult transfer targets.
+        """
+
+        record = self.findings[key]
+        record["outcome"] = "escalated"
+        record["outcome_reason"] = f"escalated: {reason}"
+        record["escalation_reason"] = reason
+
+    def escalated(self) -> tuple[Mapping[str, Any], ...]:
+        return tuple(
+            dict(item)
+            for _, item in sorted(self.findings.items())
+            if item["outcome"] == "escalated"
+        )
+
+    def mark_unresolvable(self, requested: list[str], unresolvable: list[str]) -> None:
+        """Apply a fixer's ``unresolvable_finding_keys`` declaration.
+
+        Mirrors the discipline :meth:`mark_fix_attempt` already applies to
+        ``addressed_finding_keys``: a key outside the fixer's own bound is a
+        protocol violation, not a silent no-op.
+        """
+
+        unknown = sorted(set(unresolvable) - set(requested))
+        if unknown:
+            raise ReviewFixError(
+                "fixer declared findings unresolvable outside its fix list: "
+                + ", ".join(unknown)
+            )
+        for key in unresolvable:
+            self.escalate_out_of_grant(key, "fixer_declared_unresolvable")
 
     def ingest(
         self,
@@ -524,13 +580,24 @@ class ReviewLedger:
                 {"cycle": cycle, "addressed": key in addressed}
             )
 
-    def mark_verified(self, addressed: list[str], verified: list[str]) -> None:
+    def mark_verified(
+        self,
+        addressed: list[str],
+        verified: list[str],
+        *,
+        close_immediately: bool = False,
+    ) -> None:
+        """Disposition a verified fix. ``close_immediately`` forces ``fixed``
+        rather than ``pending_review`` -- for a loop with no subsequent
+        review stage to resolve a regression check, such as the bounded
+        fix-only loop, ``pending_review`` would never close."""
+
         for key in addressed:
             if key in verified:
                 self.findings[key]["outcome"] = (
-                    "pending_review"
-                    if self.policy.regression_review_enabled
-                    else "fixed"
+                    "fixed"
+                    if close_immediately or not self.policy.regression_review_enabled
+                    else "pending_review"
                 )
             else:
                 self.findings[key]["outcome"] = "open"
@@ -540,6 +607,22 @@ class ReviewLedger:
             key
             for key, item in self.findings.items()
             if item["outcome"] in {"open", "pending_review"}
+            and (item["requires_disposition"] or item["contract_violation"])
+        )
+
+    def escalated_required(self) -> list[str]:
+        """Required findings escalated this run rather than discharged.
+
+        ``escalate_out_of_grant`` moves a finding out of ``open_required``
+        (review_fix.py:367-380), so without this a required, escalated
+        finding with no downstream owner is invisible to the same check
+        that keeps an open one from sealing the run ``succeeded``.
+        """
+
+        return sorted(
+            key
+            for key, item in self.findings.items()
+            if item["outcome"] == "escalated"
             and (item["requires_disposition"] or item["contract_violation"])
         )
 
@@ -660,6 +743,7 @@ class ReviewLedger:
             ),
             "outcome": "open",
             "outcome_reason": "",
+            "escalation_reason": "",
             "cycles_seen": [cycle],
             "occurrences": 1,
             "source_finding_ids": [str(finding.get("id", key))],
@@ -724,6 +808,8 @@ class ReviewFixLoop:
         resumed_ledger: "ReviewLedger | None" = None,
         resume_from_cycle: int = 0,
         additional_cycles: int = 0,
+        bounded_fix_only: bool = False,
+        seeded_fix_keys: tuple[str, ...] = (),
     ) -> None:
         self.run_id = run_id
         self.objective = objective
@@ -759,6 +845,19 @@ class ReviewFixLoop:
         self.resumed_ledger = resumed_ledger
         self.resume_from_cycle = resume_from_cycle
         self.additional_cycles = additional_cycles
+        self.bounded_fix_only = bounded_fix_only
+        self.seeded_fix_keys = tuple(seeded_fix_keys)
+        if bounded_fix_only:
+            if not self.seeded_fix_keys:
+                raise ValueError(
+                    "bounded fix-only loop requires at least one seeded_fix_keys entry"
+                )
+            if resumed_ledger is not None:
+                raise ValueError(
+                    "bounded fix-only loop cannot resume a predecessor ledger"
+                )
+        elif self.seeded_fix_keys:
+            raise ValueError("seeded_fix_keys requires bounded_fix_only")
         # The live ledger, published so a caller that recovers this loop can
         # continue it rather than restart discovery.
         self.ledger: ReviewLedger | None = resumed_ledger
@@ -793,6 +892,8 @@ class ReviewFixLoop:
         return max(base, self.resume_from_cycle) + self.additional_cycles
 
     def run(self) -> ReviewFixResult:
+        if self.bounded_fix_only:
+            return self._run_bounded_fix_only()
         if self.resumed_ledger is not None:
             # Continue the predecessor's ledger: finding identity, cycle
             # history, fix attempts, and dispositions all survive, so this
@@ -848,6 +949,7 @@ class ReviewFixLoop:
                     origin_node=self.origin_node_id,
                     current_paths=self.allowed_paths,
                 )
+                self._escalate_out_of_grant(ledger)
                 fix_keys = sorted(
                     key
                     for key in set(fix_keys) | set(ledger.open_all())
@@ -872,6 +974,14 @@ class ReviewFixLoop:
                             cycle,
                             "required_findings_open",
                         )
+                    if ledger.escalated_required():
+                        return self._finish(
+                            ledger,
+                            "blocked",
+                            "required findings escalated without discharge",
+                            cycle,
+                            "required_findings_open",
+                        )
                     return self._finish(
                         ledger, "succeeded", "review cleared", cycle, "cleared"
                     )
@@ -881,34 +991,14 @@ class ReviewFixLoop:
                         ledger, cycle, "cycle limit reached", "cycle_limit"
                     )
 
-                try:
-                    fix = self._execute("fix", cycle, ledger, fix_keys=fix_keys)
-                except _RecoverableFixError as exc:
-                    self.audit.append(
-                        "review_fix_recovery_triggered",
-                        status="recovering",
-                        payload={
-                            "cycle": cycle,
-                            "fix_keys": fix_keys,
-                            "reason": str(exc),
-                            "recovery_attempt": 1,
-                        },
-                        actor=AuditActor("review-fix-controller", "controller"),
-                    )
-                    fix = self._execute(
-                        "fix",
-                        cycle,
-                        ledger,
-                        fix_keys=fix_keys,
-                        recovery_attempt=1,
-                        recovery_reason=str(exc),
-                    )
+                fix = self._execute_fix_with_recovery(cycle, ledger, fix_keys)
                 fix_semantic = self._semantic(fix, "review-fix-fix/1")
                 addressed = _detail_keys(
                     fix_semantic.details,
                     "addressed_finding_keys",
                 )
                 ledger.mark_fix_attempt(fix_keys, addressed, cycle)
+                self._apply_fixer_escalations(ledger, fix_keys, fix_semantic.details)
                 if self.policy.no_progress_stop_enabled and not addressed:
                     self._persist(
                         ledger,
@@ -959,6 +1049,14 @@ class ReviewFixLoop:
                             cycle,
                             "required_findings_open",
                         )
+                    if ledger.escalated_required():
+                        return self._finish(
+                            ledger,
+                            "blocked",
+                            "required findings escalated without discharge",
+                            cycle,
+                            "required_findings_open",
+                        )
                     return self._finish(
                         ledger,
                         "succeeded",
@@ -1004,6 +1102,154 @@ class ReviewFixLoop:
             )
             return self._finish(ledger, "failed", str(exc), cycle, "failed")
 
+    def _run_bounded_fix_only(self) -> ReviewFixResult:
+        """Discharge exactly ``seeded_fix_keys`` and nothing else.
+
+        Seeds the ledger from ``inherited_findings``, freezes discovery, and
+        runs one ``fix`` stage then one ``verify`` stage. No ``review`` stage
+        is ever constructed and :meth:`ReviewLedger.ingest` is never called,
+        so opening a new finding here is structurally impossible rather than
+        merely discouraged -- an unsealed node is bounded to the one
+        obligation it was reopened for.
+        """
+
+        risk_tier = _risk_tier(self.changed_paths, self.policy)
+        ledger = ReviewLedger(self.policy, risk_tier, allowed_paths=self.allowed_paths)
+        ledger.seed_transferred(self.inherited_findings)
+        ledger.freeze_discovery()
+        self.ledger = ledger
+        fix_keys = sorted(self.seeded_fix_keys)
+        cycle = 1
+        try:
+            fix = self._execute_fix_with_recovery(cycle, ledger, fix_keys)
+            fix_semantic = self._semantic(fix, "review-fix-fix/1")
+            addressed = _detail_keys(fix_semantic.details, "addressed_finding_keys")
+            ledger.mark_fix_attempt(fix_keys, addressed, cycle)
+            self._apply_fixer_escalations(ledger, fix_keys, fix_semantic.details)
+
+            verification = self._execute("verify", cycle, ledger, fix_keys=addressed)
+            verify_semantic = self._semantic(verification, "review-fix-verify/1")
+            verified = _detail_keys(verify_semantic.details, "verified_finding_keys")
+            # No review stage will ever run to resolve a "pending_review"
+            # regression check in this loop, so a verified fix closes
+            # straight to "fixed" regardless of regression_review_enabled.
+            ledger.mark_verified(addressed, verified, close_immediately=True)
+
+            cycle_entry: dict[str, Any] = {
+                "cycle": cycle,
+                "fix_attempt_id": fix.attempt_id,
+                "verify_attempt_id": verification.attempt_id,
+                "fix_keys": list(fix_keys),
+                "addressed_finding_keys": addressed,
+                "verified_finding_keys": verified,
+            }
+            ledger.cycles.append(cycle_entry)
+            self._persist(ledger, "review_fix_cycle_completed", cycle_entry)
+        except InterruptedError as exc:
+            self.audit.append(
+                "review_fix_failed",
+                status="interrupted",
+                payload={"error": str(exc), "cycle": cycle},
+                actor=AuditActor("review-fix-controller", "controller"),
+            )
+            return self._finish(
+                ledger,
+                "interrupted",
+                str(exc) or "review-fix interrupted",
+                cycle,
+                "interrupted",
+            )
+        except Exception as exc:
+            self.audit.append(
+                "review_fix_failed",
+                status="failed",
+                payload={"error": str(exc), "cycle": cycle},
+                actor=AuditActor("review-fix-controller", "controller"),
+            )
+            return self._finish(ledger, "failed", str(exc), cycle, "failed")
+
+        if ledger.open_required():
+            return self._finish(
+                ledger,
+                "blocked",
+                "required findings remain open",
+                cycle,
+                "required_findings_open",
+            )
+        if ledger.escalated_required():
+            return self._finish(
+                ledger,
+                "blocked",
+                "required findings escalated without discharge",
+                cycle,
+                "required_findings_open",
+            )
+        return self._finish(
+            ledger, "succeeded", "bounded fix-only cleared", cycle, "cleared"
+        )
+
+    def _execute_fix_with_recovery(
+        self,
+        cycle: int,
+        ledger: ReviewLedger,
+        fix_keys: list[str],
+    ) -> TaskResult:
+        try:
+            return self._execute("fix", cycle, ledger, fix_keys=fix_keys)
+        except _RecoverableFixError as exc:
+            self.audit.append(
+                "review_fix_recovery_triggered",
+                status="recovering",
+                payload={
+                    "cycle": cycle,
+                    "fix_keys": fix_keys,
+                    "reason": str(exc),
+                    "recovery_attempt": 1,
+                },
+                actor=AuditActor("review-fix-controller", "controller"),
+            )
+            return self._execute(
+                "fix",
+                cycle,
+                ledger,
+                fix_keys=fix_keys,
+                recovery_attempt=1,
+                recovery_reason=str(exc),
+            )
+
+    def _escalate_out_of_grant(self, ledger: ReviewLedger) -> None:
+        """Ingest-time recognition: an open, required, ungranted finding.
+
+        Runs only after :meth:`ReviewLedger.transfer_scope_expanding`, so a
+        finding with a legitimate downstream owner keeps first claim
+        (AC-CC08-3). A no-op when ``escalation_enabled`` is off, which is
+        what keeps AC-CC08-1's byte-identity guarantee.
+        """
+
+        if not self.policy.escalation_enabled:
+            return
+        for key, record in ledger.findings.items():
+            if record["outcome"] != "open":
+                continue
+            required_paths = record.get("required_paths", ())
+            if required_paths and paths_outside_scope(
+                required_paths, self.allowed_paths
+            ):
+                ledger.escalate_out_of_grant(key, "required_paths_outside_grant")
+
+    def _apply_fixer_escalations(
+        self,
+        ledger: ReviewLedger,
+        fix_keys: list[str],
+        details: Mapping[str, Any],
+    ) -> None:
+        """Recognition, route two: the fixer declares a key unresolvable."""
+
+        if not self.policy.escalation_enabled:
+            return
+        unresolvable = _detail_keys_optional(details, "unresolvable_finding_keys")
+        ledger.mark_unresolvable(fix_keys, unresolvable)
+
     def _execute(
         self,
         stage: str,
@@ -1026,7 +1272,9 @@ class ReviewFixLoop:
             "changed_paths": list(self.changed_paths),
             "fix_finding_keys": list(fix_keys or ()),
             "ledger": ledger.as_dict(),
-            "output_contract": _stage_output_contract(stage),
+            "output_contract": _stage_output_contract(
+                stage, self.policy.escalation_enabled
+            ),
             "regression_focus": (
                 "Check only whether findings from the first review remain after "
                 "their fixes. Do not discover or authorize new work."
@@ -1119,6 +1367,14 @@ class ReviewFixLoop:
             ledger.apply_debt_sink()
         if ledger.open_all():
             return self._finish(ledger, "blocked", reason, cycle, stop_reason)
+        if ledger.escalated_required():
+            return self._finish(
+                ledger,
+                "blocked",
+                "required findings escalated without discharge",
+                cycle,
+                "required_findings_open",
+            )
         return self._finish(
             ledger,
             "succeeded",
@@ -1195,6 +1451,7 @@ class ReviewFixLoop:
             ledger.open_records(),
             stop_reason,
             ledger.scope_screening(),
+            ledger.escalated(),
         )
 
 
@@ -1240,6 +1497,15 @@ def _detail_keys(details: Mapping[str, Any], name: str) -> list[str]:
     return list(dict.fromkeys(value))
 
 
+def _detail_keys_optional(details: Mapping[str, Any], name: str) -> list[str]:
+    """Read an optional stage detail the same way ``_detail_keys`` reads a
+    required one -- absent is fine, present-but-malformed still raises."""
+
+    if name not in details:
+        return []
+    return _detail_keys(details, name)
+
+
 def _digest(value: Mapping[str, Any]) -> str:
     raw = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
     return "context:sha256:" + hashlib.sha256(raw).hexdigest()
@@ -1272,7 +1538,9 @@ def _risk_tier(paths: tuple[str, ...], policy: ReviewFixPolicy) -> str:
     )
 
 
-def _stage_output_contract(stage: str) -> Mapping[str, Any]:
+def _stage_output_contract(
+    stage: str, escalation_enabled: bool = False
+) -> Mapping[str, Any]:
     if stage == "review":
         return {
             "details_schema": "review-fix-review/1",
@@ -1289,10 +1557,20 @@ def _stage_output_contract(stage: str) -> Mapping[str, Any]:
             ],
         }
     key = "addressed_finding_keys" if stage == "fix" else "verified_finding_keys"
-    return {
+    contract: dict[str, Any] = {
         "details_schema": f"review-fix-{stage}/1",
         "required_details": {key: "list[string]"},
     }
+    if stage == "fix" and escalation_enabled:
+        # Optional: a subset of this stage's own fix_finding_keys the fixer
+        # could not address in-grant. Not required_details -- most fix
+        # results never touch it. Advertised only when escalation is on:
+        # otherwise a compliant fixer's declaration would be read for
+        # nothing, since ``_apply_fixer_escalations`` discards it unread.
+        contract["optional_details"] = {
+            "unresolvable_finding_keys": "list[string]"
+        }
+    return contract
 
 
 __all__ = [
