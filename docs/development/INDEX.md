@@ -63,6 +63,12 @@ Status: active
   [`DASHBOARD_OBSERVABILITY_METRICS_PLAN.md`](DASHBOARD_OBSERVABILITY_METRICS_PLAN.md)
 - Completed-PlanGraph viewer backfill and viewing runbook:
   [`../observability/completed-plangraph-viewer.md`](../observability/completed-plangraph-viewer.md)
+- Delta-to-run pipeline (finding intake, sanitizer media-type policy,
+  measurer commissioning, launcher kit and plan synthesis):
+  [`delta-to-run-plan.md`](delta-to-run-plan.md), its five-node decomposition
+  [`delta-to-run-decomposition.json`](delta-to-run-decomposition.json), and
+  the session handoff
+  [`SESSION_HANDOFF_DELTA_TO_RUN_20260820.md`](SESSION_HANDOFF_DELTA_TO_RUN_20260820.md)
 
 ## Seed implementation records
 

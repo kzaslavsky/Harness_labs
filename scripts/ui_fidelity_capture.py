@@ -142,22 +142,15 @@ def _load_sanitizer_module(module_ref: str) -> Any:
         ) from exc
 
 
-def resolve_sanitizer(spec: str | None) -> Callable[[str, bytes], bytes]:
-    """Resolve a ``<module-or-path>:<callable>`` sanitizer spec.
+def _resolve_spec_sanitizer(spec: str) -> Callable[[str, bytes], bytes]:
+    """Resolve a ``<module-or-path>:<callable>`` sanitizer spec to the
+    callable it names -- shared by the legacy ``--sanitizer`` path and the
+    ``text`` entry of a ``--sanitizer-policy`` mapping (``dtr-sn``)."""
 
-    ``None`` (the default -- no ``--sanitizer`` supplied) resolves to an
-    identity pass-through, since the hook is campaign-configured and this
-    script has no campaign config of its own to read one from. Every failure
-    to resolve a *supplied* spec is a :class:`SanitizerError` (AC-CC03-2's
-    only sanitizer-related exit path), not the base :class:`CaptureError`.
-    """
-
-    if not spec:
-        return _identity_sanitizer
     module_ref, sep, attr = spec.rpartition(":")
     if not sep or not module_ref or not attr:
         raise SanitizerError(
-            f"invalid --sanitizer spec: {spec!r} (want module_or_path:callable)"
+            f"invalid sanitizer spec: {spec!r} (want module_or_path:callable)"
         )
     module = _load_sanitizer_module(module_ref)
     try:
@@ -167,6 +160,136 @@ def resolve_sanitizer(spec: str | None) -> Callable[[str, bytes], bytes]:
     if not callable(func):
         raise SanitizerError(f"sanitizer {spec!r} is not callable")
     return func
+
+
+# Artifact kinds whose raw content is binary (media type outside the
+# ``text/*``/``application/json`` families) -- the policy mapping's
+# ``binary`` verbs apply to these; every other kind is a "text" kind and
+# passes through the policy's single ``text`` hook (``dtr-sn``).
+_BINARY_ARTIFACT_KINDS = frozenset(
+    kind
+    for kind, media_type in _MEDIA_TYPES.items()
+    if not (media_type.startswith("text/") or media_type == "application/json")
+)
+
+
+def _resolve_binary_policy_verb(
+    kind: str, verb: str, content: bytes, text_hook: Callable[[str, bytes], bytes]
+) -> bytes:
+    """Apply one binary artifact kind's declared policy verb.
+
+    ``scan`` routes the content through the policy's declared ``text`` hook
+    (which already takes ``(kind, bytes)``) -- an observable, transforming
+    step, not a silent pass-through -- so a scanned artifact is distinguishable
+    from an ``admit:<reason>`` one, which alone admits the content unchanged
+    as the explicit bypass; no product-specific scanning logic is embedded
+    here (``dtr-sn``'s "mechanism only" constraint: the hook itself is
+    product config). ``reject`` refuses it, naming the refusing rule so
+    ``--dry-run`` reports are actionable.
+    """
+
+    if verb == "scan":
+        return text_hook(kind, content)
+    if verb.startswith("admit:") and len(verb) > len("admit:"):
+        return content
+    if verb == "reject":
+        raise SanitizerError(
+            f"sanitizer policy rule 'binary.{kind}=reject' refused the {kind!r} artifact"
+        )
+    raise SanitizerError(
+        f"sanitizer policy binary verb for {kind!r} must be 'scan', "
+        f"'admit:<reason>', or 'reject', got {verb!r}"
+    )
+
+
+def _resolve_policy_sanitizer(
+    policy: Mapping[str, Any],
+) -> Callable[[str, bytes], bytes]:
+    """Resolve the ``{"text": <hook-ref>, "binary": {"<kind>": <verb>}}``
+    mapping form (``--sanitizer-policy``) into a per-kind dispatching
+    callable.
+
+    A missing or empty ``text`` entry fails closed with
+    :class:`SanitizerError` rather than a later ``AttributeError`` (mirrors
+    the driver-side ``resolve_pre_journal_sanitizer`` requirement,
+    AC-SN-4's sibling on the capture surface). An undeclared binary kind
+    also fails closed (AC-SN-2). A ``binary`` entry naming a kind that is
+    not one of :data:`_BINARY_ARTIFACT_KINDS` (including any kind not in
+    ``ARTIFACT_KINDS`` at all) is refused here, at policy-resolution time --
+    otherwise it would be silently ignored, since dispatch only ever
+    consults ``binary_policy`` for a kind it already knows is binary, and a
+    declared refusal for a text kind would admit that artifact with no
+    diagnostic.
+    """
+
+    if not isinstance(policy, Mapping):
+        raise SanitizerError(
+            f"--sanitizer-policy must hold a JSON object, got {type(policy).__name__}"
+        )
+    text_spec = policy.get("text")
+    if not isinstance(text_spec, str) or not text_spec.strip():
+        raise SanitizerError(
+            "--sanitizer-policy must carry a non-empty 'text' hook reference"
+        )
+    text_hook = _resolve_spec_sanitizer(text_spec)
+    binary_policy = policy.get("binary", {})
+    if not isinstance(binary_policy, Mapping):
+        raise SanitizerError("--sanitizer-policy 'binary' entry must be a JSON object")
+    for kind, verb in binary_policy.items():
+        if kind not in _BINARY_ARTIFACT_KINDS:
+            raise SanitizerError(
+                f"--sanitizer-policy 'binary' entry names {kind!r}, which is not a "
+                f"binary artifact kind ({sorted(_BINARY_ARTIFACT_KINDS)!r}); text-kind "
+                "artifacts are governed by the policy's 'text' hook, not 'binary'"
+            )
+        if not isinstance(verb, str) or not verb.strip():
+            raise SanitizerError(
+                f"--sanitizer-policy binary policy for {kind!r} must be a non-empty string"
+            )
+
+    def _dispatch(kind: str, content: bytes) -> bytes:
+        if kind in _BINARY_ARTIFACT_KINDS:
+            verb = binary_policy.get(kind)
+            if verb is None:
+                raise SanitizerError(
+                    f"sanitizer policy rule 'binary.{kind}=<undeclared>' refused the "
+                    f"{kind!r} artifact (undeclared binary kinds fail closed)"
+                )
+            return _resolve_binary_policy_verb(kind, verb, content, text_hook)
+        return text_hook(kind, content)
+
+    return _dispatch
+
+
+def resolve_sanitizer(
+    spec: str | None, *, policy: Mapping[str, Any] | None = None
+) -> Callable[[str, bytes], bytes]:
+    """Resolve the configured sanitizer to a ``(kind, content) -> content``
+    callable that dispatches on artifact kind (``dtr-sn``).
+
+    Exactly one of ``spec`` (the legacy ``--sanitizer <module>:<callable>``
+    form, applied uniformly to every kind, unchanged semantics) or
+    ``policy`` (the ``--sanitizer-policy`` mapping form, dispatching text
+    kinds through its ``text`` hook and binary kinds through their declared
+    verb) is expected to be set -- the CLI enforces mutual exclusivity via
+    an ``argparse`` mutually exclusive group; this function additionally
+    refuses both being set. Neither set (the default) resolves to an
+    identity pass-through, since the hook is campaign-configured and this
+    script has no campaign config of its own to read one from. Every
+    failure to resolve a *supplied* spec or policy is a
+    :class:`SanitizerError` (AC-CC03-2's only sanitizer-related exit path),
+    not the base :class:`CaptureError`.
+    """
+
+    if policy is not None:
+        if spec:
+            raise SanitizerError(
+                "--sanitizer and --sanitizer-policy are mutually exclusive"
+            )
+        return _resolve_policy_sanitizer(policy)
+    if not spec:
+        return _identity_sanitizer
+    return _resolve_spec_sanitizer(spec)
 
 
 def sanitize_before_journal(
@@ -889,6 +1012,80 @@ def _load_matrix(matrix_path: str) -> dict[str, Any]:
     return matrix
 
 
+def _load_sanitizer_policy(policy_path: str) -> Mapping[str, Any]:
+    """Load the ``--sanitizer-policy <json-file>`` mapping."""
+
+    try:
+        raw = Path(policy_path).read_text(encoding="utf-8")
+        policy = json.loads(raw)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SanitizerError(
+            f"could not load --sanitizer-policy {policy_path!r}: {exc}"
+        ) from exc
+    if not isinstance(policy, Mapping):
+        raise SanitizerError(
+            f"--sanitizer-policy {policy_path!r} must hold a JSON object, "
+            f"got {type(policy).__name__}"
+        )
+    return policy
+
+
+def _resolve_sanitizer_from_args(
+    args: argparse.Namespace,
+) -> Callable[[str, bytes], bytes]:
+    """Resolve the CLI's configured sanitizer -- ``--sanitizer-policy`` (the
+    mapping form) or legacy ``--sanitizer`` (a spec string), mutually
+    exclusive (``dtr-sn``)."""
+
+    policy_path = getattr(args, "sanitizer_policy", None)
+    if policy_path:
+        return resolve_sanitizer(None, policy=_load_sanitizer_policy(policy_path))
+    return resolve_sanitizer(args.sanitizer)
+
+
+def _sample_bundle() -> dict[str, bytes]:
+    """One representative raw artifact per kind, used by ``--dry-run`` to
+    exercise the resolved sanitizer without a real capture (AC-SN-3)."""
+
+    return {
+        "screenshot": _PLACEHOLDER_PNG,
+        "dom_snapshot": b"<html><body>dry-run sample</body></html>",
+        "computed_styles": json.dumps({"sample": True}, sort_keys=True).encode("utf-8"),
+        "aria_snapshot": json.dumps({"role": "sample"}, sort_keys=True).encode("utf-8"),
+        "console_log": json.dumps([], sort_keys=True).encode("utf-8"),
+        "network_log": json.dumps([], sort_keys=True).encode("utf-8"),
+    }
+
+
+def run_sanitizer_dry_run(args: argparse.Namespace) -> dict[str, Any]:
+    """``--dry-run``: run the resolved sanitizer over a sample bundle and
+    report would-be rejections, naming the refusing rule, without opening an
+    :class:`AuditJournal` or writing any artifact (AC-SN-3): the journal
+    file is absent after this run rather than merely unchanged.
+    """
+
+    sanitizer = _resolve_sanitizer_from_args(args)
+    bundle = _sample_bundle()
+    report: list[dict[str, Any]] = []
+    for kind in ARTIFACT_KINDS:
+        entry: dict[str, Any] = {"kind": kind, "media_type": _MEDIA_TYPES[kind]}
+        try:
+            sanitize_before_journal(sanitizer, kind, bundle[kind])
+        except SanitizerError as exc:
+            entry["would_reject"] = True
+            entry["reason"] = str(exc)
+        else:
+            entry["would_reject"] = False
+            entry["reason"] = None
+        report.append(entry)
+    return {
+        "schema": RECEIPT_SCHEMA,
+        "dry_run": True,
+        "sanitizer_report": report,
+        "cells": [],
+    }
+
+
 def run_capture(args: argparse.Namespace, out_dir: Path) -> dict[str, Any]:
     app_dir = Path(args.app_dir).resolve()
     matrix = _load_matrix(args.matrix)
@@ -899,7 +1096,7 @@ def run_capture(args: argparse.Namespace, out_dir: Path) -> dict[str, Any]:
     selectors = matrix["selectors"]
 
     python_path = args.python or sys.executable
-    sanitizer = resolve_sanitizer(args.sanitizer)
+    sanitizer = _resolve_sanitizer_from_args(args)
     # Back the catalog with a real AuditJournal so catalog.add() genuinely
     # journals every artifact via AuditJournal.write_artifact's atomic-write
     # primitive (AC-CC03-4: "before it is journaled") instead of only
@@ -981,7 +1178,11 @@ def run_capture(args: argparse.Namespace, out_dir: Path) -> dict[str, Any]:
             "selectors": list(selectors),
         },
         "cells": cells,
-        "sanitizer": {"spec": args.sanitizer, "artifacts_checked": len(cells) * len(ARTIFACT_KINDS)},
+        "sanitizer": {
+            "spec": args.sanitizer,
+            "policy_path": getattr(args, "sanitizer_policy", None),
+            "artifacts_checked": len(cells) * len(ARTIFACT_KINDS),
+        },
         "evidence": _evidence_summary(cells, audit.artifacts_dir),
         "audit_run_dir": str(audit.run_dir),
     }
@@ -1021,8 +1222,16 @@ def _evidence_summary(
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--app-dir", required=True, help="Static fixture app root")
-    parser.add_argument("--matrix", required=True, help="Path to a matrix.json declaration")
+    parser.add_argument(
+        "--app-dir",
+        default=None,
+        help="Static fixture app root (required unless --dry-run)",
+    )
+    parser.add_argument(
+        "--matrix",
+        default=None,
+        help="Path to a matrix.json declaration (required unless --dry-run)",
+    )
     parser.add_argument("--out", required=True, help="Output directory for the receipt and artifacts")
     parser.add_argument(
         "--python",
@@ -1035,10 +1244,28 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default="auto",
         help="Force stub/real, or auto-detect (default: auto)",
     )
-    parser.add_argument(
+    sanitizer_group = parser.add_mutually_exclusive_group()
+    sanitizer_group.add_argument(
         "--sanitizer",
         default=None,
         help="pre_journal_sanitizer hook as <module-or-path.py>:<callable> (default: identity)",
+    )
+    sanitizer_group.add_argument(
+        "--sanitizer-policy",
+        default=None,
+        help=(
+            "Path to a JSON file holding the {'text': <hook-ref>, "
+            "'binary': {'<kind>': 'scan'|'admit:<reason>'|'reject'}} sanitizer "
+            "policy mapping; mutually exclusive with --sanitizer"
+        ),
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=(
+            "Run the resolved sanitizer over a sample bundle, report would-be "
+            "rejections, and journal nothing"
+        ),
     )
     return parser
 
@@ -1062,7 +1289,10 @@ def _write_error_receipt(path: Path, *, kind: str, error: str, python_path: str)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    args = build_arg_parser().parse_args(argv)
+    parser = build_arg_parser()
+    args = parser.parse_args(argv)
+    if not args.dry_run and (not args.app_dir or not args.matrix):
+        parser.error("--app-dir and --matrix are required unless --dry-run is set")
     out_dir = Path(args.out)
     try:
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -1079,7 +1309,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     receipt_path = out_dir / "receipt.json"
 
     try:
-        receipt = run_capture(args, out_dir)
+        # --dry-run never opens an AuditJournal or writes an artifact: the
+        # journal is absent afterward rather than merely unchanged (AC-SN-3).
+        receipt = run_sanitizer_dry_run(args) if args.dry_run else run_capture(args, out_dir)
     except SanitizerError as exc:
         _write_error_receipt(
             receipt_path, kind="sanitizer_failure", error=str(exc), python_path=args.python

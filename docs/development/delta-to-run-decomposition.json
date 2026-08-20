@@ -1,0 +1,224 @@
+{
+  "protocol": "plan-graph-plan/1",
+  "plan": "docs/development/delta-to-run-plan.md",
+  "referenced_artifacts": [
+    "docs/development/delta-to-run-plan.md",
+    "docs/development/SESSION_HANDOFF_DELTA_TO_RUN_20260820.md",
+    "docs/decisions/0007-in-graph-escalation-bounded-unsealing.md",
+    "docs/development/relax-gate-timeout-flake-20260819.md"
+  ],
+  "acceptance_criteria": {
+    "AC-FI-1": "Every finding emitted by `finding_intake.draft_finding` / batch transcription round-trips the REAL `ConvergenceLedger.ingest_audit` (a scratch ledger in the test) with no `ConvergenceLedgerError`; the derived open set contains exactly the emitted `(file, subject)` keys, and the `DraftFinding` envelope carries all twelve validator fields including `source_finding_ids`. OBSERVABLE:{\"kind\": \"test_id\", \"referent\": \"tests/test_finding_intake.py\"}",
+    "AC-FI-2": "A statement whose root-cause search yields multiple disjoint candidate `required_paths` sets, or no candidate, returns an `IntakeQuestion` naming the candidates; no finding is emitted and nothing is sealed. Guessed attribution is unrepresentable: `draft_finding`'s return type is `DraftFinding | IntakeQuestion` and tests assert the ambiguous cases produce the question. OBSERVABLE:{\"kind\": \"test_id\", \"referent\": \"tests/test_finding_intake.py\"}",
+    "AC-FI-3": "`scripts/report_finding.py` seals accepted findings as one audit envelope (`{digest, findings, verdicts: [], confirmed_good: [], capture_coverage: {}}`) by writing it to a temp file and calling `CampaignArtifactStore.seal`; it never calls `ingest_audit`: after a single-statement report the ledger contains no `audit_ingested` record and no key's `unsuccessful_repair_claims` has incremented. Re-running with byte-identical input reseals the same digest and changes nothing. OBSERVABLE:{\"kind\": \"test_id\", \"referent\": \"tests/test_finding_intake.py\"}",
+    "AC-FI-4": "Batch mode transcribes a seed-audit file of N statements into one sealed artifact; every finding carries `confidence == \"S\"` unless capture-evidence refs are attached (then `\"C+S\"`), and judgment-call statements carry `requires_disposition: true`. OBSERVABLE:{\"kind\": \"test_id\", \"referent\": \"tests/test_finding_intake.py\"}",
+    "AC-FI-5": "`python3 -m pytest tests/test_import_boundaries.py -q` passes: `finding_intake` sits in the plangraph layer and no `harness_labs/core` module gains a plangraph import. OBSERVABLE:{\"kind\": \"test_id\", \"referent\": \"tests/test_import_boundaries.py\"}",
+    "AC-SN-1": "A campaign whose config carries the legacy string `pre_journal_sanitizer` behaves identically before and after this change: same validation, same semantics, and a byte-identical `campaign_opened.config` mapping (existing journals re-fold with no drift). OBSERVABLE:{\"kind\": \"test_id\", \"referent\": \"tests/test_convergence_campaign.py\"}",
+    "AC-SN-2": "The capture CLI accepts `--sanitizer-policy <json-file>` holding the mapping form, mutually exclusive with the legacy `--sanitizer` string: text-kind artifacts pass through the scanning hook, binary kinds follow their declared policy (`scan`, `admit:<reason>`, `reject`), and journaling an artifact whose kind has no declared policy raises `SanitizerError` — fail closed. OBSERVABLE:{\"kind\": \"test_id\", \"referent\": \"tests/test_ui_fidelity_capture.py\"}",
+    "AC-SN-3": "`ui_fidelity_capture --dry-run` over a sample bundle emits a per-artifact report of would-be rejections (naming the refusing rule) and writes nothing to the journal: the journal file is absent or byte-identical after the run. OBSERVABLE:{\"kind\": \"test_id\", \"referent\": \"tests/test_ui_fidelity_capture.py\"}",
+    "AC-SN-4": "`sanitize_before_journaling` in `scripts/run_convergence_campaign.py` resolves the `text` hook out of the mapping config form and applies it to journaled text exactly as the legacy string form does; a mapping config with no `text` entry raises `SanitizerFailure`, never `AttributeError`. OBSERVABLE:{\"kind\": \"test_id\", \"referent\": \"tests/test_convergence_campaign_driver.py\"}",
+    "AC-MC-1": "`measurer_commissioning` runs the capture matrix N times through its injected runner callable, emits a per-cell stability report classifying each cell stable/unstable against the declared divergence threshold, and records the threshold in the report; the classification is exercised over stub-driver captures in CI and never skips. OBSERVABLE:{\"kind\": \"test_id\", \"referent\": \"tests/test_measurer_commissioning.py\"}",
+    "AC-MC-2": "Commissioning with any chronically unstable cell cannot report success: the run surfaces those cells as explicit ruling requests and exits nonzero until each is ruled (excluded or threshold-amended with a recorded reason). OBSERVABLE:{\"kind\": \"test_id\", \"referent\": \"tests/test_measurer_commissioning.py\"}",
+    "AC-MC-3": "Inspector recall calibration scores the inspector against a seed-findings list of ledger finding envelopes supplied as a JSON path argument (the shape `finding_intake --batch` emits, passed as data) and emits a recall report artifact; `harness_labs/core/measurer_commissioning.py` imports nothing from `harness_labs.plangraph`. OBSERVABLE:{\"kind\": \"test_id\", \"referent\": \"tests/test_measurer_commissioning.py\"}",
+    "AC-MC-4": "`build_campaign_config` refuses a config lacking `stability_report_digest` and `recall_report_digest` unless it carries `commissioning_override: {\"reason\": <non-empty>}`, naming each missing artifact in the refusal, so `pin_target` cannot record a `campaign_opened` config without them; every existing `pin_target`/`open_campaign` call site in the granted test files is migrated and green. OBSERVABLE:{\"kind\": \"test_id\", \"referent\": \"tests/test_convergence_campaign.py\"}",
+    "AC-MC-5": "`python3 -m pytest tests/test_import_boundaries.py -q` passes: `harness_labs/core/measurer_commissioning.py` imports nothing from `harness_labs.plangraph`. OBSERVABLE:{\"kind\": \"test_id\", \"referent\": \"tests/test_import_boundaries.py\"}",
+    "AC-MC-6": "The driver's `close` step derives `inspector_recall` from the sealed recall report artifact when the caller does not supply a value, so the calibrated number reaches the recall-threshold gate; an explicit caller value still wins. OBSERVABLE:{\"kind\": \"test_id\", \"referent\": \"tests/test_convergence_campaign_driver.py\"}",
+    "AC-LK-1": "`campaign_launcher.build_campaign_launch_config()` returns a plain mapping pinned in tests against a literal golden dict transcribing `experiments/run_convergence_plan_graph.py` at base `8a13917`: coordinator spec with `timeout_seconds == 7200.0`, implementer and reviewer specs/models, `recovery_limit == 5`, `continuation_recovery_limit == 3`, `verification_repair_limit == 3`, `allow_dirty_baseline is True`, `require_repository_change is True`, `candidate_only is True`, `merge is False`, `max_parallelism == 5`, plus parameterized product values (plan/decomposition paths, logical graph id, agent-mixture specs, profile-builder hook, operator-notes directory). OBSERVABLE:{\"kind\": \"test_id\", \"referent\": \"tests/test_campaign_launcher.py\"}",
+    "AC-LK-2": "Operator-notes supplied via the parameterized notes directory are folded into the implementer, review, and fix instruction texts (not verify, matching the source launcher); a note absent from any of the three fails the test. OBSERVABLE:{\"kind\": \"test_id\", \"referent\": \"tests/test_campaign_launcher.py\"}",
+    "AC-LK-3": "The kit emits its anti-placeholder hardening from a single shared `ANTI_PLACEHOLDER_FLOOR` constant and the test asserts that constant is a substring of the implementer, fix, review, AND verify instructions — an intentional, documented widening over the source launcher, which carried two divergent copies in implementer and fix only. OBSERVABLE:{\"kind\": \"test_id\", \"referent\": \"tests/test_campaign_launcher.py\"}",
+    "AC-LK-4": "`experiments/run_convergence_plan_graph.py` is a thin shim: a source scan asserts `run_plan_graph_feature_worktree` no longer appears in it, and the kit's launch config equals the golden dict of AC-LK-1 (parity scoped to the config surface; the documented widenings are outside it). OBSERVABLE:{\"kind\": \"test_id\", \"referent\": \"tests/test_campaign_launcher.py\"}",
+    "AC-LK-8": "The kit's config surface carries an `escalation_judge` seat and its registration adds `transfer_ownership` to `automatic_recovery.allowed_actions` with a `max_structural_decisions` bound, per ADR 0007; tests assert all three appear in the built config. OBSERVABLE:{\"kind\": \"test_id\", \"referent\": \"tests/test_campaign_launcher.py\"}",
+    "AC-LK-5": "`plan_synthesis` over a ledger's open findings emits a decomposition where every criterion text parses via `parse_observable` (no criterion trips `S5_MISSING_OBSERVABLE`), each run's `allowed_paths` equals the union of its findings' `required_paths`, every grant has a path intent, `join_regression_node_id` resolves a join regression node, `validate_round_grants` passes, and the payload round-trips `canonical_plan_graph_payload` unchanged. OBSERVABLE:{\"kind\": \"test_id\", \"referent\": \"tests/test_plan_synthesis.py\"}",
+    "AC-LK-9": "`ConvergenceLedger.open_findings()` returns the folded finding envelope for each key in `open_set()`, in deterministic order; `plan_synthesis` consumes it and never re-folds the journal itself. OBSERVABLE:{\"kind\": \"test_id\", \"referent\": \"tests/test_convergence_ledger.py\"}",
+    "AC-LK-6": "The campaign driver's `plan` step invokes `plan_synthesis`, and its approve path threads `enforce=True` through BOTH `render_approval_packet` and `issue_approval` (same value both sides, satisfying the issue-side TOCTOU re-derivation); a synthesized plan carrying an S5 violation is refused at approve; `scripts/approve_plan.py` is unchanged. OBSERVABLE:{\"kind\": \"test_id\", \"referent\": \"tests/test_convergence_campaign_driver.py\"}",
+    "AC-LK-7": "`python3 -m pytest tests/ -q` exits 0 at the sink against base `8a13917`'s collected set (1027 tests), with skip count no greater than the base commit's and no skip reason introduced by this change. OBSERVABLE:{\"kind\": \"test_id\", \"referent\": \"tests/\"}"
+  },
+  "plan_sections": {
+    "dtr-problem": "## Problem and current behaviour [dtr-problem]",
+    "dtr-design": "## Design [dtr-design]",
+    "dtr-fi": "### FI — finding intake [dtr-fi]",
+    "dtr-sn": "### SN — sanitizer media-type policy [dtr-sn]",
+    "dtr-mc": "### MC — measurer commissioning [dtr-mc]",
+    "dtr-lk": "### LK — launcher kit and plan synthesis [dtr-lk]",
+    "dtr-tests": "## Tests [dtr-tests]",
+    "dtr-build-order": "## Build order [dtr-build-order]",
+    "dtr-risks": "## Risks [dtr-risks]"
+  },
+  "functionality_tests": [
+    {
+      "argv": ["python3", "-m", "pytest", "tests/", "-q"],
+      "required_paths": [],
+      "timeout_seconds": 3600.0
+    }
+  ],
+  "runs": [
+    {
+      "id": "DTR-FI",
+      "objective": "Build the finding-intake lane (DTR-F1): harness_labs/plangraph/finding_intake.py turning free-text statements into contract-valid findings — root-caused required_paths from a working-tree search, derived (file, subject) key, all twelve validator envelope fields including source_finding_ids, confidence S unless capture evidence attached, requires_disposition for judgment calls, ambiguity returned as an IntakeQuestion rather than guessed — plus scripts/report_finding.py with single-statement and --batch seed-audit modes taking explicit --ledger/--campaign-root arguments. Sealing writes the audit envelope to a temp file and seals it via CampaignArtifactStore.seal (import, not modify, convergence_campaign.py; seal_audit_result is NOT the API — it seals only evidence_refs files). The CLI never calls ingest_audit: folding a partial statement mid-round would mark other open keys unobserved and fabricate failed repair claims. Tests validate against the real ledger validator on a scratch ledger, never a mirror of its rules.",
+      "criteria": ["AC-FI-1", "AC-FI-2", "AC-FI-3", "AC-FI-4", "AC-FI-5"],
+      "depends_on": [],
+      "allowed_paths": [
+        "harness_labs/plangraph/finding_intake.py",
+        "scripts/report_finding.py",
+        "tests/test_finding_intake.py"
+      ],
+      "path_intents": [
+        {"action": "create", "path": "harness_labs/plangraph/finding_intake.py"},
+        {"action": "create", "path": "scripts/report_finding.py"},
+        {"action": "create", "path": "tests/test_finding_intake.py"}
+      ],
+      "plan_sections": ["dtr-problem", "dtr-design", "dtr-fi", "dtr-tests", "dtr-risks"],
+      "verification_argv": [
+        "python3", "-m", "pytest",
+        "tests/test_finding_intake.py",
+        "tests/test_import_boundaries.py",
+        "-q"
+      ],
+      "verification_required_paths": [],
+      "verification_timeout_seconds": 1800.0
+    },
+    {
+      "id": "DTR-SN",
+      "objective": "Build the sanitizer media-type policy lane (DTR-F2, DTR-F3) across BOTH sanitizer surfaces, named precisely: capture-side resolve_sanitizer/sanitize_before_journal in scripts/ui_fidelity_capture.py (dispatches on artifact kind, raises SanitizerError) and driver-side resolve_pre_journal_sanitizer/sanitize_before_journaling in scripts/run_convergence_campaign.py (reads CONFIG_SANITIZER_KEY, raises SanitizerFailure). Campaign config accepts the legacy string (byte-identical campaign_opened.config mapping) or the mapping form {text: hook, binary: {kind: scan|admit:<reason>|reject}}; the driver resolves the text hook from the mapping exactly as the legacy path and raises SanitizerFailure (never AttributeError) on a mapping without a text entry; the policy reaches the capture CLI as --sanitizer-policy <json-file>, mutually exclusive with legacy --sanitizer; undeclared binary kinds fail closed; --dry-run reports would-be rejections and journals nothing. Mechanism only: PHI or other policy content stays product config, not harness code.",
+      "criteria": ["AC-SN-1", "AC-SN-2", "AC-SN-3", "AC-SN-4"],
+      "depends_on": [],
+      "allowed_paths": [
+        "scripts/ui_fidelity_capture.py",
+        "harness_labs/plangraph/convergence_campaign.py",
+        "scripts/run_convergence_campaign.py",
+        "tests/test_ui_fidelity_capture.py",
+        "tests/test_convergence_campaign.py",
+        "tests/test_convergence_campaign_driver.py"
+      ],
+      "path_intents": [
+        {"action": "modify", "path": "scripts/ui_fidelity_capture.py"},
+        {"action": "modify", "path": "harness_labs/plangraph/convergence_campaign.py"},
+        {"action": "modify", "path": "scripts/run_convergence_campaign.py"},
+        {"action": "modify", "path": "tests/test_ui_fidelity_capture.py"},
+        {"action": "modify", "path": "tests/test_convergence_campaign.py"},
+        {"action": "modify", "path": "tests/test_convergence_campaign_driver.py"}
+      ],
+      "plan_sections": ["dtr-problem", "dtr-design", "dtr-sn", "dtr-tests", "dtr-risks"],
+      "verification_argv": [
+        "python3", "-m", "pytest",
+        "tests/test_ui_fidelity_capture.py",
+        "tests/test_convergence_campaign.py",
+        "tests/test_convergence_campaign_driver.py",
+        "-q"
+      ],
+      "verification_required_paths": [],
+      "verification_timeout_seconds": 2400.0
+    },
+    {
+      "id": "DTR-LK-KIT",
+      "objective": "Extract the proven experiments launcher into harness_labs/graphrun/campaign_launcher.py (DTR-F5) behind a product-config surface: build_campaign_launch_config() returns a plain mapping pinned against a literal golden dict transcribing experiments/run_convergence_plan_graph.py at base 8a13917 (coordinator spec + 7200.0s silence tolerance, implementer/reviewer specs and models, recovery_limit=5, continuation_recovery_limit=3, verification_repair_limit=3, allow_dirty_baseline, require_repository_change, candidate_only, merge=False, max_parallelism=5, plan/decomposition paths, logical graph id, agent-mixture specs, profile-builder hook, and a parameterized operator-notes directory in place of the hardcoded logs/plan-approval/operator-notes path). Operator-notes fold into implementer/review/fix instructions. Two documented widenings outside the parity scope: a single shared ANTI_PLACEHOLDER_FLOOR constant included in all four worker instructions (source carries two divergent copies in implementer and fix only), and CC-08 wiring per ADR 0007 (escalation_judge seat, transfer_ownership in automatic_recovery.allowed_actions, max_structural_decisions bound — the source launcher predates CC-08). The experiments script becomes a thin shim: run_plan_graph_feature_worktree no longer appears in it.",
+      "criteria": ["AC-LK-1", "AC-LK-2", "AC-LK-3", "AC-LK-4", "AC-LK-8"],
+      "depends_on": [],
+      "allowed_paths": [
+        "harness_labs/graphrun/campaign_launcher.py",
+        "experiments/run_convergence_plan_graph.py",
+        "tests/test_campaign_launcher.py"
+      ],
+      "path_intents": [
+        {"action": "create", "path": "harness_labs/graphrun/campaign_launcher.py"},
+        {"action": "modify", "path": "experiments/run_convergence_plan_graph.py"},
+        {"action": "create", "path": "tests/test_campaign_launcher.py"}
+      ],
+      "plan_sections": ["dtr-problem", "dtr-design", "dtr-lk", "dtr-tests", "dtr-risks"],
+      "verification_argv": [
+        "python3", "-m", "pytest",
+        "tests/test_campaign_launcher.py",
+        "-q"
+      ],
+      "verification_required_paths": [],
+      "verification_timeout_seconds": 1800.0
+    },
+    {
+      "id": "DTR-MC",
+      "objective": "Build the measurer-commissioning lane (DTR-F4): harness_labs/core/measurer_commissioning.py (plain JSON in / plain JSON out, imports nothing from harness_labs.plangraph) runs the capture matrix N times through an injected runner callable, emits a per-cell stability report against a declared divergence threshold (threshold recorded in the report, exercised over stub-driver captures in CI), refuses silent success while any cell is chronically unstable (explicit ruling requests, nonzero exit until ruled), and calibrates inspector recall against a seed-findings JSON file (the finding_intake --batch envelope shape, passed as data). scripts/commission_measurer.py drives both and seals both reports via CampaignArtifactStore. The campaign-open checklist lands at the real seat: build_campaign_config gains stability_report_digest and recall_report_digest keys and refuses a config lacking them absent commissioning_override:{reason}, so pin_target cannot record campaign_opened without them; every existing call site in the granted test files (test_convergence_campaign.py, test_convergence_campaign_driver.py, test_convergence_lifecycle.py) is migrated in this run. The driver's close step derives inspector_recall from the sealed recall report when not supplied. An ADR (docs/decisions/0008-campaign-open-commissioning-checklist.md) records the new refusal authority. Depends on DTR-FI (seed envelope shape as data) and DTR-SN (single-writer serialization of convergence_campaign.py and the driver).",
+      "criteria": ["AC-MC-1", "AC-MC-2", "AC-MC-3", "AC-MC-4", "AC-MC-5", "AC-MC-6"],
+      "depends_on": ["DTR-FI", "DTR-SN"],
+      "allowed_paths": [
+        "harness_labs/core/measurer_commissioning.py",
+        "scripts/commission_measurer.py",
+        "harness_labs/plangraph/convergence_campaign.py",
+        "scripts/run_convergence_campaign.py",
+        "docs/decisions/0008-campaign-open-commissioning-checklist.md",
+        "tests/test_measurer_commissioning.py",
+        "tests/test_convergence_campaign.py",
+        "tests/test_convergence_campaign_driver.py",
+        "tests/test_convergence_lifecycle.py"
+      ],
+      "path_intents": [
+        {"action": "create", "path": "harness_labs/core/measurer_commissioning.py"},
+        {"action": "create", "path": "scripts/commission_measurer.py"},
+        {"action": "modify", "path": "harness_labs/plangraph/convergence_campaign.py"},
+        {"action": "modify", "path": "scripts/run_convergence_campaign.py"},
+        {"action": "create", "path": "docs/decisions/0008-campaign-open-commissioning-checklist.md"},
+        {"action": "create", "path": "tests/test_measurer_commissioning.py"},
+        {"action": "modify", "path": "tests/test_convergence_campaign.py"},
+        {"action": "modify", "path": "tests/test_convergence_campaign_driver.py"},
+        {"action": "modify", "path": "tests/test_convergence_lifecycle.py"}
+      ],
+      "plan_sections": ["dtr-problem", "dtr-design", "dtr-fi", "dtr-mc", "dtr-tests", "dtr-risks"],
+      "verification_argv": [
+        "python3", "-m", "pytest",
+        "tests/test_measurer_commissioning.py",
+        "tests/test_convergence_campaign.py",
+        "tests/test_convergence_campaign_driver.py",
+        "tests/test_convergence_lifecycle.py",
+        "tests/test_import_boundaries.py",
+        "-q"
+      ],
+      "verification_required_paths": [],
+      "verification_timeout_seconds": 2400.0
+    },
+    {
+      "id": "DTR-LK-SYN",
+      "objective": "Build plan synthesis and its driver wiring (DTR-F6), sink node. harness_labs/plangraph/plan_synthesis.py turns the ledger's open findings into a decomposition JSON: allowed_paths per run equal the union of its findings' required_paths (ownership derives from required_paths alone), every grant carries a path intent, every criterion text carries a trailing OBSERVABLE:{kind, referent} annotation (no S5_MISSING_OBSERVABLE finding), the payload round-trips canonical_plan_graph_payload unchanged (the top-level key set is closed — no invented fields), and the result satisfies the driver's round contract: join_regression_node_id resolves and validate_round_grants passes. ConvergenceLedger gains open_findings() returning the folded finding envelope per open key, so synthesis never re-folds the journal. Driver wiring: the plan step invokes synthesis; the approve path threads enforce=True through BOTH render_approval_packet and issue_approval (same value both sides — the issue-side TOCTOU re-derivation refuses on drift); scripts/approve_plan.py is unchanged (the enforce path is driver-only). Updates docs/development/INDEX.md. Runs the lane gate plus the full-suite gate.",
+      "criteria": ["AC-LK-5", "AC-LK-9", "AC-LK-6", "AC-LK-7"],
+      "depends_on": ["DTR-MC", "DTR-LK-KIT"],
+      "allowed_paths": [
+        "harness_labs/plangraph/plan_synthesis.py",
+        "harness_labs/plangraph/convergence_ledger.py",
+        "scripts/run_convergence_campaign.py",
+        "docs/development/INDEX.md",
+        "tests/test_plan_synthesis.py",
+        "tests/test_convergence_ledger.py",
+        "tests/test_convergence_campaign_driver.py"
+      ],
+      "path_intents": [
+        {"action": "create", "path": "harness_labs/plangraph/plan_synthesis.py"},
+        {"action": "modify", "path": "harness_labs/plangraph/convergence_ledger.py"},
+        {"action": "modify", "path": "scripts/run_convergence_campaign.py"},
+        {"action": "modify", "path": "docs/development/INDEX.md"},
+        {"action": "create", "path": "tests/test_plan_synthesis.py"},
+        {"action": "modify", "path": "tests/test_convergence_ledger.py"},
+        {"action": "modify", "path": "tests/test_convergence_campaign_driver.py"}
+      ],
+      "plan_sections": ["dtr-problem", "dtr-design", "dtr-lk", "dtr-tests", "dtr-build-order", "dtr-risks"],
+      "verification_argv": [],
+      "verification_gates": [
+        {
+          "name": "lane-tests",
+          "argv": [
+            "python3", "-m", "pytest",
+            "tests/test_plan_synthesis.py",
+            "tests/test_convergence_ledger.py",
+            "tests/test_convergence_campaign_driver.py",
+            "tests/test_import_boundaries.py",
+            "-q"
+          ],
+          "timeout_seconds": 1800.0
+        },
+        {
+          "name": "full-suite",
+          "argv": ["python3", "-m", "pytest", "tests/", "-q"],
+          "timeout_seconds": 3600.0
+        }
+      ],
+      "verification_required_paths": [],
+      "verification_timeout_seconds": 3600.0
+    }
+  ]
+}

@@ -784,5 +784,144 @@ class RoundTripTests(ConvergenceLedgerTestCase):
         self.assertFalse(self.ledger.is_blocked())
 
 
+# -- DTR-LK-SYN AC-LK-9: open_findings() ------------------------------------
+
+_TWELVE_FIELD_ENVELOPE = frozenset({
+    "file", "subject", "required_paths", "confidence", "supersedes_key",
+    "id", "statement", "category", "severity", "requires_disposition",
+    "evidence_refs", "source_finding_ids",
+})
+
+
+class OpenFindingsTests(ConvergenceLedgerTestCase):
+    def test_empty_before_any_ingest(self) -> None:
+        self.assertEqual(self.ledger.open_findings(), ())
+
+    def test_returns_the_folded_finding_envelope_for_each_open_key(self) -> None:
+        self.ledger.ingest_audit(
+            _audit("d1", findings=[_finding("a/x.py", "s1"), _finding("b/y.py", "s2")])
+        )
+        envelopes = self.ledger.open_findings()
+        self.assertEqual(len(envelopes), 2)
+        self.assertEqual(
+            {(item["file"], item["subject"]) for item in envelopes},
+            {("a/x.py", "s1"), ("b/y.py", "s2")},
+        )
+        for envelope in envelopes:
+            self.assertEqual(set(envelope), _TWELVE_FIELD_ENVELOPE)
+            self.assertEqual(envelope["required_paths"], [envelope["file"]])
+
+    def test_shape_matches_exactly_between_a_live_and_a_freshly_replayed_ledger(
+        self,
+    ) -> None:
+        """A ``finding_opened`` record's on-disk shape mixes journal
+        bookkeeping fields (``type``/``key``/``digest``) in with the finding
+        fields; a fresh instance folding the journal from disk must still
+        project down to the same clean twelve-field envelope a live instance
+        returns right after ingest."""
+
+        self.ledger.ingest_audit(
+            _audit("d1", findings=[_finding("a/x.py", "s1", statement="stmt", category="cat")])
+        )
+        live = self.ledger.open_findings()
+        replayed = ConvergenceLedger(self.path).open_findings()
+        self.assertEqual(live, replayed)
+        for envelope in replayed:
+            self.assertEqual(set(envelope), _TWELVE_FIELD_ENVELOPE)
+            self.assertNotIn("type", envelope)
+            self.assertNotIn("key", envelope)
+            self.assertNotIn("digest", envelope)
+
+    def test_envelope_keys_correspond_exactly_to_open_set(self) -> None:
+        """AC-LK-9 names ``open_set()`` explicitly: every key in it must
+        appear once as an envelope from ``open_findings()``, and no other
+        key may. A fixed, a waived, and a still-open key together exercise
+        that the two views agree key-for-key, not merely status-by-status."""
+
+        open_key = ("a/x.py", "s1")
+        fixed_key = ("b/y.py", "s2")
+        waived_key = ("c/z.py", "s3")
+        self.ledger.ingest_audit(
+            _audit("d1", findings=[
+                _finding(*open_key), _finding(*fixed_key), _finding(*waived_key),
+            ])
+        )
+        self.ledger.ingest_audit(
+            _audit("d2", verdicts=[_observed_fixed(fixed_key, capture_cell="cell-1")],
+                   capture_coverage={"cell-1": "ok"})
+        )
+        self.ledger.record_ruling(waived_key, disposition="waive", statement="not real")
+
+        envelope_keys = {
+            (item["file"], item["subject"]) for item in self.ledger.open_findings()
+        }
+        self.assertEqual(envelope_keys, set(self.ledger.open_set()))
+        self.assertEqual(envelope_keys, {open_key})
+
+    def test_returned_in_deterministic_sorted_key_order(self) -> None:
+        self.ledger.ingest_audit(
+            _audit(
+                "d1",
+                findings=[
+                    _finding("z/last.py", "s1"), _finding("a/first.py", "s2"),
+                    _finding("m/middle.py", "s3"),
+                ],
+            )
+        )
+        keys = [(item["file"], item["subject"]) for item in self.ledger.open_findings()]
+        self.assertEqual(keys, sorted(keys))
+
+    def test_a_fixed_key_is_excluded(self) -> None:
+        key = ("a/x.py", "s1")
+        self.ledger.ingest_audit(_audit("d1", findings=[_finding(*key)]))
+        self.ledger.ingest_audit(
+            _audit("d2", verdicts=[_observed_fixed(key, capture_cell="cell-1")],
+                   capture_coverage={"cell-1": "ok"})
+        )
+        self.assertEqual(self.ledger.open_findings(), ())
+
+    def test_an_excluded_waived_key_is_excluded(self) -> None:
+        key = ("a/x.py", "s1")
+        self.ledger.ingest_audit(_audit("d1", findings=[_finding(*key)]))
+        self.ledger.record_ruling(key, disposition="waive", statement="not real")
+        self.assertEqual(self.ledger.open_findings(), ())
+
+    def test_an_invalidated_key_is_excluded(self) -> None:
+        key = ("a/x.py", "s1")
+        self.ledger.ingest_audit(_audit("d1", findings=[_finding(*key)]))
+        self.ledger.ingest_audit(_audit("d2", verdicts=[_invalidated(key)]))
+        self.assertEqual(self.ledger.open_findings(), ())
+
+    def test_a_fix_claimed_key_is_still_open(self) -> None:
+        key = ("a/x.py", "s1")
+        self.ledger.ingest_audit(_audit("d1", findings=[_finding(*key)]))
+        self.ledger.record_fix_claimed(key)
+        envelopes = self.ledger.open_findings()
+        self.assertEqual(len(envelopes), 1)
+        self.assertEqual((envelopes[0]["file"], envelopes[0]["subject"]), key)
+
+    def test_a_re_emitted_finding_against_a_fixed_key_reopens_it_in_open_findings(
+        self,
+    ) -> None:
+        """A ``finding_reemitted`` reopen only transitions status (recorded
+        as ``finding_reopened``); it does not rewrite the key's stored
+        finding fields, so the envelope ``open_findings`` returns is still
+        the originally-opened one -- exercised here to pin that fact rather
+        than assume it."""
+
+        key = ("a/x.py", "s1")
+        self.ledger.ingest_audit(_audit("d1", findings=[_finding(*key, statement="first")]))
+        self.ledger.ingest_audit(
+            _audit("d2", verdicts=[_observed_fixed(key, capture_cell="cell-1")],
+                   capture_coverage={"cell-1": "ok"})
+        )
+        self.assertEqual(self.ledger.open_findings(), ())
+        self.ledger.ingest_audit(_audit("d3", findings=[_finding(*key, statement="second")]))
+        envelopes = self.ledger.open_findings()
+        self.assertEqual(len(envelopes), 1)
+        self.assertEqual((envelopes[0]["file"], envelopes[0]["subject"]), key)
+        self.assertEqual(envelopes[0]["statement"], "first")
+
+
 if __name__ == "__main__":
     unittest.main()
