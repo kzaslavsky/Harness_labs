@@ -68,6 +68,7 @@ class RelaxGateTimeoutClassificationTests(unittest.TestCase):
                     "--base", base_sha,
                     "--finding-tests", "tests/test_probe.py",
                     "--timeout", "0.01",
+                    "--red-timeout", "0.01",
                 ],
                 cwd=sandbox, text=True, capture_output=True, check=False,
             )
@@ -101,6 +102,8 @@ class RelaxGateTimeoutClassificationTests(unittest.TestCase):
         # to green. The regression target exists only in the worktree (it
         # is added after the base commit, so git archive never picks it up)
         # and sleeps past the timeout, so only the green phase can time out.
+        # The red phase gets its own generous --red-timeout so pytest startup
+        # under machine load can never be misread as the phase under test.
         with tempfile.TemporaryDirectory(prefix="relax-gate-green-timeout-") as tmp:
             sandbox, base_sha = _make_sandbox_repo(self, Path(tmp), probe_body="assert False")
             (sandbox / "tests" / "test_slow_regression.py").write_text(
@@ -113,6 +116,7 @@ class RelaxGateTimeoutClassificationTests(unittest.TestCase):
                     "--finding-tests", "tests/test_probe.py",
                     "--regression", "tests/test_slow_regression.py",
                     "--timeout", "2",
+                    "--red-timeout", "60",
                 ],
                 cwd=sandbox, text=True, capture_output=True, check=False,
             )
