@@ -108,10 +108,13 @@ Step 2 is what arms real campaigns: generated plans must stamp observables.
 | Proven campaign launcher (experiments-grade) | `experiments/run_convergence_plan_graph.py` |
 | Lifecycle proof of the whole slice | `tests/test_convergence_lifecycle.py` |
 
-Related pending work: CC-08 in-graph escalation
-(`docs/development/SESSION_HANDOFF_CC08_ESCALATION_20260819.md`); the
-red_green_check per-phase-timeout fix (separate session, may already be
-merged — check `git log scripts/dev/red_green_check.py`).
+Both follow-ups from the CC campaign are DONE and merged (2026-08-20):
+CC-08 in-graph escalation with bounded unsealing (escalation judge seat,
+`schemas/plan-graph-escalation-judgment.json`, escalation routed per
+launch, ADR 0007 amended for the refusal channel — see merge `04002e8`)
+and the red_green_check per-phase timeout fix (`706e555`). Pitfall 1 below
+is therefore mitigated in-graph now, and pitfall 4's flake is fixed;
+both remain listed for their design lessons.
 
 ## What to build (four lanes; FI ∥ SN, then MC, then LK)
 
