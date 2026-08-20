@@ -146,8 +146,8 @@ Hard constraints from the plan ({PLAN_PATH}) and ADR 0007:
   stage at all, not by instructing the reviewer to behave.
 - The judge never routes, and never judges its own reviewer's finding. Both
   are hard refusals in code, not prompt guidance.
-- Feature off by default: escalation_enabled=False, escalation_judge=None,
-  and behaviour byte-identical in that configuration.
+- Escalation is ON in this runner (escalation_enabled=True plus a wired
+  judge seat).  The library defaults remain off; this runner opts in.
 - scope_expanding (from required_paths) and anchor_out_of_grant (from the
   single file anchor) are different, and since commit b6fd71e there is a third
   term, fixable_in_grant at review_fix.py:426, which clears
@@ -575,7 +575,13 @@ def _launch_node(
         binding=binding,
         schema=schema,
         contract_factory=contract_factory,
-        review_fix_policy=ReviewFixPolicy(),
+        # Escalation on, by operator decision 2026-08-20.  Wiring the judge
+        # seat alone did nothing: this policy is what makes the featurerun
+        # layer recognise an out-of-grant finding and emit escalated_findings
+        # at all, and without it the seat is never called.  Both halves are
+        # required, and both are now present -- the seat is built in
+        # _escalation_judge and passed to PlanGraph in run_graph/resume_graph.
+        review_fix_policy=ReviewFixPolicy(escalation_enabled=True),
         base_repository=REPO,
         base_branch=base_branch,
         base_commit=request.base_commit,
