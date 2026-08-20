@@ -313,12 +313,14 @@ Run it yourself before finishing and repair every failure.
 {_operator_note(node.plan_node_id)}\
 Do not commit. A prior failed attempt may have left uncommitted work in your
 allowed paths; inspect and finish or replace it rather than starting blind.
-Your structured result is part of the deliverable: summary and
-deliverable_markdown must substantively describe what you changed and how
-the gate proves it. The harness hard-fails any result whose summary contains
-placeholder text (TODO, TBD, XXX, lorem, "fill in", template braces) — write
-concrete prose about the actual change, never a stub, even when interrupted
-or uncertain.
+Your structured result is part of the deliverable and is accepted exactly
+once, at the end: never emit trial, test, or example values through the
+structured-output channel — a stub like "test" becomes your permanent
+report. summary and deliverable_markdown must substantively describe what
+you changed and how the gate proves it. The harness hard-fails any result
+whose free-text fields contain placeholder text (TODO, TBD, XXX, lorem,
+"fill in", template braces) — write concrete prose about the actual change,
+never a stub, even when interrupted or uncertain.
 """
     return (
         WorkerRole(
@@ -398,9 +400,13 @@ Inspect the supplied ledger and fix_finding_keys. Modify only
 {', '.join(writable)}, and only as needed to resolve those exact findings
 without feature growth. Run {_gate_command_text(node.run)}. Return
 addressed_finding_keys as the exact subset actually fixed. Do not commit.
-Your structured summary must be concrete prose about the actual repair; the
-harness hard-fails placeholder text (TODO, TBD, XXX, template braces) in the
-summary field, even when you are interrupted or uncertain — never stub it.
+Your structured output IS the deliverable and is accepted exactly once, at
+the end: never emit trial, test, or example values through the
+structured-output channel at any point — there is no dry run of it, and a
+stub like "test" is recorded as your permanent report. Every free-text
+field (summary AND deliverable_markdown) must be concrete prose about the
+actual repair you made; the harness hard-fails placeholder or stub text in
+any of them, even when you are interrupted or uncertain.
 {_operator_note(node.plan_node_id)}\
 """,
             "verify": f"""\
