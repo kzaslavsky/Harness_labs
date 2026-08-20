@@ -575,8 +575,8 @@ class _EscalationDisposition:
     exact finding_key was already judged and rejected earlier in this graph
     attempt) each force this attempt to block regardless of the launch's own
     outcome. ``retry_frontier_prefix`` is non-empty only when a confirm
-    unsealed a completed owner, and is ``[owner, escalating_node]`` in
-    plan-declaration order.
+    unsealed at least one completed owner, and is
+    ``[*unsealed_owners, escalating_node]`` in plan-declaration order.
     """
 
     advances: tuple[tuple[str, Mapping[str, object]], ...] = ()
@@ -2803,12 +2803,14 @@ class PlanGraph:
         A pure no-op with ``escalation_judge=None`` -- the default -- so the
         feature stays byte-identical to before CC-08 existed even when a
         caller has flipped ``ReviewFixPolicy.escalation_enabled`` on the
-        featurerun layer without wiring a judge here (AC-CC08-1). Processes
-        at most one confirmed unseal per call: unrouted and budget-exhausted
-        outcomes stop immediately (nothing further makes sense to route this
-        launch), and a confirmed unseal returns immediately once its single
-        ``transfer_ownership`` decision is spent, since only one retry
-        frontier can describe this attempt's block.
+        featurerun layer without wiring a judge here (AC-CC08-1). Routes every
+        escalated finding in the launch: a queued-owner injection writes its
+        obligation and continues, and each confirmed unseal spends its own
+        ``transfer_ownership`` decision and adds its owner to a single
+        multi-node retry frontier.  Only the three operator-facing outcomes
+        end the pass early -- unrouted, already-rejected, and an exhausted
+        structural allowance -- because each forces this attempt to block and
+        wants an operator's eyes before more of the graph is disturbed.
         """
 
         escalated = self._escalated_findings(outcome)
@@ -2816,6 +2818,7 @@ class PlanGraph:
             return _EscalationDisposition()
         advances: list[tuple[str, Mapping[str, object]]] = []
         escalations_payload: list[dict[str, object]] = []
+        unsealed_owners: list[str] = []
         for record in escalated:
             key = record.get("key")
             if not isinstance(key, str) or not key:
@@ -2920,12 +2923,13 @@ class PlanGraph:
                 # Owner has not yet run: no authority is spent, the record
                 # rides the existing finding_obligations -> inherited_ledger
                 # channel to whichever launch reaches it (AC-CC08-9).
+                # Nothing to serialise: the injection blocks nothing, spends
+                # no authority, and needs no frontier, so keep routing the
+                # rest of this launch's escalations rather than making each
+                # one cost its own graph attempt.
                 confirmed["bounded_fix_only"] = False
                 advances.append((owner, confirmed))
-                return _EscalationDisposition(
-                    advances=tuple(advances),
-                    escalations_payload=tuple(escalations_payload),
-                )
+                continue
             # Owner is sealed: unseal it. Exactly one transfer_ownership
             # structural decision per unseal (AC-CC08-10); exhaustion raises
             # BudgetError, which the caller turns into an ordinary block.
@@ -2950,13 +2954,22 @@ class PlanGraph:
             confirmed["bounded_fix_only"] = True
             audit.record_node_unsealed(owner, key, escalating_node=run.id)
             advances.append((owner, confirmed))
-            return _EscalationDisposition(
-                advances=tuple(advances),
-                escalations_payload=tuple(escalations_payload),
-                retry_frontier_prefix=self._plan_declaration_order((owner, run.id)),
-            )
+            if owner not in unsealed_owners:
+                unsealed_owners.append(owner)
+            continue
         return _EscalationDisposition(
-            advances=tuple(advances), escalations_payload=tuple(escalations_payload),
+            advances=tuple(advances),
+            escalations_payload=tuple(escalations_payload),
+            # One frontier still describes this attempt's block; it is simply
+            # no longer limited to one owner.  ``ee6ee25`` made the recovery
+            # path accept a frontier of any width, so N confirmed unseals
+            # resolve in one attempt instead of costing N -- each of which
+            # would relaunch the escalating node, its owner, and every
+            # transitive dependent whose reuse the cascade invalidates.
+            retry_frontier_prefix=(
+                self._plan_declaration_order((*unsealed_owners, run.id))
+                if unsealed_owners else ()
+            ),
         )
 
     @staticmethod

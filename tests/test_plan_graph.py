@@ -1267,6 +1267,109 @@ class PlanGraphEscalationTests(unittest.TestCase):
             escalation["resume_directive_template"]["retry_frontier"], ["a", "b"],
         )
 
+    def test_every_confirmed_unseal_in_one_launch_resolves_in_one_attempt(self) -> None:
+        """Two sealed owners, one launch, one multi-node frontier.
+
+        The first implementation returned after a single confirmed unseal,
+        on the reasoning that only one retry frontier could describe an
+        attempt's block.  ``ee6ee25`` removed that premise -- the recovery
+        path accepts a frontier of any width -- and serialising unseals is
+        expensive: each extra attempt relaunches the escalating node, its
+        owner, and every transitive dependent the cascade invalidates.
+        """
+
+        registration = self._chain_registration(
+            logical_id="confirm-two-sealed",
+            automatic_recovery={
+                "protocol": "plan-graph-automatic-recovery/1",
+                "allowed_actions": ["transfer_ownership"],
+                "max_extra_node_launches": 0, "max_structural_decisions": 2,
+            },
+        )
+        judge = _RecordingJudge(
+            identity="judge-1", verdict="confirm", rationale="both are real",
+        )
+        graph = self.graph(
+            lambda request: FeatureRunOutcome("failed"),
+            registration=registration, escalation_judge=judge,
+        )
+        audit = graph._audit_for_run()
+        run_b = next(run for run in graph.plan.runs if run.id == "b")
+        outcome = FeatureRunOutcome(
+            "succeeded", "b-commit",
+            evidence={"review_fix": {"escalated_findings": [
+                self._escalated_record("consumer.py:needs-producer", ["producer.py"]),
+                self._escalated_record("consumer.py:needs-sibling", ["sibling.py"]),
+            ]}},
+        )
+        before = graph.budget.path.read_text(encoding="utf-8").splitlines()
+
+        disposition = graph._resolve_escalations(
+            run_b, outcome, {"a": "a-commit", "d": "d-commit"}, audit
+        )
+
+        after = graph.budget.path.read_text(encoding="utf-8").splitlines()
+        events = [json.loads(line) for line in after[len(before):]]
+        self.assertEqual(
+            [event["event"] for event in events],
+            ["recovery_decision", "obligation_transferred"] * 2,
+            "each unseal must still spend exactly one transfer_ownership decision",
+        )
+        self.assertEqual(
+            sorted(node_id for node_id, _ in disposition.advances), ["a", "d"]
+        )
+        self.assertEqual(
+            [item["finding_key"] for item in disposition.escalations_payload],
+            ["consumer.py:needs-producer", "consumer.py:needs-sibling"],
+        )
+        # Plan-declaration order is a, d, b -- both owners and the escalating
+        # node, in one frontier rather than one attempt apiece.
+        self.assertEqual(disposition.retry_frontier_prefix, ("a", "d", "b"))
+        for _, record in disposition.advances:
+            self.assertTrue(record["bounded_fix_only"])
+
+    def test_queued_owner_injections_do_not_stop_the_pass(self) -> None:
+        """A queued injection blocks nothing, so it must not end the pass.
+
+        It writes an obligation, spends no authority and needs no frontier.
+        Returning after the first one dropped every later escalation of the
+        same launch, recovering it only when the escalating node relaunched
+        and rediscovered it -- a whole graph attempt to deliver a record the
+        controller already had in hand.
+        """
+
+        registration = self._chain_registration(logical_id="confirm-two-queued")
+        judge = _RecordingJudge(
+            identity="judge-1", verdict="confirm", rationale="both are real",
+        )
+        graph = self.graph(
+            lambda request: FeatureRunOutcome("failed"),
+            registration=registration, escalation_judge=judge,
+        )
+        audit = graph._audit_for_run()
+        run_b = next(run for run in graph.plan.runs if run.id == "b")
+        outcome = FeatureRunOutcome(
+            "succeeded", "b-commit",
+            evidence={"review_fix": {"escalated_findings": [
+                self._escalated_record("consumer.py:needs-producer", ["producer.py"]),
+                self._escalated_record("consumer.py:needs-sibling", ["sibling.py"]),
+            ]}},
+        )
+        before = graph.budget.path.read_text(encoding="utf-8").splitlines()
+
+        disposition = graph._resolve_escalations(run_b, outcome, {}, audit)
+
+        self.assertEqual(
+            sorted(node_id for node_id, _ in disposition.advances), ["a", "d"]
+        )
+        for _, record in disposition.advances:
+            self.assertFalse(record["bounded_fix_only"])
+        self.assertEqual(disposition.retry_frontier_prefix, ())
+        self.assertEqual(
+            graph.budget.path.read_text(encoding="utf-8").splitlines(), before,
+            "a queued injection must spend no structural authority",
+        )
+
     def test_second_unseal_against_exhausted_budget_blocks_with_required_decision(
         self,
     ) -> None:
