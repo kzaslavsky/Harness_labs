@@ -10,7 +10,7 @@ from pathlib import Path
 
 from harness_labs.core.audit import AuditActor, AuditJournal
 from harness_labs.plangraph.plan_graph_audit import PlanGraphAudit
-from harness_labs.observability.run_catalog import _ID_MATCH_REASON, _REUSE_UNRESOLVED_REASON, _detail_metrics, _graph_execution, _snapshot, build_run_catalog, build_run_detail, merge_run_catalogs
+from harness_labs.observability.run_catalog import _ID_MATCH_REASON, _REUSE_UNRESOLVED_REASON, _apply_unique_display_names, _detail_metrics, _feature_run_display_name, _graph_execution, _snapshot, build_run_catalog, build_run_detail, merge_run_catalogs
 
 
 def _registration_binding(graph_run_id: str) -> dict[str, str]:
@@ -647,6 +647,270 @@ class RunCatalogTests(unittest.TestCase):
             journal.checkpoint("running", journal.checkpoint_state())
             totals = build_run_detail(root, "untimed")["metrics"]["totals"]
         self.assertIsNone(totals["busy_ms"])
+
+    def test_plan_graph_display_name_uses_stem_and_attempt_suffix(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            plan = root / "dashboard-observability-metrics-plan.md"
+            plan.write_text("approved plan\n", encoding="utf-8")
+            PlanGraphAudit(
+                repository=root, run_root=root, graph_run_id="graph-attempt", plan=str(plan),
+                plan_sha256=hashlib.sha256(plan.read_bytes()).hexdigest(),
+                base_commit="a" * 40, registration_binding=_registration_binding("graph-attempt"),
+                objective="test graph", nodes={}, functionality_tests=(),
+            )
+            lineage = PlanGraphAudit(
+                repository=root, run_root=root, graph_run_id="lineage-graph", plan=str(plan),
+                plan_sha256=hashlib.sha256(plan.read_bytes()).hexdigest(),
+                base_commit="a" * 40, registration_binding=_registration_binding("lineage-graph"),
+                objective="lineage graph", nodes={}, functionality_tests=(),
+            )
+            descriptor_path = lineage.journal.run_dir / "descriptor.json"
+            descriptor = json.loads(descriptor_path.read_text(encoding="utf-8"))
+            descriptor.update({
+                "logical_graph_id": "logical-graph",
+                "graph_attempt_id": "lineage-attempt-2",
+                "predecessor_attempt_id": "lineage-attempt-1",
+            })
+            raw = (json.dumps(descriptor, sort_keys=True, separators=(",", ":")) + "\n").encode()
+            descriptor_path.write_bytes(raw)
+            lineage.journal.append(
+                "run_descriptor_bound", status="succeeded",
+                payload={"descriptor_sha256": hashlib.sha256(raw).hexdigest()},
+            )
+            lineage.journal.checkpoint("running", lineage.state)
+            snapshot = build_run_catalog(root)
+        graphs = {graph["run_id"]: graph for graph in snapshot["plan_graphs"]}
+        # Basename split on -/_, title-cased; no attempt suffix when
+        # graph_attempt_id == logical_graph_id (the default first attempt).
+        self.assertEqual(graphs["graph-attempt"]["display_name"], "Dashboard Observability Metrics Plan")
+        # graph_attempt_id != logical_graph_id triggers the attempt suffix.
+        self.assertTrue(graphs["lineage-graph"]["display_name"].startswith("Dashboard Observability Metrics Plan (Attempt"))
+
+    def test_plan_graph_display_names_are_unique_without_lineage_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            plan = root / "shared-plan.md"
+            plan.write_text("approved plan\n", encoding="utf-8")
+            for index, run_id in enumerate(("historical-a", "historical-b")):
+                audit = PlanGraphAudit(
+                    repository=root, run_root=root, graph_run_id=run_id, plan=str(plan),
+                    plan_sha256=hashlib.sha256(plan.read_bytes()).hexdigest(),
+                    base_commit="a" * 40, registration_binding=_registration_binding(run_id),
+                    objective=f"historical graph {index}", nodes={}, functionality_tests=(),
+                )
+                descriptor_path = audit.journal.run_dir / "descriptor.json"
+                descriptor = json.loads(descriptor_path.read_text(encoding="utf-8"))
+                # Historical descriptors predate the lineage extension: the
+                # fields are absent from the raw JSON entirely, not merely
+                # equal to the run ID (both cases collapse to the same
+                # defaulted logical_graph_id/graph_attempt_id downstream).
+                for key in ("logical_graph_id", "graph_attempt_id", "predecessor_attempt_id"):
+                    del descriptor[key]
+                descriptor["created_at"] = f"2026-08-{10 + index:02d}T00:00:00Z"
+                raw = (json.dumps(descriptor, sort_keys=True, separators=(",", ":")) + "\n").encode()
+                descriptor_path.write_bytes(raw)
+                audit.journal.append(
+                    "run_descriptor_bound", status="succeeded",
+                    payload={"descriptor_sha256": hashlib.sha256(raw).hexdigest()},
+                )
+                audit.journal.checkpoint("running", audit.state)
+            snapshot = build_run_catalog(root)
+        names = {graph["run_id"]: graph["display_name"] for graph in snapshot["plan_graphs"]}
+        self.assertEqual(len(names), 2)
+        self.assertEqual(len(set(names.values())), 2)
+        for name in names.values():
+            # Both share the "Shared Plan" base name; the ordinal-suffix rule
+            # alone never fires for lineage-absent records (their descriptor
+            # never names a graph_attempt_id != logical_graph_id), so
+            # uniqueness comes only from the created_at/run_id disambiguator.
+            self.assertTrue(name.startswith("Shared Plan ("))
+            self.assertIn("#", name)
+
+    def test_unique_display_names_catch_cross_group_collisions(self) -> None:
+        # r1 and r2 both start from base name "Plan" and collide, so r2 is
+        # disambiguated to "Plan (unknown-date #r2)". r3's *own* base name is
+        # already exactly that literal string (as a lineage-absent base name
+        # would embed its own disambiguator). A naive per-base-name-group
+        # resolution never compares r2's disambiguated output against r3's
+        # base name and would let them collide; the shared `used` set must
+        # catch it and push r3 to the terminal run_id tiebreak.
+        graphs = [{"run_id": "r1"}, {"run_id": "r2"}, {"run_id": "r3"}]
+        base_names = {"r1": "Plan", "r2": "Plan", "r3": "Plan (unknown-date #r2)"}
+        _apply_unique_display_names(graphs, base_names)
+        names = {graph["run_id"]: graph["display_name"] for graph in graphs}
+        self.assertEqual(len(set(names.values())), 3)
+        self.assertEqual(names["r2"], "Plan (unknown-date #r2)")
+        self.assertEqual(names["r3"], "Plan (unknown-date #r2) (unknown-date #r3)")
+
+    def test_merged_catalog_plan_graph_display_names_stay_unique(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_a, tempfile.TemporaryDirectory() as directory_b:
+            root_a, root_b = Path(directory_a), Path(directory_b)
+            for root, run_id in ((root_a, "graph-a"), (root_b, "graph-b")):
+                plan = root / "shared-plan.md"
+                plan.write_text("approved plan\n", encoding="utf-8")
+                PlanGraphAudit(
+                    repository=root, run_root=root, graph_run_id=run_id, plan=str(plan),
+                    plan_sha256=hashlib.sha256(plan.read_bytes()).hexdigest(),
+                    base_commit="a" * 40, registration_binding=_registration_binding(run_id),
+                    objective="graph", nodes={}, functionality_tests=(),
+                )
+            catalog_a = build_run_catalog(root_a)
+            catalog_b = build_run_catalog(root_b)
+            # Each independent single-attempt graph is unambiguous within its
+            # own root: no attempt suffix, no lineage-absent disambiguator.
+            self.assertEqual(catalog_a["plan_graphs"][0]["display_name"], "Shared Plan")
+            self.assertEqual(catalog_b["plan_graphs"][0]["display_name"], "Shared Plan")
+            merged = merge_run_catalogs([(root_a, catalog_a), (root_b, catalog_b)])
+        names = {graph["run_id"]: graph["display_name"] for graph in merged["plan_graphs"]}
+        self.assertEqual(len(set(names.values())), 2)
+        self.assertNotEqual(names["graph-a"], "Shared Plan")
+        self.assertNotEqual(names["graph-b"], "Shared Plan")
+
+    def test_merged_catalog_renumbers_attempt_ordinal_when_original_attempt_is_in_another_root(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_a, tempfile.TemporaryDirectory() as directory_b:
+            root_a, root_b = Path(directory_a), Path(directory_b)
+            plan_a = root_a / "shared-plan.md"
+            plan_a.write_text("approved plan\n", encoding="utf-8")
+            origin = PlanGraphAudit(
+                repository=root_a, run_root=root_a, graph_run_id="origin-graph", plan=str(plan_a),
+                plan_sha256=hashlib.sha256(plan_a.read_bytes()).hexdigest(),
+                base_commit="a" * 40, registration_binding=_registration_binding("origin-graph"),
+                objective="graph", nodes={}, functionality_tests=(),
+            )
+            origin_descriptor_path = origin.journal.run_dir / "descriptor.json"
+            origin_descriptor = json.loads(origin_descriptor_path.read_text(encoding="utf-8"))
+            origin_descriptor["created_at"] = "2026-08-01T00:00:00Z"
+            origin_raw = (json.dumps(origin_descriptor, sort_keys=True, separators=(",", ":")) + "\n").encode()
+            origin_descriptor_path.write_bytes(origin_raw)
+            origin.journal.append("run_descriptor_bound", status="succeeded", payload={"descriptor_sha256": hashlib.sha256(origin_raw).hexdigest()})
+            origin.journal.checkpoint("running", origin.state)
+
+            plan_b = root_b / "shared-plan.md"
+            plan_b.write_text("approved plan\n", encoding="utf-8")
+            successor = PlanGraphAudit(
+                repository=root_b, run_root=root_b, graph_run_id="successor-graph", plan=str(plan_b),
+                plan_sha256=hashlib.sha256(plan_b.read_bytes()).hexdigest(),
+                base_commit="a" * 40, registration_binding=_registration_binding("successor-graph"),
+                objective="graph", nodes={}, functionality_tests=(),
+            )
+            successor_descriptor_path = successor.journal.run_dir / "descriptor.json"
+            successor_descriptor = json.loads(successor_descriptor_path.read_text(encoding="utf-8"))
+            successor_descriptor.update({
+                "logical_graph_id": "origin-graph",
+                "graph_attempt_id": "successor-attempt-2",
+                "predecessor_attempt_id": "origin-graph",
+                "created_at": "2026-08-02T00:00:00Z",
+            })
+            successor_raw = (json.dumps(successor_descriptor, sort_keys=True, separators=(",", ":")) + "\n").encode()
+            successor_descriptor_path.write_bytes(successor_raw)
+            successor.journal.append("run_descriptor_bound", status="succeeded", payload={"descriptor_sha256": hashlib.sha256(successor_raw).hexdigest()})
+            successor.journal.checkpoint("running", successor.state)
+
+            catalog_a = build_run_catalog(root_a)
+            catalog_b = build_run_catalog(root_b)
+            # Each root only sees its own attempt: the origin (attempt_id ==
+            # logical_id) gets no suffix, and the successor -- unaware the
+            # origin exists locally -- also computes ordinal 1.
+            self.assertEqual(catalog_a["plan_graphs"][0]["display_name"], "Shared Plan")
+            self.assertEqual(catalog_b["plan_graphs"][0]["display_name"], "Shared Plan (Attempt 1)")
+
+            merged = merge_run_catalogs([(root_a, catalog_a), (root_b, catalog_b)])
+        names = {graph["run_id"]: graph["display_name"] for graph in merged["plan_graphs"]}
+        # The un-suffixed origin still occupies ordinal position 1 in the
+        # full merged sibling set, so the successor must be renumbered to
+        # (Attempt 2) rather than left at its stale, locally-computed
+        # (Attempt 1).
+        self.assertEqual(names["origin-graph"], "Shared Plan")
+        self.assertEqual(names["successor-graph"], "Shared Plan (Attempt 2)")
+
+    def test_node_projection_carries_objective_from_checkpoint_state(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            plan = root / "plan.md"
+            plan.write_text("approved plan\n", encoding="utf-8")
+            PlanGraphAudit(
+                repository=root, run_root=root, graph_run_id="graph-attempt", plan=str(plan),
+                plan_sha256=hashlib.sha256(plan.read_bytes()).hexdigest(),
+                base_commit="a" * 40, registration_binding=_registration_binding("graph-attempt"),
+                objective="test graph",
+                nodes={"root": {"status": "queued", "feature_run_id": "child-root", "depends_on": [], "objective": "Implement the catalog naming projection."}},
+                functionality_tests=(),
+            )
+            graph = build_run_catalog(root)["plan_graphs"][0]
+        self.assertEqual(graph["nodes"][0]["objective"], "Implement the catalog naming projection.")
+
+    def test_feature_run_display_name_and_objective_fallback_chain(self) -> None:
+        now = datetime(2026, 8, 9, tzinfo=timezone.utc)
+        records = [
+            {
+                "run_id": "graph", "status": "running",
+                "liveness": {"state": "liveness_unavailable", "reason": "no lease"},
+                "evidence": {"state": "available", "reason": None},
+                "nodes": [
+                    {"node_id": "node-with-objective", "status": "succeeded", "feature_run_id": "child-a", "liveness": {"state": "not_applicable", "reason": None}, "evidence": {"state": "available", "reason": None}, "objective": "Ship the naming projection. It has two sentences."},
+                    {"node_id": "node-without-objective", "status": "succeeded", "feature_run_id": "child-b", "liveness": {"state": "not_applicable", "reason": None}, "evidence": {"state": "available", "reason": None}, "objective": None},
+                    {"node_id": "node-bare", "status": "succeeded", "feature_run_id": "child-c", "liveness": {"state": "not_applicable", "reason": None}, "evidence": {"state": "available", "reason": None}, "objective": None},
+                ],
+            },
+            {"run_id": "child-a", "kind": "feature_run", "status": "succeeded", "liveness": {"state": "terminal", "reason": None}, "evidence": {"state": "available", "reason": None}, "correlation": {"plan_graph_id": "graph", "plan_node_id": "node-with-objective", "parent_run_id": "graph"}, "objective": "Descriptor objective that should lose to the node's."},
+            {"run_id": "child-b", "kind": "feature_run", "status": "succeeded", "liveness": {"state": "terminal", "reason": None}, "evidence": {"state": "available", "reason": None}, "correlation": {"plan_graph_id": "graph", "plan_node_id": "node-without-objective", "parent_run_id": "graph"}, "objective": "Only the descriptor carries prose here."},
+            {"run_id": "child-c", "kind": "feature_run", "status": "succeeded", "liveness": {"state": "terminal", "reason": None}, "evidence": {"state": "available", "reason": None}, "correlation": {"plan_graph_id": "graph", "plan_node_id": "node-bare", "parent_run_id": "graph"}, "objective": None},
+            {"run_id": "ungrouped-run", "kind": "legacy_feature_run", "status": "succeeded", "liveness": {"state": "terminal", "reason": None}, "evidence": {"state": "partial", "reason": "descriptor was absent for the legacy run"}, "correlation": None, "objective": None},
+        ]
+        snapshot = _snapshot(Path("/runs"), now, [], records)
+        features = {record["run_id"]: record for record in snapshot["feature_runs"]}
+        ungrouped = {record["run_id"]: record for record in snapshot["ungrouped_feature_runs"]}
+        # 1) A correlated node's own objective outranks the FeatureRun's
+        #    descriptor objective.
+        self.assertEqual(features["child-a"]["objective"], "Ship the naming projection. It has two sentences.")
+        self.assertEqual(features["child-a"]["display_name"], "Ship the naming projection.")
+        # 2) No node objective: fall back to the descriptor's own objective.
+        self.assertEqual(features["child-b"]["objective"], "Only the descriptor carries prose here.")
+        self.assertEqual(features["child-b"]["display_name"], "Only the descriptor carries prose here.")
+        # 3) No prose anywhere: fall back to the correlated node_id.
+        self.assertIsNone(features["child-c"]["objective"])
+        self.assertEqual(features["child-c"]["display_name"], "node-bare")
+        # 4) No prose and no correlated node: fall back to run_id.
+        self.assertIsNone(ungrouped["ungrouped-run"]["objective"])
+        self.assertEqual(ungrouped["ungrouped-run"]["display_name"], "ungrouped-run")
+
+    def test_feature_run_display_name_truncates_long_objectives(self) -> None:
+        long_sentence = "A" * 90
+        name = _feature_run_display_name(long_sentence, None, "run-id")
+        self.assertEqual(len(name), 80)
+        self.assertTrue(name.endswith("…"))
+
+    def test_block_escalation_indicator_reflects_the_journal_event(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            plan = root / "plan.md"
+            plan.write_text("approved plan\n", encoding="utf-8")
+            PlanGraphAudit(
+                repository=root, run_root=root, graph_run_id="graph-clean", plan=str(plan),
+                plan_sha256=hashlib.sha256(plan.read_bytes()).hexdigest(),
+                base_commit="a" * 40, registration_binding=_registration_binding("graph-clean"),
+                objective="test graph", nodes={}, functionality_tests=(),
+            )
+            audit = PlanGraphAudit(
+                repository=root, run_root=root, graph_run_id="graph-blocked", plan=str(plan),
+                plan_sha256=hashlib.sha256(plan.read_bytes()).hexdigest(),
+                base_commit="a" * 40, registration_binding=_registration_binding("graph-blocked"),
+                objective="test graph", nodes={}, functionality_tests=(),
+            )
+            evidence_ref = f"artifact:sha256:{'a' * 64}"
+            audit.journal.append(
+                "plan_graph_block_escalated", status="blocked",
+                payload={"blocker_evidence_ref": evidence_ref, "stable_path": "escalation.json"},
+            )
+            audit.journal.checkpoint("running", audit.state)
+            graphs = {graph["run_id"]: graph for graph in build_run_catalog(root)["plan_graphs"]}
+        self.assertEqual(graphs["graph-blocked"]["execution"]["block_escalation"], {
+            "escalated": True, "blocker_evidence_ref": evidence_ref, "stable_path": "escalation.json",
+        })
+        self.assertEqual(graphs["graph-clean"]["execution"]["block_escalation"], {
+            "escalated": False, "blocker_evidence_ref": None, "stable_path": None,
+        })
 
 
 if __name__ == "__main__":

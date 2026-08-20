@@ -7,12 +7,16 @@ import argparse
 import hashlib
 import importlib
 import json
+import os
+import tempfile
 from pathlib import Path
 import sys
 from typing import Callable
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from harness_labs.observability.dashboard_server import MAX_AUDIT_ROOTS
+from harness_labs.observability.plangraph_snapshot import emit_best_effort_snapshot
 from harness_labs.plangraph.plan_approval import PlanApprovalAdmission, PlanApprovalError
 from harness_labs.plangraph.plan_graph import (
     FeatureRunOutcome,
@@ -25,6 +29,52 @@ from harness_labs.plangraph.plan_graph import (
     register_plan_graph,
 )
 from harness_labs.plangraph.plan_graph_budget import BudgetError, RetryBudgetLedger
+
+_DEFAULT_AUDIT_ROOT_REGISTRY = Path.home() / ".harness_labs" / "dashboard-audit-roots.json"
+_AUDIT_ROOT_REGISTRY_ENV = "HARNESS_DASHBOARD_AUDIT_ROOT_REGISTRY"
+
+
+def _audit_root_registry_path() -> Path:
+    override = os.environ.get(_AUDIT_ROOT_REGISTRY_ENV)
+    return Path(override).expanduser() if override else _DEFAULT_AUDIT_ROOT_REGISTRY
+
+
+def _register_run_root(run_root: Path) -> None:
+    """Best-effort self-registration of ``run_root`` in the default,
+    user-level dashboard audit-root registry, at graph start.
+
+    Atomic (temp file + rename), deduplicated, and pruned of entries whose
+    directory no longer exists.  A registration failure is a warning, never
+    a run failure: it is caught here and never raised to the caller.
+    """
+    try:
+        path = _audit_root_registry_path()
+        resolved = str(run_root.resolve())
+        existing: list[str] = []
+        if path.is_file() and not path.is_symlink():
+            try:
+                value = json.loads(path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                value = None
+            if isinstance(value, dict) and isinstance(value.get("audit_roots"), list):
+                existing = [item for item in value["audit_roots"] if isinstance(item, str) and item]
+        pruned = [item for item in existing if item != resolved and Path(item).is_dir()]
+        roots = ([resolved] + pruned)[:MAX_AUDIT_ROOTS]
+        payload = {"protocol": "harness-dashboard-audit-root-registry/1", "audit_roots": roots}
+        path.parent.mkdir(parents=True, exist_ok=True)
+        descriptor, tmp_name = tempfile.mkstemp(prefix=".tmp-audit-roots-", dir=str(path.parent))
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                handle.write(json.dumps(payload, sort_keys=True))
+            os.replace(tmp_name, path)
+        except BaseException:
+            try:
+                os.unlink(tmp_name)
+            except OSError:
+                pass
+            raise
+    except OSError as exc:
+        print(f"PlanGraph run-root registration failed (continuing): {exc}", file=sys.stderr)
 
 
 def _load_callable(reference: str) -> Callable[..., object]:
@@ -226,6 +276,7 @@ def main() -> int:
         if arguments.lineage_id is not None and arguments.lineage_id != registration.plan_lineage_id:
             parser.error("--lineage-id must match the persisted registration lineage")
     run_root = _repository_path(repository, arguments.run_root, "logs/runs")
+    _register_run_root(run_root)
     launcher_cwd = (
         _repository_path(repository, arguments.launcher_cwd, "")
         if arguments.launcher_cwd is not None
@@ -248,6 +299,7 @@ def main() -> int:
             return FeatureRunOutcome(**result)
         raise TypeError("launcher must return FeatureRunOutcome or a mapping")
 
+    graph = None
     try:
         on_block_argv = None
         if arguments.on_block_argv is not None:
@@ -258,10 +310,16 @@ def main() -> int:
         result = graph.run()
     except (PlanGraphError, ValueError, json.JSONDecodeError) as exc:
         print(f"PlanGraph failed: {exc}", file=sys.stderr)
+        if graph is not None:
+            # Best-effort: a graph reaching this except block may already have
+            # a terminal (e.g. blocked) checkpoint on disk; a failure or skip
+            # here must never mask the real failure above.
+            emit_best_effort_snapshot(run_root, graph.graph_run_id, repository=repository)
         return 3 if any(
             marker in str(exc)
             for marker in ("retry budget", "gate-change block", "changed-plan lineage", "operator intervention required")
         ) else 1
+    emit_best_effort_snapshot(run_root, graph.graph_run_id, repository=repository)
     print(
         json.dumps(
             {

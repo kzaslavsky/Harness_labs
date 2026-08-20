@@ -57,6 +57,12 @@ Status: active
   [`cc08-escalation-decomposition.json`](cc08-escalation-decomposition.json),
   and the implementer handoff
   [`SESSION_HANDOFF_CC08_ESCALATION_20260819.md`](SESSION_HANDOFF_CC08_ESCALATION_20260819.md)
+- Dashboard observability metrics plan (graph rollup, naming, snapshot
+  contract, server API, live and completed-viewer UI, historical
+  reconstruction):
+  [`DASHBOARD_OBSERVABILITY_METRICS_PLAN.md`](DASHBOARD_OBSERVABILITY_METRICS_PLAN.md)
+- Completed-PlanGraph viewer backfill and viewing runbook:
+  [`../observability/completed-plangraph-viewer.md`](../observability/completed-plangraph-viewer.md)
 
 ## Seed implementation records
 

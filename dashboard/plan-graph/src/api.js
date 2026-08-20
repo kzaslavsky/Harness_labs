@@ -21,7 +21,9 @@ function validMetrics(value) {
 function validFeatureRun(value) {
   return isObject(value) && isText(value.run_id) && ['feature_run', 'legacy_feature_run'].includes(value.kind)
     && runStatuses.has(value.status) && validLiveness(value.liveness) && validAvailability(value.evidence)
-    && (value.correlation === null || isObject(value.correlation));
+    && (value.correlation === null || isObject(value.correlation))
+    && (value.display_name === undefined || isText(value.display_name))
+    && (value.objective === undefined || nullableText(value.objective));
 }
 
 function validNodeCorrelation(value) {
@@ -38,7 +40,8 @@ function validNode(value) {
     && (value.candidate_commit === undefined || nullableText(value.candidate_commit))
     && validNodeCorrelation(value.correlation)
     && Array.isArray(value.depends_on) && value.depends_on.every(isText)
-    && validLiveness(value.liveness) && validAvailability(value.evidence);
+    && validLiveness(value.liveness) && validAvailability(value.evidence)
+    && (value.objective === undefined || nullableText(value.objective));
 }
 
 function validGraphExecution(value) {
@@ -64,7 +67,9 @@ function validGraphExecution(value) {
     && typeof item.forced === 'boolean' && Array.isArray(item.evidence_refs) && new Set(item.evidence_refs).size === item.evidence_refs.length && item.evidence_refs.every(isText);
   const validLeaseRecord = (item) => item === null || (isObject(item) && hasOnly(item, ['node_id', 'lease_id', 'expected_staging_head'])
     && isText(item.node_id) && isText(item.lease_id) && isText(item.expected_staging_head));
-  return isObject(value) && hasOnly(value, ['logical_graph', 'attempts', 'concurrency', 'integration', 'recovery'])
+  const validBlockEscalation = (item) => isObject(item) && hasOnly(item, ['escalated', 'blocker_evidence_ref', 'stable_path'])
+    && typeof item.escalated === 'boolean' && nullableText(item.blocker_evidence_ref) && nullableText(item.stable_path);
+  return isObject(value) && hasOnly(value, ['logical_graph', 'attempts', 'concurrency', 'integration', 'recovery', 'block_escalation'])
     && isObject(value.logical_graph) && hasOnly(value.logical_graph, ['base_commit', 'plan_digest', 'plan_graph_digest'])
     && nullableText(value.logical_graph.base_commit) && nullableText(value.logical_graph.plan_digest) && nullableText(value.logical_graph.plan_graph_digest)
     && Array.isArray(value.attempts) && value.attempts.every(validAttempt)
@@ -79,7 +84,8 @@ function validGraphExecution(value) {
     && Array.isArray(value.recovery.attempt_lineage) && value.recovery.attempt_lineage.every(validLineage)
     && isObject(value.recovery.retry_state) && hasOnly(value.recovery.retry_state, ['invalidations', 'reuse'])
     && Array.isArray(value.recovery.retry_state.invalidations) && value.recovery.retry_state.invalidations.every(validInvalidation)
-    && Array.isArray(value.recovery.retry_state.reuse) && value.recovery.retry_state.reuse.every(validReuse);
+    && Array.isArray(value.recovery.retry_state.reuse) && value.recovery.retry_state.reuse.every(validReuse)
+    && (value.block_escalation === undefined || validBlockEscalation(value.block_escalation));
 }
 
 function validGraph(value) {
@@ -91,7 +97,8 @@ function validGraph(value) {
     && (value.retention_constraints === undefined || validAvailability(value.retention_constraints))
     && validLiveness(value.liveness) && validAvailability(value.evidence)
     && Array.isArray(value.nodes) && value.nodes.every(validNode)
-    && (value.execution === undefined || validGraphExecution(value.execution));
+    && (value.execution === undefined || validGraphExecution(value.execution))
+    && (value.display_name === undefined || isText(value.display_name));
 }
 
 export function validateCatalog(value) {
@@ -103,6 +110,59 @@ export function validateCatalog(value) {
   }
   if (!value.plan_graphs.every(validGraph) || !value.feature_runs.every(validFeatureRun) || !value.ungrouped_feature_runs.every(validFeatureRun)) {
     throw new Error('The dashboard received an invalid catalog record.');
+  }
+  return value;
+}
+
+const graphMetricsProtocol = 'harness-plan-graph-metrics/1';
+const genericMetricStates = new Set(['available', 'partial', 'unavailable']);
+const tokenBlockStates = new Set(['available', 'partial', 'unavailable']);
+const costBlockStates = new Set(['available', 'estimated', 'partial', 'unavailable']);
+const ledgerBlockStates = new Set(['available', 'unavailable']);
+const distributionStates = new Set(['available', 'partial', 'unavailable', 'estimated']);
+
+function nullableNumber(value) { return value === null || typeof value === 'number'; }
+function validGenericMetric(value) { return isObject(value) && hasOnly(value, ['state', 'value', 'reason']) && genericMetricStates.has(value.state) && nullableNumber(value.value) && nullableText(value.reason); }
+function validTokenBlock(value) { return isObject(value) && hasOnly(value, ['state', 'reason', 'input_tokens', 'cached_input_tokens', 'output_tokens', 'total_tokens']) && tokenBlockStates.has(value.state) && nullableText(value.reason) && nullableInteger(value.input_tokens) && nullableInteger(value.cached_input_tokens) && nullableInteger(value.output_tokens) && nullableInteger(value.total_tokens); }
+function validCostBlock(value) { return isObject(value) && hasOnly(value, ['state', 'usd', 'reason']) && costBlockStates.has(value.state) && nullableNumber(value.usd) && nullableText(value.reason); }
+function validLedgerBlock(value) { return isObject(value) && hasOnly(value, ['state', 'reason', 'graph_launches', 'gate_invocations', 'repair_dispatches', 'structural_decisions']) && ledgerBlockStates.has(value.state) && nullableText(value.reason) && nullableInteger(value.graph_launches) && nullableInteger(value.gate_invocations) && nullableInteger(value.repair_dispatches) && nullableInteger(value.structural_decisions); }
+function validDistribution(value) { return isObject(value) && hasOnly(value, ['state', 'reason', 'mean', 'median', 'max', 'sample_size', 'population']) && distributionStates.has(value.state) && nullableText(value.reason) && nullableNumber(value.mean) && nullableNumber(value.median) && nullableNumber(value.max) && Number.isInteger(value.sample_size) && Number.isInteger(value.population); }
+function validNodeTableRow(value) {
+  return isObject(value) && hasOnly(value, ['node_id', 'status', 'tries', 'detail', 'totals', 'cumulative', 'wait_ms'])
+    && isText(value.node_id) && nullableText(value.status) && Number.isInteger(value.tries)
+    && isObject(value.detail) && hasOnly(value.detail, ['state', 'reason']) && ['available', 'unavailable'].includes(value.detail.state) && nullableText(value.detail.reason)
+    && (value.totals === null || isObject(value.totals))
+    && isObject(value.cumulative) && hasOnly(value.cumulative, ['tries', 'attempts', 'totals', 'reason'])
+    && Number.isInteger(value.cumulative.tries) && Number.isInteger(value.cumulative.attempts)
+    && (value.cumulative.totals === null || isObject(value.cumulative.totals)) && nullableText(value.cumulative.reason)
+    && validGenericMetric(value.wait_ms);
+}
+
+export function validateGraphMetrics(value) {
+  if (!isObject(value) || value.protocol !== graphMetricsProtocol || !isText(value.run_id)) {
+    throw new Error('The dashboard received an invalid PlanGraph metrics response.');
+  }
+  if (value.error !== undefined) {
+    if (!hasOnly(value, ['protocol', 'run_id', 'status', 'error']) || !validAvailability(value.error)) {
+      throw new Error('The dashboard received an invalid PlanGraph metrics error document.');
+    }
+    return value;
+  }
+  const valid = hasOnly(value, ['protocol', 'run_id', 'status', 'timing', 'totals', 'retries', 'recovery', 'blockers', 'counts', 'per_feature_run', 'nodes', 'scheduling', 'cache', 'lineage_totals'])
+    && isObject(value.timing) && hasOnly(value.timing, ['started_at', 'wall_clock_ms']) && nullableText(value.timing.started_at) && validGenericMetric(value.timing.wall_clock_ms)
+    && isObject(value.totals) && hasOnly(value.totals, ['tokens', 'cost', 'calls', 'agent_busy_ms', 'parallelism', 'peak_input_tokens'])
+    && validTokenBlock(value.totals.tokens) && validCostBlock(value.totals.cost) && validGenericMetric(value.totals.calls) && validGenericMetric(value.totals.agent_busy_ms) && validGenericMetric(value.totals.parallelism) && validGenericMetric(value.totals.peak_input_tokens)
+    && isObject(value.retries) && hasOnly(value.retries, ['budget_ledger', 'node_retries', 'graph_attempts']) && validLedgerBlock(value.retries.budget_ledger) && Number.isInteger(value.retries.node_retries) && Number.isInteger(value.retries.graph_attempts)
+    && isObject(value.recovery) && hasOnly(value.recovery, ['dispositions', 'attempt_lineage_count', 'invalidations_count']) && Array.isArray(value.recovery.dispositions) && Number.isInteger(value.recovery.attempt_lineage_count) && Number.isInteger(value.recovery.invalidations_count)
+    && isObject(value.blockers) && hasOnly(value.blockers, ['count', 'nodes']) && Number.isInteger(value.blockers.count) && Array.isArray(value.blockers.nodes)
+    && isObject(value.counts) && hasOnly(value.counts, ['logical_nodes', 'feature_run_tries']) && Number.isInteger(value.counts.logical_nodes) && Number.isInteger(value.counts.feature_run_tries)
+    && isObject(value.per_feature_run) && hasOnly(value.per_feature_run, ['wall_ms', 'tokens', 'cost_usd']) && validDistribution(value.per_feature_run.wall_ms) && validDistribution(value.per_feature_run.tokens) && validDistribution(value.per_feature_run.cost_usd)
+    && Array.isArray(value.nodes) && value.nodes.every(validNodeTableRow)
+    && isObject(value.scheduling) && hasOnly(value.scheduling, ['critical_path_ms']) && validGenericMetric(value.scheduling.critical_path_ms)
+    && isObject(value.cache) && hasOnly(value.cache, ['savings_usd']) && validGenericMetric(value.cache.savings_usd)
+    && isObject(value.lineage_totals) && hasOnly(value.lineage_totals, ['tokens', 'cost', 'calls', 'agent_busy_ms', 'peak_input_tokens', 'reason']) && validTokenBlock(value.lineage_totals.tokens) && validCostBlock(value.lineage_totals.cost) && validGenericMetric(value.lineage_totals.calls) && validGenericMetric(value.lineage_totals.agent_busy_ms) && validGenericMetric(value.lineage_totals.peak_input_tokens) && isText(value.lineage_totals.reason);
+  if (!valid) {
+    throw new Error('The dashboard received an invalid PlanGraph metrics record.');
   }
   return value;
 }
@@ -156,6 +216,10 @@ export function planGraphGroups(catalog) {
   for (const group of groups.values()) {
     group.attempts.sort((left, right) => right.created_at.localeCompare(left.created_at) || right.run_id.localeCompare(left.run_id));
     group.planPath = group.attempts[0].plan_path;
+    // The newest attempt's display_name represents the group in the plan
+    // selector; per-attempt names (with their "(Attempt N)" suffix, when
+    // present) are shown separately in the attempt selector.
+    group.displayName = group.attempts[0].display_name || group.planPath;
   }
   return [...groups.values()].sort((left, right) => right.attempts[0].created_at.localeCompare(left.attempts[0].created_at));
 }
@@ -226,8 +290,154 @@ export async function fetchCatalog({ etag, signal } = {}) {
   return { catalog: validateCatalog(await response.json()), etag: response.headers.get('ETag') || undefined };
 }
 
+// ---------------------------------------------------------------------------
+// Completed-PlanGraph snapshots (plan DM-06): `GET /api/snapshots` (bounded
+// per-request listing, own ETag) and `GET /api/snapshots/<id>` (one full
+// document). Validation mirrors validateCatalog/validateGraphMetrics above
+// -- tri-state blocks are checked with the same helpers so a malformed
+// response is rejected before it reaches a component.
+// ---------------------------------------------------------------------------
+
+const snapshotsListingProtocol = 'harness-dashboard-snapshots-listing/1';
+const snapshotProtocol = 'plangraph-metrics-snapshot/1';
+const completenessGrades = new Set(['complete', 'partial', 'minimal']);
+
+function validSnapshotEntry(value) {
+  return isObject(value) && isText(value.run_id)
+    && nullableText(value.logical_graph_id) && nullableText(value.graph_attempt_id)
+    && nullableText(value.display_name) && nullableText(value.status) && nullableText(value.finished_at)
+    && (value.wall_clock_ms === null || validGenericMetric(value.wall_clock_ms))
+    && (value.tokens === null || validTokenBlock(value.tokens))
+    && (value.cost === null || validCostBlock(value.cost))
+    && (value.completeness === null || completenessGrades.has(value.completeness))
+    && typeof value.snapshot_missing === 'boolean' && nullableText(value.reason) && nullableText(value.source_root);
+}
+
+export function validateSnapshotsListing(value) {
+  if (!isObject(value) || value.protocol !== snapshotsListingProtocol || !isObject(value.bounds)
+      || !Array.isArray(value.snapshots) || !Array.isArray(value.diagnostics) || !value.snapshots.every(validSnapshotEntry)) {
+    throw new Error('The dashboard received an invalid snapshots listing.');
+  }
+  return value;
+}
+
+function validSnapshotIdentity(value) {
+  return isObject(value) && hasOnly(value, ['logical_graph_id', 'graph_attempt_id', 'run_id', 'plan_path', 'plan_digest', 'base_commit', 'repository_id'])
+    && nullableText(value.logical_graph_id) && nullableText(value.graph_attempt_id) && isText(value.run_id)
+    && nullableText(value.plan_path) && nullableText(value.plan_digest) && nullableText(value.base_commit) && nullableText(value.repository_id);
+}
+
+function validSnapshotTiming(value) {
+  return isObject(value) && hasOnly(value, ['started_at', 'finished_at', 'wall_clock_ms'])
+    && nullableText(value.started_at) && nullableText(value.finished_at) && validGenericMetric(value.wall_clock_ms);
+}
+
+function validFeatureRunRow(value) {
+  return isObject(value) && hasOnly(value, ['node_id', 'objective', 'display_name', 'status', 'feature_run_id', 'tries', 'detail', 'metrics'])
+    && nullableText(value.node_id) && nullableText(value.objective) && nullableText(value.display_name) && nullableText(value.status)
+    && nullableText(value.feature_run_id) && Number.isInteger(value.tries)
+    && isObject(value.detail) && hasOnly(value.detail, ['state', 'reason']) && ['available', 'unavailable'].includes(value.detail.state) && nullableText(value.detail.reason)
+    && (value.metrics === null || isObject(value.metrics));
+}
+
+function validOutcomeNode(value) {
+  return isObject(value) && hasOnly(value, ['node_id', 'objective', 'status', 'criteria_satisfied', 'criteria_total', 'criteria_state', 'evidence_reason'])
+    && nullableText(value.node_id) && nullableText(value.objective) && nullableText(value.status)
+    && nullableInteger(value.criteria_satisfied) && nullableInteger(value.criteria_total)
+    && ['available', 'unavailable'].includes(value.criteria_state) && nullableText(value.evidence_reason);
+}
+
+function validDeltaNode(value) {
+  return isObject(value) && hasOnly(value, ['node_id', 'candidate_commit']) && nullableText(value.node_id) && nullableText(value.candidate_commit);
+}
+
+function validDelta(value) {
+  return isObject(value) && hasOnly(value, ['state', 'reason', 'base_commit', 'final_integrated_commit', 'files_changed', 'insertions', 'deletions', 'nodes'])
+    && ['available', 'unavailable'].includes(value.state) && nullableText(value.reason)
+    && nullableText(value.base_commit) && nullableText(value.final_integrated_commit)
+    && nullableInteger(value.files_changed) && nullableInteger(value.insertions) && nullableInteger(value.deletions)
+    && Array.isArray(value.nodes) && value.nodes.every(validDeltaNode);
+}
+
+function validOutcome(value) {
+  return isObject(value) && hasOnly(value, ['nodes', 'nodes_total', 'nodes_attempted', 'nodes_succeeded', 'nodes_blocked', 'nodes_failed', 'delta', 'plan_sections', 'acceptance_criteria', 'narrative'])
+    && Array.isArray(value.nodes) && value.nodes.every(validOutcomeNode)
+    && Number.isInteger(value.nodes_total) && Number.isInteger(value.nodes_attempted) && Number.isInteger(value.nodes_succeeded)
+    && Number.isInteger(value.nodes_blocked) && Number.isInteger(value.nodes_failed) && validDelta(value.delta)
+    && (value.plan_sections === null || isObject(value.plan_sections)) && (value.acceptance_criteria === null || isObject(value.acceptance_criteria))
+    && isText(value.narrative);
+}
+
+function validDataQuality(value) {
+  return isObject(value) && hasOnly(value, ['summary_missing', 'token_records_missing', 'cost_state', 'busy_unavailable_reason', 'criteria_text_unavailable', 'reconstructed', 'reconstruction_notes', 'completeness'])
+    && typeof value.summary_missing === 'boolean' && typeof value.token_records_missing === 'boolean'
+    && ['available', 'estimated', 'partial', 'unavailable'].includes(value.cost_state) && nullableText(value.busy_unavailable_reason)
+    && typeof value.criteria_text_unavailable === 'boolean' && typeof value.reconstructed === 'boolean'
+    && Array.isArray(value.reconstruction_notes) && value.reconstruction_notes.every(isText)
+    && completenessGrades.has(value.completeness);
+}
+
+export function validateSnapshotDocument(value) {
+  if (!isObject(value) || value.protocol !== snapshotProtocol || !validSnapshotIdentity(value.identity)
+      || !isText(value.display_name) || !isText(value.status) || !validSnapshotTiming(value.timing)
+      || !Array.isArray(value.feature_runs) || !value.feature_runs.every(validFeatureRunRow)
+      || !validOutcome(value.outcome) || !validDataQuality(value.data_quality) || !isObject(value.provenance)) {
+    throw new Error('The dashboard received an invalid PlanGraph snapshot document.');
+  }
+  // graph_metrics shares the exact `harness-plan-graph-metrics/1` shape the
+  // live endpoint serves (DM-03's schema mirrors it field-for-field), so the
+  // same validator -- and the same GraphTotals/NodeMetricsTable components
+  // downstream -- apply to a snapshot's embedded metrics unchanged.
+  validateGraphMetrics(value.graph_metrics);
+  return value;
+}
+
+export async function fetchSnapshots({ etag, signal } = {}) {
+  const response = await fetch('/api/snapshots', { headers: etag ? { 'If-None-Match': etag } : {}, signal });
+  if (response.status === 304) return { unchanged: true, etag };
+  if (!response.ok) throw new Error(`Snapshot listing request failed (${response.status}).`);
+  return { listing: validateSnapshotsListing(await response.json()), etag: response.headers.get('ETag') || undefined };
+}
+
+export async function fetchSnapshotDocument(snapshotId, signal) {
+  const response = await fetch(`/api/snapshots/${encodeURIComponent(snapshotId)}`, { signal });
+  if (response.status === 404) return null;
+  if (!response.ok) throw new Error(`Snapshot document is unavailable (${response.status}).`);
+  return validateSnapshotDocument(await response.json());
+}
+
 export async function fetchRunDetail(runId, signal) {
   const response = await fetch(`/api/feature-runs/${encodeURIComponent(runId)}`, { signal });
   if (!response.ok) throw new Error(`FeatureRun detail is unavailable (${response.status}).`);
   return validateRunDetail(await response.json());
+}
+
+export async function fetchPlanGraphMetrics(runId, signal) {
+  const response = await fetch(`/api/plan-graph-metrics/${encodeURIComponent(runId)}`, { signal });
+  if (response.status === 404) return null;
+  if (!response.ok) throw new Error(`PlanGraph metrics are unavailable (${response.status}).`);
+  return validateGraphMetrics(await response.json());
+}
+
+// Elapsed time is deliberately never served by the metrics endpoint for live
+// graphs (plan DM-04); the client derives it from the catalog-served
+// `started_at` against the current clock.
+export function elapsedMs(startedAt, nowMs = Date.now()) {
+  if (!startedAt) return null;
+  const started = Date.parse(startedAt);
+  if (Number.isNaN(started)) return null;
+  return Math.max(0, nowMs - started);
+}
+
+// "In flight" means not yet terminal (queued/running), matching the
+// terminal-status set the graph rollup itself uses -- not the separate,
+// lease-derived `liveness` field (a graph legitimately has no liveness
+// lease yet still be genuinely in flight).
+const _TERMINAL_GRAPH_STATUSES = new Set(['succeeded', 'failed', 'blocked', 'interrupted', 'corrupt']);
+
+export function liveGraphs(catalog) {
+  if (!catalog) return [];
+  return catalog.plan_graphs
+    .filter((graph) => !_TERMINAL_GRAPH_STATUSES.has(graph.status))
+    .sort((left, right) => right.created_at.localeCompare(left.created_at) || right.run_id.localeCompare(left.run_id));
 }

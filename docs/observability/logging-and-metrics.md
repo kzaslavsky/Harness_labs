@@ -106,6 +106,21 @@ explicit `ModelPrice` and recorded source; absent pricing creates an unpriced
 usage record and makes `cost_complete=false`. Capability-broker executions
 contribute duration and tool-call counts without inventing model-token usage.
 
+A terminal PlanGraph attempt may additionally get a `plangraph-metrics-snapshot/1`
+document at `<run-root>/.plan-graph-snapshots/<graph_attempt_id>.json`: a
+persisted graph-level rollup (attempt-scoped totals, a separately labelled
+cross-attempt `lineage_totals` block, per-node detail, outcome, and explicit
+`data_quality` flags) computed through the same shared rollup the live
+dashboard uses, so the two can never numerically diverge. It is written by
+`scripts/run_plan_graph.py` and `scripts/plan_graph_recover.py`
+best-effort after finalization, and reconstructible offline for historical
+runs via `scripts/build_plangraph_snapshot.py`; a snapshot failure is a
+warning and never alters run status or journals. See
+[`completed-plangraph-viewer.md`](completed-plangraph-viewer.md) for the
+backfill and viewing runbook, and
+[`../../schemas/plangraph-metrics-snapshot.schema.json`](../../schemas/plangraph-metrics-snapshot.schema.json)
+for the schema.
+
 The read-only dashboard projects verified `backend_transport` events into run,
 phase, agent invocation, agent type, model, reasoning-effort, and backend
 breakdowns. Total tokens are input plus output tokens; cached input is reported
