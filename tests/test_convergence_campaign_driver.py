@@ -2513,5 +2513,432 @@ class FindingsOwnersPathsTableTests(unittest.TestCase):
         self.assertEqual(table[0]["file"], "a.py")
 
 
+# ---------------------------------------------------------------------------
+# AC-EM-16 / AC-EM-17: recurrence-annotation sealing at ingest
+# ---------------------------------------------------------------------------
+
+
+class RecurrenceAnnotationIngestTests(_RepoFixture):
+    """``ingest``'s new ``--history-roots`` input (EM-D2)."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        # These tests configure the driver with ``repository=self.repository``
+        # (to resolve the finding-history ``repository_id``), and every
+        # ``state()`` call then resolves the repository's current HEAD --
+        # which requires at least one commit to exist.
+        self._git("add", ".")
+        self._git("commit", "-m", "initial repository identity")
+
+    def _prior_campaign_root(self) -> Path:
+        prior_root = self.root / "campaign-prior"
+        driver = ConvergenceCampaignDriver(
+            campaign_root=prior_root, campaign_id="prior-camp", repository=self.repository,
+        )
+        self.open_campaign(driver, base_commit=self._git("rev-parse", "HEAD"))
+        audit = _audit("digest-prior", findings=[_finding("src/a.py", "stale-issue")])
+        driver.ingest(audit_result=audit)
+        driver.rule(
+            dispositions=[
+                {
+                    "key": ("src/a.py", "stale-issue"),
+                    "disposition": "waive",
+                    "statement": "confirmed non-issue in a prior audit",
+                }
+            ]
+        )
+        return prior_root
+
+    def _current_driver(self, *, root_name: str) -> ConvergenceCampaignDriver:
+        driver = ConvergenceCampaignDriver(
+            campaign_root=self.root / root_name, campaign_id="current-camp",
+            repository=self.repository,
+        )
+        self.open_campaign(driver, base_commit=self._git("rev-parse", "HEAD"))
+        return driver
+
+    def test_a_waived_prior_finding_seals_a_recurrence_annotation(self) -> None:
+        prior_root = self._prior_campaign_root()
+        driver = self._current_driver(root_name="campaign-current")
+        audit = _audit("digest-current", findings=[_finding("src/a.py", "stale-issue")])
+
+        result = driver.ingest(audit_result=audit, history_roots=[prior_root])
+
+        self.assertIn("src/a.py:stale-issue", result["recurrence_annotations"])
+        digest = result["recurrence_annotations"]["src/a.py:stale-issue"]
+        payload = json.loads(driver.artifacts.open_bytes(digest))
+        self.assertEqual(payload["prior_disposition"], "waive")
+        self.assertEqual(
+            payload["prior_statement"], "confirmed non-issue in a prior audit"
+        )
+        self.assertEqual(payload["prior_campaign_label"], "prior-camp")
+        self.assertEqual(payload["file"], "src/a.py")
+        self.assertEqual(payload["subject"], "stale-issue")
+
+        # The digest is recorded in the checkpoint state, keyed by finding key.
+        state = driver.state()
+        self.assertEqual(
+            state["recurrence_annotations"]["src/a.py:stale-issue"], digest
+        )
+
+    def test_a_waive_later_amended_to_a_non_excluded_terminal_status_gets_no_annotation(
+        self,
+    ) -> None:
+        prior_root = self.root / "campaign-prior-amended"
+        driver = ConvergenceCampaignDriver(
+            campaign_root=prior_root, campaign_id="prior-amended-camp",
+            repository=self.repository,
+        )
+        self.open_campaign(driver, base_commit=self._git("rev-parse", "HEAD"))
+        audit = _audit(
+            "digest-prior-amended", findings=[_finding("src/a.py", "stale-issue")]
+        )
+        driver.ingest(audit_result=audit)
+        driver.rule(
+            dispositions=[
+                {
+                    "key": ("src/a.py", "stale-issue"),
+                    "disposition": "waive",
+                    "statement": "confirmed non-issue in a prior audit",
+                }
+            ]
+        )
+        driver.rule(
+            dispositions=[
+                {
+                    "key": ("src/a.py", "stale-issue"),
+                    "disposition": "amend_criterion",
+                    "statement": "the criterion itself was wrong",
+                }
+            ]
+        )
+
+        current = self._current_driver(root_name="campaign-current-amended")
+        audit_current = _audit(
+            "digest-current-amended", findings=[_finding("src/a.py", "stale-issue")]
+        )
+        result = current.ingest(audit_result=audit_current, history_roots=[prior_root])
+
+        self.assertEqual(result["recurrence_annotations"], {})
+
+    def test_a_key_with_no_prior_waive_ruling_gets_no_annotation(self) -> None:
+        prior_root = self._prior_campaign_root()
+        driver = self._current_driver(root_name="campaign-current-2")
+        audit = _audit("digest-current-2", findings=[_finding("src/z.py", "brand-new")])
+
+        result = driver.ingest(audit_result=audit, history_roots=[prior_root])
+
+        self.assertEqual(result["recurrence_annotations"], {})
+        self.assertNotIn("recurrence_annotations", driver.state())
+
+    def test_recurrence_annotation_leaves_ledger_bytes_unchanged_and_kinds_closed(
+        self,
+    ) -> None:
+        """AC-EM-17: the annotation lives only in the artifact store; the
+        current campaign's ledger journal is byte-identical to a control
+        ingest run with no ``--history-roots``, and every record the
+        resulting ledger folds is one of the pre-existing ``state-ledger``
+        record kinds."""
+
+        prior_root = self._prior_campaign_root()
+
+        control = self._current_driver(root_name="campaign-control")
+        control.ingest(
+            audit_result=_audit(
+                "digest-a", findings=[_finding("src/a.py", "stale-issue")]
+            )
+        )
+        control_bytes = (self.root / "campaign-control" / "ledger.jsonl").read_bytes()
+
+        annotated = self._current_driver(root_name="campaign-annotated")
+        annotated.ingest(
+            audit_result=_audit(
+                "digest-a", findings=[_finding("src/a.py", "stale-issue")]
+            ),
+            history_roots=[prior_root],
+        )
+        annotated_bytes = (
+            self.root / "campaign-annotated" / "ledger.jsonl"
+        ).read_bytes()
+
+        self.assertEqual(
+            annotated_bytes, control_bytes,
+            "sealing a recurrence annotation must never touch the ledger journal",
+        )
+        annotated_ledger = ConvergenceLedger(
+            self.root / "campaign-annotated" / "ledger.jsonl"
+        )
+        for record in annotated_ledger.records():
+            self.assertIn(record["type"], ConvergenceLedger.RECORD_TYPES)
+
+    def test_retrying_an_already_folded_digest_with_history_roots_still_seals_annotation(
+        self,
+    ) -> None:
+        """A first ``ingest`` call with no ``--history-roots`` (or one that
+        aborted inside ``_seal_recurrence_annotations``) already folded this
+        digest into the ledger; a retry supplying ``history_roots`` must
+        still recover the round's opened keys and seal the annotation
+        instead of finding ``summary["opened"]`` empty and sealing
+        nothing."""
+
+        prior_root = self._prior_campaign_root()
+        driver = self._current_driver(root_name="campaign-current-retry")
+        audit = _audit(
+            "digest-current-retry", findings=[_finding("src/a.py", "stale-issue")]
+        )
+
+        first = driver.ingest(audit_result=audit)
+        self.assertEqual(first["recurrence_annotations"], {})
+
+        retried = driver.ingest(audit_result=audit, history_roots=[prior_root])
+
+        self.assertIn("src/a.py:stale-issue", retried["recurrence_annotations"])
+        digest = retried["recurrence_annotations"]["src/a.py:stale-issue"]
+        payload = json.loads(driver.artifacts.open_bytes(digest))
+        self.assertEqual(payload["prior_disposition"], "waive")
+
+    def test_history_roots_without_a_configured_repository_is_refused(self) -> None:
+        prior_root = self._prior_campaign_root()
+        driver = ConvergenceCampaignDriver(
+            campaign_root=self.root / "campaign-no-repo", campaign_id="no-repo-camp",
+        )
+        self.open_campaign(driver)
+        audit = _audit("digest-no-repo", findings=[_finding("src/a.py", "stale-issue")])
+        with self.assertRaisesRegex(
+            ConvergenceCampaignDriverError, "configured with a repository"
+        ):
+            driver.ingest(audit_result=audit, history_roots=[prior_root])
+
+    def test_history_roots_cli_flag_seals_a_recurrence_annotation(self) -> None:
+        prior_root = self._prior_campaign_root()
+        current_root = self.root / "campaign-current-cli"
+        driver = self._current_driver(root_name="campaign-current-cli")
+        audit = _audit("digest-current-cli", findings=[_finding("src/a.py", "stale-issue")])
+        audit_result_path = self.root / "audit-current-cli.json"
+        audit_result_path.write_text(json.dumps(audit), encoding="utf-8")
+
+        exit_code = main(
+            [
+                "--campaign-root", str(current_root), "--campaign-id", "current-camp",
+                "--repository", str(self.repository),
+                "ingest",
+                "--audit-result-file", str(audit_result_path),
+                "--history-roots", str(prior_root),
+            ]
+        )
+
+        self.assertEqual(exit_code, 0)
+        checkpoint = json.loads((current_root / "checkpoint.json").read_text(encoding="utf-8"))
+        annotations = checkpoint["state"]["recurrence_annotations"]
+        self.assertIn("src/a.py:stale-issue", annotations)
+        digest = annotations["src/a.py:stale-issue"]
+        payload = json.loads(driver.artifacts.open_bytes(digest))
+        self.assertEqual(payload["prior_disposition"], "waive")
+        self.assertEqual(payload["prior_campaign_label"], "prior-camp")
+
+
+# ---------------------------------------------------------------------------
+# AC-EM-24: the campaign approve path stays deadlock-free with the new
+# warning/notice kinds present
+# ---------------------------------------------------------------------------
+
+
+class DeadlockFreeApprovePathTests(_RepoFixture):
+    """``prepare -> approval packet -> issue`` over a fixture campaign whose
+    admission gate evidence carries the impact-analysis warning/notice kinds
+    (EM-D1) added since ``ApprovalPacketTests`` was written."""
+
+    def _write_impact_fixture(self) -> None:
+        (self.repository / "impact_target.py").write_text(
+            "VALUE = 1\n", encoding="utf-8"
+        )
+        (self.repository / "impact_importer.py").write_text(
+            "import impact_target\n", encoding="utf-8"
+        )
+        (self.repository / "feature.txt").write_text("notes\n", encoding="utf-8")
+        decisions_directory = self.repository / "docs" / "decisions"
+        decisions_directory.mkdir(parents=True, exist_ok=True)
+        (decisions_directory / "0001-covers-impact-target.md").write_text(
+            "# 0001 — Covers impact target\n\n"
+            "Status: accepted\n"
+            "Concerns-paths: impact_target.py\n\n"
+            "## Context\n\nBody.\n",
+            encoding="utf-8",
+        )
+        (self.repository / "docs").mkdir(exist_ok=True)
+        (self.repository / "docs" / "plan.md").write_text(
+            "Modify impact_target.py and feature.txt. AC-1: works.\n",
+            encoding="utf-8",
+        )
+
+    def _decomposition(self, *, grant_importer: bool) -> dict:
+        allowed_paths = ["impact_target.py", "feature.txt"]
+        path_intents = [
+            {"path": "impact_target.py", "action": "modify"},
+            {"path": "feature.txt", "action": "modify"},
+        ]
+        if grant_importer:
+            allowed_paths.append("impact_importer.py")
+            path_intents.append({"path": "impact_importer.py", "action": "modify"})
+        return {
+            "protocol": "plan-graph-plan/1",
+            "plan": "docs/plan.md",
+            "plan_sections": {"1": "Modify impact_target.py and feature.txt. AC-1: works."},
+            "acceptance_criteria": {"AC-1": "works."},
+            "runs": [
+                {
+                    "id": "A",
+                    "objective": "Modify impact_target.py and feature.txt",
+                    "plan_sections": ["1"],
+                    "criteria": ["AC-1"],
+                    "depends_on": [],
+                    "allowed_paths": allowed_paths,
+                    "path_intents": path_intents,
+                    "verification_argv": [sys.executable, "-c", "pass"],
+                    "verification_timeout_seconds": 30,
+                    "verification_required_paths": [],
+                }
+            ],
+            "functionality_tests": [],
+            "referenced_artifacts": [],
+        }
+
+    def _commit(self, decomposition: dict) -> Path:
+        decomposition_path = self.repository / "decomposition.json"
+        decomposition_path.write_text(
+            json.dumps(decomposition, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        self._git("add", ".")
+        self._git("commit", "-m", "add plan and impact/decision fixture")
+        return decomposition_path
+
+    def _findings_by_run(self) -> dict:
+        return {"A": [_finding("impact_target.py", "in-scope")]}
+
+    def test_notices_only_completes_without_any_acknowledgement(self) -> None:
+        """Both admission notice kinds (unsupported-language impact,
+        active-decision) are present and zero ``warnings`` -- the packet
+        renders and the receipt issues with no acknowledgement at all."""
+
+        self._write_impact_fixture()
+        decomposition_path = self._commit(self._decomposition(grant_importer=True))
+        driver = self.driver()
+        self.open_campaign(driver)
+        output = self.root / "approval"
+
+        packet = driver.approve_prepare(
+            repository=self.repository,
+            decomposition_path=decomposition_path,
+            output_directory=output,
+            findings_by_run=self._findings_by_run(),
+        )
+        self.assertEqual(packet.warnings, ())
+
+        gate_evidence = json.loads((output / "gate-evidence.json").read_text(encoding="utf-8"))
+        notice_kinds = {n["kind"] for n in gate_evidence.get("notices") or ()}
+        self.assertEqual(
+            notice_kinds,
+            {"required-paths-impact-unsupported", "active-decision-notice"},
+        )
+        self.assertEqual(gate_evidence.get("warnings", []), [])
+
+        from harness_labs.plangraph.plan_approval import OPERATOR_APPROVAL_PROTOCOL
+        from harness_labs.plangraph.plan_graph_contract import sha256_json
+
+        subject = json.loads((output / "subject.json").read_text(encoding="utf-8"))
+        operator_approval_path = output / "operator-approval.json"
+        operator_approval_path.write_text(
+            json.dumps(
+                {
+                    "protocol": OPERATOR_APPROVAL_PROTOCOL,
+                    "subject_sha256": sha256_json(subject),
+                    "actor": "operator",
+                    "approved_at": "2026-01-01T00:00:00Z",
+                    "statement": "approved; only notices present",
+                },
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+        receipt_path = driver.approve_issue(
+            repository=self.repository,
+            subject_path=output / "subject.json",
+            gate_evidence_path=output / "gate-evidence.json",
+            operator_approval_path=operator_approval_path,
+            receipt_path=output / "receipt.json",
+        )
+        self.assertTrue(receipt_path.exists())
+
+    def test_one_high_impact_warning_requires_exactly_that_acknowledgement(self) -> None:
+        """Dropping the importer grant introduces exactly one high-severity
+        ``required-paths-impact-gap`` warning; the packet refuses until it
+        (and only it) is acknowledged, then the receipt issues."""
+
+        self._write_impact_fixture()
+        decomposition_path = self._commit(self._decomposition(grant_importer=False))
+        driver = self.driver()
+        self.open_campaign(driver)
+        probe_output = self.root / "approval-probe"
+
+        with self.assertRaises(UnacknowledgedWarningsError):
+            driver.approve_prepare(
+                repository=self.repository,
+                decomposition_path=decomposition_path,
+                output_directory=probe_output,
+                findings_by_run=self._findings_by_run(),
+            )
+        gate_evidence = json.loads(
+            (probe_output / "gate-evidence.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(len(gate_evidence["warnings"]), 1)
+        warning = gate_evidence["warnings"][0]
+        self.assertEqual(warning["kind"], "required-paths-impact-gap")
+        self.assertEqual(warning["severity"], "high")
+        self.assertEqual(warning["paths"], ["impact_importer.py"])
+
+        from harness_labs.plangraph.plan_approval import warning_identity
+
+        acknowledgements = [
+            {"warning_sha256": warning_identity(warning), "reason": "importer change tracked separately"}
+        ]
+        output = self.root / "approval-issued"
+        packet = driver.approve_prepare(
+            repository=self.repository,
+            decomposition_path=decomposition_path,
+            output_directory=output,
+            findings_by_run=self._findings_by_run(),
+            warning_acknowledgements=acknowledgements,
+        )
+        self.assertEqual(len(packet.warnings), 1)
+
+        from harness_labs.plangraph.plan_approval import OPERATOR_APPROVAL_PROTOCOL
+        from harness_labs.plangraph.plan_graph_contract import sha256_json
+
+        subject = json.loads((output / "subject.json").read_text(encoding="utf-8"))
+        operator_approval_path = output / "operator-approval.json"
+        operator_approval_path.write_text(
+            json.dumps(
+                {
+                    "protocol": OPERATOR_APPROVAL_PROTOCOL,
+                    "subject_sha256": sha256_json(subject),
+                    "actor": "operator",
+                    "approved_at": "2026-01-01T00:00:00Z",
+                    "statement": "approved; impact gap acknowledged",
+                    "warning_acknowledgements": acknowledgements,
+                },
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+        receipt_path = driver.approve_issue(
+            repository=self.repository,
+            subject_path=output / "subject.json",
+            gate_evidence_path=output / "gate-evidence.json",
+            operator_approval_path=operator_approval_path,
+            receipt_path=output / "receipt.json",
+        )
+        self.assertTrue(receipt_path.exists())
+
+
 if __name__ == "__main__":
     unittest.main()
