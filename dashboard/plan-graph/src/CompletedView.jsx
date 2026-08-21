@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { fetchSnapshotDocument, fetchSnapshots } from './api.js';
+import { fetchSnapshotDocument, fetchSnapshots, shouldPoll } from './api.js';
 import { duration, title } from './format.js';
 import { buildComparisonRow, filterMetricsComplete } from './snapshots.js';
 import ComparisonTable from './components/ComparisonTable.jsx';
@@ -94,8 +94,14 @@ export default function CompletedView() {
     const controller = new AbortController();
     let active = true;
     let timer;
+    // First fetch runs even while hidden (headless/embedded viewers report
+    // 'hidden' permanently); only repeat polls are visibility-gated.
+    let fetchedOnce = false;
     const poll = async () => {
-      if (document.visibilityState === 'visible') await refresh(controller.signal);
+      if (shouldPoll(document.visibilityState, fetchedOnce)) {
+        fetchedOnce = true;
+        await refresh(controller.signal);
+      }
       if (active) timer = window.setTimeout(poll, POLL_MILLISECONDS);
     };
     poll();

@@ -555,6 +555,51 @@ class PlanGraphMetricsEndpointTests(unittest.TestCase):
 
         self.assertEqual(missing_status, 404)
 
+    def test_live_graph_serves_cost_and_busy_time_from_in_flight_usage_records(self) -> None:
+        """A live attempt with an in-flight child (no summary.json yet) must
+        serve estimated cost and busy time as verified lower bounds — not
+        degrade them to unavailable. Regression: usage recorded under a
+        "[1m]" long-context model variant had no recognized pricing, which
+        made the only reporting node's cost unavailable and therefore the
+        whole live graph's cost unavailable."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            create_fixture(root)
+            journal = AuditJournal.open_existing(root / "live-child", actor=AuditActor("dashboard-fixture", "test"))
+            journal.append(
+                "backend_transport", status="succeeded", attempt_id="implement-live/attempt-1",
+                actor=AuditActor("implement-live/attempt-1", "semantic_worker"), backend_id="claude-session", duration_ms=2_000,
+                payload={"model": "claude-opus-4-8[1m]", "reasoning": "high", "usage": {
+                    "input_tokens": 200_000, "cached_input_tokens": 150_000, "output_tokens": 5_000, "cost_usd": None,
+                }},
+            )
+            app = DashboardApplication(root, refresh_seconds=60)
+            status, body, _ = self._request(app, "GET", "/api/plan-graph-metrics/active-graph")
+
+        self.assertEqual(status, 200)
+        live = json.loads(body)
+        self.assertEqual(live["status"], "running")
+        # Wall clock stays deliberately unserved for live graphs (the client
+        # derives elapsed from started_at) — never a fabricated zero.
+        self.assertEqual(live["timing"]["wall_clock_ms"]["state"], "unavailable")
+        self.assertIn("live; elapsed is derived client-side", live["timing"]["wall_clock_ms"]["reason"])
+        # The in-flight child's verified usage must surface as lower bounds.
+        cost = live["totals"]["cost"]
+        self.assertEqual(cost["state"], "partial")
+        self.assertGreater(cost["usd"], 0)
+        self.assertIn("lower bound", cost["reason"])
+        busy = live["totals"]["agent_busy_ms"]
+        self.assertEqual(busy["state"], "partial")
+        self.assertGreater(busy["value"], 0)
+        tokens = live["totals"]["tokens"]
+        self.assertEqual(tokens["state"], "partial")
+        self.assertEqual(tokens["total_tokens"], 205_000)
+        # Per-node rows must be served for a live graph, never empty.
+        self.assertEqual(live["counts"]["logical_nodes"], 3)
+        rows = {row["node_id"]: row for row in live["nodes"]}
+        self.assertEqual(rows["live"]["detail"]["state"], "available")
+        self.assertEqual(rows["live"]["totals"]["cost"]["state"], "estimated")
+
     def test_rollup_is_cached_within_one_catalog_revision_and_recomputes_only_after_a_revision_change(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

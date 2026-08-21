@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Background, Controls, Handle, Position, ReactFlow, ReactFlowProvider } from '@xyflow/react';
-import { defaultGraphAttempt, displayState, elapsedMs, fetchCatalog, fetchPlanGraphMetrics, fetchRunDetail, graphProjection, liveGraphs, planGraphGroups, selectedRunFor, stateLabel } from './api.js';
+import { defaultGraphAttempt, displayState, elapsedMs, fetchCatalog, fetchPlanGraphMetrics, fetchRunDetail, graphProjection, liveGraphs, planGraphGroups, selectedRunFor, shouldPoll, stateLabel } from './api.js';
 import { compactId, duration, money, title, tokens } from './format.js';
 import CompletedView from './CompletedView.jsx';
 import GraphTotals from './components/GraphTotals.jsx';
@@ -131,7 +131,11 @@ function Dashboard() {
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [graphMetrics, setGraphMetrics] = useState(null); const [graphMetricsRunId, setGraphMetricsRunId] = useState(null);
   const refresh = useCallback(async (signal) => { try { const result = await fetchCatalog({ etag: etag.current, signal }); if (result.catalog) { etag.current = result.etag; setCatalog(result.catalog); } setError(undefined); } catch (reason) { if (reason.name !== 'AbortError') setError(reason.message); } }, []);
-  useEffect(() => { const controller = new AbortController(); let active = true; let timer; const poll = async () => { if (document.visibilityState === 'visible') await refresh(controller.signal); if (active) timer = window.setTimeout(poll, POLL_MILLISECONDS); }; poll(); return () => { active = false; controller.abort(); window.clearTimeout(timer); }; }, [refresh]);
+  // The first fetch of each polling loop must run even when the document is
+  // hidden: headless and embedded viewers report visibilityState 'hidden'
+  // permanently, and a visibility-gated first fetch left them on "Loading…"
+  // forever. Only repeat polls are skipped while hidden.
+  useEffect(() => { const controller = new AbortController(); let active = true; let timer; let fetchedOnce = false; const poll = async () => { if (shouldPoll(document.visibilityState, fetchedOnce)) { fetchedOnce = true; await refresh(controller.signal); } if (active) timer = window.setTimeout(poll, POLL_MILLISECONDS); }; poll(); return () => { active = false; controller.abort(); window.clearTimeout(timer); }; }, [refresh]);
   // Elapsed time for live PlanGraphs is derived client-side from `started_at`
   // (the metrics endpoint deliberately never serves it), so this clock ticks
   // independently of the catalog/metrics polling cadence.
@@ -144,8 +148,10 @@ function Dashboard() {
     let active = true;
     let requestController;
     let timer;
+    let fetchedOnce = false;
     const refreshDetail = async () => {
-      if (document.visibilityState === 'visible') {
+      if (shouldPoll(document.visibilityState, fetchedOnce)) {
+        fetchedOnce = true;
         requestController = new AbortController();
         setDetailError(undefined);
         try {
@@ -174,8 +180,10 @@ function Dashboard() {
     let active = true;
     let requestController;
     let timer;
+    let fetchedOnce = false;
     const refreshGraphMetrics = async () => {
-      if (document.visibilityState === 'visible') {
+      if (shouldPoll(document.visibilityState, fetchedOnce)) {
+        fetchedOnce = true;
         requestController = new AbortController();
         try {
           const result = await fetchPlanGraphMetrics(runId, requestController.signal);
