@@ -1,0 +1,454 @@
+{
+  "cost_aggregate_group": [
+    {
+      "artifact_refs": [],
+      "attempt_id": "run-e-attempt-1",
+      "classification": "indeterminate",
+      "event_hashes": [
+        "70ec28de7846debc031f21d4592b291373312774f8c8817aff5a99ac525a9def"
+      ],
+      "evidence_classification": "production_lifecycle",
+      "first_event_sequence": 0,
+      "node_id": null,
+      "phase": "failed",
+      "protocol": "blocker-observation/1",
+      "redaction_applied": true,
+      "resolution": "unresolved_blocked",
+      "resolution_cost": {
+        "diff_churn_lines": 1,
+        "repair_dispatches": 0,
+        "retries": 0,
+        "tokens": null,
+        "wall_clock_ms": 100
+      },
+      "rule_id": null,
+      "run_id": "run-e",
+      "run_kind": "suite-1",
+      "signature": "sig-cost"
+    },
+    {
+      "artifact_refs": [],
+      "attempt_id": "run-f-attempt-1",
+      "classification": "indeterminate",
+      "event_hashes": [
+        "85dbb81352ed70e96526a97eb2376dd2d7fc2307566ecc57d9a5734504b44ffc"
+      ],
+      "evidence_classification": "production_lifecycle",
+      "first_event_sequence": 0,
+      "node_id": null,
+      "phase": "failed",
+      "protocol": "blocker-observation/1",
+      "redaction_applied": true,
+      "resolution": "unresolved_blocked",
+      "resolution_cost": {
+        "diff_churn_lines": 2,
+        "repair_dispatches": 0,
+        "retries": 0,
+        "tokens": 10,
+        "wall_clock_ms": 200
+      },
+      "rule_id": null,
+      "run_id": "run-f",
+      "run_kind": "suite-1",
+      "signature": "sig-cost"
+    },
+    {
+      "artifact_refs": [],
+      "attempt_id": "run-g-attempt-1",
+      "classification": "indeterminate",
+      "event_hashes": [
+        "d9e135bd38fbb4b85d81ca5bdf4fd0f48b51dff3260275dc1600165fdd24e6c1"
+      ],
+      "evidence_classification": "production_lifecycle",
+      "first_event_sequence": 0,
+      "node_id": null,
+      "phase": "failed",
+      "protocol": "blocker-observation/1",
+      "redaction_applied": true,
+      "resolution": "unresolved_blocked",
+      "resolution_cost": {
+        "diff_churn_lines": 3,
+        "repair_dispatches": 0,
+        "retries": 0,
+        "tokens": 20,
+        "wall_clock_ms": 300
+      },
+      "rule_id": null,
+      "run_id": "run-g",
+      "run_kind": "suite-2",
+      "signature": "sig-cost"
+    },
+    {
+      "artifact_refs": [],
+      "attempt_id": "run-h-attempt-1",
+      "classification": "indeterminate",
+      "event_hashes": [
+        "d22809e67bfd6e3801d35703fd635363921658ace8f7409ecf1c8d8e7709465d"
+      ],
+      "evidence_classification": "production_lifecycle",
+      "first_event_sequence": 0,
+      "node_id": null,
+      "phase": "failed",
+      "protocol": "blocker-observation/1",
+      "redaction_applied": true,
+      "resolution": "unresolved_blocked",
+      "resolution_cost": {
+        "diff_churn_lines": 4,
+        "repair_dispatches": 0,
+        "retries": 0,
+        "tokens": null,
+        "wall_clock_ms": 400
+      },
+      "rule_id": null,
+      "run_id": "run-h",
+      "run_kind": "suite-2",
+      "signature": "sig-cost"
+    },
+    {
+      "artifact_refs": [],
+      "attempt_id": "run-i-attempt-1",
+      "classification": "indeterminate",
+      "event_hashes": [
+        "036bd49af5319f1e029504d04237995f709195e029c15d42773f89bf82bb9f1f"
+      ],
+      "evidence_classification": "production_lifecycle",
+      "first_event_sequence": 0,
+      "node_id": null,
+      "phase": "failed",
+      "protocol": "blocker-observation/1",
+      "redaction_applied": true,
+      "resolution": "unresolved_blocked",
+      "resolution_cost": {
+        "diff_churn_lines": 5,
+        "repair_dispatches": 0,
+        "retries": 0,
+        "tokens": 30,
+        "wall_clock_ms": 500
+      },
+      "rule_id": null,
+      "run_id": "run-i",
+      "run_kind": "suite-2",
+      "signature": "sig-cost"
+    }
+  ],
+  "insufficient_observation_count": [
+    {
+      "artifact_refs": [],
+      "attempt_id": "run-c-attempt-1",
+      "classification": "product",
+      "event_hashes": [
+        "96af14f6f26cc241bb61e0cfc7528358b7539d08401500c69021e6ce42328ed1"
+      ],
+      "evidence_classification": "production_lifecycle",
+      "first_event_sequence": 0,
+      "node_id": null,
+      "phase": "failed",
+      "protocol": "blocker-observation/1",
+      "redaction_applied": true,
+      "resolution": "unresolved_blocked",
+      "resolution_cost": {
+        "diff_churn_lines": 10,
+        "repair_dispatches": 0,
+        "retries": 0,
+        "tokens": null,
+        "wall_clock_ms": 100
+      },
+      "rule_id": null,
+      "run_id": "run-c",
+      "run_kind": "toy-suite",
+      "signature": "sig-too-few"
+    },
+    {
+      "artifact_refs": [],
+      "attempt_id": "run-d-attempt-1",
+      "classification": "product",
+      "event_hashes": [
+        "5630d8476eb24a2867b6f0099bc37b1488f776f2984254e36991802ccb2394ed"
+      ],
+      "evidence_classification": "production_lifecycle",
+      "first_event_sequence": 0,
+      "node_id": null,
+      "phase": "failed",
+      "protocol": "blocker-observation/1",
+      "redaction_applied": true,
+      "resolution": "unresolved_blocked",
+      "resolution_cost": {
+        "diff_churn_lines": 10,
+        "repair_dispatches": 0,
+        "retries": 0,
+        "tokens": null,
+        "wall_clock_ms": 100
+      },
+      "rule_id": null,
+      "run_id": "run-d",
+      "run_kind": "toy-suite",
+      "signature": "sig-too-few"
+    }
+  ],
+  "proposable_task_suite_diverse": [
+    {
+      "artifact_refs": [],
+      "attempt_id": "run-j-attempt-1",
+      "classification": "structural_decision",
+      "event_hashes": [
+        "8ebd12e12d5dc2c081c42ab8715ab44f08b8d269237adc3b1cf0296c1205baea"
+      ],
+      "evidence_classification": "production_lifecycle",
+      "first_event_sequence": 0,
+      "node_id": null,
+      "phase": "failed",
+      "protocol": "blocker-observation/1",
+      "redaction_applied": true,
+      "resolution": "unresolved_blocked",
+      "resolution_cost": {
+        "diff_churn_lines": 10,
+        "repair_dispatches": 0,
+        "retries": 0,
+        "tokens": null,
+        "wall_clock_ms": 100
+      },
+      "rule_id": null,
+      "run_id": "run-j",
+      "run_kind": "suite-alpha",
+      "signature": "sig-suite-diverse"
+    },
+    {
+      "artifact_refs": [],
+      "attempt_id": "run-k-attempt-1",
+      "classification": "structural_decision",
+      "event_hashes": [
+        "ba49ae603724101ad2cb2a2d13bfb15a61ef6dcacd46afbd5ebb67880ea2ed32"
+      ],
+      "evidence_classification": "production_lifecycle",
+      "first_event_sequence": 0,
+      "node_id": null,
+      "phase": "failed",
+      "protocol": "blocker-observation/1",
+      "redaction_applied": true,
+      "resolution": "unresolved_blocked",
+      "resolution_cost": {
+        "diff_churn_lines": 10,
+        "repair_dispatches": 0,
+        "retries": 0,
+        "tokens": null,
+        "wall_clock_ms": 100
+      },
+      "rule_id": null,
+      "run_id": "run-k",
+      "run_kind": "suite-beta",
+      "signature": "sig-suite-diverse"
+    },
+    {
+      "artifact_refs": [],
+      "attempt_id": "run-l-attempt-1",
+      "classification": "structural_decision",
+      "event_hashes": [
+        "a43680940971563aaf4475c6a5df0eacddd9b7cb1f24b0b63d00cc7ab98bb2bc"
+      ],
+      "evidence_classification": "production_lifecycle",
+      "first_event_sequence": 0,
+      "node_id": null,
+      "phase": "failed",
+      "protocol": "blocker-observation/1",
+      "redaction_applied": true,
+      "resolution": "unresolved_blocked",
+      "resolution_cost": {
+        "diff_churn_lines": 10,
+        "repair_dispatches": 0,
+        "retries": 0,
+        "tokens": null,
+        "wall_clock_ms": 100
+      },
+      "rule_id": null,
+      "run_id": "run-l",
+      "run_kind": "suite-gamma",
+      "signature": "sig-suite-diverse"
+    }
+  ],
+  "single_run_multiattempt": [
+    {
+      "artifact_refs": [],
+      "attempt_id": "run-x-attempt-1",
+      "classification": "harness_or_configuration",
+      "event_hashes": [
+        "ebd19f6d7e5d99d18b4e6a1eef2c830a38b8fe501484c50700a7b6638748108b"
+      ],
+      "evidence_classification": "production_lifecycle",
+      "first_event_sequence": 0,
+      "node_id": null,
+      "phase": "failed",
+      "protocol": "blocker-observation/1",
+      "redaction_applied": true,
+      "resolution": "unresolved_blocked",
+      "resolution_cost": {
+        "diff_churn_lines": 10,
+        "repair_dispatches": 0,
+        "retries": 0,
+        "tokens": null,
+        "wall_clock_ms": 100
+      },
+      "rule_id": null,
+      "run_id": "run-x",
+      "run_kind": "toy-suite",
+      "signature": "sig-single-run"
+    },
+    {
+      "artifact_refs": [],
+      "attempt_id": "run-x-attempt-2",
+      "classification": "harness_or_configuration",
+      "event_hashes": [
+        "641cd94c2f7c50cc82eebf18c6c9f70516d0f78ea2e2a9eb3b04d059a8851dcd"
+      ],
+      "evidence_classification": "production_lifecycle",
+      "first_event_sequence": 0,
+      "node_id": null,
+      "phase": "failed",
+      "protocol": "blocker-observation/1",
+      "redaction_applied": true,
+      "resolution": "unresolved_blocked",
+      "resolution_cost": {
+        "diff_churn_lines": 10,
+        "repair_dispatches": 0,
+        "retries": 0,
+        "tokens": null,
+        "wall_clock_ms": 100
+      },
+      "rule_id": null,
+      "run_id": "run-x",
+      "run_kind": "toy-suite",
+      "signature": "sig-single-run"
+    },
+    {
+      "artifact_refs": [],
+      "attempt_id": "run-x-attempt-3",
+      "classification": "harness_or_configuration",
+      "event_hashes": [
+        "af4d4902505795e2589bf8dd6b424005421e15c33087f229c500f5cfb0b980b7"
+      ],
+      "evidence_classification": "production_lifecycle",
+      "first_event_sequence": 0,
+      "node_id": null,
+      "phase": "failed",
+      "protocol": "blocker-observation/1",
+      "redaction_applied": true,
+      "resolution": "unresolved_blocked",
+      "resolution_cost": {
+        "diff_churn_lines": 10,
+        "repair_dispatches": 0,
+        "retries": 0,
+        "tokens": null,
+        "wall_clock_ms": 100
+      },
+      "rule_id": null,
+      "run_id": "run-x",
+      "run_kind": "toy-suite",
+      "signature": "sig-single-run"
+    },
+    {
+      "artifact_refs": [],
+      "attempt_id": "run-x-attempt-4",
+      "classification": "harness_or_configuration",
+      "event_hashes": [
+        "71ec6c36c3e098ba7b47f6924cc43c7d5a9a0015b96c2f6a6aface47b592c5b8"
+      ],
+      "evidence_classification": "production_lifecycle",
+      "first_event_sequence": 0,
+      "node_id": null,
+      "phase": "failed",
+      "protocol": "blocker-observation/1",
+      "redaction_applied": true,
+      "resolution": "unresolved_blocked",
+      "resolution_cost": {
+        "diff_churn_lines": 10,
+        "repair_dispatches": 0,
+        "retries": 0,
+        "tokens": null,
+        "wall_clock_ms": 100
+      },
+      "rule_id": null,
+      "run_id": "run-x",
+      "run_kind": "toy-suite",
+      "signature": "sig-single-run"
+    }
+  ],
+  "two_run_candidate": [
+    {
+      "artifact_refs": [],
+      "attempt_id": "run-a-attempt-1",
+      "classification": "policy_violation",
+      "event_hashes": [
+        "f1ed3fe985158dd444abb25c332e7907ac92e4ba2cb6bf2b0376662dc6b66b84"
+      ],
+      "evidence_classification": "production_lifecycle",
+      "first_event_sequence": 0,
+      "node_id": null,
+      "phase": "failed",
+      "protocol": "blocker-observation/1",
+      "redaction_applied": true,
+      "resolution": "prompt_workaround",
+      "resolution_cost": {
+        "diff_churn_lines": 10,
+        "repair_dispatches": 0,
+        "retries": 0,
+        "tokens": null,
+        "wall_clock_ms": 100
+      },
+      "rule_id": null,
+      "run_id": "run-a",
+      "run_kind": "toy-suite",
+      "signature": "sig-two-run"
+    },
+    {
+      "artifact_refs": [],
+      "attempt_id": "run-a-attempt-2",
+      "classification": "policy_violation",
+      "event_hashes": [
+        "c8c9ed8555212723466435a5d5bf33f006a01ada15e97d91a9cdd00a73b1e138"
+      ],
+      "evidence_classification": "production_lifecycle",
+      "first_event_sequence": 0,
+      "node_id": null,
+      "phase": "failed",
+      "protocol": "blocker-observation/1",
+      "redaction_applied": true,
+      "resolution": "repair_attempt",
+      "resolution_cost": {
+        "diff_churn_lines": 10,
+        "repair_dispatches": 0,
+        "retries": 0,
+        "tokens": null,
+        "wall_clock_ms": 100
+      },
+      "rule_id": null,
+      "run_id": "run-a",
+      "run_kind": "toy-suite",
+      "signature": "sig-two-run"
+    },
+    {
+      "artifact_refs": [],
+      "attempt_id": "run-b-attempt-1",
+      "classification": "policy_violation",
+      "event_hashes": [
+        "814134459673153e4cb0b036ddf31015086ac07854f4643dfbc15fdb067a08c2"
+      ],
+      "evidence_classification": "production_lifecycle",
+      "first_event_sequence": 0,
+      "node_id": null,
+      "phase": "failed",
+      "protocol": "blocker-observation/1",
+      "redaction_applied": true,
+      "resolution": "prompt_workaround",
+      "resolution_cost": {
+        "diff_churn_lines": 10,
+        "repair_dispatches": 0,
+        "retries": 0,
+        "tokens": null,
+        "wall_clock_ms": 100
+      },
+      "rule_id": null,
+      "run_id": "run-b",
+      "run_kind": "toy-suite",
+      "signature": "sig-two-run"
+    }
+  ]
+}
