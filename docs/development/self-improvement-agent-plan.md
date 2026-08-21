@@ -236,8 +236,10 @@ Objective: an accepted proposal becomes a bounded convergence campaign
 over the harness repo, dispatching successive PlanGraphs until all
 specifications are met.
 
-`scripts/self_improve.py` (thin argparse over the library; JSON to
-stdout, errors to stderr, exit nonzero), subcommands:
+`harness_labs/graphrun/improvement_loop.py` (the campaign orchestration
+library, including close-out promotion) plus `scripts/self_improve.py`
+(thin argparse over it; JSON to stdout, errors to stderr, exit nonzero),
+subcommands:
 
 - `audit` — run SI-02 mining + SI-03 clustering. Deterministic; safe on
   a schedule. `--propose-if-ready` additionally drafts proposals for
@@ -291,10 +293,11 @@ engineering memory, and validation of everything committed.
   corpus. A Claude Code routine may additionally wake a session to
   review drafted proposals, but it is a convenience trigger only — no
   required contract exists only in a prompt.
-- **CI's real job**: `check_improvement_artifacts.py` over committed
-  artifacts + the existing repository-contract and import-boundary
-  checks; asserts every accepted proposal has a human ruling and every
-  `addressed` pattern names its campaign and landing commit.
+- **CI's real job**: run `check_improvement_artifacts.py` (built in
+  SI-01 with all committed-tree assertions: every accepted proposal has
+  a human ruling; every `addressed` pattern names its campaign and
+  landing commit) over `docs/improvement/`, alongside the existing
+  repository-contract and import-boundary checks.
 - **Close-out.** A campaign that terminates successful promotes to
   `docs/decisions/NNNN-*.md` via `TEMPLATE.md` — "Validation and
   reversal" holds the before/after evidence; `Concerns-paths:` is filled

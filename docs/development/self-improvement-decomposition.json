@@ -7,13 +7,13 @@
     "SI-02": "Forensic miner: harness_labs/observability/run_forensics.py deterministically extracts blocker-observation records from local run journals, admitting only runs whose audit hash chain verifies via project_run_metrics. Reads events, decisions, checkpoint, summary, manifest, review-ledger, retry-budget-ledger, block-escalation, and workspace-change artifacts. Hard filter: only production_lifecycle evidence aggregates; fabricated_fixture parses but is excluded. Signatures normalized and secret-free; watermarked idempotent state under logs/improvement/state/.",
     "SI-03": "Pattern index: harness_labs/observability/improvement_index.py clusters observations by normalized signature plus classification with anti-N=1 thresholds (candidate at >=3 observations across >=2 lineages; proposable at >=2 distinct graph attempts or task suites; single-run findings stay observed forever). Computes support and median-plus-tail cost aggregates. Anti-thrash state: one open proposal per target-surface path, cooldown before re-proposal, hard cap on open proposals, rejected/regressed history bar.",
     "SI-04": "Improvement program: harness_labs/graphrun/improvement_program.py performs the engineering-memory joins (finding_history.fold_campaigns recurrence over prior campaign journals; decision_registry governing-decision annotation with refusal to draft against governed paths uncited; Inconsistency records surfaced, never resolved), drafts improvement-proposal/1 records via an injectable bounded judgment callable (refusing when the Complexity-admission triple or an executable assertion cannot be filled; gate_relaxation requires a ruling statement naming the gate and superseding mechanism), and assembles operator ruling packets. Rulings are never machine-authored.",
-    "SI-05": "Convergence bridge and loop driver: scripts/self_improve.py with subcommands audit, open, round, remeasure, status. open ingests an accepted proposal's success_criteria as the seed finding batch into a real ConvergenceLedger under logs/improvement/campaigns/. round synthesizes each PlanGraph from open_findings via plan_synthesis and dispatches only under an issued plan-approval receipt using campaign_launcher defaults. remeasure re-runs the miner plus each open key's assertion and folds convergence verdicts: only observed_fixed closes a key; unobserved blocks success termination; the round bound closes the campaign incomplete and reverts the pattern to candidate.",
-    "SI-06": "Scheduling, close-out, CI, docs: repo-owned scheduled entry point (launchd template; CI cannot mine gitignored 0700-mode journals, so its job is validating committed artifacts via check_improvement_artifacts.py), close-out promotion of a successful campaign to a docs/decisions/ record with Concerns-paths filled from target_surface so the decision registry serves it in future approvals, docs/improvement/ committed home, agent guide plus INDEX registration, and .gitignore coverage for logs/improvement/.",
+    "SI-05": "Convergence bridge and loop driver: harness_labs/graphrun/improvement_loop.py (campaign orchestration and close-out promotion) plus scripts/self_improve.py with subcommands audit, open, round, remeasure, status. open ingests an accepted proposal's success_criteria as the seed finding batch into a real ConvergenceLedger under logs/improvement/campaigns/. round synthesizes each PlanGraph from open_findings via plan_synthesis and dispatches only under an issued plan-approval receipt using campaign_launcher defaults. remeasure re-runs the miner plus each open key's assertion and folds convergence verdicts: only observed_fixed closes a key; unobserved blocks success termination; the round bound closes the campaign incomplete and reverts the pattern to candidate.",
+    "SI-06": "Scheduling, close-out, CI, docs: repo-owned scheduled entry point (launchd template; CI cannot mine gitignored 0700-mode journals, so its job is running the SI-01 checker over the committed docs/improvement/ tree), close-out promotion of a successful campaign to a docs/decisions/ record with Concerns-paths filled from target_surface so the decision registry serves it in future approvals, docs/improvement/ committed home, agent guide plus INDEX registration, and .gitignore coverage for logs/improvement/.",
     "SI-GUARDRAILS": "Cross-cutting guardrails: read-only miner writing only under logs/improvement/ with capability-broker grants excluding docs, schemas, AGENTS.md, and code; implementation only inside receipted PlanGraph nodes; accuracy is a constraint never traded for efficiency; observations carry normalized signatures and hash refs, never raw transcripts; cold-start gold set backfilled from contract-burden-reduction items with proposal mode config-disabled until the corpus reaches roughly 20-30 production FeatureRuns across >=3 programs."
   },
   "acceptance_criteria": {
     "AC-SI01-1": "schemas/blocker-observation.schema.json, schemas/blocker-pattern.schema.json, and schemas/improvement-proposal.schema.json exist with protocol consts and additionalProperties false, and a test asserts their classification, evidence_classification, and resolution enums are equal to the enums loaded from schemas/block-escalation.json, schemas/retry-budget-ledger.json, and schemas/audit-event.schema.json rather than retyped copies drifting silently.",
-    "AC-SI01-2": "scripts/dev/check_improvement_artifacts.py imports stdlib only, exits nonzero on a proposal missing any Complexity-admission field, on an accepted proposal without a human ruling (actor, statement, ruled_at), and on a success criterion whose file is absent from its required_paths, and exits zero on a valid fixture artifact tree.",
+    "AC-SI01-2": "scripts/dev/check_improvement_artifacts.py imports stdlib only, exits nonzero on a proposal missing any Complexity-admission field, on an accepted proposal without a human ruling (actor, statement, ruled_at), on a success criterion whose file is absent from its required_paths, and on a pattern with status addressed that does not name its campaign id and landing commit, and exits zero on a valid fixture artifact tree.",
     "AC-SI01-3": "every improvement-proposal success_criteria entry validates as intake-shaped (non-empty file, subject, required_paths, and an assertion with argv and timeout or a signature-absence check), so an accepted proposal can seed delta-to-run finding intake without transformation.",
     "AC-SI01-4": "tests/test_improvement_artifacts.py passes together with the full suite.",
     "AC-SI02-1": "run_forensics admits a run only when its audit hash chain verifies via project_run_metrics; a tampered fixture journal is excluded from output and reported as refused rather than silently skipped.",
@@ -32,15 +32,23 @@
     "AC-SI05-3": "remeasure folds convergence verdicts such that only observed_fixed closes a key, a key whose assertion did not execute folds unobserved and blocks success termination, and hitting the round bound closes the campaign incomplete and reverts its pattern to candidate.",
     "AC-SI05-4": "a fixture improvement campaign runs open, round with the stub driver, remeasure, and close end to end in tests with no live model and no real browser.",
     "AC-SI06-1": "the launchd template and self-improvement agent guide exist, the guide is registered in docs/development/INDEX.md, docs/improvement/ exists as the committed artifact home, and logs/improvement/ is gitignored.",
-    "AC-SI06-2": "check_improvement_artifacts.py run over docs/improvement/ additionally asserts that every accepted proposal has a ruling and that every pattern with status addressed names its campaign id and landing commit, exiting nonzero otherwise, so CI validates committed artifacts without needing journal access.",
+    "AC-SI06-2": "running scripts/dev/check_improvement_artifacts.py over the seeded docs/improvement/ tree exits zero, violations seeded into a copy exit nonzero, and tests/test_improvement_closeout.py exercises both, so CI validates committed improvement artifacts without needing journal access.",
     "AC-SI06-3": "closing a successful fixture campaign emits a decision-record draft from docs/decisions/TEMPLATE.md with Concerns-paths filled from the proposal's target_surface, and a test asserts decision_registry.active_decisions_for_paths returns the new record for those paths once accepted."
   },
   "runs": [
     {
       "id": "SI-01",
       "objective": "Define the three improvement artifact schemas (blocker-observation/1, blocker-pattern/1, improvement-proposal/1) reusing existing enums verbatim, plus a stdlib-only checker for committed artifact trees, so every later stage has a closed, falsifiable contract to emit against.",
-      "plan_sections": ["SI-00", "SI-01"],
-      "criteria": ["AC-SI01-1", "AC-SI01-2", "AC-SI01-3", "AC-SI01-4"],
+      "plan_sections": [
+        "SI-00",
+        "SI-01"
+      ],
+      "criteria": [
+        "AC-SI01-1",
+        "AC-SI01-2",
+        "AC-SI01-3",
+        "AC-SI01-4"
+      ],
       "depends_on": [],
       "allowed_paths": [
         "schemas/blocker-observation.schema.json",
@@ -48,162 +56,366 @@
         "schemas/improvement-proposal.schema.json",
         "scripts/dev/check_improvement_artifacts.py",
         "tests/test_improvement_artifacts.py",
-        "tests/fixtures/improvement"
+        "tests/fixtures/improvement/artifacts"
       ],
       "path_intents": [
-        {"path": "schemas/blocker-observation.schema.json", "action": "create"},
-        {"path": "schemas/blocker-pattern.schema.json", "action": "create"},
-        {"path": "schemas/improvement-proposal.schema.json", "action": "create"},
-        {"path": "scripts/dev/check_improvement_artifacts.py", "action": "create"},
-        {"path": "tests/test_improvement_artifacts.py", "action": "create"},
-        {"path": "tests/fixtures/improvement", "action": "create"}
+        {
+          "path": "schemas/blocker-observation.schema.json",
+          "action": "create"
+        },
+        {
+          "path": "schemas/blocker-pattern.schema.json",
+          "action": "create"
+        },
+        {
+          "path": "schemas/improvement-proposal.schema.json",
+          "action": "create"
+        },
+        {
+          "path": "scripts/dev/check_improvement_artifacts.py",
+          "action": "create"
+        },
+        {
+          "path": "tests/test_improvement_artifacts.py",
+          "action": "create"
+        },
+        {
+          "path": "tests/fixtures/improvement/artifacts",
+          "action": "create"
+        }
       ],
-      "verification_argv": ["python3", "-m", "pytest", "tests/test_improvement_artifacts.py", "-q"],
+      "verification_argv": [
+        "python3",
+        "-m",
+        "pytest",
+        "tests/test_improvement_artifacts.py",
+        "-q"
+      ],
       "verification_timeout_seconds": 600,
       "verification_required_paths": [
-        {"path": "tests/__init__.py", "availability": "base"}
+        {
+          "path": "tests/__init__.py",
+          "availability": "base"
+        }
       ]
     },
     {
       "id": "SI-02",
       "objective": "Build the deterministic forensic miner in observability: authenticated-journal-only extraction of blocker-observation records with normalized secret-free signatures, a hard production_lifecycle aggregation filter, and watermarked idempotent state under logs/improvement/state/.",
-      "plan_sections": ["SI-00", "SI-02", "SI-GUARDRAILS"],
-      "criteria": ["AC-SI02-1", "AC-SI02-2", "AC-SI02-3", "AC-SI02-4"],
-      "depends_on": ["SI-01"],
+      "plan_sections": [
+        "SI-00",
+        "SI-02",
+        "SI-GUARDRAILS"
+      ],
+      "criteria": [
+        "AC-SI02-1",
+        "AC-SI02-2",
+        "AC-SI02-3",
+        "AC-SI02-4"
+      ],
+      "depends_on": [
+        "SI-01"
+      ],
       "allowed_paths": [
         "harness_labs/observability/run_forensics.py",
         "tests/test_run_forensics.py",
-        "tests/fixtures/improvement"
+        "tests/fixtures/improvement/journals"
       ],
       "path_intents": [
-        {"path": "harness_labs/observability/run_forensics.py", "action": "create"},
-        {"path": "tests/test_run_forensics.py", "action": "create"},
-        {"path": "tests/fixtures/improvement", "action": "modify"}
+        {
+          "path": "harness_labs/observability/run_forensics.py",
+          "action": "create"
+        },
+        {
+          "path": "tests/test_run_forensics.py",
+          "action": "create"
+        },
+        {
+          "path": "tests/fixtures/improvement/journals",
+          "action": "create"
+        }
       ],
-      "verification_argv": ["python3", "-m", "pytest", "tests/test_run_forensics.py", "-q"],
+      "verification_argv": [
+        "python3",
+        "-m",
+        "pytest",
+        "tests/test_run_forensics.py",
+        "-q"
+      ],
       "verification_timeout_seconds": 900,
       "verification_required_paths": [
-        {"path": "tests/__init__.py", "availability": "base"}
+        {
+          "path": "tests/__init__.py",
+          "availability": "base"
+        }
       ]
     },
     {
       "id": "SI-03",
-      "objective": "Build the pattern index in observability: deterministic signature clustering into blocker-pattern records with anti-N=1 thresholds, support and cost aggregates, and anti-thrash state (per-surface uniqueness, cooldowns, caps, rejected-history bar) — no plangraph imports.",
-      "plan_sections": ["SI-00", "SI-03", "SI-GUARDRAILS"],
-      "criteria": ["AC-SI03-1", "AC-SI03-2", "AC-SI03-3"],
-      "depends_on": ["SI-02"],
+      "objective": "Build the pattern index in observability: deterministic signature clustering into blocker-pattern records with anti-N=1 thresholds, support and cost aggregates, and anti-thrash state (per-surface uniqueness, cooldowns, caps, rejected-history bar) \u2014 no plangraph imports.",
+      "plan_sections": [
+        "SI-00",
+        "SI-03",
+        "SI-GUARDRAILS"
+      ],
+      "criteria": [
+        "AC-SI03-1",
+        "AC-SI03-2",
+        "AC-SI03-3"
+      ],
+      "depends_on": [
+        "SI-02"
+      ],
       "allowed_paths": [
         "harness_labs/observability/improvement_index.py",
         "tests/test_improvement_index.py",
-        "tests/fixtures/improvement"
+        "tests/fixtures/improvement/index"
       ],
       "path_intents": [
-        {"path": "harness_labs/observability/improvement_index.py", "action": "create"},
-        {"path": "tests/test_improvement_index.py", "action": "create"},
-        {"path": "tests/fixtures/improvement", "action": "modify"}
+        {
+          "path": "harness_labs/observability/improvement_index.py",
+          "action": "create"
+        },
+        {
+          "path": "tests/test_improvement_index.py",
+          "action": "create"
+        },
+        {
+          "path": "tests/fixtures/improvement/index",
+          "action": "create"
+        }
       ],
-      "verification_argv": ["python3", "-m", "pytest", "tests/test_improvement_index.py", "-q"],
+      "verification_argv": [
+        "python3",
+        "-m",
+        "pytest",
+        "tests/test_improvement_index.py",
+        "-q"
+      ],
       "verification_timeout_seconds": 600,
       "verification_required_paths": [
-        {"path": "tests/__init__.py", "availability": "base"}
+        {
+          "path": "tests/__init__.py",
+          "availability": "base"
+        }
       ]
     },
     {
       "id": "SI-04",
       "objective": "Build the graphrun-layer improvement program: engineering-memory joins (finding_history recurrence, decision-registry governance with refusal on uncited governed paths), bounded injectable proposal drafting that cannot emit an unfalsifiable proposal, and operator ruling packets with human-only ruling validation.",
-      "plan_sections": ["SI-00", "SI-04", "SI-GUARDRAILS"],
-      "criteria": ["AC-SI04-1", "AC-SI04-2", "AC-SI04-3", "AC-SI04-4"],
-      "depends_on": ["SI-01", "SI-03"],
+      "plan_sections": [
+        "SI-00",
+        "SI-04",
+        "SI-GUARDRAILS"
+      ],
+      "criteria": [
+        "AC-SI04-1",
+        "AC-SI04-2",
+        "AC-SI04-3",
+        "AC-SI04-4"
+      ],
+      "depends_on": [
+        "SI-01",
+        "SI-03"
+      ],
       "allowed_paths": [
         "harness_labs/graphrun/improvement_program.py",
         "tests/test_improvement_program.py",
-        "tests/fixtures/improvement"
+        "tests/fixtures/improvement/memory"
       ],
       "path_intents": [
-        {"path": "harness_labs/graphrun/improvement_program.py", "action": "create"},
-        {"path": "tests/test_improvement_program.py", "action": "create"},
-        {"path": "tests/fixtures/improvement", "action": "modify"}
+        {
+          "path": "harness_labs/graphrun/improvement_program.py",
+          "action": "create"
+        },
+        {
+          "path": "tests/test_improvement_program.py",
+          "action": "create"
+        },
+        {
+          "path": "tests/fixtures/improvement/memory",
+          "action": "create"
+        }
       ],
-      "verification_argv": ["python3", "-m", "pytest", "tests/test_improvement_program.py", "-q"],
+      "verification_argv": [
+        "python3",
+        "-m",
+        "pytest",
+        "tests/test_improvement_program.py",
+        "-q"
+      ],
       "verification_timeout_seconds": 900,
       "verification_required_paths": [
-        {"path": "tests/__init__.py", "availability": "base"}
+        {
+          "path": "tests/__init__.py",
+          "availability": "base"
+        }
       ]
     },
     {
       "id": "SI-05",
-      "objective": "Build the convergence bridge and loop driver: scripts/self_improve.py (audit|open|round|remeasure|status) turning an accepted proposal into a bounded convergence campaign over the harness repo — seed findings into a real ConvergenceLedger, per-round plan_synthesis and receipt-gated PlanGraph dispatch via campaign_launcher, re-measurement folding convergence verdicts, and bounded termination.",
-      "plan_sections": ["SI-00", "SI-05", "SI-GUARDRAILS"],
-      "criteria": ["AC-SI05-1", "AC-SI05-2", "AC-SI05-3", "AC-SI05-4"],
-      "depends_on": ["SI-04"],
+      "objective": "Build the convergence bridge and loop driver: harness_labs/graphrun/improvement_loop.py plus scripts/self_improve.py (audit|open|round|remeasure|status) turning an accepted proposal into a bounded convergence campaign over the harness repo \u2014 seed findings into a real ConvergenceLedger, per-round plan_synthesis and receipt-gated PlanGraph dispatch via campaign_launcher, re-measurement folding convergence verdicts, and bounded termination.",
+      "plan_sections": [
+        "SI-00",
+        "SI-05",
+        "SI-GUARDRAILS"
+      ],
+      "criteria": [
+        "AC-SI05-1",
+        "AC-SI05-2",
+        "AC-SI05-3",
+        "AC-SI05-4"
+      ],
+      "depends_on": [
+        "SI-04"
+      ],
       "allowed_paths": [
+        "harness_labs/graphrun/improvement_loop.py",
         "scripts/self_improve.py",
-        "harness_labs/graphrun/improvement_program.py",
         "tests/test_self_improve_loop.py",
-        "tests/fixtures/improvement"
+        "tests/fixtures/improvement/loop"
       ],
       "path_intents": [
-        {"path": "scripts/self_improve.py", "action": "create"},
-        {"path": "harness_labs/graphrun/improvement_program.py", "action": "modify"},
-        {"path": "tests/test_self_improve_loop.py", "action": "create"},
-        {"path": "tests/fixtures/improvement", "action": "modify"}
+        {
+          "path": "harness_labs/graphrun/improvement_loop.py",
+          "action": "create"
+        },
+        {
+          "path": "scripts/self_improve.py",
+          "action": "create"
+        },
+        {
+          "path": "tests/test_self_improve_loop.py",
+          "action": "create"
+        },
+        {
+          "path": "tests/fixtures/improvement/loop",
+          "action": "create"
+        }
       ],
-      "verification_argv": ["python3", "-m", "pytest", "tests/test_self_improve_loop.py", "-q"],
+      "verification_argv": [
+        "python3",
+        "-m",
+        "pytest",
+        "tests/test_self_improve_loop.py",
+        "-q"
+      ],
       "verification_timeout_seconds": 1200,
       "verification_required_paths": [
-        {"path": "tests/__init__.py", "availability": "base"}
+        {
+          "path": "tests/__init__.py",
+          "availability": "base"
+        }
       ]
     },
     {
       "id": "SI-06",
       "objective": "Wire recurrence and closure: repo-owned scheduled audit entry point with launchd template, docs/improvement/ committed artifact home, CI validation of committed artifacts via the checker, close-out promotion of successful campaigns into docs/decisions/ records the decision registry serves back, agent guide, INDEX registration, and gitignore coverage.",
-      "plan_sections": ["SI-00", "SI-06", "SI-GUARDRAILS"],
-      "criteria": ["AC-SI06-1", "AC-SI06-2", "AC-SI06-3"],
-      "depends_on": ["SI-05"],
+      "plan_sections": [
+        "SI-00",
+        "SI-06",
+        "SI-GUARDRAILS"
+      ],
+      "criteria": [
+        "AC-SI06-1",
+        "AC-SI06-2",
+        "AC-SI06-3"
+      ],
+      "depends_on": [
+        "SI-05"
+      ],
       "allowed_paths": [
         "docs/operations/self-improve.launchd.plist.example",
         "docs/development/self-improvement-agent-guide.md",
         "docs/development/INDEX.md",
         "docs/improvement",
         ".gitignore",
-        "scripts/dev/check_improvement_artifacts.py",
-        "harness_labs/graphrun/improvement_program.py",
-        "tests/test_improvement_artifacts.py",
-        "tests/test_self_improve_loop.py"
+        "tests/test_improvement_closeout.py"
       ],
       "path_intents": [
-        {"path": "docs/operations/self-improve.launchd.plist.example", "action": "create"},
-        {"path": "docs/development/self-improvement-agent-guide.md", "action": "create"},
-        {"path": "docs/development/INDEX.md", "action": "modify"},
-        {"path": "docs/improvement", "action": "create"},
-        {"path": ".gitignore", "action": "modify"},
-        {"path": "scripts/dev/check_improvement_artifacts.py", "action": "modify"},
-        {"path": "harness_labs/graphrun/improvement_program.py", "action": "modify"},
-        {"path": "tests/test_improvement_artifacts.py", "action": "modify"},
-        {"path": "tests/test_self_improve_loop.py", "action": "modify"}
+        {
+          "path": "docs/operations/self-improve.launchd.plist.example",
+          "action": "create"
+        },
+        {
+          "path": "docs/development/self-improvement-agent-guide.md",
+          "action": "create"
+        },
+        {
+          "path": "docs/development/INDEX.md",
+          "action": "modify"
+        },
+        {
+          "path": "docs/improvement",
+          "action": "create"
+        },
+        {
+          "path": ".gitignore",
+          "action": "modify"
+        },
+        {
+          "path": "tests/test_improvement_closeout.py",
+          "action": "create"
+        }
       ],
-      "verification_argv": ["python3", "-m", "pytest", "tests/test_improvement_artifacts.py", "tests/test_self_improve_loop.py", "-q"],
+      "verification_argv": [
+        "python3",
+        "-m",
+        "pytest",
+        "tests/test_improvement_closeout.py",
+        "-q"
+      ],
       "verification_timeout_seconds": 1200,
       "verification_required_paths": [
-        {"path": "tests/__init__.py", "availability": "base"}
+        {
+          "path": "tests/__init__.py",
+          "availability": "base"
+        }
       ]
     }
   ],
   "functionality_tests": [
     {
-      "argv": ["python3", "-m", "pytest", "tests/", "-q"],
+      "argv": [
+        "python3",
+        "-m",
+        "pytest",
+        "tests/",
+        "-q"
+      ],
       "timeout_seconds": 3600,
-      "required_paths": [{"path": "tests/__init__.py", "availability": "base"}]
+      "required_paths": [
+        {
+          "path": "tests/__init__.py",
+          "availability": "base"
+        }
+      ]
     },
     {
-      "argv": ["python3", "scripts/check_repository_contracts.py"],
+      "argv": [
+        "python3",
+        "scripts/check_repository_contracts.py"
+      ],
       "timeout_seconds": 600,
-      "required_paths": [{"path": "scripts/check_repository_contracts.py", "availability": "base"}]
+      "required_paths": [
+        {
+          "path": "scripts/check_repository_contracts.py",
+          "availability": "base"
+        }
+      ]
     },
     {
-      "argv": ["python3", "scripts/dev/check_import_boundaries.py"],
+      "argv": [
+        "python3",
+        "scripts/dev/check_import_boundaries.py"
+      ],
       "timeout_seconds": 300,
-      "required_paths": [{"path": "scripts/dev/check_import_boundaries.py", "availability": "base"}]
+      "required_paths": [
+        {
+          "path": "scripts/dev/check_import_boundaries.py",
+          "availability": "base"
+        }
+      ]
     }
   ],
   "referenced_artifacts": [
