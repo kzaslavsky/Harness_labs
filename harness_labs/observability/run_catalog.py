@@ -51,6 +51,13 @@ _LONG_CONTEXT_THRESHOLD = 272_000
 # prices identically to its base model; without this fallback every usage
 # record from a "[1m]" session degraded the whole run's cost to unavailable.
 _LONG_CONTEXT_VARIANT_SUFFIX = "[1m]"
+
+# Statuses under which a missing terminal manifest is "not yet produced"
+# (partial evidence over the verified journal prefix) rather than the
+# terminal-run failure "no terminal manifest exists".  Deliberately a closed
+# set: an unrecognized checkpoint status must not be declared in flight.
+_IN_FLIGHT_STATUSES = frozenset({"queued", "running"})
+_IN_FLIGHT_EVIDENCE_REASON = "run is in flight: journal prefix is verified; the terminal manifest is not yet produced"
 # Naming (DM-02): first-sentence truncation length for FeatureRun display
 # names; long enough to stay legible in a list row, short enough to bound
 # UI layout.
@@ -275,7 +282,17 @@ def _project_run(directory: Path, root: Path, now: datetime, probe: ProcessProbe
     kind = descriptor.get("run_kind") if descriptor else None
     status = _graph_status(metrics, metrics["status"]) if kind == "plan_graph" else metrics["status"]
     liveness = _liveness(directory, metrics["run_id"], kind, status, now, probe, freshness)
-    evidence = availability("available") if metrics["manifest"] else availability("unavailable", "no terminal manifest exists")
+    if metrics["manifest"]:
+        evidence = availability("available")
+    elif status in _IN_FLIGHT_STATUSES:
+        # A non-terminal run legitimately has no terminal manifest yet: the
+        # manifest is written at seal time.  Its verified journal prefix
+        # (project_run_metrics only returns after AuditJournal verification)
+        # is real partial evidence, so "not yet produced" must not read as
+        # the terminal-run failure state "no terminal manifest exists".
+        evidence = availability("partial", _IN_FLIGHT_EVIDENCE_REASON)
+    else:
+        evidence = availability("unavailable", "no terminal manifest exists")
     if not descriptor:
         evidence = availability("partial", "descriptor was absent for the legacy run")
     record: dict[str, Any] = {"run_id": metrics["run_id"], "kind": kind or "legacy_feature_run", "status": status, "liveness": liveness, "evidence": evidence}
