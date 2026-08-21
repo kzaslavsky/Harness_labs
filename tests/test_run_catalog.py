@@ -42,6 +42,39 @@ class RunCatalogTests(unittest.TestCase):
         self.assertEqual(records["old"]["kind"], "legacy_feature_run")
         self.assertEqual(snapshot["diagnostics"][0]["run_id"], "bad")
 
+    def test_in_flight_run_evidence_is_partial_not_unavailable(self) -> None:
+        # A running run legitimately has no terminal manifest yet (the
+        # manifest is written at seal), but its journal prefix was verified
+        # or the record would be corrupt.  That is partial evidence -- "not
+        # yet produced" -- and must never read as the blanket "no terminal
+        # manifest exists" that describes a terminal run's missing manifest.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._run(root, "active")
+            self._run(root, "done", terminal=True)
+            plan = root / "plan.md"
+            plan.write_text("approved plan\n", encoding="utf-8")
+            audit = PlanGraphAudit(
+                repository=root, run_root=root, graph_run_id="graph-live", plan=str(plan),
+                plan_sha256=hashlib.sha256(plan.read_bytes()).hexdigest(),
+                base_commit="a" * 40, registration_binding=_registration_binding("graph-live"),
+                objective="test graph",
+                nodes={"lane": {"status": "running", "feature_run_id": "active", "depends_on": []}},
+                functionality_tests=(),
+            )
+            audit.journal.checkpoint("running", audit.state)
+            snapshot = build_run_catalog(root)
+        runs = {record["run_id"]: record for record in snapshot["feature_runs"]}
+        self.assertEqual(runs["active"]["status"], "running")
+        self.assertEqual(runs["active"]["evidence"]["state"], "partial")
+        self.assertIn("in flight", runs["active"]["evidence"]["reason"])
+        self.assertIn("not yet produced", runs["active"]["evidence"]["reason"])
+        self.assertEqual(runs["done"]["evidence"], {"state": "available", "reason": None})
+        graph = snapshot["plan_graphs"][0]
+        self.assertEqual(graph["status"], "running")
+        self.assertEqual(graph["evidence"]["state"], "partial")
+        self.assertIn("in flight", graph["evidence"]["reason"])
+
     def test_live_requires_fresh_same_process_identity(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory); run = self._run(root, "active")
