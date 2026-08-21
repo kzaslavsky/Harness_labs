@@ -60,7 +60,8 @@ Status: active
 - Delta-to-run pipeline (finding intake, sanitizer media-type policy,
   measurer commissioning, launcher kit and plan synthesis):
   [`delta-to-run-plan.md`](delta-to-run-plan.md), its five-node decomposition
-  [`delta-to-run-decomposition.json`](delta-to-run-decomposition.json), and
+  [`delta-to-run-decomposition.json`](delta-to-run-decomposition.json), the
+  agent guide [`delta-to-run-agent-guide.md`](delta-to-run-agent-guide.md), and
   the session handoff
   [`SESSION_HANDOFF_DELTA_TO_RUN_20260820.md`](SESSION_HANDOFF_DELTA_TO_RUN_20260820.md)
 
