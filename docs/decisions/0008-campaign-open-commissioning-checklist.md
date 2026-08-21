@@ -4,6 +4,7 @@ Status: accepted
 Date: 2026-08-20
 Owners: PlanGraph controller
 Run: `delta-to-run-pipeline-attempt-3`, node `DTR-MC`
+Concerns-paths: scripts/run_convergence_campaign.py, harness_labs/plangraph/convergence_campaign.py
 
 ## Context
 

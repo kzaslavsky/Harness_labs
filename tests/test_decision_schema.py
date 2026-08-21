@@ -338,6 +338,9 @@ ADR_BODY_DIGESTS: dict[str, str] = {
     "0007-in-graph-escalation-bounded-unsealing.md": (
         "abf600813906dcd5cf4bb672afae5bb213bc474b2d9c98a2c13d39f72337a008"
     ),
+    "0008-campaign-open-commissioning-checklist.md": (
+        "2c990d6a8b2d168fd288af3893564e5f4c91a00c484f7b824ed6c1493cbb4ed9"
+    ),
     "TEMPLATE.md": (
         "7f5747e2ec2b7498caf1ed6b5fb47bcb33db904f6952d0754266718c8cad967b"
     ),
