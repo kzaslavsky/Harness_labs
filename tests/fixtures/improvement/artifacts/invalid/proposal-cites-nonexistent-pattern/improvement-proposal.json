@@ -1,0 +1,59 @@
+{
+  "protocol": "improvement-proposal/1",
+  "proposal_id": "proposal-gate-timeout-01",
+  "pattern_ids": ["pattern-does-not-exist-01"],
+  "question": "Should the improvement-artifact checker's pytest gate raise its default timeout?",
+  "choice": "Raise the gate timeout from 300s to 600s for tests/test_improvement_artifacts.py.",
+  "alternatives": [
+    "Leave the timeout unchanged and require workers to split the fixture tree.",
+    "Move the checker to a compiled implementation."
+  ],
+  "rationale": "Three independent lineages hit the same pytest-timeout signature while walking the full fixture tree under load; the checker's own runtime is deterministic and bounded, so raising the timeout closes the pattern without masking a real regression.",
+  "evidence": [
+    "logs/improvement/patterns/pattern-pytest-timeout-01.json"
+  ],
+  "consequences": [
+    "CI wall-clock budget for this gate grows by up to 300 seconds on a cold cache."
+  ],
+  "reversible": true,
+  "status": "accepted",
+  "demonstrated_failure": "pattern-pytest-timeout-01 recorded three observation_count across two distinct run lineages, both exceeding the prior 300s gate timeout.",
+  "production_consumer": "python3 -m pytest tests/test_improvement_artifacts.py -q, the controller-owned SI-01 verification gate.",
+  "end_to_end_assertion": "Re-running the gate after the timeout change completes within the new bound on the same fixture tree that previously timed out.",
+  "target_surface": [
+    {
+      "path": "docs/development/self-improvement-decomposition.json",
+      "kind": "doc",
+      "governing_decisions": []
+    }
+  ],
+  "accuracy_risk": "none",
+  "success_criteria": [
+    {
+      "file": "scripts/dev/check_improvement_artifacts.py",
+      "subject": "improvement-artifact-gate-timeout",
+      "required_paths": ["scripts/dev/check_improvement_artifacts.py"],
+      "statement": "The improvement-artifact checker completes tests/test_improvement_artifacts.py within the new 600s gate timeout.",
+      "assertion": {
+        "argv": ["python3", "-m", "pytest", "tests/test_improvement_artifacts.py", "-q"],
+        "timeout_seconds": 600
+      }
+    },
+    {
+      "file": "tests/test_improvement_artifacts.py",
+      "subject": "gate-timeout-signature-absence",
+      "required_paths": ["tests/test_improvement_artifacts.py"],
+      "statement": "The pytest-timeout signature for the improvement-artifact gate no longer appears in fresh run journals.",
+      "assertion": {
+        "signature_absent": "pytest-timeout::tests/test_improvement_artifacts.py"
+      }
+    }
+  ],
+  "rollback": "Revert the timeout change; the prior 300s bound and gate command are unchanged in git history.",
+  "ruling": {
+    "disposition": "accept",
+    "actor": "operator",
+    "statement": "Timeout increase accepted; bounded, reversible, and evidenced by three independent lineages.",
+    "ruled_at": "2026-08-21T10:00:00Z"
+  }
+}

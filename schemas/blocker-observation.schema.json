@@ -1,0 +1,106 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://harness-labs.local/schemas/blocker-observation.schema.json",
+  "title": "Improvement agent blocker observation",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol",
+    "run_id",
+    "run_kind",
+    "evidence_classification",
+    "node_id",
+    "attempt_id",
+    "phase",
+    "classification",
+    "rule_id",
+    "signature",
+    "first_event_sequence",
+    "event_hashes",
+    "resolution",
+    "resolution_cost",
+    "artifact_refs",
+    "redaction_applied"
+  ],
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "resolution": {
+      "description": "How a blocker's episode ended. No external source: minted here, referenced by $ref from every other use site (blocker-pattern.schema.json's fixes_employed).",
+      "enum": [
+        "self_recovered",
+        "repair_attempt",
+        "retry_renewed",
+        "operator_intervention",
+        "prompt_workaround",
+        "transferred",
+        "unresolved_blocked"
+      ]
+    },
+    "artifact_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    }
+  },
+  "properties": {
+    "protocol": { "const": "blocker-observation/1" },
+    "run_id": { "type": "string", "minLength": 1 },
+    "run_kind": { "type": "string", "minLength": 1 },
+    "evidence_classification": {
+      "enum": [
+        "production_lifecycle",
+        "component",
+        "synthetic",
+        "fabricated_fixture"
+      ]
+    },
+    "node_id": { "type": ["string", "null"] },
+    "attempt_id": { "type": "string", "minLength": 1 },
+    "phase": { "type": "string", "minLength": 1 },
+    "classification": {
+      "enum": [
+        "product",
+        "indeterminate",
+        "infrastructure_transient",
+        "harness_or_configuration",
+        "policy_violation",
+        "structural_decision"
+      ]
+    },
+    "rule_id": { "type": ["string", "null"] },
+    "signature": { "type": "string", "minLength": 1 },
+    "first_event_sequence": { "type": "integer", "minimum": 0 },
+    "event_hashes": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/sha256" }
+    },
+    "resolution": { "$ref": "#/$defs/resolution" },
+    "resolution_cost": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "retries",
+        "repair_dispatches",
+        "wall_clock_ms",
+        "tokens",
+        "diff_churn_lines"
+      ],
+      "properties": {
+        "retries": { "type": "integer", "minimum": 0 },
+        "repair_dispatches": { "type": "integer", "minimum": 0 },
+        "wall_clock_ms": { "type": "integer", "minimum": 0 },
+        "tokens": { "type": ["integer", "null"], "minimum": 0 },
+        "diff_churn_lines": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "artifact_refs": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/artifact_ref" }
+    },
+    "redaction_applied": { "type": "boolean" }
+  }
+}

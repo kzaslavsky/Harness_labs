@@ -1,0 +1,63 @@
+{
+  "protocol": "blocker-pattern/1",
+  "pattern_id": "pattern-pytest-timeout-01",
+  "signature": "pytest-timeout::tests/test_improvement_artifacts.py",
+  "classification": "harness_or_configuration",
+  "status": "addressed",
+  "support": {
+    "observation_count": 3,
+    "distinct_run_count": 2,
+    "distinct_lineage_count": 2,
+    "distinct_task_suite_count": 1
+  },
+  "first_seen_at": "2026-08-18T09:00:00Z",
+  "last_seen_at": "2026-08-21T09:00:00Z",
+  "observations": [
+    {
+      "run_id": "run-2026-08-18-0002",
+      "attempt_id": "attempt-01",
+      "sha256": "3f9e4298f1e6e661894b06854c6539ecbce11684310919778b618d400a1d225d"
+    },
+    {
+      "run_id": "run-2026-08-20-0004",
+      "attempt_id": "attempt-02",
+      "sha256": "3620367257958ba31a1b52b88af53dc1f0e0fed222c07c3d3efe2f2c2e14e299"
+    },
+    {
+      "run_id": "run-2026-08-21-0001",
+      "attempt_id": "attempt-01",
+      "sha256": "c91f51d309736c5ecef334c5eddc761d26fab848df0a5df1acfdeb9813d1d8be"
+    }
+  ],
+  "cost_aggregate": {
+    "wall_clock_ms": {
+      "median": 90000,
+      "tail": 180000
+    },
+    "tokens": {
+      "median": 3500,
+      "tail": 8000
+    },
+    "diff_churn_lines": {
+      "median": 12,
+      "tail": 40
+    }
+  },
+  "fixes_employed": [
+    "repair_attempt",
+    "operator_intervention"
+  ],
+  "generalizability": {
+    "verdict": "policy_gap",
+    "rubric_id": "burden-admission/1",
+    "rationale": "The gate's default timeout was too low for the checker's full artifact-tree walk under load; three independent lineages hit the same signature before the timeout was raised.",
+    "counterexamples": []
+  },
+  "recurrence": [
+    {
+      "source": "finding_history",
+      "key": "scripts/dev/check_improvement_artifacts.py::gate-timeout",
+      "ref": "logs/plangraph/finding_history/gate-timeout-v1.json"
+    }
+  ]
+}
