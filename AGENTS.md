@@ -19,10 +19,36 @@ Compare efficiency only across runs with equivalent acceptance criteria.
 - Logging and metrics: `docs/observability/logging-and-metrics.md`
 - Architectural decisions: `docs/decisions/`
 - Active development navigation: `docs/development/INDEX.md`
+- Campaign pipeline for agents: `docs/development/delta-to-run-agent-guide.md`
 - Machine-readable contracts: `schemas/`
 - Run output: `logs/runs/<run-id>/`
 - Bootstrap initializer retained from the seed project: `bin/`, `templates/`,
   `assets/`, and `skills/`
+
+## Campaign pipeline (delta-to-run)
+
+Statements about required or deviant behavior become an approved, running
+PlanGraph through one pipeline: intake (`finding_intake`,
+`scripts/report_finding.py`) → synthesis (`plan_synthesis` over
+`ConvergenceLedger.open_findings()`) → refine/prepare → operator approval →
+issue → register/run (`harness_labs/graphrun/campaign_launcher.py`).
+Read `docs/development/delta-to-run-agent-guide.md` before operating it.
+Hard invariants, enforced by code and worth knowing before you hit them:
+
+- `required_paths` on a finding is load-bearing: node grants derive from it
+  alone; ambiguity returns an `IntakeQuestion` — never guess.
+- Intake seals via `CampaignArtifactStore.seal` and never calls
+  `ingest_audit` mid-round (partial folds fabricate `unobserved` state).
+- Generated criteria carry `OBSERVABLE:{kind, referent}` annotations;
+  conformance blocking (`enforce=True`) rides the driver's approve path.
+- Campaign open requires sealed commissioning artifacts
+  (`stability_report_digest`, `recall_report_digest`) or a recorded
+  override (ADR 0008).
+- Worker structured output is accepted exactly once — no trial values; the
+  deliverable floor hard-fails stubs and the failure is non-transient.
+- `prepare` and `issue` must run in the same shell (gate evidence pins
+  `PATH`); approval directories are write-once; the base repository must be
+  pristine at every node launch and resume.
 
 ## Non-negotiable harness properties
 
