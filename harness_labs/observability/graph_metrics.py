@@ -26,7 +26,7 @@ from pathlib import Path
 from statistics import median
 from typing import Any, Mapping
 
-from harness_labs.observability.run_catalog import _ESTIMATED_MODEL_PRICES
+from harness_labs.observability.run_catalog import _estimated_model_price
 
 PROTOCOL = "harness-plan-graph-metrics/1"
 MAX_LEDGER_BYTES = 4 * 1024 * 1024
@@ -949,7 +949,7 @@ def _cache_savings(node_rows: list[dict[str, Any]]) -> dict[str, Any]:
             cached = int(model_row.get("cached_input_tokens", 0) or 0)
             if cached <= 0:
                 continue
-            price = _ESTIMATED_MODEL_PRICES.get(model_row.get("label"))
+            price = _estimated_model_price(model_row.get("label"))
             if price is None:
                 unpriced_records += 1
                 continue

@@ -40,10 +40,17 @@ _ESTIMATED_MODEL_PRICES = {
     # and stay excluded, as the provenance reason states.
     "claude-fable-5": {"input": Decimal("10.00"), "cached_input": Decimal("1.00"), "output": Decimal("50.00"), "long_context_premium": False, "source": "https://platform.claude.com/docs/en/about-claude/pricing"},
     "claude-opus-5": {"input": Decimal("5.00"), "cached_input": Decimal("0.50"), "output": Decimal("25.00"), "long_context_premium": False, "source": "https://platform.claude.com/docs/en/about-claude/pricing"},
+    "claude-opus-4-8": {"input": Decimal("5.00"), "cached_input": Decimal("0.50"), "output": Decimal("25.00"), "long_context_premium": False, "source": "https://platform.claude.com/docs/en/about-claude/pricing"},
     "claude-sonnet-5": {"input": Decimal("2.00"), "cached_input": Decimal("0.20"), "output": Decimal("10.00"), "long_context_premium": False, "source": "https://platform.claude.com/docs/en/about-claude/pricing"},
     "claude-haiku-4-5": {"input": Decimal("1.00"), "cached_input": Decimal("0.10"), "output": Decimal("5.00"), "long_context_premium": False, "source": "https://platform.claude.com/docs/en/about-claude/pricing"},
 }
 _LONG_CONTEXT_THRESHOLD = 272_000
+# Harness backends report 1M-context model variants with a "[1m]" marker
+# appended to the base model id (e.g. "claude-opus-4-8[1m]").  Claude 4.6+
+# bills the full context window at standard per-token rates, so the variant
+# prices identically to its base model; without this fallback every usage
+# record from a "[1m]" session degraded the whole run's cost to unavailable.
+_LONG_CONTEXT_VARIANT_SUFFIX = "[1m]"
 # Naming (DM-02): first-sentence truncation length for FeatureRun display
 # names; long enough to stay legible in a list row, short enough to bound
 # UI layout.
@@ -1073,8 +1080,23 @@ def _nonnegative_number(value: Any) -> float | None:
     return float(parsed) if parsed.is_finite() and parsed >= 0 else None
 
 
-def _estimated_api_cost(model: str, usage: Mapping[str, Any]) -> dict[str, Any] | None:
+def _estimated_model_price(model: Any) -> dict[str, Any] | None:
+    """Published pricing for a recorded model id, or ``None`` when unpriced.
+
+    A ``"[1m]"`` long-context variant resolves to its base model's rates:
+    Claude 4.6+ bills the full window at standard per-token prices, so the
+    variant is a routing marker, not a distinct price point.
+    """
+    if not isinstance(model, str):
+        return None
     price = _ESTIMATED_MODEL_PRICES.get(model)
+    if price is None and model.endswith(_LONG_CONTEXT_VARIANT_SUFFIX):
+        price = _ESTIMATED_MODEL_PRICES.get(model[: -len(_LONG_CONTEXT_VARIANT_SUFFIX)])
+    return price
+
+
+def _estimated_api_cost(model: str, usage: Mapping[str, Any]) -> dict[str, Any] | None:
+    price = _estimated_model_price(model)
     if price is None:
         return None
     input_tokens = _nonnegative_int(usage.get("input_tokens"))
