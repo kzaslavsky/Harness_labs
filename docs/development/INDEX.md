@@ -68,6 +68,8 @@ Status: active
   (folding [`../../harness_labs/plangraph/convergence_ledger.py`](../../harness_labs/plangraph/convergence_ledger.py)'s
   public per-key lineage accessor), and the decision registry
   [`../../harness_labs/core/decision_registry.py`](../../harness_labs/core/decision_registry.py).
+  Agent how-to (start here):
+  [`engineering-memory-agent-guide.md`](engineering-memory-agent-guide.md)
   Wired into admission
   ([`../../harness_labs/plangraph/plan_approval.py`](../../harness_labs/plangraph/plan_approval.py):
   `REQUIRED_PATHS_IMPACT_WARNING`, `gates["notices"]`), refinement advisories
