@@ -419,6 +419,14 @@ export async function fetchPlanGraphMetrics(runId, signal) {
   return validateGraphMetrics(await response.json());
 }
 
+// Polling loops skip repeat fetches while the document is hidden, but the
+// FIRST fetch must always run: headless and embedded viewers report
+// visibilityState 'hidden' permanently, and gating the initial fetch on
+// visibility left them showing "Loading…" (and "No logical nodes") forever.
+export function shouldPoll(visibilityState, fetchedOnce) {
+  return !fetchedOnce || visibilityState !== 'hidden';
+}
+
 // Elapsed time is deliberately never served by the metrics endpoint for live
 // graphs (plan DM-04); the client derives it from the catalog-served
 // `started_at` against the current clock.

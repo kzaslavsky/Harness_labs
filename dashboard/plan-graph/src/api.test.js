@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { defaultGraphAttempt, displayState, elapsedMs, graphProjection, liveGraphs, planGraphGroups, selectedRunFor, stateLabel, validateCatalog, validateGraphMetrics, validateRunDetail, validateSnapshotDocument, validateSnapshotsListing } from './api.js';
+import { defaultGraphAttempt, displayState, elapsedMs, graphProjection, liveGraphs, planGraphGroups, selectedRunFor, shouldPoll, stateLabel, validateCatalog, validateGraphMetrics, validateRunDetail, validateSnapshotDocument, validateSnapshotsListing } from './api.js';
 import { distributionSummary, metricValue, money } from './format.js';
 
 const availability = { state: 'available', reason: null };
@@ -251,4 +251,14 @@ test('FeatureRun detail validation normalizes keyed controller families', () => 
   const normalized = validateRunDetail(detail);
   assert.deepEqual(normalized.criteria, [{ id: 'AC-1', status: 'satisfied' }]);
   assert.deepEqual(normalized.tasks, [{ id: 'task', status: 'succeeded' }]);
+});
+
+test('polling always performs the first fetch, and only skips repeats while hidden', () => {
+  // Headless and embedded viewers report visibilityState 'hidden'
+  // permanently; gating the initial fetch on visibility left the dashboard
+  // on "Loading PlanGraph metrics…" / "No logical nodes" forever.
+  assert.equal(shouldPoll('hidden', false), true);
+  assert.equal(shouldPoll('visible', false), true);
+  assert.equal(shouldPoll('visible', true), true);
+  assert.equal(shouldPoll('hidden', true), false);
 });

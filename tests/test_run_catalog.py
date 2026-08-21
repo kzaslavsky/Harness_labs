@@ -155,6 +155,46 @@ class RunCatalogTests(unittest.TestCase):
         self.assertEqual(cost["long_context_records"], 0)
         self.assertIn("platform.claude.com", cost["sources"][0])
 
+    def test_detail_prices_a_1m_long_context_variant_at_its_base_model_rates(self) -> None:
+        # Backends report 1M-context sessions as "<model>[1m]"; Claude 4.6+
+        # bills the full window at standard rates, so the variant must price
+        # like its base model instead of degrading the run cost to
+        # unavailable ("usage record(s) lack recognized pricing").
+        metrics = _detail_metrics({
+            "events": [{
+                "event_type": "backend_transport", "attempt_id": "implement-cost/attempt-1",
+                "actor": {"id": "worker", "role": "semantic_worker"}, "backend_id": "claude-session", "duration_ms": 1,
+                "payload": {"model": "claude-opus-4-8[1m]", "reasoning": "high", "usage": {
+                    "input_tokens": 1_000_000, "cached_input_tokens": 400_000, "output_tokens": 100_000, "cost_usd": None,
+                }},
+            }],
+            "checkpoint": {"state": {}}, "summary": None,
+        })
+        cost = metrics["totals"]["cost"]
+        self.assertEqual(cost["state"], "estimated")
+        # 600k uncached * $5 + 400k cache-read * $0.50 + 100k output * $25, per MTok
+        self.assertEqual(cost["usd"], 5.7)
+        self.assertEqual(cost["long_context_records"], 0)
+        self.assertIn("platform.claude.com", cost["sources"][0])
+
+    def test_detail_still_degrades_cost_for_an_unrecognized_model(self) -> None:
+        # The "[1m]" fallback must not invent pricing for genuinely unknown
+        # models; those keep degrading the run cost to unavailable.
+        metrics = _detail_metrics({
+            "events": [{
+                "event_type": "backend_transport", "attempt_id": "implement-cost/attempt-1",
+                "actor": {"id": "worker", "role": "semantic_worker"}, "backend_id": "claude-session", "duration_ms": 1,
+                "payload": {"model": "claude-unknown-9[1m]", "reasoning": "high", "usage": {
+                    "input_tokens": 100, "cached_input_tokens": 0, "output_tokens": 10, "cost_usd": None,
+                }},
+            }],
+            "checkpoint": {"state": {}}, "summary": None,
+        })
+        cost = metrics["totals"]["cost"]
+        self.assertEqual(cost["state"], "unavailable")
+        self.assertIsNone(cost["usd"])
+        self.assertIn("lack recognized pricing", cost["reason"])
+
     def test_detail_projects_claude_session_stream_coordinator_row(self) -> None:
         # ClaudeAgentSession coordinators journal their stream-json transcript
         # but never emit a backend_transport usage record; the projection must
