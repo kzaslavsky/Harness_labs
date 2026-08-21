@@ -89,7 +89,11 @@ dependencies — artifact checkers are hand-written.
 ## SI-01 — Improvement artifact schemas and checker [si-01-schemas]
 
 Objective: the three improvement artifact contracts plus a deterministic
-checker, reusing existing enums verbatim — no new taxonomies.
+checker, reusing existing enums verbatim wherever a source exists
+(`classification`, `evidence_classification`); vocabularies with no
+external source (`resolution`, pattern `status`) are minted here and
+defined exactly once in their own schema's `$defs`, referenced from
+every use site.
 
 New schemas (`protocol: {"const": "…/1"}`, `additionalProperties:
 false`, in the style of `plan-approval-receipt.schema.json`):
