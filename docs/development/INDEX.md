@@ -51,6 +51,8 @@ Status: active
   [`dashboard-improve-port-plan.md`](dashboard-improve-port-plan.md)
 - Session handoff and ranked backlog (2026-08-19):
   [`SESSION_HANDOFF_20260819.md`](SESSION_HANDOFF_20260819.md)
+- Session handoff and re-ranked backlog (2026-08-21), superseding the above:
+  [`SESSION_HANDOFF_20260821.md`](SESSION_HANDOFF_20260821.md)
 - In-graph escalation of out-of-scope findings, with bounded unsealing
   (ADR 0007): [`in-graph-escalation-unsealing-plan.md`](in-graph-escalation-unsealing-plan.md),
   its two-node decomposition
