@@ -31,7 +31,12 @@ from harness_labs.graphrun.campaign_launcher import (  # noqa: E402
 
 PLAN_PATH = "docs/development/self-improvement-agent-plan.md"
 DECOMPOSITION_PATH = "docs/development/self-improvement-decomposition.json"
-LOGICAL_GRAPH_ID = "self-improvement-agent"
+# -r2: the amended decomposition (AC-SI01-1 resolution-clause fix) is a new
+# plan digest; logs/registration is fail-closed per logical id, and the kit
+# does not wire plan_version_transition, so the amendment registers as an
+# overt supersession under a new logical id. attempt-1's registration and
+# journals remain the historical record of the superseded plan version.
+LOGICAL_GRAPH_ID = "self-improvement-agent-r2"
 
 
 def main() -> int:
