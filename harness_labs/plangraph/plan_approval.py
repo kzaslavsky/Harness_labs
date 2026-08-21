@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
@@ -13,11 +14,17 @@ import subprocess
 import tempfile
 from typing import Mapping, Sequence
 
+from harness_labs.core.decision_registry import (
+    Decision,
+    DecisionRegistry,
+    _parse_header_block as _parse_decision_header,
+)
 from harness_labs.plangraph.decomposition_conformance import (
     analyze_decomposition,
     validate_conformance_report,
     DecompositionConformanceError,
 )
+from harness_labs.plangraph.impact_analysis import assess_required_paths
 from harness_labs.plangraph.plan_graph import (
     ApprovalEvidence,
     PlanGraphPlan,
@@ -30,6 +37,7 @@ from harness_labs.plangraph.plan_graph_contract import (
     canonical_plan_graph_payload,
     declares_intent,
     load_repository_id,
+    path_is_allowed,
     plan_graph_identity,
     sha256_bytes,
     sha256_json,
@@ -52,6 +60,24 @@ MAX_TIMEOUT_SECONDS = 7200.0
 SIBLING_OVERLAP_WARNING = "sibling-allowed-path-overlap"
 UNCLAIMED_GRANT_WARNING = "run-grants-exceed-declared-intents"
 NO_DECLARED_INTENT_WARNING = "plan-declares-no-path-intents"
+#: High severity only -- the one impact-analysis finding that flows through
+#: the acknowledgement machinery. Everything else impact analysis surfaces
+#: (an unsupported/unparseable target) is informational and lands in
+#: ``gates["notices"]`` instead, which no acknowledgement gate scans.
+REQUIRED_PATHS_IMPACT_WARNING = "required-paths-impact-gap"
+#: Notice kind for a path_intent impact analysis could not assess (non-.py,
+#: unparseable, or not yet present at ``base_commit``), carrying the
+#: analyzer's own reason rather than a synthesized one.
+IMPACT_ANALYSIS_UNSUPPORTED_NOTICE = "required-paths-impact-unsupported"
+#: Notice kind listing accepted decisions whose ``concerns_paths`` intersect
+#: this plan's granted paths -- "these decisions govern your paths" instead
+#: of "read the ADR directory".
+ACTIVE_DECISION_NOTICE = "active-decision-notice"
+
+#: Non-recursive listing directory for decision records, mirroring
+#: ``decision_registry.load_decisions``'s directory scan.
+DECISIONS_DIRECTORY = "docs/decisions"
+_ADR_FILENAME_RE = re.compile(r"^\d{4}-.+\.md$")
 
 
 class PlanApprovalError(ValueError):
@@ -262,6 +288,11 @@ def issue_receipt(
         # Warnings join the pinned set so a hand-edited evidence file cannot
         # drop a high-severity finding and escape the acknowledgment backstop.
         "warnings",
+        # Notices join the pinned set too: no acknowledgement gate scans
+        # them, but they must still re-derive byte-identically at issue, or
+        # a hand-edited evidence file could smuggle in false "this decision
+        # governs you" or "impact unsupported" claims undetected.
+        "notices",
         # Likewise the conformance report: it is hash-bound through this
         # same gate-evidence artifact, so a tampered or stale report is
         # caught here rather than only at the outer file-hash check.
@@ -514,13 +545,21 @@ def _run_static_gates(
             f"decomposition conformance blocked admission: {detail}"
         )
     gates["conformance_report"] = report.as_mapping()
+    impact_warnings, impact_notices = _impact_warnings_and_notices(
+        repository, base_commit, plan
+    )
+    decision_notice = _active_decision_notice(repository, base_commit, plan)
     warnings = (
         _sibling_overlap_warnings(plan)
         + _unclaimed_grant_warnings(plan)
+        + impact_warnings
         + report.warning_entries()
     )
+    notices = impact_notices + ([decision_notice] if decision_notice is not None else [])
     if warnings:
         gates["warnings"] = warnings
+    if notices:
+        gates["notices"] = notices
     return gates
 
 
@@ -684,6 +723,203 @@ def _unclaimed_grant_warnings(plan: PlanGraphPlan) -> list[dict[str, object]]:
     # five, and the counts stay exact rather than becoming a threshold.
     warnings.sort(key=lambda record: (-len(record["paths"]), record["runs"]))
     return warnings
+
+
+def _git_blob_source(repository: Path, base_commit: str):
+    """A ``impact_analysis.SourceReader`` reading only git blobs at
+    ``base_commit`` -- never the working tree -- so admission-time impact
+    assessment is deterministic and byte-identical when ``issue_receipt``
+    re-derives it later, regardless of uncommitted working-tree mutations.
+
+    Memoized per returned reader: ``module_neighborhood`` re-scans the full
+    ``.py`` tree for every path intent, so the same blob is re-requested by
+    every intent (and, across a multi-intent run, by every one of its
+    intents) unless the spawned ``git show`` is cached here rather than
+    re-run each time.
+    """
+
+    cache: dict[str, bytes | None] = {}
+
+    def _read(path: str) -> bytes | None:
+        if path in cache:
+            return cache[path]
+        completed = subprocess.run(
+            ["git", "-C", str(repository), "show", f"{base_commit}:{path}"],
+            capture_output=True,
+            check=False,
+        )
+        result = None if completed.returncode else completed.stdout
+        cache[path] = result
+        return result
+
+    return _read
+
+
+def _git_list_py_paths(repository: Path, base_commit: str) -> tuple[str, ...]:
+    listing = _git(repository, "ls-tree", "-r", "--name-only", base_commit)
+    return tuple(sorted(line for line in listing.splitlines() if line.endswith(".py")))
+
+
+def _impact_warnings_and_notices(
+    repository: Path, base_commit: str, plan: PlanGraphPlan
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    """Static-import impact assessment of every run's path intents.
+
+    Each intent is checked with ``assess_required_paths`` against its run's
+    ``allowed_paths``. ``assess_required_paths`` itself decides coverage by
+    exact set membership, so a neighborhood path already covered by a
+    directory grant (rather than named verbatim in ``allowed_paths``) comes
+    back in ``missing`` too; each candidate is re-checked here with
+    ``path_is_allowed`` -- the same containment test ``allowed_paths`` grants
+    are defined by everywhere else in this module -- and dropped if the run
+    can already write it. A supported assessment with a nonempty remaining
+    gap contributes to that run's single aggregated
+    ``REQUIRED_PATHS_IMPACT_WARNING`` (union of missing paths across all of
+    the run's intents, so the warning's identity-participating ``paths``
+    field changes exactly when the gap changes). An unsupported assessment
+    (non-``.py``, unparseable, or absent at ``base_commit``) never becomes a
+    warning -- it is informational and lands in ``notices`` instead, so it
+    can never deadlock the campaign driver's all-severity acknowledgement
+    rule.
+    """
+
+    source = _git_blob_source(repository, base_commit)
+    repo_py_paths = _git_list_py_paths(repository, base_commit)
+    warnings: list[dict[str, object]] = []
+    notices: list[dict[str, object]] = []
+    for run in plan.runs:
+        missing: dict[str, set[str]] = {}
+        for intent in run.path_intents:
+            assessment = assess_required_paths(
+                intent.path, run.allowed_paths, repo_py_paths, source
+            )
+            if not assessment.supported:
+                notices.append(
+                    {
+                        "kind": IMPACT_ANALYSIS_UNSUPPORTED_NOTICE,
+                        "run": run.id,
+                        "path": intent.path,
+                        "reason": assessment.reason,
+                    }
+                )
+                continue
+            for path, edge_kind in assessment.missing:
+                if path_is_allowed(path, run.allowed_paths):
+                    continue
+                missing.setdefault(path, set()).add(edge_kind)
+        if missing:
+            warnings.append(
+                {
+                    "kind": REQUIRED_PATHS_IMPACT_WARNING,
+                    "severity": "high",
+                    "runs": [run.id],
+                    "paths": sorted(missing),
+                    "missing": [
+                        {"path": path, "edge_kind": edge_kind}
+                        for path in sorted(missing)
+                        for edge_kind in sorted(missing[path])
+                    ],
+                    "note": (
+                        "static import analysis found path(s) in this run's "
+                        "module neighborhood that are outside its "
+                        "allowed_paths; the run may fail mid-flight editing "
+                        "an importer/import it cannot write, or leave a "
+                        "caller stale"
+                    ),
+                }
+            )
+    warnings.sort(key=lambda record: record["runs"])
+    notices.sort(key=lambda record: (record["run"], record["path"]))
+    return warnings, notices
+
+
+def _split_decision_list(value: str | None) -> tuple[str, ...]:
+    if not value:
+        return ()
+    return tuple(part.strip() for part in value.split(",") if part.strip())
+
+
+def _decisions_at_base_commit(
+    repository: Path, base_commit: str
+) -> tuple[Decision, ...]:
+    """Load every ADR header block directly inside ``DECISIONS_DIRECTORY``
+    at ``base_commit``, mirroring ``decision_registry.load_decisions``'s
+    non-recursive directory scan and filename-synthesized ids -- but reading
+    git blobs instead of the working tree, so admission stays deterministic.
+    A repository with no decisions directory at ``base_commit`` yields no
+    decisions rather than an error.
+
+    Header fields are parsed with ``decision_registry``'s own
+    ``_parse_header_block`` (imported above as ``_parse_decision_header``),
+    not a local copy, so a git-blob read and a working-tree read of the same
+    ADR can never diverge on how a wrapped multi-line field folds.
+    """
+
+    listing = _git(
+        repository,
+        "ls-tree",
+        "--name-only",
+        base_commit,
+        "--",
+        f"{DECISIONS_DIRECTORY}/",
+    )
+    decisions: list[Decision] = []
+    for line in listing.splitlines():
+        name = line.strip()
+        if not name or not name.endswith(".md"):
+            continue
+        if not _ADR_FILENAME_RE.match(PurePosixPath(name).name):
+            continue
+        _, raw = _git_artifact(repository, base_commit, name)
+        fields = _parse_decision_header(raw.decode("utf-8"))
+        decisions.append(
+            Decision(
+                id=PurePosixPath(name).stem,
+                status=fields.get("Status", "").strip(),
+                supersedes=_split_decision_list(fields.get("Supersedes")),
+                concerns_paths=_split_decision_list(fields.get("Concerns-paths")),
+                valid_from_commit=(fields.get("Valid-from-commit") or "").strip()
+                or None,
+                source_path=name,
+            )
+        )
+    return tuple(decisions)
+
+
+def _active_decision_notice(
+    repository: Path, base_commit: str, plan: PlanGraphPlan
+) -> dict[str, object] | None:
+    """One ``ACTIVE_DECISION_NOTICE`` naming every accepted, non-superseded
+    decision whose ``concerns_paths`` intersect the plan's union of
+    ``allowed_paths`` -- or ``None`` when nothing governs this plan's paths,
+    so a plan touching ungoverned territory carries no empty notice.
+    """
+
+    allowed_paths: set[str] = set()
+    for run in plan.runs:
+        allowed_paths.update(run.allowed_paths)
+    if not allowed_paths:
+        return None
+    decisions = _decisions_at_base_commit(repository, base_commit)
+    if not decisions:
+        return None
+    result = DecisionRegistry(decisions).active_decisions_for_paths(
+        tuple(sorted(allowed_paths))
+    )
+    if not result.active:
+        return None
+    return {
+        "kind": ACTIVE_DECISION_NOTICE,
+        "decisions": [
+            {
+                "id": decision.id,
+                "status": decision.status,
+                "concerns_paths": list(decision.concerns_paths),
+                "source_path": decision.source_path,
+            }
+            for decision in sorted(result.active, key=lambda decision: decision.id)
+        ],
+    }
 
 
 def _validate_intents(
@@ -1030,9 +1266,14 @@ def _validate_gate_evidence(gates: Mapping[str, object]) -> None:
     # "warnings" is optional: advisory admission findings (such as
     # sibling-allowed-path-overlap) that inform the operator without
     # blocking approval. Absent in evidence produced before the field existed.
+    # "notices" is likewise optional: purely informational admission output
+    # (unsupported-language impact results, active-decision listings) that
+    # no acknowledgement gate scans, so it can never deadlock issuance.
     _require_exact_keys(
         gates,
-        required_keys | ({"warnings"} if "warnings" in gates else set()),
+        required_keys
+        | ({"warnings"} if "warnings" in gates else set())
+        | ({"notices"} if "notices" in gates else set()),
         "gate evidence",
     )
     if "warnings" in gates:
@@ -1041,6 +1282,12 @@ def _validate_gate_evidence(gates: Mapping[str, object]) -> None:
             for item in gates["warnings"]
         ):
             raise PlanApprovalError("gate warnings must be an array of kinded records")
+    if "notices" in gates:
+        if not isinstance(gates["notices"], list) or not all(
+            isinstance(item, Mapping) and isinstance(item.get("kind"), str)
+            for item in gates["notices"]
+        ):
+            raise PlanApprovalError("gate notices must be an array of kinded records")
     try:
         validate_conformance_report(gates.get("conformance_report"))
     except DecompositionConformanceError as exc:

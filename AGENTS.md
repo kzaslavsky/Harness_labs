@@ -19,6 +19,8 @@ Compare efficiency only across runs with equivalent acceptance criteria.
 - Logging and metrics: `docs/observability/logging-and-metrics.md`
 - Architectural decisions: `docs/decisions/`
 - Active development navigation: `docs/development/INDEX.md`
+- Engineering-memory features (impact warnings, finding history, decision
+  registry) — agent how-to: `docs/development/engineering-memory-agent-guide.md`
 - Machine-readable contracts: `schemas/`
 - Run output: `logs/runs/<run-id>/`
 - Bootstrap initializer retained from the seed project: `bin/`, `templates/`,

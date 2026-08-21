@@ -1,6 +1,7 @@
 # 0003 — Pass-through child context
 
 Status: accepted
+Concerns-paths: harness_labs/core/composition.py
 Date: 2026-08-03
 Owners: harness controller
 

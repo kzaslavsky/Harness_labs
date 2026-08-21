@@ -1,0 +1,232 @@
+{
+  "protocol": "plan-graph-plan/1",
+  "plan": "docs/development/engineering-memory-port-plan.md",
+  "referenced_artifacts": [
+    "docs/development/engineering-memory-port-plan.md",
+    "docs/development/SESSION_HANDOFF_DELTA_TO_RUN_20260820.md",
+    "docs/decisions/0007-in-graph-escalation-bounded-unsealing.md",
+    "docs/architecture/context-engineering.md",
+    "schemas/decision.schema.json"
+  ],
+  "acceptance_criteria": {
+    "AC-EM-1": "`module_neighborhood` over a fixture repository, read through a filesystem-backed source callable, returns the files importing the target module — including one whose import statement is inside a function body (deferred import) — and the files the target imports.",
+    "AC-EM-2": "`assess_required_paths` on a fixture where one importer of `file` is absent from `required_paths` returns that path in `missing` with edge kind `imported_by`, and every declared neighborhood path in `confirmed`; the assessment computes no set of 'unrelated declared paths'.",
+    "AC-EM-3": "For a non-`.py` target file and for a `.py` file with a syntax error, `assess_required_paths` returns `supported is False` with a non-empty `reason` and raises nothing.",
+    "AC-EM-4": "A module-scoped fixture records a `{relative_path: sha256}` manifest of the fixture repository immediately after construction and re-asserts equality in teardown, including the absence of new files such as `__pycache__` directories.",
+    "AC-EM-5": "`fold_campaigns` over two caller-declared entries `(journal_path, campaign_label, repository_id)` for the same `repository_id` yields `for_key(file, subject)` lineage ordered newest-entry-first, each element carrying the derived terminal status, every `finding_ruled` disposition with its recorded `statement`, the caller-supplied campaign label, the `campaign_opened` record's `base_commit`, and each record's journal ordinal (line index) as the when-learned order.",
+    "AC-EM-6": "`for_paths([\"pkg/sub\"])` returns findings whose `required_paths` contain `pkg/sub/mod.py` (directory-prefix containment) and exact matches, does NOT return a finding whose only path is `pkg/subx/mod.py`, and excludes keys with no recorded `required_paths` without raising.",
+    "AC-EM-7": "Folding entries that declare different `repository_id` values raises a `finding_history` error naming both ids.",
+    "AC-EM-8": "`fold_campaigns` obtains records only through `convergence_ledger`'s public read surface and the named per-kind constants it exports; a journal the ledger rejects raises `ConvergenceLedgerError` out of `fold_campaigns`; `finding_history.py` contains no `state-ledger` record-kind string literal.",
+    "AC-EM-9": "`schemas/decision.schema.json` declares `schema_version` as `{\"enum\": [\"1.0\", \"1.1\"]}`, keeps `additionalProperties: false`, lists `supersedes`, `concerns_paths`, and `valid_from_commit` under `properties` and in no `required` array, and forbids all three when `schema_version` is `\"1.0\"`; a hand-written checker in `tests/test_decision_schema.py` (no third-party jsonschema import) accepts a 1.1 record carrying them, accepts a 1.0 record lacking them, rejects a 1.0 record carrying `supersedes`, and rejects a record with an undeclared field.",
+    "AC-EM-10": "`load_decisions(\"docs/decisions\")` parses every numbered ADR's header block, synthesizing decision ids from filenames so the two files numbered 0006 load as distinct accepted decisions; a wrapped multi-line header value (as in ADR 0007's `Run:`) does not corrupt adjacent fields.",
+    "AC-EM-11": "`active_decisions_for_paths([\"harness_labs/plangraph/plan_graph.py\"])` contains every loaded decision with status `accepted` whose `concerns_paths` cover that path by directory prefix, and contains no decision named in any other loaded decision's `supersedes` (containment assertions, never set equality against the live ADR count).",
+    "AC-EM-12": "A fixture where decision X carries `status: accepted` while decision Y lists X in `supersedes` yields an explicit inconsistency report naming X and Y; X appears in neither the active set nor the superseded set without the inconsistency being surfaced.",
+    "AC-EM-13": "Each pre-existing file under `docs/decisions/` has body bytes (everything from the first `## ` heading onward) hashing to the sha256 recorded in `ADR_BODY_DIGESTS` in `tests/test_decision_schema.py`, captured from the pre-change tree; header lines before the first `## ` heading are the only permitted difference.",
+    "AC-EM-14": "`prepare_approval` on a fixture repository whose committed base tree contains a Python importer omitted from a run's `allowed_paths` emits `REQUIRED_PATHS_IMPACT_WARNING` with severity `high` naming the missing path and edge kind, with the missing paths in the identity-participating `paths` field so two distinct gaps carry distinct `warning_identity` values; the approve step refuses an operator approval lacking that warning's acknowledgement via the existing high-warning acknowledgement gate and accepts one carrying it.",
+    "AC-EM-15": "The same prepare against a run whose paths are all non-Python emits no `warnings` entry for impact and instead a `gates[\"notices\"]` entry carrying the analyzer's `supported=False` reason; approval succeeds with no acknowledgement.",
+    "AC-EM-16": "The campaign driver's ingest step, given `--history-roots` naming a prior campaign whose journal ruled a key `waive` (a `finding_ruled` record whose disposition folds to terminal status `excluded`), seals a recurrence-annotation artifact through the existing campaign artifact store carrying the prior disposition, its `statement`, and the campaign label, and records the artifact digest in the checkpoint `state` keyed by finding key.",
+    "AC-EM-17": "The recurrence annotation leaves the current campaign's ledger journal bytes unchanged, and the folded ledger reports no record kinds beyond the existing `state-ledger` vocabulary.",
+    "AC-EM-18": "Prepare emits an `ACTIVE_DECISION_NOTICE` entry in `gates[\"notices\"]` listing each active decision — read from git at `base_commit`, via the same header shape `decision_registry` parses — whose `concerns_paths` intersect the plan's union of `allowed_paths`; a superseded decision covering the same paths is absent; no acknowledgement gate scans `notices`.",
+    "AC-EM-19": "`refine_repository_decomposition` computes impact assessments once and passes them into `refine_decomposition` through a keyword-with-default input surfaced in the refinement outcome's advisories; with the input omitted and `judge=None`, revised plans over the fixtures in `tests/test_plan_refinement.py` hash to the values pinned in `PRE_CHANGE_REVISION_DIGESTS`, captured from pre-change behaviour (`judge=None` still applies its intent-aware narrowing; the invariant is no drift, not no-op).",
+    "AC-EM-20": "`warning_identity` of each pre-existing warning kind over the existing fixtures equals hex constants pinned in `tests/test_plan_approval.py`, captured from pre-change behaviour.",
+    "AC-EM-21": "`python3 -m pytest tests/test_import_boundaries.py -q` passes with `decision_registry` in core importing core only, and `impact_analysis` and `finding_history` in plangraph; no core module imports the plangraph layer.",
+    "AC-EM-22": "`python3 -m pytest tests/ -q` passes at EM-D2's `suite` verification gate with no test skipped for reasons introduced by this graph.",
+    "AC-EM-23": "`fold_campaigns` raises on a non-existent journal path before constructing any ledger object, and folding leaves the journal roots byte-identical with no new files or directories created.",
+    "AC-EM-24": "An end-to-end driver sequence — prepare, approval packet, issue — over a fixture campaign completes without requiring any acknowledgement when only notices (active-decision, unsupported-language impact) are present, and completes with one high impact warning present once exactly that warning is acknowledged.",
+    "AC-EM-25": "After prepare, mutating working-tree files under a granted path and appending records to an unrelated campaign journal changes nothing: `issue_receipt` re-derives byte-identical warnings and notices from git at `base_commit` and issuance succeeds."
+  },
+  "functionality_tests": [
+    {
+      "argv": ["python3", "-m", "pytest", "tests/", "-q"],
+      "required_paths": [],
+      "timeout_seconds": 3600.0
+    }
+  ],
+  "plan_sections": {
+    "em-problem": "## Problem [em-problem]",
+    "em-constraints": "## Design constraints [em-constraints]",
+    "em-impact": "### EM-1 Impact analysis for required_paths [em-impact]",
+    "em-history": "### EM-2 Repo-scoped finding history [em-history]",
+    "em-decisions": "### EM-3 Decision lifecycle [em-decisions]",
+    "em-wiring": "### EM-4 Wiring [em-wiring]",
+    "em-objectives": "## Node objectives [em-objectives]",
+    "em-criteria": "## Acceptance criteria [em-criteria]",
+    "em-deferred": "## Non-goals and deferred [em-deferred]",
+    "em-risks": "## Risks [em-risks]",
+    "em-order": "## Build order [em-order]"
+  },
+  "runs": [
+    {
+      "id": "EM-A",
+      "objective": "Build the impact-analysis core: harness_labs/plangraph/impact_analysis.py reading file bytes through an injected source callable (filesystem-backed in tests; git-blob-backed at admission) with module_neighborhood (AST walk covering deferred in-function imports, generalizing the technique of scripts/dev/check_import_boundaries.py without importing it) and assess_required_paths returning an ImpactAssessment carrying supported, reason, confirmed, and missing-with-edge-kinds. Non-Python and unparseable targets return supported=False with a reason — never a clean verdict, never an exception. Read-only analysis; no wiring into approval or refinement (that is EM-D1 and EM-D2). Fixture repositories are built inside the test's tmp path, not committed.",
+      "criteria": ["AC-EM-1", "AC-EM-2", "AC-EM-3", "AC-EM-4"],
+      "allowed_paths": [
+        "harness_labs/plangraph/impact_analysis.py",
+        "tests/test_impact_analysis.py"
+      ],
+      "path_intents": [
+        { "action": "create", "path": "harness_labs/plangraph/impact_analysis.py" },
+        { "action": "create", "path": "tests/test_impact_analysis.py" }
+      ],
+      "depends_on": [],
+      "plan_sections": ["em-objectives", "em-criteria", "em-problem", "em-constraints", "em-impact", "em-deferred", "em-risks"],
+      "verification_argv": [
+        "python3", "-m", "pytest",
+        "tests/test_impact_analysis.py", "tests/test_import_boundaries.py", "-q"
+      ],
+      "verification_required_paths": [],
+      "verification_timeout_seconds": 1800.0
+    },
+    {
+      "id": "EM-B",
+      "objective": "Build the repo-scoped finding history. First add a public read-only per-key lineage accessor and named record-kind constants to harness_labs/plangraph/convergence_ledger.py (no new record kinds, no writer changes, existing journals readable unchanged). Then build harness_labs/plangraph/finding_history.py folding caller-declared (journal_path, campaign_label, repository_id) entries through that accessor, guarded by repository_id agreement, exposing for_key (exact-key lineage newest-entry-first with ruling dispositions and statements, base_commit, journal ordinals) and for_paths (exact and directory-prefix containment against recorded required_paths — no similarity retrieval). Folding never writes: a missing journal path raises before any ledger object is constructed. EM-B is the sole owner of convergence_ledger.py in this graph; consumers use the new accessor only.",
+      "criteria": ["AC-EM-5", "AC-EM-6", "AC-EM-7", "AC-EM-8", "AC-EM-23"],
+      "allowed_paths": [
+        "harness_labs/plangraph/finding_history.py",
+        "tests/test_finding_history.py",
+        "harness_labs/plangraph/convergence_ledger.py",
+        "tests/test_convergence_ledger.py"
+      ],
+      "path_intents": [
+        { "action": "create", "path": "harness_labs/plangraph/finding_history.py" },
+        { "action": "create", "path": "tests/test_finding_history.py" },
+        { "action": "modify", "path": "harness_labs/plangraph/convergence_ledger.py" },
+        { "action": "modify", "path": "tests/test_convergence_ledger.py" }
+      ],
+      "depends_on": [],
+      "plan_sections": ["em-objectives", "em-criteria", "em-problem", "em-constraints", "em-history", "em-deferred", "em-risks"],
+      "verification_argv": [
+        "python3", "-m", "pytest",
+        "tests/test_finding_history.py", "tests/test_convergence_ledger.py",
+        "tests/test_import_boundaries.py", "-q"
+      ],
+      "verification_required_paths": [],
+      "verification_timeout_seconds": 1800.0
+    },
+    {
+      "id": "EM-C1",
+      "objective": "Decision lifecycle data. Bump schemas/decision.schema.json to schema_version enum [\"1.0\", \"1.1\"], adding optional supersedes, concerns_paths, and valid_from_commit that are forbidden on 1.0 records. Extend docs/decisions/TEMPLATE.md with the optional Supersedes:, Concerns-paths:, and Valid-from-commit: header lines placed after Status: (keeping Status: within the first 12 lines). Backfill Concerns-paths: onto the eight numbered ADRs — header lines only, bodies byte-identical; NO Supersedes: backfill, because no existing ADR supersedes another: the two 0006 files are a numbering collision between distinct active decisions, and ADR 0007's amendment is body prose, not a supersession. Record both 0006 decisions in docs/decisions/README.md's index and add the header-only amendment exemption sentence there.",
+      "criteria": ["AC-EM-9", "AC-EM-13"],
+      "allowed_paths": [
+        "schemas/decision.schema.json",
+        "docs/decisions/TEMPLATE.md",
+        "docs/decisions/README.md",
+        "docs/decisions/0001-execution-first-production-lifecycle.md",
+        "docs/decisions/0002-controller-owned-parallel-child-batches.md",
+        "docs/decisions/0003-pass-through-child-context.md",
+        "docs/decisions/0004-hybrid-controller-command-kernel.md",
+        "docs/decisions/0005-ledger-backed-review-fix.md",
+        "docs/decisions/0006-parallel-plangraph-contract.md",
+        "docs/decisions/0006-repository-bound-plan-approval.md",
+        "docs/decisions/0007-in-graph-escalation-bounded-unsealing.md",
+        "tests/test_decision_schema.py"
+      ],
+      "path_intents": [
+        { "action": "modify", "path": "schemas/decision.schema.json" },
+        { "action": "modify", "path": "docs/decisions/TEMPLATE.md" },
+        { "action": "modify", "path": "docs/decisions/README.md" },
+        { "action": "modify", "path": "docs/decisions/0001-execution-first-production-lifecycle.md" },
+        { "action": "modify", "path": "docs/decisions/0002-controller-owned-parallel-child-batches.md" },
+        { "action": "modify", "path": "docs/decisions/0003-pass-through-child-context.md" },
+        { "action": "modify", "path": "docs/decisions/0004-hybrid-controller-command-kernel.md" },
+        { "action": "modify", "path": "docs/decisions/0005-ledger-backed-review-fix.md" },
+        { "action": "modify", "path": "docs/decisions/0006-parallel-plangraph-contract.md" },
+        { "action": "modify", "path": "docs/decisions/0006-repository-bound-plan-approval.md" },
+        { "action": "modify", "path": "docs/decisions/0007-in-graph-escalation-bounded-unsealing.md" },
+        { "action": "create", "path": "tests/test_decision_schema.py" }
+      ],
+      "depends_on": [],
+      "plan_sections": ["em-objectives", "em-criteria", "em-problem", "em-constraints", "em-decisions", "em-deferred", "em-risks"],
+      "verification_argv": [
+        "python3", "-m", "pytest", "tests/test_decision_schema.py", "-q"
+      ],
+      "verification_required_paths": [],
+      "verification_timeout_seconds": 1800.0
+    },
+    {
+      "id": "EM-C2",
+      "objective": "Decision registry: harness_labs/core/decision_registry.py (core layer, imports core only) with load_decisions parsing ADR markdown headers (decision ids synthesized from filenames; tolerant of wrapped multi-line header values) and schema-1.1 JSON records into one Decision dataclass carrying id, status, supersedes, concerns_paths, valid_from_commit, and source_path, plus active_decisions_for_paths by directory-prefix intersection. Status/supersedes contradictions are reported as explicit inconsistencies, never resolved silently. This registry reads ADR files and JSON records conforming to decision.schema.json only; it does not ingest controller_kernel decision records, whose shape is different and out of scope.",
+      "criteria": ["AC-EM-10", "AC-EM-11", "AC-EM-12", "AC-EM-21"],
+      "allowed_paths": [
+        "harness_labs/core/decision_registry.py",
+        "tests/test_decision_registry.py"
+      ],
+      "path_intents": [
+        { "action": "create", "path": "harness_labs/core/decision_registry.py" },
+        { "action": "create", "path": "tests/test_decision_registry.py" }
+      ],
+      "depends_on": ["EM-C1"],
+      "plan_sections": ["em-objectives", "em-criteria", "em-constraints", "em-decisions", "em-deferred", "em-risks"],
+      "verification_argv": [
+        "python3", "-m", "pytest",
+        "tests/test_decision_registry.py", "tests/test_import_boundaries.py", "-q"
+      ],
+      "verification_required_paths": [],
+      "verification_timeout_seconds": 1800.0
+    },
+    {
+      "id": "EM-D1",
+      "objective": "Wire impact analysis and decision notices into admission: harness_labs/plangraph/plan_approval.py derives both purely from git blobs at base_commit of the repository it already receives — REQUIRED_PATHS_IMPACT_WARNING (high severity only; for each .py path_intent of a run, assess_required_paths against the run's allowed_paths, one warning per run aggregating the union of missing paths, which participate in warning_identity via the paths field) into gates[\"warnings\"] through the existing acknowledgement machinery, and informational entries (unsupported-language impact results, ACTIVE_DECISION_NOTICE) into a new optional gates[\"notices\"] array that no acknowledgement gate scans and issue_receipt re-derives deterministically. No new prepare_approval or issue_receipt parameters, no new plan payload fields, and identities of pre-existing warning kinds unchanged.",
+      "criteria": ["AC-EM-14", "AC-EM-15", "AC-EM-18", "AC-EM-20", "AC-EM-25"],
+      "allowed_paths": [
+        "harness_labs/plangraph/plan_approval.py",
+        "tests/test_plan_approval.py"
+      ],
+      "path_intents": [
+        { "action": "modify", "path": "harness_labs/plangraph/plan_approval.py" },
+        { "action": "modify", "path": "tests/test_plan_approval.py" }
+      ],
+      "depends_on": ["EM-A", "EM-B", "EM-C2"],
+      "plan_sections": ["em-objectives", "em-criteria", "em-constraints", "em-wiring", "em-order", "em-risks", "em-deferred"],
+      "verification_argv": [
+        "python3", "-m", "pytest",
+        "tests/test_plan_approval.py", "tests/test_import_boundaries.py", "-q"
+      ],
+      "verification_required_paths": [
+        { "path": "harness_labs/plangraph/impact_analysis.py", "availability": "created_by", "producer_run_id": "EM-A" },
+        { "path": "harness_labs/plangraph/finding_history.py", "availability": "created_by", "producer_run_id": "EM-B" },
+        { "path": "harness_labs/core/decision_registry.py", "availability": "created_by", "producer_run_id": "EM-C2" }
+      ],
+      "verification_timeout_seconds": 1800.0
+    },
+    {
+      "id": "EM-D2",
+      "objective": "Wire the remaining consumers. plan_refinement.refine_repository_decomposition computes impact assessments once and passes them into refine_decomposition through a new keyword-with-default advisories input reported in the refinement outcome (judgment protocol unchanged; _prepare stays git-independent and pure). scripts/run_convergence_campaign.py gains an explicit --history-roots input, consults finding_history at ingest, seals a recurrence-annotation artifact via the existing campaign artifact store, and records its digest in the checkpoint state keyed by finding key. docs/development/INDEX.md registers the new modules. The campaign approve path must remain deadlock-free end to end with the new warning and notice kinds present. Consumes EM-B's public ledger accessor; does not edit convergence_ledger.py.",
+      "criteria": ["AC-EM-16", "AC-EM-17", "AC-EM-19", "AC-EM-22", "AC-EM-24"],
+      "allowed_paths": [
+        "harness_labs/plangraph/plan_refinement.py",
+        "scripts/run_convergence_campaign.py",
+        "tests/test_plan_refinement.py",
+        "tests/test_convergence_campaign_driver.py",
+        "docs/development/INDEX.md"
+      ],
+      "path_intents": [
+        { "action": "modify", "path": "harness_labs/plangraph/plan_refinement.py" },
+        { "action": "modify", "path": "scripts/run_convergence_campaign.py" },
+        { "action": "modify", "path": "tests/test_plan_refinement.py" },
+        { "action": "modify", "path": "tests/test_convergence_campaign_driver.py" },
+        { "action": "modify", "path": "docs/development/INDEX.md" }
+      ],
+      "depends_on": ["EM-D1"],
+      "plan_sections": ["em-objectives", "em-criteria", "em-constraints", "em-wiring", "em-order", "em-risks", "em-deferred"],
+      "verification_argv": [],
+      "verification_required_paths": [],
+      "verification_timeout_seconds": 3600.0,
+      "verification_gates": [
+        {
+          "name": "targeted",
+          "argv": [
+            "python3", "-m", "pytest",
+            "tests/test_plan_refinement.py", "tests/test_convergence_campaign_driver.py", "-q"
+          ],
+          "timeout_seconds": 1800.0
+        },
+        {
+          "name": "suite",
+          "argv": ["python3", "-m", "pytest", "tests/", "-q"],
+          "timeout_seconds": 3600.0
+        }
+      ]
+    }
+  ]
+}

@@ -69,6 +69,25 @@ Status: active
   [`delta-to-run-decomposition.json`](delta-to-run-decomposition.json), and
   the session handoff
   [`SESSION_HANDOFF_DELTA_TO_RUN_20260820.md`](SESSION_HANDOFF_DELTA_TO_RUN_20260820.md)
+- Engineering-memory port (impact analysis, finding history, decision
+  lifecycle): [`engineering-memory-port-plan.md`](engineering-memory-port-plan.md)
+  and its six-node decomposition
+  [`engineering-memory-decomposition.json`](engineering-memory-decomposition.json).
+  New modules: static-import impact analysis
+  [`../../harness_labs/plangraph/impact_analysis.py`](../../harness_labs/plangraph/impact_analysis.py),
+  repo-scoped finding history
+  [`../../harness_labs/plangraph/finding_history.py`](../../harness_labs/plangraph/finding_history.py)
+  (folding [`../../harness_labs/plangraph/convergence_ledger.py`](../../harness_labs/plangraph/convergence_ledger.py)'s
+  public per-key lineage accessor), and the decision registry
+  [`../../harness_labs/core/decision_registry.py`](../../harness_labs/core/decision_registry.py).
+  Agent how-to (start here):
+  [`engineering-memory-agent-guide.md`](engineering-memory-agent-guide.md)
+  Wired into admission
+  ([`../../harness_labs/plangraph/plan_approval.py`](../../harness_labs/plangraph/plan_approval.py):
+  `REQUIRED_PATHS_IMPACT_WARNING`, `gates["notices"]`), refinement advisories
+  and the campaign driver's history-aware ingest
+  ([`../../harness_labs/plangraph/plan_refinement.py`](../../harness_labs/plangraph/plan_refinement.py),
+  [`../../scripts/run_convergence_campaign.py`](../../scripts/run_convergence_campaign.py)).
 
 ## Seed implementation records
 

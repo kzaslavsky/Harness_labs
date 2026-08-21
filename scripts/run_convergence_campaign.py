@@ -63,17 +63,26 @@ from harness_labs.plangraph.convergence_campaign import (  # noqa: E402
     pin_target,
 )
 from harness_labs.plangraph.convergence_ledger import (  # noqa: E402
+    RECORD_KIND_FINDING_OPENED,
     ConvergenceLedger,
     ConvergenceLedgerError,
 )
+from harness_labs.plangraph.finding_history import (  # noqa: E402
+    FindingHistoryError,
+    fold_campaigns,
+)
 from harness_labs.plangraph.plan_approval import (  # noqa: E402
+    REPOSITORY_IDENTITY_PATH,
     SIBLING_OVERLAP_WARNING,
     issue_receipt,
     prepare_approval,
     warning_identity,
 )
 from harness_labs.plangraph.plan_graph import PlanGraph  # noqa: E402
-from harness_labs.plangraph.plan_graph_contract import path_is_allowed  # noqa: E402
+from harness_labs.plangraph.plan_graph_contract import (  # noqa: E402
+    load_repository_id,
+    path_is_allowed,
+)
 from harness_labs.plangraph.plan_refinement import (  # noqa: E402
     RefinementOutcome,
     refine_repository_decomposition,
@@ -95,6 +104,11 @@ from scripts.plan_graph_autoresume import (  # noqa: E402
 PROTOCOL = "convergence-campaign-driver/1"
 DEFAULT_MAX_REPAIR_ROUNDS = 3
 FINDINGS_OWNERS_PATHS_RELATIVE_PATH = "findings-owners-paths.json"
+#: Protocol tag for the recurrence-annotation artifact ``ingest`` seals
+#: through the existing :class:`CampaignArtifactStore` (EM-D2, ``em-history``
+#: production consumer) -- never a new ``state-ledger`` record kind, and
+#: never written to the ledger's own journal.
+RECURRENCE_ANNOTATION_PROTOCOL = "convergence-campaign-recurrence-annotation/1"
 
 #: The base ``run_plan_graph.py run`` invocation ``resume_directive_from_escalation``
 #: appends its directive flags to when no campaign-specific launcher is given
@@ -1562,6 +1576,7 @@ class ConvergenceCampaignDriver:
         *,
         digest: str | None = None,
         audit_result: Mapping[str, Any] | None = None,
+        history_roots: Sequence[str | Path] = (),
     ) -> dict[str, Any]:
         """``ingest(digest)`` -- folds exactly one sealed artifact; idempotent
         by digest (delegated entirely to :meth:`ConvergenceLedger.ingest_audit`).
@@ -1573,6 +1588,26 @@ class ConvergenceCampaignDriver:
         never read. They are consumed exactly once: this ingest clears
         ``harvested_findings`` from state so a later ingest does not re-fold
         the same items.
+
+        ``history_roots`` (EM-D2) names prior campaign roots to consult via
+        ``harness_labs.plangraph.finding_history`` for every key this ingest
+        newly opens. A key a named prior campaign ruled ``waive`` (folds to
+        terminal status ``excluded``) gets one recurrence-annotation
+        artifact sealed through the existing :class:`CampaignArtifactStore`
+        -- carrying the prior disposition, its statement, and the prior
+        campaign's label -- with the sealed digest recorded in the
+        checkpoint ``state`` under ``recurrence_annotations``, keyed by
+        finding key. This never touches this campaign's own ledger journal:
+        the annotation is a sealed artifact, not a ledger record, so the
+        folded ledger's record-kind vocabulary is unchanged.
+
+        A retried ingest of an already-folded digest (``ingest_audit``
+        reports ``idempotent``, e.g. re-running after a first attempt died
+        inside :meth:`_seal_recurrence_annotations` with a mistyped root)
+        recovers the keys that digest opened from the ledger's own durable
+        ``finding_opened`` records rather than from ``summary["opened"]``
+        (empty on the short-circuited retry), so the annotation still gets
+        sealed instead of silently returning ``{}``.
         """
 
         state = self.state()
@@ -1605,13 +1640,119 @@ class ConvergenceCampaignDriver:
         new_required_findings = sum(
             1 for finding in opened_findings if finding.get("requires_disposition")
         )
+        annotation_keys = opened_keys
+        if summary["idempotent"]:
+            annotation_keys = {
+                tuple(record["key"])
+                for record in self.ledger.records()
+                if record.get("type") == RECORD_KIND_FINDING_OPENED
+                and record.get("digest") == summary["digest"]
+            }
+        recurrence_annotations = self._seal_recurrence_annotations(
+            history_roots, annotation_keys
+        )
+        if recurrence_annotations:
+            merged = dict(state.get("recurrence_annotations") or {})
+            merged.update(recurrence_annotations)
+            state["recurrence_annotations"] = merged
         state["pending_audit_digest"] = None
         state["last_ingest_digest"] = digest
         state["harvested_findings"] = []
         state["regression_suspects"] = [list(item) for item in suspects]
         state["last_ingest_new_required_findings"] = new_required_findings
         self._save(lifecycle="ingested", state=state)
-        return {"summary": summary, "regression_suspect_keys": suspects}
+        return {
+            "summary": summary,
+            "regression_suspect_keys": suspects,
+            "recurrence_annotations": recurrence_annotations,
+        }
+
+    def _seal_recurrence_annotations(
+        self,
+        history_roots: Sequence[str | Path],
+        opened_keys: set[tuple[str, str]],
+    ) -> dict[str, str]:
+        """Seal one recurrence-annotation artifact per arriving key a named
+        prior campaign ruled ``waive``, keyed by ``"file:subject"``.
+
+        Volume is bounded by arriving findings (``opened_keys``, this
+        ingest's own newly-opened keys), and lookup is exact-key only --
+        ``FindingHistory.for_key``, never similarity retrieval. Folding a
+        named root's journal never writes to it (``finding_history``'s own
+        contract); sealing lands only in this campaign's own artifact store,
+        never in its ledger journal.
+        """
+
+        if not history_roots or not opened_keys:
+            return {}
+        if self.repository is None:
+            raise ConvergenceCampaignDriverError(
+                "ingest --history-roots requires the driver to be configured "
+                "with a repository, to resolve the repository_id finding "
+                "history is scoped to"
+            )
+        identity_path = self.repository / REPOSITORY_IDENTITY_PATH
+        try:
+            identity_payload = json.loads(identity_path.read_text(encoding="utf-8"))
+        except OSError as exc:
+            raise ConvergenceCampaignDriverError(
+                f"could not read repository identity at {identity_path}: {exc}"
+            ) from exc
+        repository_id = load_repository_id(identity_payload)
+
+        entries: list[tuple[Path, str, str]] = []
+        for root in history_roots:
+            root = Path(root)
+            journal_path = root / "ledger.jsonl"
+            checkpoint_path = root / "checkpoint.json"
+            try:
+                checkpoint_raw = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+            except OSError as exc:
+                raise ConvergenceCampaignDriverError(
+                    f"could not read history root checkpoint at {checkpoint_path}: {exc}"
+                ) from exc
+            entries.append((journal_path, str(checkpoint_raw["campaign_id"]), repository_id))
+
+        history = fold_campaigns(entries)
+        digests: dict[str, str] = {}
+        for file, subject in sorted(opened_keys):
+            lineage = history.for_key(file, subject)
+            waived = next(
+                (
+                    (entry, ruling)
+                    for entry in lineage
+                    if entry.status == "excluded"
+                    for ruling in reversed(entry.rulings)
+                    if ruling.disposition == "waive"
+                ),
+                None,
+            )
+            if waived is None:
+                continue
+            entry, ruling = waived
+            payload = {
+                "protocol": RECURRENCE_ANNOTATION_PROTOCOL,
+                "file": file,
+                "subject": subject,
+                "prior_campaign_label": entry.campaign_label,
+                "prior_disposition": ruling.disposition,
+                "prior_statement": ruling.statement,
+            }
+            raw = (
+                json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n"
+            ).encode("utf-8")
+            descriptor, temp_name = tempfile.mkstemp(
+                dir=self.campaign_root, prefix=".recurrence-annotation-"
+            )
+            temp_path = Path(temp_name)
+            try:
+                with open(descriptor, "wb") as handle:
+                    handle.write(raw)
+                record = self.artifacts.seal(temp_path, media_type="application/json")
+            finally:
+                temp_path.unlink(missing_ok=True)
+            digests[f"{file}:{subject}"] = record.digest
+        return digests
 
     # -- rule ----------------------------------------------------------------
 
@@ -2134,6 +2275,14 @@ def _parser() -> argparse.ArgumentParser:
     ingest = subparsers.add_parser("ingest")
     ingest.add_argument("--digest", default=None)
     ingest.add_argument("--audit-result-file", type=Path, default=None)
+    ingest.add_argument(
+        "--history-roots", nargs="+", type=Path, default=None,
+        help="one or more prior campaign roots to consult via finding_history "
+        "at ingest; a key a named root's journal ruled 'waive' gets a "
+        "recurrence-annotation artifact sealed through this campaign's own "
+        "artifact store, digest recorded in checkpoint state keyed by "
+        "finding key (requires the top-level --repository)",
+    )
 
     rule = subparsers.add_parser("rule")
     rule.add_argument("--dispositions-file", type=Path, required=True)
@@ -2232,7 +2381,10 @@ def _dispatch(arguments: argparse.Namespace, driver: ConvergenceCampaignDriver) 
         )
     if step == "ingest":
         audit_result = _load_json_or_default(arguments.audit_result_file, None)
-        return driver.ingest(digest=arguments.digest, audit_result=audit_result)
+        return driver.ingest(
+            digest=arguments.digest, audit_result=audit_result,
+            history_roots=arguments.history_roots or (),
+        )
     if step == "rule":
         dispositions = _load_json_or_default(arguments.dispositions_file, [])
         return driver.rule(dispositions=dispositions)
@@ -2304,6 +2456,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         ConvergenceCampaignDriverError,
         ConvergenceCampaignError,
         ConvergenceLedgerError,
+        FindingHistoryError,
         AutoresumeError,
         PlanSynthesisError,
     ) as exc:

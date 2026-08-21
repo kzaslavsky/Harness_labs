@@ -1,6 +1,7 @@
 # 0004 — Hybrid controller with a deterministic command kernel
 
 Status: accepted
+Concerns-paths: harness_labs/core/controller_kernel.py, harness_labs/core/controller_coordinator.py
 Date: 2026-08-03
 Owners: harness controller
 

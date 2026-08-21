@@ -1,6 +1,7 @@
 # 0001 — Execution-first production lifecycle
 
 Status: accepted
+Concerns-paths: harness_labs/featurerun/feature_run.py, harness_labs/core/controller_run.py
 Date: 2026-07-21
 Owners: Harness Labs maintainers
 Run: not applicable

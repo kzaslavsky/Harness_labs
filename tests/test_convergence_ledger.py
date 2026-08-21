@@ -21,6 +21,17 @@ from harness_labs.core.convergence_contract import (
 from harness_labs.plangraph.convergence_ledger import (
     ConvergenceLedger,
     ConvergenceLedgerError,
+    RECORD_KIND_AUDIT_INGESTED,
+    RECORD_KIND_CAMPAIGN_OPENED,
+    RECORD_KIND_CAPTURE_COVERAGE,
+    RECORD_KIND_CONFIRMED_GOOD,
+    RECORD_KIND_FINDING_FIX_CLAIMED,
+    RECORD_KIND_FINDING_FIXED,
+    RECORD_KIND_FINDING_INVALIDATED,
+    RECORD_KIND_FINDING_OPENED,
+    RECORD_KIND_FINDING_REOPENED,
+    RECORD_KIND_FINDING_RULED,
+    RECORD_KIND_TARGET_AMENDED,
 )
 
 
@@ -921,6 +932,90 @@ class OpenFindingsTests(ConvergenceLedgerTestCase):
         self.assertEqual(len(envelopes), 1)
         self.assertEqual((envelopes[0]["file"], envelopes[0]["subject"]), key)
         self.assertEqual(envelopes[0]["statement"], "first")
+# -- em-history: named record-kind constants + key_lineage accessor --------
+
+
+class RecordKindConstantsTests(unittest.TestCase):
+    def test_named_constants_match_the_existing_record_type_vocabulary(self) -> None:
+        self.assertEqual(
+            {
+                RECORD_KIND_CAMPAIGN_OPENED, RECORD_KIND_FINDING_OPENED,
+                RECORD_KIND_FINDING_FIX_CLAIMED, RECORD_KIND_FINDING_FIXED,
+                RECORD_KIND_FINDING_REOPENED, RECORD_KIND_FINDING_INVALIDATED,
+                RECORD_KIND_FINDING_RULED, RECORD_KIND_CONFIRMED_GOOD,
+                RECORD_KIND_TARGET_AMENDED, RECORD_KIND_CAPTURE_COVERAGE,
+                RECORD_KIND_AUDIT_INGESTED,
+            },
+            ConvergenceLedger.RECORD_TYPES,
+        )
+        # no new record kind: exactly the eleven pre-existing kinds.
+        self.assertEqual(len(ConvergenceLedger.RECORD_TYPES), 11)
+
+
+class KeyLineageAccessorTests(ConvergenceLedgerTestCase):
+    KEY = ("svc/handler.py", "unbounded-retry")
+
+    def test_key_lineage_groups_records_by_key_with_journal_ordinals(self) -> None:
+        self.ledger.ingest_audit(_audit("d1", findings=[_finding(*self.KEY)]))
+        self.ledger.record_ruling(
+            self.KEY, disposition="waive", statement="accepted risk"
+        )
+        lineage = self.ledger.key_lineage()
+        self.assertIn(self.KEY, lineage)
+        records = lineage[self.KEY]
+        record_types = [record["type"] for record in records]
+        self.assertEqual(
+            record_types, [RECORD_KIND_FINDING_OPENED, RECORD_KIND_FINDING_RULED]
+        )
+        # ordinals are each record's index into records(), i.e. strictly
+        # increasing when-learned order.
+        ordinals = [record["ordinal"] for record in records]
+        self.assertEqual(ordinals, sorted(ordinals))
+        self.assertEqual(len(set(ordinals)), len(ordinals))
+
+    def test_key_lineage_excludes_campaign_level_records(self) -> None:
+        self.ledger.open_campaign(
+            domain="d", target={"kind": "k", "digest": "x", "snapshot_path": "t.md"},
+            base_commit="deadbeef",
+        )
+        self.ledger.ingest_audit(_audit("d1", findings=[_finding(*self.KEY)]))
+        lineage = self.ledger.key_lineage()
+        for records in lineage.values():
+            for record in records:
+                self.assertNotEqual(record["type"], RECORD_KIND_CAMPAIGN_OPENED)
+
+    def test_key_lineage_is_read_only_and_leaves_records_unchanged(self) -> None:
+        self.ledger.ingest_audit(_audit("d1", findings=[_finding(*self.KEY)]))
+        before = self.ledger.records()
+        self.ledger.key_lineage()
+        self.ledger.key_lineage()
+        after = self.ledger.records()
+        self.assertEqual(before, after)
+
+    def test_base_rebase_reopened_record_reaches_every_affected_key_lineage(
+        self,
+    ) -> None:
+        other_key = ("svc/other.py", "flaky")
+        self.ledger.ingest_audit(
+            _audit("d1", findings=[_finding(*self.KEY), _finding(*other_key)])
+        )
+        self.ledger.record_fix_claimed(self.KEY)
+        self.ledger.ingest_audit(
+            _audit(
+                "d2", verdicts=[_observed_fixed(self.KEY)],
+                capture_coverage={"cell-1": "ok"},
+            )
+        )
+        self.ledger.record_base_rebase()
+        lineage = self.ledger.key_lineage()
+        self.assertIn(
+            RECORD_KIND_FINDING_REOPENED,
+            [record["type"] for record in lineage[self.KEY]],
+        )
+        self.assertNotIn(
+            RECORD_KIND_FINDING_REOPENED,
+            [record["type"] for record in lineage[other_key]],
+        )
 
 
 if __name__ == "__main__":
