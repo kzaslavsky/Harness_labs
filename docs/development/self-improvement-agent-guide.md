@@ -107,6 +107,58 @@ real tree directly. An operator reviews the draft, flips its `Status:` to
 The cited patterns flip to `status: addressed` (stamped with the closing
 `campaign_id` and `landing_commit`) in the same close.
 
+## 5. Reading an audit (what the output means)
+
+`self_improve.py audit` mines `logs/runs/` of `--repository`, descending
+one level into PlanGraph graph roots (`logs/runs/<graph-root>/<run-id>/`).
+Its result is complete or it says why not:
+
+- `skipped` lists every directory it could not treat as a run — an empty
+  result with no skips means an empty corpus, never silent no-coverage.
+- Refused runs failed audit hash-chain verification; they are excluded,
+  not silently absorbed.
+- `signature` is cause-shaped (`command_rejected:unknown_evidence`,
+  `deliverable_floor:placeholder_token`), preferring stable `rule_id`s /
+  `failure_keys` / escalation reasons over lifecycle event names; one
+  incident is deduplicated within a run. `classification` comes from the
+  strongest node-level source; `indeterminate` means no source existed.
+- `support.distinct_lineage_count` folds a logical node's retry chain
+  across graph attempts into ONE incident lineage (derived from the
+  `<graph>-attempt-<n>[-<node>]` run-id convention). Retries are never
+  recurrence: a single-incident pattern stays `observed` forever, no
+  matter how many attempts it burned. `distinct_run_count` is the raw
+  count, reported but never gating.
+- Exploratory runs: pass a scratch `state_root` (library) rather than
+  polluting `logs/improvement/state/` — the watermark is idempotent and
+  per-checkout (gitignored), so a fresh worktree re-mines from scratch.
+
+## 6. What to expect while fixes land concurrently
+
+Multiple sessions routinely land harness fixes on `main` while campaigns
+or audits are running. Expectations:
+
+- Pattern records are recomputable projections of the journals. Never
+  hand-edit one to reflect a fix you know landed; re-run `audit` instead.
+- A fix landed *outside* an improvement campaign does not flip its
+  pattern to `addressed` — only a campaign close does that (with
+  `campaign_id` + `landing_commit`). If a landed fix makes a pattern
+  moot, the honest end state is: the signature stops recurring in new
+  runs, and the drafter's anti-thrash/decision-registry joins (plus the
+  operator ruling) reject proposing it again; mark it `superseded` in a
+  reviewed commit if it was accepted-but-overtaken.
+- A running PlanGraph node is pinned to its receipt's `base_commit`;
+  `main` moving underneath does not change what its workers see. New
+  behavior reaches campaigns only through a new approval (new receipt) —
+  never assume a mid-campaign node has a fix that landed after its base.
+- After merging `main` into your worktree, re-running `audit` is cheap
+  and idempotent; enrichment changes to the miner may re-shape
+  signatures, which re-clusters patterns — expect pattern ids to change
+  across miner versions, and treat committed pattern records under
+  `docs/improvement/` as the operator-reviewed snapshot, not live state.
+- Proposal drafting stays config-disabled until the corpus reaches
+  roughly 20–30 `production_lifecycle` FeatureRuns across ≥3 programs;
+  until then every audit is collect-only regardless of what it finds.
+
 ## Hard rules (violations fail review)
 
 1. No new `state-ledger` record kinds; no ledger writer changes.
