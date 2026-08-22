@@ -21,6 +21,47 @@ QUERY_NAMES = frozenset(
     }
 )
 
+# A retry storm relaunches the coordinator many times in a row; each relaunch
+# is one more entry in the durable "coordinator_dispatch.sessions" ledger
+# (kernel.snapshot() keeps the full ledger for audit/resume correctness --
+# that is unbounded on purpose). What must stay bounded is what gets
+# *serialized back to a model* as working context: with no cap, the ledger
+# entry text grows without limit and, incident-observed, can by itself blow
+# past a backend's input-size ceiling long before the actual task content
+# matters. Keep only the most recent N sessions verbatim in any view built
+# for a model, plus one summary record for everything older.
+COORDINATOR_SESSION_HISTORY_LIMIT = 20
+
+
+def bound_coordinator_sessions(
+    sessions: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Bound a coordinator session ledger for serialization into model context.
+
+    Keeps the most recent ``COORDINATOR_SESSION_HISTORY_LIMIT`` records
+    verbatim and collapses everything older into one summary record carrying
+    the elided count and a tally of their outcomes, so serialized context
+    size stays bounded no matter how many coordinator relaunches a run
+    accumulates.
+    """
+
+    total = len(sessions)
+    if total <= COORDINATOR_SESSION_HISTORY_LIMIT:
+        return [copy.deepcopy(item) for item in sessions]
+    recent = sessions[-COORDINATOR_SESSION_HISTORY_LIMIT:]
+    elided = sessions[:-COORDINATOR_SESSION_HISTORY_LIMIT]
+    outcome_tally: dict[str, int] = {}
+    for item in elided:
+        outcome = str(item.get("outcome", "unknown"))
+        outcome_tally[outcome] = outcome_tally.get(outcome, 0) + 1
+    summary = {
+        "summary": True,
+        "total_session_count": total,
+        "elided_session_count": len(elided),
+        "elided_outcome_tally": outcome_tally,
+    }
+    return [summary] + [copy.deepcopy(item) for item in recent]
+
 
 def project_run_view(kernel: ControllerKernel) -> dict[str, Any]:
     """Build the coordinator's compact working view without scenario branches."""
@@ -104,7 +145,20 @@ def project_run_view(kernel: ControllerKernel) -> dict[str, Any]:
         "completion_failures": list(kernel.completion_failures()),
         "anomalies": copy.deepcopy(state["anomalies"]),
         "operator_questions": copy.deepcopy(state["operator_questions"]),
-        "coordinator_dispatch": copy.deepcopy(state["coordinator_dispatch"]),
+        "coordinator_dispatch": {
+            "schema": copy.deepcopy(state["coordinator_dispatch"]["schema"]),
+            "active_session": copy.deepcopy(
+                state["coordinator_dispatch"]["active_session"]
+            ),
+            # Bounded here -- this is the one authoritative place a
+            # coordinator's model context carries session history; the
+            # per-launch context omits its own copy (see
+            # CoordinatorDispatcher._build_launch) to avoid serializing the
+            # same ledger twice into one turn.
+            "sessions": bound_coordinator_sessions(
+                state["coordinator_dispatch"]["sessions"]
+            ),
+        },
         "allowed_commands": sorted(
             {
                 "criterion.propose",
