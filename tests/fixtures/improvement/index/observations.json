@@ -131,6 +131,246 @@
       "signature": "sig-cost"
     }
   ],
+  "distinct_logical_graphs_same_node_id": [
+    {
+      "artifact_refs": [],
+      "attempt_id": "graph-alpha-attempt-1-SI-06",
+      "classification": "indeterminate",
+      "event_hashes": [
+        "77d4a3d57f690802225d758f7fb8285d793539d06d87df8f5afad3a4860aec39"
+      ],
+      "evidence_classification": "production_lifecycle",
+      "first_event_sequence": 0,
+      "node_id": null,
+      "phase": "blocked",
+      "protocol": "blocker-observation/1",
+      "redaction_applied": true,
+      "resolution": "unresolved_blocked",
+      "resolution_cost": {
+        "diff_churn_lines": 10,
+        "repair_dispatches": 0,
+        "retries": 0,
+        "tokens": null,
+        "wall_clock_ms": 100
+      },
+      "rule_id": null,
+      "run_id": "graph-alpha-attempt-1-SI-06",
+      "run_kind": "feature_run",
+      "signature": "sig-cross-graph"
+    },
+    {
+      "artifact_refs": [],
+      "attempt_id": "graph-beta-attempt-1-SI-06",
+      "classification": "indeterminate",
+      "event_hashes": [
+        "2a134d0d238bcf55e05e63af44b66ac94be546cfcc9010d86ebc181e8e45755a"
+      ],
+      "evidence_classification": "production_lifecycle",
+      "first_event_sequence": 0,
+      "node_id": null,
+      "phase": "blocked",
+      "protocol": "blocker-observation/1",
+      "redaction_applied": true,
+      "resolution": "unresolved_blocked",
+      "resolution_cost": {
+        "diff_churn_lines": 10,
+        "repair_dispatches": 0,
+        "retries": 0,
+        "tokens": null,
+        "wall_clock_ms": 100
+      },
+      "rule_id": null,
+      "run_id": "graph-beta-attempt-1-SI-06",
+      "run_kind": "feature_run",
+      "signature": "sig-cross-graph"
+    },
+    {
+      "artifact_refs": [],
+      "attempt_id": "graph-beta-attempt-2-SI-06",
+      "classification": "indeterminate",
+      "event_hashes": [
+        "082089e5790736485b3f28dd7b509eb0b5a7c38eb6cd122dd1080caa7b48f422"
+      ],
+      "evidence_classification": "production_lifecycle",
+      "first_event_sequence": 0,
+      "node_id": null,
+      "phase": "blocked",
+      "protocol": "blocker-observation/1",
+      "redaction_applied": true,
+      "resolution": "unresolved_blocked",
+      "resolution_cost": {
+        "diff_churn_lines": 10,
+        "repair_dispatches": 0,
+        "retries": 0,
+        "tokens": null,
+        "wall_clock_ms": 100
+      },
+      "rule_id": null,
+      "run_id": "graph-beta-attempt-2-SI-06",
+      "run_kind": "feature_run",
+      "signature": "sig-cross-graph"
+    }
+  ],
+  "distinct_nodes_of_one_graph": [
+    {
+      "artifact_refs": [],
+      "attempt_id": "si-graph-r2-attempt-2-SI-02",
+      "classification": "indeterminate",
+      "event_hashes": [
+        "86ba17db2b3ecf7234a1e611e11d2989a7c1c0aca87cf780f88a041dd522c9a5"
+      ],
+      "evidence_classification": "production_lifecycle",
+      "first_event_sequence": 0,
+      "node_id": null,
+      "phase": "blocked",
+      "protocol": "blocker-observation/1",
+      "redaction_applied": true,
+      "resolution": "unresolved_blocked",
+      "resolution_cost": {
+        "diff_churn_lines": 10,
+        "repair_dispatches": 0,
+        "retries": 0,
+        "tokens": null,
+        "wall_clock_ms": 100
+      },
+      "rule_id": null,
+      "run_id": "si-graph-r2-attempt-2-SI-02",
+      "run_kind": "feature_run",
+      "signature": "sig-cross-node"
+    },
+    {
+      "artifact_refs": [],
+      "attempt_id": "si-graph-r2-attempt-3-SI-04",
+      "classification": "indeterminate",
+      "event_hashes": [
+        "125b0398772d52a64ef6f4f16e89fb7b91f0c4851e27a516f296d26c78b609d1"
+      ],
+      "evidence_classification": "production_lifecycle",
+      "first_event_sequence": 0,
+      "node_id": null,
+      "phase": "blocked",
+      "protocol": "blocker-observation/1",
+      "redaction_applied": true,
+      "resolution": "unresolved_blocked",
+      "resolution_cost": {
+        "diff_churn_lines": 10,
+        "repair_dispatches": 0,
+        "retries": 0,
+        "tokens": null,
+        "wall_clock_ms": 100
+      },
+      "rule_id": null,
+      "run_id": "si-graph-r2-attempt-3-SI-04",
+      "run_kind": "feature_run",
+      "signature": "sig-cross-node"
+    },
+    {
+      "artifact_refs": [],
+      "attempt_id": "si-graph-r2-attempt-5-SI-06",
+      "classification": "indeterminate",
+      "event_hashes": [
+        "1090a6a349bf0af05b850f8035f2fc8fce5b87f5e08fe3c01b97c3e4e931f628"
+      ],
+      "evidence_classification": "production_lifecycle",
+      "first_event_sequence": 0,
+      "node_id": null,
+      "phase": "blocked",
+      "protocol": "blocker-observation/1",
+      "redaction_applied": true,
+      "resolution": "unresolved_blocked",
+      "resolution_cost": {
+        "diff_churn_lines": 10,
+        "repair_dispatches": 0,
+        "retries": 0,
+        "tokens": null,
+        "wall_clock_ms": 100
+      },
+      "rule_id": null,
+      "run_id": "si-graph-r2-attempt-5-SI-06",
+      "run_kind": "feature_run",
+      "signature": "sig-cross-node"
+    }
+  ],
+  "graph_level_retry_chain": [
+    {
+      "artifact_refs": [],
+      "attempt_id": "si-graph-r2-attempt-1",
+      "classification": "indeterminate",
+      "event_hashes": [
+        "0eefbf307276cd0f75efce8b19f3cf60a8ed146f327e50ce80d52375d746e3c6"
+      ],
+      "evidence_classification": "production_lifecycle",
+      "first_event_sequence": 0,
+      "node_id": null,
+      "phase": "blocked",
+      "protocol": "blocker-observation/1",
+      "redaction_applied": true,
+      "resolution": "unresolved_blocked",
+      "resolution_cost": {
+        "diff_churn_lines": 10,
+        "repair_dispatches": 0,
+        "retries": 0,
+        "tokens": null,
+        "wall_clock_ms": 100
+      },
+      "rule_id": null,
+      "run_id": "si-graph-r2-attempt-1",
+      "run_kind": "plan_graph",
+      "signature": "sig-graph-retry"
+    },
+    {
+      "artifact_refs": [],
+      "attempt_id": "si-graph-r2-attempt-2",
+      "classification": "indeterminate",
+      "event_hashes": [
+        "dc84f3e34de6f670b73818ade93431b1faf292ab3b49aa7ae8c93361db819d8a"
+      ],
+      "evidence_classification": "production_lifecycle",
+      "first_event_sequence": 0,
+      "node_id": null,
+      "phase": "blocked",
+      "protocol": "blocker-observation/1",
+      "redaction_applied": true,
+      "resolution": "unresolved_blocked",
+      "resolution_cost": {
+        "diff_churn_lines": 10,
+        "repair_dispatches": 0,
+        "retries": 0,
+        "tokens": null,
+        "wall_clock_ms": 100
+      },
+      "rule_id": null,
+      "run_id": "si-graph-r2-attempt-2",
+      "run_kind": "plan_graph",
+      "signature": "sig-graph-retry"
+    },
+    {
+      "artifact_refs": [],
+      "attempt_id": "si-graph-r2-attempt-3",
+      "classification": "indeterminate",
+      "event_hashes": [
+        "787c08359800a35155600acda9d59eda1a65b382a3b11a294396cb14c739697d"
+      ],
+      "evidence_classification": "production_lifecycle",
+      "first_event_sequence": 0,
+      "node_id": null,
+      "phase": "blocked",
+      "protocol": "blocker-observation/1",
+      "redaction_applied": true,
+      "resolution": "unresolved_blocked",
+      "resolution_cost": {
+        "diff_churn_lines": 10,
+        "repair_dispatches": 0,
+        "retries": 0,
+        "tokens": null,
+        "wall_clock_ms": 100
+      },
+      "rule_id": null,
+      "run_id": "si-graph-r2-attempt-3",
+      "run_kind": "plan_graph",
+      "signature": "sig-graph-retry"
+    }
+  ],
   "insufficient_observation_count": [
     {
       "artifact_refs": [],
@@ -183,6 +423,246 @@
       "run_id": "run-d",
       "run_kind": "toy-suite",
       "signature": "sig-too-few"
+    }
+  ],
+  "node_id_enriched_distinct_nodes": [
+    {
+      "artifact_refs": [],
+      "attempt_id": "si-graph-r2-attempt-3",
+      "classification": "indeterminate",
+      "event_hashes": [
+        "bc2a3a4e11937cf401658a2ecba9e20640b2aa47c992bce4f115393be433906e"
+      ],
+      "evidence_classification": "production_lifecycle",
+      "first_event_sequence": 0,
+      "node_id": "SI-02",
+      "phase": "blocked",
+      "protocol": "blocker-observation/1",
+      "redaction_applied": true,
+      "resolution": "unresolved_blocked",
+      "resolution_cost": {
+        "diff_churn_lines": 10,
+        "repair_dispatches": 0,
+        "retries": 0,
+        "tokens": null,
+        "wall_clock_ms": 100
+      },
+      "rule_id": null,
+      "run_id": "si-graph-r2-attempt-3",
+      "run_kind": "plan_graph",
+      "signature": "sig-enriched-cross"
+    },
+    {
+      "artifact_refs": [],
+      "attempt_id": "si-graph-r2-attempt-4",
+      "classification": "indeterminate",
+      "event_hashes": [
+        "adb5a53d8e916af81e81ec62e4e3a295aaad5ed16c6cfc2a40cebaaebe9e09f3"
+      ],
+      "evidence_classification": "production_lifecycle",
+      "first_event_sequence": 0,
+      "node_id": "SI-04",
+      "phase": "blocked",
+      "protocol": "blocker-observation/1",
+      "redaction_applied": true,
+      "resolution": "unresolved_blocked",
+      "resolution_cost": {
+        "diff_churn_lines": 10,
+        "repair_dispatches": 0,
+        "retries": 0,
+        "tokens": null,
+        "wall_clock_ms": 100
+      },
+      "rule_id": null,
+      "run_id": "si-graph-r2-attempt-4",
+      "run_kind": "plan_graph",
+      "signature": "sig-enriched-cross"
+    },
+    {
+      "artifact_refs": [],
+      "attempt_id": "si-graph-r2-attempt-5",
+      "classification": "indeterminate",
+      "event_hashes": [
+        "a720685403d8368dc4ee76947411b41945955b100860bfa37bbdf8d42b7edb95"
+      ],
+      "evidence_classification": "production_lifecycle",
+      "first_event_sequence": 0,
+      "node_id": "SI-06",
+      "phase": "blocked",
+      "protocol": "blocker-observation/1",
+      "redaction_applied": true,
+      "resolution": "unresolved_blocked",
+      "resolution_cost": {
+        "diff_churn_lines": 10,
+        "repair_dispatches": 0,
+        "retries": 0,
+        "tokens": null,
+        "wall_clock_ms": 100
+      },
+      "rule_id": null,
+      "run_id": "si-graph-r2-attempt-5",
+      "run_kind": "plan_graph",
+      "signature": "sig-enriched-cross"
+    }
+  ],
+  "node_id_enriched_retry_chain": [
+    {
+      "artifact_refs": [],
+      "attempt_id": "si-graph-r2-attempt-3",
+      "classification": "indeterminate",
+      "event_hashes": [
+        "76f4bc4eaf9fe99fe56afe1b7fca590d2306105045c9bef9514274bdd554c47c"
+      ],
+      "evidence_classification": "production_lifecycle",
+      "first_event_sequence": 0,
+      "node_id": "SI-06",
+      "phase": "blocked",
+      "protocol": "blocker-observation/1",
+      "redaction_applied": true,
+      "resolution": "unresolved_blocked",
+      "resolution_cost": {
+        "diff_churn_lines": 10,
+        "repair_dispatches": 0,
+        "retries": 0,
+        "tokens": null,
+        "wall_clock_ms": 100
+      },
+      "rule_id": null,
+      "run_id": "si-graph-r2-attempt-3",
+      "run_kind": "plan_graph",
+      "signature": "sig-enriched-retry"
+    },
+    {
+      "artifact_refs": [],
+      "attempt_id": "si-graph-r2-attempt-4",
+      "classification": "indeterminate",
+      "event_hashes": [
+        "8fe2f7b1a831319d50ed2122bc7209660387e85bb69bc00433fc4e0f99a22ebd"
+      ],
+      "evidence_classification": "production_lifecycle",
+      "first_event_sequence": 0,
+      "node_id": "SI-06",
+      "phase": "blocked",
+      "protocol": "blocker-observation/1",
+      "redaction_applied": true,
+      "resolution": "unresolved_blocked",
+      "resolution_cost": {
+        "diff_churn_lines": 10,
+        "repair_dispatches": 0,
+        "retries": 0,
+        "tokens": null,
+        "wall_clock_ms": 100
+      },
+      "rule_id": null,
+      "run_id": "si-graph-r2-attempt-4",
+      "run_kind": "plan_graph",
+      "signature": "sig-enriched-retry"
+    },
+    {
+      "artifact_refs": [],
+      "attempt_id": "si-graph-r2-attempt-5",
+      "classification": "indeterminate",
+      "event_hashes": [
+        "8434f8e7336ff56b51b4f4fd75d90b8164af33ec8fe7a448c4dd55b3e30a855f"
+      ],
+      "evidence_classification": "production_lifecycle",
+      "first_event_sequence": 0,
+      "node_id": "SI-06",
+      "phase": "blocked",
+      "protocol": "blocker-observation/1",
+      "redaction_applied": true,
+      "resolution": "unresolved_blocked",
+      "resolution_cost": {
+        "diff_churn_lines": 10,
+        "repair_dispatches": 0,
+        "retries": 0,
+        "tokens": null,
+        "wall_clock_ms": 100
+      },
+      "rule_id": null,
+      "run_id": "si-graph-r2-attempt-5",
+      "run_kind": "plan_graph",
+      "signature": "sig-enriched-retry"
+    }
+  ],
+  "node_retry_chain_across_graph_attempts": [
+    {
+      "artifact_refs": [],
+      "attempt_id": "si-graph-r2-attempt-3-SI-06",
+      "classification": "indeterminate",
+      "event_hashes": [
+        "e0dea1524ba501863f69823d908e79af26012bec6914695aecd4d4e7812edc9f"
+      ],
+      "evidence_classification": "production_lifecycle",
+      "first_event_sequence": 0,
+      "node_id": null,
+      "phase": "blocked",
+      "protocol": "blocker-observation/1",
+      "redaction_applied": true,
+      "resolution": "unresolved_blocked",
+      "resolution_cost": {
+        "diff_churn_lines": 10,
+        "repair_dispatches": 0,
+        "retries": 0,
+        "tokens": null,
+        "wall_clock_ms": 100
+      },
+      "rule_id": null,
+      "run_id": "si-graph-r2-attempt-3-SI-06",
+      "run_kind": "feature_run",
+      "signature": "sig-node-retry"
+    },
+    {
+      "artifact_refs": [],
+      "attempt_id": "si-graph-r2-attempt-4-SI-06",
+      "classification": "indeterminate",
+      "event_hashes": [
+        "4c2a4813b35b78d7e2ecda84d0326108cbe58ddabaaa894772f4b319f62c98d2"
+      ],
+      "evidence_classification": "production_lifecycle",
+      "first_event_sequence": 0,
+      "node_id": null,
+      "phase": "blocked",
+      "protocol": "blocker-observation/1",
+      "redaction_applied": true,
+      "resolution": "unresolved_blocked",
+      "resolution_cost": {
+        "diff_churn_lines": 10,
+        "repair_dispatches": 0,
+        "retries": 0,
+        "tokens": null,
+        "wall_clock_ms": 100
+      },
+      "rule_id": null,
+      "run_id": "si-graph-r2-attempt-4-SI-06",
+      "run_kind": "feature_run",
+      "signature": "sig-node-retry"
+    },
+    {
+      "artifact_refs": [],
+      "attempt_id": "si-graph-r2-attempt-5-SI-06",
+      "classification": "indeterminate",
+      "event_hashes": [
+        "4269d4fc9c563a6044372a4b3daeea5fbca7eb1dd3ce7ec1642609c1292c6dc2"
+      ],
+      "evidence_classification": "production_lifecycle",
+      "first_event_sequence": 0,
+      "node_id": null,
+      "phase": "blocked",
+      "protocol": "blocker-observation/1",
+      "redaction_applied": true,
+      "resolution": "unresolved_blocked",
+      "resolution_cost": {
+        "diff_churn_lines": 10,
+        "repair_dispatches": 0,
+        "retries": 0,
+        "tokens": null,
+        "wall_clock_ms": 100
+      },
+      "rule_id": null,
+      "run_id": "si-graph-r2-attempt-5-SI-06",
+      "run_kind": "feature_run",
+      "signature": "sig-node-retry"
     }
   ],
   "proposable_task_suite_diverse": [
@@ -449,6 +929,86 @@
       "run_id": "run-b",
       "run_kind": "toy-suite",
       "signature": "sig-two-run"
+    }
+  ],
+  "unparseable_run_ids_stay_distinct": [
+    {
+      "artifact_refs": [],
+      "attempt_id": "legacy-run-alpha-1",
+      "classification": "indeterminate",
+      "event_hashes": [
+        "fc753be416bbae1f2bcd12845a8482854726fee737a2783ca51936ebab55d676"
+      ],
+      "evidence_classification": "production_lifecycle",
+      "first_event_sequence": 0,
+      "node_id": null,
+      "phase": "blocked",
+      "protocol": "blocker-observation/1",
+      "redaction_applied": true,
+      "resolution": "unresolved_blocked",
+      "resolution_cost": {
+        "diff_churn_lines": 10,
+        "repair_dispatches": 0,
+        "retries": 0,
+        "tokens": null,
+        "wall_clock_ms": 100
+      },
+      "rule_id": null,
+      "run_id": "legacy-run-alpha",
+      "run_kind": "feature_run",
+      "signature": "sig-unparseable"
+    },
+    {
+      "artifact_refs": [],
+      "attempt_id": "legacy-run-alpha-2",
+      "classification": "indeterminate",
+      "event_hashes": [
+        "fc753be416bbae1f2bcd12845a8482854726fee737a2783ca51936ebab55d676"
+      ],
+      "evidence_classification": "production_lifecycle",
+      "first_event_sequence": 0,
+      "node_id": null,
+      "phase": "blocked",
+      "protocol": "blocker-observation/1",
+      "redaction_applied": true,
+      "resolution": "unresolved_blocked",
+      "resolution_cost": {
+        "diff_churn_lines": 10,
+        "repair_dispatches": 0,
+        "retries": 0,
+        "tokens": null,
+        "wall_clock_ms": 100
+      },
+      "rule_id": null,
+      "run_id": "legacy-run-alpha",
+      "run_kind": "feature_run",
+      "signature": "sig-unparseable"
+    },
+    {
+      "artifact_refs": [],
+      "attempt_id": "legacy-run-beta-1",
+      "classification": "indeterminate",
+      "event_hashes": [
+        "74cfd7e1245bbfa0a59956181f647db4b3049753f08fdbf2c2acb53446c8bab7"
+      ],
+      "evidence_classification": "production_lifecycle",
+      "first_event_sequence": 0,
+      "node_id": null,
+      "phase": "blocked",
+      "protocol": "blocker-observation/1",
+      "redaction_applied": true,
+      "resolution": "unresolved_blocked",
+      "resolution_cost": {
+        "diff_churn_lines": 10,
+        "repair_dispatches": 0,
+        "retries": 0,
+        "tokens": null,
+        "wall_clock_ms": 100
+      },
+      "rule_id": null,
+      "run_id": "legacy-run-beta",
+      "run_kind": "feature_run",
+      "signature": "sig-unparseable"
     }
   ]
 }

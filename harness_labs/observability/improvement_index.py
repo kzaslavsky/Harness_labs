@@ -11,28 +11,63 @@ campaign loop (SI-05) cannot thrash the same target surface. A ``closed``
 point -- and a ``regressed`` entry bars re-proposal exactly like an
 explicit ``rejected`` disposition.
 
-**Status-gate ruling (operator disposition on AC-SI03-1, resolving an
-escalated finding against an over-broad prior reading).** The plan text
-governs verbatim: "Single-run findings stay ``observed`` forever." For the
-``status`` gate this means ``>= 2 distinct run lineages`` is ``>= 2
-distinct run_id`` values -- ``_status`` requires ``distinct_run_count >=
-2`` (in addition to ``observation_count >= 3``) before a pattern leaves
-``observed``. Any number of observations drawn from multiple *attempts* of
-a single run never crosses this gate, no matter how many attempts pile up.
-``distinct_lineage_count`` keeps its ``(run_id, attempt_id)`` keying as a
-reporting statistic only -- it is not the status gate, and it is always
-``>= distinct_run_count`` (each distinct run contributes at least one
-lineage), so it can legitimately equal ``distinct_run_count`` for the
-common case where a run's observations were never split across recorded
-sub-run attempts.
+**Status-gate ruling (operator disposition on AC-SI03-1, as corrected by
+the first real audit over this campaign's own journals).** The plan text
+governs verbatim: "``candidate`` at >=3 observations across >=2 distinct
+run *lineages*"; "Single-run findings stay ``observed`` forever." The
+ruling's intent is that recurrence requires an *independent* observation
+-- not a retry of the same incident. Counting raw ``run_id`` values
+defeats exactly that intent under PlanGraph: a node that retries across
+graph attempts gets a *fresh* ``run_id`` every attempt
+(``...-attempt-3-SI-06``, ``...-attempt-4-SI-06``,
+``...-attempt-5-SI-06`` are three run ids for ONE logical node retrying
+ONE defect), so a single defect could promote itself to ``candidate`` on
+its own retry storm.
+
+``_incident_lineage_key`` therefore folds retries of one logical node
+across graph attempts of one logical graph into a single lineage, and
+``_status_from_support`` gates on ``distinct_lineage_count >= 2`` (plus
+``observation_count >= 3``). ``distinct_run_count`` stays the raw
+``run_id`` count -- an honest reporting statistic, never a gate -- and is
+always ``>= distinct_lineage_count``. A pattern seen only inside one
+logical node's retry chain stays ``observed`` no matter how many attempts
+(or how many fresh run ids) pile up.
+
+**Incident-lineage identity and its fallback.** The observation schema is
+closed (``blocker-observation.schema.json``) and carries exactly
+``run_id``, ``run_kind``, ``node_id`` and ``attempt_id`` of the
+correlation data a run descriptor holds -- descriptors themselves
+(``parent_correlation.plan_graph_id`` / ``plan_node_id``,
+``logical_graph_id`` / ``graph_attempt_id``) are not reachable from this
+layer, so the identity is derived at cluster time from what observations
+do carry, in this order:
+
+1. ``run_id`` matching the harness's graph-attempt convention
+   ``<logical-graph>-attempt-<n>[-<node>]`` yields the logical graph id
+   (everything before ``-attempt-<n>``) and, when a node suffix is
+   present, the plan node id. ``node_id`` -- populated from event
+   correlation when the miner has it -- takes precedence over the run-id
+   suffix for the node component. Lineage is then
+   ``("node", logical_graph, node)``, or ``("graph", logical_graph)`` for
+   an observation mined from the graph-level run itself (retries of one
+   logical graph are likewise retries, not independent observations).
+2. Otherwise -- no attempt marker, i.e. no correlation to recover --
+   lineage falls back to ``("run", run_id, node_id or "")``. This folds
+   only attempts *within* one ``run_id`` (which are by construction the
+   same run) and never merges two different ``run_id`` values, so an
+   unparseable naming scheme can only *under*-count support, never
+   fabricate a fold between genuinely unrelated runs.
+
+The fold is likewise conservative in the parseable case: two run ids
+collapse only when they differ solely in their graph-attempt ordinal,
+which is precisely the harness's own retry naming.
 
 ``is_proposable``'s stricter gate (``>= 2`` distinct graph attempts *or*
-task suites, additionally required on top of ``candidate`` status) is
-unaffected by this ruling and uses ``distinct_lineage_count`` /
-``distinct_task_suite_count`` exactly as SI-03 describes; see
-``is_proposable`` for why the "attempts" branch is, by construction,
-already implied by ``candidate`` status and ``distinct_task_suite_count``
-is the branch that adds real marginal selectivity.
+task suites, additionally required on top of ``candidate`` status) keeps
+using ``distinct_lineage_count`` / ``distinct_task_suite_count`` exactly
+as SI-03 describes -- and it is the folded lineage count that now feeds
+it, so "distinct graph attempts" means attempts that are not retries of
+the same incident. See ``is_proposable``.
 
 **Known schema tension, not owned by this node.** ``blocker-pattern
 .schema.json`` (SI-01, out of this node's grant) requires
@@ -59,6 +94,7 @@ and ledger state the caller supplies.
 from __future__ import annotations
 
 import hashlib
+import re
 import statistics
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -75,8 +111,17 @@ STATUS_OBSERVED = "observed"
 STATUS_CANDIDATE = "candidate"
 
 CANDIDATE_MIN_OBSERVATIONS = 3
-CANDIDATE_MIN_DISTINCT_RUNS = 2
+#: Plan SI-03: "``candidate`` at >=3 observations across >=2 distinct run
+#: lineages" -- lineages, not raw run ids (see the module docstring's
+#: status-gate ruling and ``_incident_lineage_key``).
+CANDIDATE_MIN_DISTINCT_LINEAGES = 2
 PROPOSABLE_MIN_ATTEMPTS_OR_SUITES = 2
+
+#: The harness's PlanGraph run-id convention: a logical graph id, the
+#: graph attempt ordinal, and (for a node's own feature run) the plan node
+#: id -- e.g. ``self-improvement-agent-r2-attempt-4-SI-06``. Retrying a
+#: node mints a fresh run id that differs only in ``<n>``.
+_RUN_ATTEMPT_PATTERN = re.compile(r"^(?P<graph>.+?)-attempt-(?P<attempt>\d+)(?:-(?P<node>.+))?$")
 
 #: Anti-thrash defaults (plan: "cooldown (>=14 days or >=N new runs)").
 DEFAULT_COOLDOWN_DAYS = 14
@@ -121,13 +166,46 @@ def _observation_ref(observation: Mapping[str, Any]) -> dict[str, str]:
     }
 
 
+def _incident_lineage_key(observation: Mapping[str, Any]) -> tuple[str, ...]:
+    """The incident-lineage identity of one observation.
+
+    Two observations share a lineage when they are retries of the *same*
+    logical incident: the same plan node of the same logical graph
+    (whatever graph attempt each retry happened to be minted under), or
+    the same logical graph for observations mined from a graph-level run.
+    Independent observations -- a different node, a different logical
+    graph, an unrelated run -- always get different keys.
+
+    Derivation and fallback are documented in the module docstring; the
+    invariant that matters is one-directional: the fallback may split a
+    genuine lineage in two (under-counting support, which can only make
+    the ``candidate`` gate harder to cross) but never merges observations
+    from genuinely unrelated runs.
+    """
+
+    run_id = str(observation["run_id"])
+    node_id = observation.get("node_id")
+    node_id = str(node_id) if isinstance(node_id, str) and node_id else None
+
+    match = _RUN_ATTEMPT_PATTERN.match(run_id)
+    if match is not None:
+        logical_graph = match.group("graph")
+        node = node_id or match.group("node")
+        if node:
+            return ("node", logical_graph, node)
+        return ("graph", logical_graph)
+
+    # No recoverable correlation: keep the run itself as the lineage, so
+    # attempts recorded inside one run fold (they are one run by
+    # construction) while distinct run ids never merge.
+    return ("run", run_id, node_id or "")
+
+
 def _support(observations: Sequence[Mapping[str, Any]]) -> dict[str, int]:
     return {
         "observation_count": len(observations),
         "distinct_run_count": len({str(o["run_id"]) for o in observations}),
-        "distinct_lineage_count": len(
-            {(str(o["run_id"]), str(o["attempt_id"])) for o in observations}
-        ),
+        "distinct_lineage_count": len({_incident_lineage_key(o) for o in observations}),
         "distinct_task_suite_count": len({str(o["run_kind"]) for o in observations}),
     }
 
@@ -135,7 +213,7 @@ def _support(observations: Sequence[Mapping[str, Any]]) -> dict[str, int]:
 def _status_from_support(support: Mapping[str, int]) -> str:
     if (
         support["observation_count"] >= CANDIDATE_MIN_OBSERVATIONS
-        and support["distinct_run_count"] >= CANDIDATE_MIN_DISTINCT_RUNS
+        and support["distinct_lineage_count"] >= CANDIDATE_MIN_DISTINCT_LINEAGES
     ):
         return STATUS_CANDIDATE
     return STATUS_OBSERVED
@@ -144,16 +222,22 @@ def _status_from_support(support: Mapping[str, int]) -> str:
 def is_proposable(pattern: Mapping[str, Any]) -> bool:
     """Additionally-required, stricter gate on top of ``candidate`` status.
 
-    ``distinct_run_count >= 2`` (the candidate gate) already forces
-    ``distinct_lineage_count >= 2`` -- each distinct run contributes at
-    least one ``(run_id, attempt_id)`` lineage -- so the "attempts" branch
-    of this OR is, by construction, always satisfied once a pattern is
-    ``candidate``. ``distinct_task_suite_count >= 2`` is therefore the only
-    branch carrying independent marginal information for this repo's
-    current mining fields (run_kind is the sole per-observation task-suite
-    signal SI-02 captures); it is kept in the OR verbatim per the plan text
-    rather than dropped, since a future observation field could make the
-    attempts branch non-trivial without requiring a signature change here.
+    The ``candidate`` gate is itself ``distinct_lineage_count >= 2``, so
+    the "attempts" branch of this OR is by construction satisfied once a
+    pattern is ``candidate`` -- but that is now a *meaningful* two, not
+    two retries of one incident: the lineage identity folds a node's
+    retries across graph attempts into one lineage
+    (``_incident_lineage_key``). ``distinct_task_suite_count >= 2`` is the
+    branch that adds marginal selectivity for this repo's current mining
+    fields (``run_kind`` is the sole per-observation task-suite signal
+    SI-02 captures); it is kept in the OR verbatim per the plan text.
+
+    The invariant this gate must preserve, per the SI-03 ruling: a
+    single-run -- and now a single-incident -- finding is never
+    actionable. A pattern whose observations all come from one logical
+    node's retry chain has ``distinct_lineage_count == 1``, never reaches
+    ``candidate``, and is therefore never proposable, however many
+    attempts and fresh run ids it accumulates.
     """
 
     if pattern.get("status") != STATUS_CANDIDATE:

@@ -49,6 +49,7 @@ class ClusteringThresholdTests(unittest.TestCase):
         pattern = _pattern_for_signature(patterns, "sig-single-run")
         self.assertEqual(pattern["support"]["observation_count"], 4)
         self.assertEqual(pattern["support"]["distinct_run_count"], 1)
+        self.assertEqual(pattern["support"]["distinct_lineage_count"], 1)
         self.assertEqual(pattern["status"], "observed")
 
     def test_two_distinct_runs_and_three_observations_becomes_candidate(self) -> None:
@@ -57,6 +58,7 @@ class ClusteringThresholdTests(unittest.TestCase):
         pattern = _pattern_for_signature(patterns, "sig-two-run")
         self.assertEqual(pattern["support"]["observation_count"], 3)
         self.assertEqual(pattern["support"]["distinct_run_count"], 2)
+        self.assertEqual(pattern["support"]["distinct_lineage_count"], 2)
         self.assertEqual(pattern["status"], "candidate")
 
     def test_two_distinct_runs_but_too_few_observations_stays_observed(self) -> None:
@@ -135,6 +137,126 @@ class ClusteringThresholdTests(unittest.TestCase):
         forward = cluster_observations(observations, now=NOW)
         backward = cluster_observations(list(reversed(observations)), now=NOW)
         self.assertEqual(forward, backward)
+
+
+class LineageKeyingTests(unittest.TestCase):
+    """Incident-lineage identity: retries of one logical node across graph
+    attempts are ONE lineage, not N independent observations.
+
+    A PlanGraph node that retries mints a fresh ``run_id`` per graph
+    attempt (``...-attempt-3-SI-06``, ``...-attempt-4-SI-06``,
+    ``...-attempt-5-SI-06`` are three run ids for one logical node
+    retrying one defect). Counting raw run ids promoted such a single
+    defect to ``candidate`` off its own retry storm -- inflating exactly
+    the anti-N=1 thresholds that gate proposal admission. The status gate
+    therefore uses ``distinct_lineage_count`` (folded), while
+    ``distinct_run_count`` stays the honest raw run-id stat.
+    """
+
+    def setUp(self) -> None:
+        self.fixture = _load_fixture()
+
+    def test_node_retry_chain_across_graph_attempts_is_one_lineage(self) -> None:
+        observations = self.fixture["node_retry_chain_across_graph_attempts"]
+        self.assertEqual(len({o["run_id"] for o in observations}), 3)
+
+        patterns = cluster_observations(observations, now=NOW)
+        pattern = _pattern_for_signature(patterns, "sig-node-retry")
+        support = pattern["support"]
+        self.assertEqual(support["observation_count"], 3)
+        self.assertEqual(support["distinct_run_count"], 3, "raw run-id count stays honest")
+        self.assertEqual(support["distinct_lineage_count"], 1)
+        self.assertEqual(pattern["status"], "observed")
+        self.assertFalse(is_proposable(pattern))
+
+    def test_distinct_nodes_of_one_graph_are_distinct_lineages(self) -> None:
+        """The counterpart ground truth: a pattern spanning genuinely
+        different logical nodes still reaches ``candidate``."""
+
+        observations = self.fixture["distinct_nodes_of_one_graph"]
+        patterns = cluster_observations(observations, now=NOW)
+        pattern = _pattern_for_signature(patterns, "sig-cross-node")
+        self.assertEqual(pattern["support"]["distinct_lineage_count"], 3)
+        self.assertEqual(pattern["status"], "candidate")
+
+    def test_graph_level_retry_chain_is_one_lineage(self) -> None:
+        observations = self.fixture["graph_level_retry_chain"]
+        patterns = cluster_observations(observations, now=NOW)
+        pattern = _pattern_for_signature(patterns, "sig-graph-retry")
+        self.assertEqual(pattern["support"]["distinct_run_count"], 3)
+        self.assertEqual(pattern["support"]["distinct_lineage_count"], 1)
+        self.assertEqual(pattern["status"], "observed")
+
+    def test_node_id_correlation_takes_precedence_over_the_run_id_suffix(self) -> None:
+        """When the miner populates ``node_id`` (event correlation), it
+        supplies the node component even for graph-level run ids -- so a
+        node's retries fold whether or not the run id carries a suffix."""
+
+        observations = self.fixture["node_id_enriched_retry_chain"]
+        self.assertEqual({o["node_id"] for o in observations}, {"SI-06"})
+        patterns = cluster_observations(observations, now=NOW)
+        pattern = _pattern_for_signature(patterns, "sig-enriched-retry")
+        self.assertEqual(pattern["support"]["distinct_lineage_count"], 1)
+        self.assertEqual(pattern["status"], "observed")
+
+    def test_node_id_correlation_keeps_distinct_nodes_apart(self) -> None:
+        observations = self.fixture["node_id_enriched_distinct_nodes"]
+        patterns = cluster_observations(observations, now=NOW)
+        pattern = _pattern_for_signature(patterns, "sig-enriched-cross")
+        self.assertEqual(pattern["support"]["distinct_lineage_count"], 3)
+        self.assertEqual(pattern["status"], "candidate")
+
+    def test_same_node_id_in_different_logical_graphs_never_folds(self) -> None:
+        """The fold is scoped to one logical graph: node ``SI-06`` of
+        ``graph-alpha`` and of ``graph-beta`` are independent incidents,
+        while ``graph-beta``'s own two attempts are one."""
+
+        observations = self.fixture["distinct_logical_graphs_same_node_id"]
+        patterns = cluster_observations(observations, now=NOW)
+        pattern = _pattern_for_signature(patterns, "sig-cross-graph")
+        self.assertEqual(pattern["support"]["distinct_run_count"], 3)
+        self.assertEqual(pattern["support"]["distinct_lineage_count"], 2)
+        self.assertEqual(pattern["status"], "candidate")
+
+    def test_unparseable_run_ids_fall_back_to_the_run_itself(self) -> None:
+        """Fallback when no correlation is recoverable: attempts inside
+        one ``run_id`` fold (they are one run by construction), and two
+        different run ids never merge. Reconciles the prior
+        ``(run_id, attempt_id)`` keying -- intra-run attempt ids stay
+        distinct only when they belong to genuinely different runs."""
+
+        observations = self.fixture["unparseable_run_ids_stay_distinct"]
+        self.assertEqual(len({o["attempt_id"] for o in observations}), 3)
+        patterns = cluster_observations(observations, now=NOW)
+        pattern = _pattern_for_signature(patterns, "sig-unparseable")
+        self.assertEqual(pattern["support"]["observation_count"], 3)
+        self.assertEqual(pattern["support"]["distinct_run_count"], 2)
+        self.assertEqual(pattern["support"]["distinct_lineage_count"], 2)
+        self.assertEqual(pattern["status"], "candidate")
+
+    def test_lineage_count_never_exceeds_the_raw_run_count(self) -> None:
+        every_observation = [
+            observation for group in self.fixture.values() for observation in group
+        ]
+        for pattern in cluster_observations(every_observation, now=NOW):
+            support = pattern["support"]
+            self.assertLessEqual(
+                support["distinct_lineage_count"],
+                support["distinct_run_count"],
+                msg=f"lineage fold must never invent support: {pattern['signature']!r}",
+            )
+
+    def test_lineage_key_is_stable_and_folds_only_the_attempt_ordinal(self) -> None:
+        from harness_labs.observability.improvement_index import _incident_lineage_key
+
+        def key(run_id: str, node_id: str | None = None) -> tuple[str, ...]:
+            return _incident_lineage_key({"run_id": run_id, "node_id": node_id})
+
+        self.assertEqual(key("g-attempt-3-SI-06"), key("g-attempt-40-SI-06"))
+        self.assertNotEqual(key("g-attempt-3-SI-06"), key("g-attempt-3-SI-05"))
+        self.assertNotEqual(key("g-attempt-3-SI-06"), key("h-attempt-3-SI-06"))
+        self.assertNotEqual(key("g-attempt-3-SI-06"), key("g-attempt-3"))
+        self.assertNotEqual(key("legacy-a"), key("legacy-b"))
 
 
 class SupportAndCostAggregateTests(unittest.TestCase):
