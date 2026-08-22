@@ -75,10 +75,14 @@ parameters to it and no new receipt schemas, unlike rev 1).
 
 **What is committed vs. local.** `logs/runs/*` and
 `logs/improvement/**` stay gitignored (mining state, unaccepted drafts,
-campaign ledgers). Committed artifacts live under `docs/improvement/`:
-accepted proposals, the pattern records they cite (sanitized,
-hash-referencing local journals), per-campaign decomposition JSONs, and
-the closing decision record in `docs/decisions/`.
+campaign ledgers, and — per the attempt-5 operator ruling — campaign
+ROUND artifacts: `decomposition.json` and `findings_by_run.json` live
+under `logs/improvement/campaigns/<id>/`, since the round decomposition
+is receipt-bound and reproducible from the ledger). Committed artifacts
+live under `docs/improvement/`: accepted proposals and the pattern
+records they cite (sanitized, hash-referencing local journals) — only
+protocols the checker recognizes; the closing decision record lands in
+`docs/decisions/`.
 
 **Engineering-memory hard rules honored** (violations fail review):
 no new `state-ledger` record kinds and no ledger writer changes; no new
