@@ -158,8 +158,24 @@ class CodexExecutorFloorTests(unittest.TestCase):
     """The Codex semantic executor refuses a placeholder result mechanically."""
 
     def _run_executor(
-        self, raw: dict, *, audit: AuditJournal | None = None
-    ) -> TaskResult:
+        self,
+        raws: dict | list[dict],
+        *,
+        audit: AuditJournal | None = None,
+    ) -> tuple[TaskResult, list[str]]:
+        """Execute against a sequence of dispatch results, one per dispatch.
+
+        A single dict is dispatched to every call (unchanged behavior for
+        callers with no retry). A list supplies a distinct raw result per
+        dispatch -- the last element repeats once the list is exhausted --
+        so a retry scenario can hand back a placeholder on the first
+        dispatch and real content on the retry. Returns the prompts sent on
+        each dispatch alongside the result, so a caller can assert the
+        retry's corrective addendum landed in the second prompt.
+        """
+
+        raw_sequence = [raws] if isinstance(raws, dict) else list(raws)
+        prompts: list[str] = []
         with tempfile.TemporaryDirectory() as temporary:
             repository = _init_repo(Path(temporary))
             evidence = EvidenceCatalog()
@@ -169,8 +185,13 @@ class CodexExecutorFloorTests(unittest.TestCase):
                 "context:inspect",
                 "profile:inspector",
             )
+            calls = {"n": 0}
 
             def run(argv, **kwargs):
+                index = min(calls["n"], len(raw_sequence) - 1)
+                calls["n"] += 1
+                prompts.append(kwargs.get("input", ""))
+                raw = raw_sequence[index]
                 output = Path(argv[argv.index("-o") + 1])
                 output.write_text(json.dumps(raw), encoding="utf-8")
                 return subprocess.CompletedProcess(
@@ -197,32 +218,79 @@ class CodexExecutorFloorTests(unittest.TestCase):
                     side_effect=run,
                 ),
             ):
-                return executor.execute(attempt)
+                return executor.execute(attempt), prompts
 
-    def test_placeholder_deliverable_is_refused(self) -> None:
+    def test_placeholder_deliverable_retries_then_succeeds(self) -> None:
+        """A refused first dispatch consumes one in-dispatch retry and recovers."""
+
+        placeholder = _raw_result(summary="test", deliverable_markdown="test")
+        substantive = _raw_result()
+        with tempfile.TemporaryDirectory() as audit_root:
+            journal = _open_audit_journal(Path(audit_root))
+            result, prompts = self._run_executor(
+                [placeholder, substantive], audit=journal
+            )
+            self.assertEqual(result.status, "succeeded", result.payload)
+            semantic = validate_semantic_result(
+                result,
+                expected_details_schema="inspection-details/1",
+            )
+            self.assertEqual(semantic.summary, _SUBSTANTIVE_SUMMARY)
+            self.assertEqual(len(prompts), 2, prompts)
+            self.assertNotIn("Corrective addendum", prompts[0])
+            self.assertIn("Corrective addendum", prompts[1])
+            self.assertIn("deliverable_markdown", prompts[1])
+            self.assertIn("placeholder_token", prompts[1])
+            refused = _journaled_events(journal, "deliverable_floor_refused")
+            self.assertEqual(len(refused), 1, refused)
+            self.assertEqual(
+                refused[0]["payload"],
+                {"field": "deliverable_markdown", "reason": "placeholder_token"},
+            )
+            retried = _journaled_events(journal, "deliverable_floor_retry_dispatched")
+            self.assertEqual(len(retried), 1, retried)
+            self.assertEqual(retried[0]["attempt_id"], "inspect/attempt-1")
+            self.assertEqual(
+                retried[0]["payload"],
+                {
+                    "field": "deliverable_markdown",
+                    "reason": "placeholder_token",
+                    "attempt": 2,
+                },
+            )
+
+    def test_placeholder_deliverable_still_refused_after_retry(self) -> None:
+        """A retry that also violates the floor fails with the existing payload shape."""
+
         raw = _raw_result(summary="test", deliverable_markdown="test")
         with tempfile.TemporaryDirectory() as audit_root:
             journal = _open_audit_journal(Path(audit_root))
-            result = self._run_executor(raw, audit=journal)
+            result, prompts = self._run_executor(raw, audit=journal)
             self.assertEqual(result.status, "failed", result.payload)
             self.assertEqual(
                 result.payload.get("error_type"), "DeliverableFloorViolation"
             )
             self.assertEqual(result.payload.get("field"), "deliverable_markdown")
             self.assertEqual(result.payload.get("reason"), "placeholder_token")
+            self.assertEqual(len(prompts), 2, prompts)
+            self.assertIn("Corrective addendum", prompts[1])
             events = _journaled_events(journal, "deliverable_floor_refused")
-            self.assertEqual(len(events), 1, events)
-            self.assertEqual(events[0]["status"], "failed")
-            self.assertEqual(events[0]["attempt_id"], "inspect/attempt-1")
-            self.assertEqual(
-                events[0]["payload"],
-                {"field": "deliverable_markdown", "reason": "placeholder_token"},
-            )
+            self.assertEqual(len(events), 2, events)
+            for event in events:
+                self.assertEqual(event["status"], "failed")
+                self.assertEqual(event["attempt_id"], "inspect/attempt-1")
+                self.assertEqual(
+                    event["payload"],
+                    {"field": "deliverable_markdown", "reason": "placeholder_token"},
+                )
+            retried = _journaled_events(journal, "deliverable_floor_retry_dispatched")
+            self.assertEqual(len(retried), 1, retried)
 
     def test_substantive_deliverable_passes_unchanged(self) -> None:
         raw = _raw_result()
-        result = self._run_executor(raw)
+        result, prompts = self._run_executor(raw)
         self.assertEqual(result.status, "succeeded", result.payload)
+        self.assertEqual(len(prompts), 1, prompts)
         semantic = validate_semantic_result(
             result,
             expected_details_schema="inspection-details/1",
@@ -234,8 +302,19 @@ class ClaudeExecutorFloorTests(unittest.TestCase):
     """The Claude semantic executor refuses a placeholder result mechanically."""
 
     def _run_executor(
-        self, raw: dict, *, audit: AuditJournal | None = None
-    ) -> TaskResult:
+        self,
+        raws: dict | list[dict],
+        *,
+        audit: AuditJournal | None = None,
+    ) -> tuple[TaskResult, list[str]]:
+        """Execute against a sequence of dispatch results, one per dispatch.
+
+        See :meth:`CodexExecutorFloorTests._run_executor` for the retry
+        semantics this mirrors between the two executors.
+        """
+
+        raw_sequence = [raws] if isinstance(raws, dict) else list(raws)
+        prompts: list[str] = []
         with tempfile.TemporaryDirectory() as temporary:
             repository = _init_repo(Path(temporary))
             evidence = EvidenceCatalog()
@@ -245,12 +324,16 @@ class ClaudeExecutorFloorTests(unittest.TestCase):
                 "context:inspect",
                 "profile:inspector",
             )
+            calls = {"n": 0}
 
             def run(argv, **kwargs):
+                index = min(calls["n"], len(raw_sequence) - 1)
+                calls["n"] += 1
+                prompts.append(kwargs.get("input", ""))
                 return subprocess.CompletedProcess(
                     argv,
                     0,
-                    stdout=json.dumps(_claude_envelope(raw)),
+                    stdout=json.dumps(_claude_envelope(raw_sequence[index])),
                     stderr="",
                 )
 
@@ -270,37 +353,87 @@ class ClaudeExecutorFloorTests(unittest.TestCase):
                     "harness_labs.core.claude_task_executor.subprocess.run",
                     side_effect=run,
                 ),
+                # A fixed snapshot on every call (rather than a short
+                # side_effect list) keeps this valid across however many
+                # dispatches the floor-violation retry loop runs.
                 patch(
                     "harness_labs.core.claude_task_executor.workspace_snapshot",
-                    side_effect=(_snapshot(), _snapshot()),
+                    return_value=_snapshot(),
                 ),
             ):
-                return executor.execute(attempt)
+                return executor.execute(attempt), prompts
 
-    def test_placeholder_deliverable_is_refused(self) -> None:
+    def test_placeholder_deliverable_retries_then_succeeds(self) -> None:
+        """A refused first dispatch consumes one in-dispatch retry and recovers."""
+
+        placeholder = _raw_result(summary="todo", deliverable_markdown="todo")
+        substantive = _raw_result()
+        with tempfile.TemporaryDirectory() as audit_root:
+            journal = _open_audit_journal(Path(audit_root))
+            result, prompts = self._run_executor(
+                [placeholder, substantive], audit=journal
+            )
+            self.assertEqual(result.status, "succeeded", result.payload)
+            semantic = validate_semantic_result(
+                result,
+                expected_details_schema="inspection-details/1",
+            )
+            self.assertEqual(semantic.summary, _SUBSTANTIVE_SUMMARY)
+            self.assertEqual(len(prompts), 2, prompts)
+            self.assertNotIn("Corrective addendum", prompts[0])
+            self.assertIn("Corrective addendum", prompts[1])
+            self.assertIn("deliverable_markdown", prompts[1])
+            self.assertIn("placeholder_token", prompts[1])
+            refused = _journaled_events(journal, "deliverable_floor_refused")
+            self.assertEqual(len(refused), 1, refused)
+            self.assertEqual(
+                refused[0]["payload"],
+                {"field": "deliverable_markdown", "reason": "placeholder_token"},
+            )
+            retried = _journaled_events(journal, "deliverable_floor_retry_dispatched")
+            self.assertEqual(len(retried), 1, retried)
+            self.assertEqual(retried[0]["attempt_id"], "inspect/attempt-1")
+            self.assertEqual(
+                retried[0]["payload"],
+                {
+                    "field": "deliverable_markdown",
+                    "reason": "placeholder_token",
+                    "attempt": 2,
+                },
+            )
+
+    def test_placeholder_deliverable_still_refused_after_retry(self) -> None:
+        """A retry that also violates the floor fails with the existing payload shape."""
+
         raw = _raw_result(summary="todo", deliverable_markdown="todo")
         with tempfile.TemporaryDirectory() as audit_root:
             journal = _open_audit_journal(Path(audit_root))
-            result = self._run_executor(raw, audit=journal)
+            result, prompts = self._run_executor(raw, audit=journal)
             self.assertEqual(result.status, "failed", result.payload)
             self.assertEqual(
                 result.payload.get("error_type"), "DeliverableFloorViolation"
             )
             self.assertEqual(result.payload.get("field"), "deliverable_markdown")
             self.assertEqual(result.payload.get("reason"), "placeholder_token")
+            self.assertEqual(len(prompts), 2, prompts)
+            self.assertIn("Corrective addendum", prompts[1])
             events = _journaled_events(journal, "deliverable_floor_refused")
-            self.assertEqual(len(events), 1, events)
-            self.assertEqual(events[0]["status"], "failed")
-            self.assertEqual(events[0]["attempt_id"], "inspect/attempt-1")
-            self.assertEqual(
-                events[0]["payload"],
-                {"field": "deliverable_markdown", "reason": "placeholder_token"},
-            )
+            self.assertEqual(len(events), 2, events)
+            for event in events:
+                self.assertEqual(event["status"], "failed")
+                self.assertEqual(event["attempt_id"], "inspect/attempt-1")
+                self.assertEqual(
+                    event["payload"],
+                    {"field": "deliverable_markdown", "reason": "placeholder_token"},
+                )
+            retried = _journaled_events(journal, "deliverable_floor_retry_dispatched")
+            self.assertEqual(len(retried), 1, retried)
 
     def test_substantive_deliverable_passes_unchanged(self) -> None:
         raw = _raw_result()
-        result = self._run_executor(raw)
+        result, prompts = self._run_executor(raw)
         self.assertEqual(result.status, "succeeded", result.payload)
+        self.assertEqual(len(prompts), 1, prompts)
         semantic = validate_semantic_result(
             result,
             expected_details_schema="inspection-details/1",
