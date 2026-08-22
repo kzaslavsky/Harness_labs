@@ -91,6 +91,21 @@ Undeclared binary kinds fail closed. Capture takes the mapping as
   experiments launcher for new campaigns — use the kit
   (`experiments/run_dtr_plan_graph.py` is the last copy; it predates the
   kit).
+- Plan amendments mid-lineage go through `--transition <file>` on the `run`
+  or `resume` stages: the file is a `plan-graph-version-transition/1` record
+  (`schemas/plan-version-transition.json`) whose `predecessor_plan_sha256`
+  must equal the persisted registration's `plan_sha256` exactly — refused
+  otherwise, before any registration or ledger state changes. The successor
+  registration atomically replaces the persisted predecessor (same logical
+  id, lineage, and run root preserved; no `-r2` re-registration needed), and
+  the retry ledger consumes one structural decision with per-node
+  `budget_carryover`. Requires the campaign's `automatic_recovery` to have
+  granted the revision action (e.g. `revise_acceptance`) at first
+  registration — the authority is registration-immutable, so opt in via
+  `build_campaign_launch_config(automatic_recovery=...)` when creating the
+  lineage. After the transition is consumed, plain `run`/`resume` (no flag)
+  keeps working: the launcher adopts the persisted transition-carrying
+  registration and the ledger replays the consumed record idempotently.
 
 ## Operational gotchas (each cost a real blocked attempt)
 

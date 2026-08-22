@@ -1,0 +1,40 @@
+{
+  "protocol": "improvement-proposal/1",
+  "proposal_id": "proposal-si05-fixture-unruled-01",
+  "pattern_ids": ["pattern-si05-fixture-01"],
+  "question": "Should module_a.py set its completion marker?",
+  "choice": "Set MARKER_A to True once the guard is satisfied.",
+  "alternatives": [
+    "Leave the marker False and document the gap instead."
+  ],
+  "rationale": "Fixture-only proposal used by tests/test_self_improve_loop.py to exercise open's refusal of a proposal with no accept ruling.",
+  "evidence": [
+    "tests/fixtures/improvement/loop/proposal-not-accepted.json"
+  ],
+  "consequences": [
+    "None beyond the one fixture module; this proposal never targets real product code."
+  ],
+  "reversible": true,
+  "status": "proposed",
+  "demonstrated_failure": "The fixture module is observed with its completion marker left False.",
+  "production_consumer": "tests/test_self_improve_loop.py, the controller-owned SI-05 verification gate.",
+  "end_to_end_assertion": "The success-criterion assertion re-reads the file and checks its marker literal.",
+  "target_surface": [
+    {"path": "src/pkg_a/module_a.py", "kind": "code", "governing_decisions": []}
+  ],
+  "accuracy_risk": "none",
+  "success_criteria": [
+    {
+      "file": "src/pkg_a/module_a.py",
+      "subject": "marker-a-not-set",
+      "required_paths": ["src/pkg_a/module_a.py"],
+      "statement": "src/pkg_a/module_a.py sets MARKER_A = True.",
+      "assertion": {
+        "argv": ["python3", "-c", "import pathlib, sys; sys.exit(0 if 'MARKER_A = True' in pathlib.Path('src/pkg_a/module_a.py').read_text() else 1)"],
+        "timeout_seconds": 30
+      }
+    }
+  ],
+  "rollback": "Revert MARKER_A to False; no other state is touched.",
+  "ruling": null
+}

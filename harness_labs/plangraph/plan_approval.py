@@ -73,6 +73,13 @@ IMPACT_ANALYSIS_UNSUPPORTED_NOTICE = "required-paths-impact-unsupported"
 #: this plan's granted paths -- "these decisions govern your paths" instead
 #: of "read the ADR directory".
 ACTIVE_DECISION_NOTICE = "active-decision-notice"
+#: High severity only -- an acceptance criterion references production
+#: files/symbols its own run cannot write, whose writable home (if any) is a
+#: different run's grant. The SI-06 defect class: a testing node whose
+#: criterion demands logic that can only land in an already-sealed sibling's
+#: ``allowed_paths``, discovered mid-graph as a repeated block instead of at
+#: admission.
+CRITERION_GRANT_MISMATCH_WARNING = "criterion-logic-outside-grant"
 
 #: Non-recursive listing directory for decision records, mirroring
 #: ``decision_registry.load_decisions``'s directory scan.
@@ -553,6 +560,9 @@ def _run_static_gates(
         _sibling_overlap_warnings(plan)
         + _unclaimed_grant_warnings(plan)
         + impact_warnings
+        + _criterion_grant_warnings(
+            plan, _git_list_tree_paths(repository, base_commit)
+        )
         + report.warning_entries()
     )
     notices = impact_notices + ([decision_notice] if decision_notice is not None else [])
@@ -760,6 +770,11 @@ def _git_list_py_paths(repository: Path, base_commit: str) -> tuple[str, ...]:
     return tuple(sorted(line for line in listing.splitlines() if line.endswith(".py")))
 
 
+def _git_list_tree_paths(repository: Path, base_commit: str) -> tuple[str, ...]:
+    listing = _git(repository, "ls-tree", "-r", "--name-only", base_commit)
+    return tuple(sorted(listing.splitlines()))
+
+
 def _impact_warnings_and_notices(
     repository: Path, base_commit: str, plan: PlanGraphPlan
 ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
@@ -831,6 +846,225 @@ def _impact_warnings_and_notices(
     warnings.sort(key=lambda record: record["runs"])
     notices.sort(key=lambda record: (record["run"], record["path"]))
     return warnings, notices
+
+
+#: Tokens an acceptance criterion may use to reference a repository file:
+#: slash paths (``harness_labs/graphrun/improvement_loop.py``,
+#: ``docs/decisions/TEMPLATE.md``), bare Python filenames
+#: (``self_improve.py``), and dotted symbol references whose head is a
+#: snake_case module name (``decision_registry.active_decisions_for_paths``).
+#: Capitalized heads (``ConvergenceLedger.open_findings``) are class
+#: references, not modules, and are deliberately not matched.
+_CRITERION_SLASH_PATH_RE = re.compile(r"[A-Za-z0-9_.\-]+(?:/[A-Za-z0-9_.\-]+)+")
+_CRITERION_PY_FILENAME_RE = re.compile(r"\b[A-Za-z0-9_\-]+\.py\b")
+_CRITERION_DOTTED_SYMBOL_RE = re.compile(
+    r"\b([a-z_][a-z0-9_]*)\.[A-Za-z_][A-Za-z0-9_]*\b"
+)
+
+
+def _is_production_code_path(path: str) -> bool:
+    """A ``.py`` file outside ``tests/`` -- the only references that can
+    demand new logic a testing node cannot host itself."""
+
+    return path.endswith(".py") and path.split("/", 1)[0] != "tests"
+
+
+def _holds_production_write_grant(run: object) -> bool:
+    """Whether a run could host production logic inside its own grant.
+
+    Test paths, docs paths, and dotfiles cannot carry production behavior; a
+    ``.py`` grant or an extensionless (directory) grant elsewhere can. The
+    directory case is deliberately conservative: an unclassifiable directory
+    counts as capacity, suppressing the homeless-reference prong rather than
+    inventing findings for runs that may well be able to implement locally.
+    """
+
+    for path in run.allowed_paths:
+        head = path.split("/", 1)[0]
+        name = PurePosixPath(path).name
+        if head in ("tests", "docs") or name.startswith("."):
+            continue
+        if path.endswith(".py") or "." not in name:
+            return True
+    return False
+
+
+def _criterion_file_references(
+    text: str,
+    base_paths: frozenset[str],
+    granted_paths: Sequence[str],
+    py_paths_by_name: Mapping[str, frozenset[str]],
+) -> frozenset[str]:
+    """Repository paths a criterion's text names or implies, v1 heuristic.
+
+    Slash tokens resolve to themselves when they exist at ``base_commit``
+    (as a file or a directory prefix) or sit under some run's grant; bare
+    ``*.py`` filenames and dotted-symbol module heads resolve through a
+    unique-basename match against the base tree plus every run's granted or
+    intended ``.py`` paths. Ambiguous or unresolvable tokens are dropped --
+    a recorded refusal to guess, not full semantic analysis.
+    """
+
+    resolved: set[str] = set()
+    slash_tokens: set[str] = set()
+    for match in _CRITERION_SLASH_PATH_RE.finditer(text):
+        token = match.group(0).rstrip("./")
+        if not token or "/" not in token:
+            continue
+        slash_tokens.add(token)
+        if (
+            token in base_paths
+            or any(base.startswith(token + "/") for base in base_paths)
+            or path_is_allowed(token, granted_paths)
+        ):
+            resolved.add(token)
+    stems = {match.group(0) for match in _CRITERION_PY_FILENAME_RE.finditer(text)}
+    stems |= {
+        match.group(1) + ".py"
+        for match in _CRITERION_DOTTED_SYMBOL_RE.finditer(text)
+    }
+    for stem in stems:
+        candidates = py_paths_by_name.get(stem, frozenset())
+        if len(candidates) == 1:
+            resolved.update(candidates)
+        elif len(candidates) > 1 and slash_tokens & candidates:
+            # An ambiguous basename is disambiguated when the same criterion
+            # also spells one candidate out as a full path.
+            resolved.update(slash_tokens & candidates)
+    return frozenset(resolved)
+
+
+def _criterion_grant_warnings(
+    plan: PlanGraphPlan, base_paths: Sequence[str]
+) -> list[dict[str, object]]:
+    """Warn when a run's acceptance criteria reference production files it
+    cannot write.
+
+    The defect class this catches statically is "criterion tests logic
+    outside the testing node's grant": on the self-improvement campaign,
+    AC-SI06-3 required a close-out emitter in ``improvement_loop.py`` --
+    SI-05's grant, already sealed by the time SI-06 ran -- while SI-06 could
+    only write tests and docs, and the graph blocked twice before a human
+    diagnosed it. Two prongs, both grounded in extracted file references:
+
+    - a reference whose writable home is a *different* run's ``allowed_paths``
+      is always flagged, naming those homes;
+    - a reference nobody can write is flagged only when the owning run holds
+      no production-code grant at all (the testing-node shape: if satisfying
+      the criterion needs any new production logic, this run has nowhere to
+      put it), listing its dependencies' production grants as the places
+      that logic would have had to land.
+
+    References under ``tests/`` are skipped entirely -- criteria routinely
+    name their own or sibling test files, and test-file placement is the
+    conformance analyzer's territory, not this check's.
+    """
+
+    base_set = frozenset(base_paths)
+    py_paths_by_name: dict[str, set[str]] = {}
+    for path in base_set:
+        if path.endswith(".py"):
+            py_paths_by_name.setdefault(PurePosixPath(path).name, set()).add(path)
+    for run in plan.runs:
+        granted = [intent.path for intent in run.path_intents]
+        granted += list(run.allowed_paths)
+        for path in granted:
+            if path.endswith(".py"):
+                py_paths_by_name.setdefault(PurePosixPath(path).name, set()).add(path)
+    frozen_by_name: Mapping[str, frozenset[str]] = {
+        name: frozenset(paths) for name, paths in py_paths_by_name.items()
+    }
+    all_granted: tuple[str, ...] = tuple(
+        sorted(
+            {
+                path
+                for run in plan.runs
+                for path in (
+                    list(run.allowed_paths)
+                    + [intent.path for intent in run.path_intents]
+                )
+            }
+        )
+    )
+
+    runs_by_id = {run.id: run for run in plan.runs}
+    ancestors: dict[str, frozenset[str]] = {}
+
+    def ancestry(run_id: str) -> frozenset[str]:
+        known = ancestors.get(run_id)
+        if known is not None:
+            return known
+        found: set[str] = set()
+        for dependency in runs_by_id[run_id].depends_on:
+            found.add(dependency)
+            found |= ancestry(dependency)
+        ancestors[run_id] = frozenset(found)
+        return ancestors[run_id]
+
+    warnings: list[dict[str, object]] = []
+    for run in plan.runs:
+        flagged: list[dict[str, object]] = []
+        homeless = False
+        for criterion_id in run.criteria:
+            text = plan.acceptance_criteria.get(criterion_id, "")
+            for path in sorted(
+                _criterion_file_references(
+                    text, base_set, all_granted, frozen_by_name
+                )
+            ):
+                if path.split("/", 1)[0] == "tests":
+                    continue
+                if path_is_allowed(path, run.allowed_paths):
+                    continue
+                homes = sorted(
+                    other.id
+                    for other in plan.runs
+                    if other.id != run.id
+                    and path_is_allowed(path, other.allowed_paths)
+                )
+                if not homes:
+                    if _holds_production_write_grant(run):
+                        continue
+                    if not _is_production_code_path(path):
+                        continue
+                    homeless = True
+                flagged.append(
+                    {
+                        "criterion": criterion_id,
+                        "path": path,
+                        "writable_homes": homes,
+                    }
+                )
+        if not flagged:
+            continue
+        warning: dict[str, object] = {
+            "kind": CRITERION_GRANT_MISMATCH_WARNING,
+            "severity": "high",
+            "runs": [run.id],
+            "paths": sorted({entry["path"] for entry in flagged}),
+            "criteria": sorted(
+                flagged, key=lambda entry: (entry["criterion"], entry["path"])
+            ),
+            "note": (
+                "acceptance criteria reference production files this run "
+                "cannot write; any logic they require can only land in "
+                "another run's grant (or nowhere), which surfaces as a "
+                "mid-graph block after the owning run has sealed -- move "
+                "the criterion, widen the grant, or re-home the logic"
+            ),
+        }
+        if homeless:
+            warning["dependency_production_grants"] = sorted(
+                {
+                    grant
+                    for dependency in ancestry(run.id)
+                    for grant in runs_by_id[dependency].allowed_paths
+                    if _is_production_code_path(grant)
+                }
+            )
+        warnings.append(warning)
+    warnings.sort(key=lambda record: record["runs"])
+    return warnings
 
 
 def _split_decision_list(value: str | None) -> tuple[str, ...]:

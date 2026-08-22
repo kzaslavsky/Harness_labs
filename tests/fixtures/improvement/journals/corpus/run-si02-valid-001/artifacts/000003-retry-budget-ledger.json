@@ -1,0 +1,1 @@
+{"classification":"product","event":"extended","failure_keys":["gate:flaky-assertion"],"lineage_id":"lineage-si02-valid","node_id":"node-d","protocol":"retry-budget-ledger/1","reason":"operator granted extension"}

@@ -19,6 +19,7 @@ import subprocess
 import tempfile
 import unittest
 from unittest import mock
+from unittest.mock import patch
 
 from harness_labs.featurerun.feature_run import (
     DeterministicVerificationResult,
@@ -35,7 +36,9 @@ from harness_labs.plangraph.plan_graph import (
     FEATURE_RUN_REQUEST_PROTOCOL,
     FeatureRunRequest,
     PlanGraph,
+    PlanGraphError,
     PlanRun,
+    persist_registration,
     register_plan_graph,
 )
 
@@ -324,6 +327,314 @@ class Cc08WideningTests(unittest.TestCase):
         )
         self.assertGreater(
             config["automatic_recovery"]["max_structural_decisions"], 0
+        )
+
+
+# -- plan-version transition path (sanctioned amendment mechanism) -----------
+TRANSITION_AUTHORITY = {
+    "protocol": "plan-graph-automatic-recovery/1",
+    "allowed_actions": [
+        "resume",
+        "extend_budget",
+        "transfer_ownership",
+        "revise_acceptance",
+    ],
+    "max_extra_node_launches": 6,
+    "max_structural_decisions": 2,
+}
+
+
+def _transition_record(predecessor: str, successor: str) -> dict:
+    return {
+        "protocol": "plan-graph-version-transition/1",
+        "action": "revise_acceptance",
+        "predecessor_plan_sha256": predecessor,
+        "successor_plan_sha256": successor,
+        "node_correspondence": {"a": "a"},
+        "budget_carryover": {"a": "full"},
+        "authorizing_decision": {
+            "protocol": "plan-graph-recovery-decision/1",
+            "action": "revise_acceptance",
+            "target": "plan_version",
+            "expected_prior_digest": predecessor,
+            "payload": {},
+        },
+    }
+
+
+class TransitionValidationTests(unittest.TestCase):
+    """load_validated_transition fails closed before any registration state."""
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.repository = self.root / "repository"
+        self.repository.mkdir()
+        for argv in (
+            ("init",),
+            ("config", "user.email", "tests@example.com"),
+            ("config", "user.name", "Tests"),
+        ):
+            subprocess.run(
+                ["git", *argv], cwd=self.repository, check=True, capture_output=True
+            )
+        plan = self.repository / "docs" / "plan.md"
+        plan.parent.mkdir()
+        plan.write_text("plan v1\n", encoding="utf-8")
+        subprocess.run(
+            ["git", "add", "docs/plan.md"],
+            cwd=self.repository, check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "commit", "-m", "plan"],
+            cwd=self.repository, check=True, capture_output=True,
+        )
+        base = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=self.repository, check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        self.registration = register_plan_graph(
+            repository=self.repository,
+            logical_graph_id="amend-campaign",
+            decomposition={
+                "plan": "docs/plan.md",
+                "base_commit": base,
+                "runs": [
+                    {
+                        "id": "a",
+                        "objective": "Build A",
+                        "plan_sections": ["1"],
+                        "criteria": ["AC-1"],
+                        "depends_on": [],
+                        "verification_argv": ["true"],
+                    }
+                ],
+                "plan_sections": {"1": "Build A. AC-1: A works."},
+                "acceptance_criteria": {"AC-1": "A works."},
+                "functionality_tests": [],
+            },
+            automatic_recovery=TRANSITION_AUTHORITY,
+        )
+        self.registration_root = self.root / "registration"
+        persist_registration(
+            repository=self.repository,
+            registration_root=self.registration_root,
+            registration=self.registration,
+        )
+        self.config = campaign_launcher.build_campaign_launch_config(
+            logical_graph_id="amend-campaign",
+            automatic_recovery=TRANSITION_AUTHORITY,
+        )
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def _write_transition(self, record) -> Path:
+        path = self.root / "transition.json"
+        path.write_text(json.dumps(record), encoding="utf-8")
+        return path
+
+    def test_valid_transition_naming_persisted_predecessor_loads(self) -> None:
+        record = _transition_record(self.registration.plan_sha256, "b" * 64)
+        checked = campaign_launcher.load_validated_transition(
+            self.config, self._write_transition(record), self.registration_root
+        )
+        self.assertEqual(checked, record)
+
+    def test_transition_not_naming_persisted_predecessor_is_refused(self) -> None:
+        record = _transition_record("f" * 64, "b" * 64)
+        with self.assertRaisesRegex(PlanGraphError, "exact predecessor"):
+            campaign_launcher.load_validated_transition(
+                self.config, self._write_transition(record), self.registration_root
+            )
+
+    def test_transition_without_predecessor_registration_is_refused(self) -> None:
+        record = _transition_record(self.registration.plan_sha256, "b" * 64)
+        with self.assertRaisesRegex(PlanGraphError, "existing predecessor"):
+            campaign_launcher.load_validated_transition(
+                self.config,
+                self._write_transition(record),
+                self.root / "no-registrations",
+            )
+
+    def test_transition_without_granted_revision_action_is_refused(self) -> None:
+        """The pinned default authority grants no revision action, so a
+        campaign that never opted in cannot thread a transition at all."""
+        config = campaign_launcher.build_campaign_launch_config(
+            logical_graph_id="amend-campaign"
+        )
+        record = _transition_record(self.registration.plan_sha256, "b" * 64)
+        with self.assertRaisesRegex(PlanGraphError, "transition is invalid"):
+            campaign_launcher.load_validated_transition(
+                config, self._write_transition(record), self.registration_root
+            )
+
+    def test_post_transition_plain_run_adopts_persisted_registration(self) -> None:
+        """After a transition is consumed, a transition-less re-run of the
+        same approved plan must adopt the persisted transition-carrying
+        registration instead of failing on its embedded-transition digest."""
+        plan = self.repository / "docs" / "plan.md"
+        plan.write_text("plan v2\n", encoding="utf-8")
+        subprocess.run(
+            ["git", "commit", "-am", "revise plan"],
+            cwd=self.repository, check=True, capture_output=True,
+        )
+        base = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=self.repository, check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        revised = {
+            "plan": "docs/plan.md",
+            "base_commit": base,
+            "runs": [
+                {
+                    "id": "a",
+                    "objective": "Build A",
+                    "plan_sections": ["1"],
+                    "criteria": ["AC-1"],
+                    "depends_on": [],
+                    "verification_argv": ["true"],
+                }
+            ],
+            "plan_sections": {"1": "Build A. AC-1: A works."},
+            "acceptance_criteria": {"AC-1": "A works."},
+            "functionality_tests": [],
+        }
+
+        def successor(transition=None):
+            return register_plan_graph(
+                repository=self.repository,
+                logical_graph_id="amend-campaign",
+                decomposition=revised,
+                automatic_recovery=TRANSITION_AUTHORITY,
+                plan_version_transition=transition,
+            )
+
+        transitioned = successor(
+            _transition_record(
+                self.registration.plan_sha256, successor().plan_sha256
+            )
+        )
+        persisted_path = persist_registration(
+            repository=self.repository,
+            registration_root=self.registration_root,
+            registration=transitioned,
+        )
+        persisted_bytes = persisted_path.read_bytes()
+        with patch.object(
+            campaign_launcher, "register_plan_graph", return_value=successor()
+        ), patch.object(
+            campaign_launcher,
+            "_registration_root",
+            lambda: self.registration_root,
+        ):
+            from types import SimpleNamespace
+
+            adopted, adopted_path = campaign_launcher._register_campaign_graph(
+                self.config,
+                SimpleNamespace(
+                    decomposition=revised,
+                    base_commit=base,
+                    repository_id="repository",
+                    decomposition_path="docs/plan.md",
+                ),
+                None,
+            )
+        self.assertEqual(adopted.graph_digest, transitioned.graph_digest)
+        self.assertEqual(adopted_path, persisted_path)
+        self.assertEqual(persisted_path.read_bytes(), persisted_bytes)
+
+    def test_non_object_transition_payload_is_refused(self) -> None:
+        path = self.root / "transition.json"
+        path.write_text("[]", encoding="utf-8")
+        with self.assertRaisesRegex(PlanGraphError, "JSON object"):
+            campaign_launcher.load_validated_transition(
+                self.config, path, self.registration_root
+            )
+
+
+class TransitionStageWiringTests(unittest.TestCase):
+    """--transition threads through run/resume and is refused elsewhere."""
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.receipt = self.root / "receipt.json"
+        self.receipt.write_text("{}", encoding="utf-8")
+        self.transition_path = self.root / "transition.json"
+        self.transition_path.write_text("{}", encoding="utf-8")
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def test_run_stage_threads_validated_transition(self) -> None:
+        sentinel = {"validated": True}
+        with patch.object(
+            campaign_launcher, "load_validated_transition", return_value=sentinel
+        ) as load, patch.object(
+            campaign_launcher, "run_graph", return_value=0
+        ) as run:
+            exit_code = campaign_launcher.main(
+                [
+                    "run",
+                    "--receipt", str(self.receipt),
+                    "--transition", str(self.transition_path),
+                ]
+            )
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(load.call_args.args[1], self.transition_path)
+        self.assertEqual(run.call_args.kwargs["transition"], sentinel)
+
+    def test_resume_stage_threads_validated_transition(self) -> None:
+        sentinel = {"validated": True}
+        with patch.object(
+            campaign_launcher, "load_validated_transition", return_value=sentinel
+        ), patch.object(
+            campaign_launcher, "resume_graph", return_value=0
+        ) as resume:
+            exit_code = campaign_launcher.main(
+                [
+                    "resume",
+                    "--receipt", str(self.receipt),
+                    "--predecessor-attempt-id", "attempt-1",
+                    "--blocker-evidence-ref", "artifact:sha256:" + "0" * 64,
+                    "--transition", str(self.transition_path),
+                ]
+            )
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(resume.call_args.kwargs["transition"], sentinel)
+
+    def test_refused_transition_halts_before_run(self) -> None:
+        with patch.object(
+            campaign_launcher,
+            "load_validated_transition",
+            side_effect=PlanGraphError("does not name the persisted registration"),
+        ), patch.object(campaign_launcher, "run_graph", return_value=0) as run:
+            exit_code = campaign_launcher.main(
+                [
+                    "run",
+                    "--receipt", str(self.receipt),
+                    "--transition", str(self.transition_path),
+                ]
+            )
+        self.assertEqual(exit_code, 1)
+        run.assert_not_called()
+
+    def test_prepare_and_issue_refuse_transition(self) -> None:
+        for stage in ("prepare", "issue"):
+            with self.subTest(stage=stage), self.assertRaises(SystemExit):
+                campaign_launcher.main(
+                    [stage, "--transition", str(self.transition_path)]
+                )
+
+    def test_automatic_recovery_is_parameterized_with_pinned_default(self) -> None:
+        config = campaign_launcher.build_campaign_launch_config(
+            automatic_recovery=TRANSITION_AUTHORITY
+        )
+        self.assertEqual(config["automatic_recovery"], TRANSITION_AUTHORITY)
+        self.assertEqual(
+            campaign_launcher.build_campaign_launch_config()["automatic_recovery"],
+            GOLDEN_CONFIG["automatic_recovery"],
         )
 
 

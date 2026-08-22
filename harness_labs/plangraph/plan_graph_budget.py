@@ -115,10 +115,19 @@ class RetryBudgetLedger:
             if state["authority"] is not None and state["authority"] != authority.as_mapping():
                 raise BudgetError("automatic recovery authority is registration-immutable; re-register a new lineage")
             if transition is not None and not changed_plan:
-                # A transition is the sole authorization for a new plan
-                # version.  Ignoring one on a same-version registration would
-                # silently discard a typed authority record.
-                raise BudgetError("plan-version transition requires a changed plan digest")
+                if state["consumed_transitions"].get(plan_sha256) == dict(transition):
+                    # A registration durably carries its authorizing
+                    # transition, so every later attempt of the transitioned
+                    # plan replays the exact record this ledger already
+                    # consumed.  That replay authorizes nothing new and
+                    # discards nothing; treat it as a same-plan
+                    # re-registration.
+                    transition = None
+                else:
+                    # A transition is the sole authorization for a new plan
+                    # version.  Ignoring one on a same-version registration
+                    # would silently discard a typed authority record.
+                    raise BudgetError("plan-version transition requires a changed plan digest")
             if changed_plan:
                 if transition is not None:
                     try:
@@ -604,7 +613,7 @@ class RetryBudgetLedger:
         return _Lock(handle, ledger_was_missing=ledger_was_missing)
 
     def _fold(self, handle) -> dict[str, Any]:
-        state: dict[str, Any] = {"plan_sha256": set(), "active_plan_sha256": None, "gates": {}, "nodes": {}, "reservations": {}, "finding_keys": {}, "accepted_plan_sha256": None, "imported_invocations": set(), "authority": None, "automatic_recovery_extra_launches": 0, "automatic_recovery_structural_decisions": 0, "pending_plan_transition_decision": None}
+        state: dict[str, Any] = {"plan_sha256": set(), "active_plan_sha256": None, "gates": {}, "nodes": {}, "reservations": {}, "finding_keys": {}, "accepted_plan_sha256": None, "imported_invocations": set(), "authority": None, "automatic_recovery_extra_launches": 0, "automatic_recovery_structural_decisions": 0, "pending_plan_transition_decision": None, "consumed_transitions": {}}
         handle.seek(0)
         for line in handle:
             try:
@@ -630,6 +639,7 @@ class RetryBudgetLedger:
                                     or not set(checked_transition["node_correspondence"]).issubset(state["gates"])
                                     or state["pending_plan_transition_decision"] != checked_transition["authorizing_decision"]): raise ValueError
                             state["pending_plan_transition_decision"] = None
+                            state["consumed_transitions"][event["plan_sha256"]] = event["transition"]
                         elif not event.get("consumes_plan_change_authorization") or state["accepted_plan_sha256"] != event["plan_sha256"]: raise ValueError
                         state["accepted_plan_sha256"] = None
                     state["authority"] = authority.as_mapping()

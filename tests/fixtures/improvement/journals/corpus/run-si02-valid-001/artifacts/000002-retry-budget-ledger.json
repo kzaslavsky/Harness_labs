@@ -1,0 +1,1 @@
+{"classification":"infrastructure_transient","event":"abandoned","failure_keys":["gate:verification-timeout"],"lineage_id":"lineage-si02-valid","node_id":"node-c","protocol":"retry-budget-ledger/1","reason":"exceeded retry ceiling"}
