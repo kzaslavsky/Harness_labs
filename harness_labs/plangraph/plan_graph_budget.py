@@ -301,6 +301,13 @@ class RetryBudgetLedger:
         This deliberately accepts no prose-derived counts.  Replaying a child
         result is safe because identifiers already folded into the ledger are
         ignored rather than charged a second time.
+
+        Imported facts land in per-node ``evidence_counters`` (and the
+        taxonomy ``attempt_counters``), never in the launch-class ``counters``
+        that admission checks against: intra-launch gate invocations and
+        repair dispatches are already bounded by the child's own limits, and
+        charging them against ``node_gate_limit`` would let a single thorough
+        launch exhaust every future launch and adoption verdict.
         """
         verification = evidence.get("verification")
         if not isinstance(verification, Mapping):
@@ -576,7 +583,7 @@ class RetryBudgetLedger:
     def _node(state: dict[str, Any], node_id: str) -> dict[str, Any]:
         return state["nodes"].setdefault(
             node_id,
-            {"launches": 0, "extra": 0, "reservations": {}, "counters": {}, "finding_keys": {}},
+            {"launches": 0, "extra": 0, "reservations": {}, "counters": {}, "evidence_counters": {}, "finding_keys": {}},
         )
 
     def _locked(self, shared: bool = False):
@@ -692,7 +699,12 @@ class RetryBudgetLedger:
                     counters = node.setdefault("attempt_counters", {name: 0 for name in _ATTEMPT_COUNTERS})
                     counters["gate_invocations" if event["kind"] == "gate_invocation" else "repair_dispatches"] += 1
                     if classification is not None:
-                        node["counters"][classification] = node["counters"].get(classification, 0) + 1
+                        # Imported child facts are a retroactive record, never
+                        # a charge against the launch-class allowance: one
+                        # launch whose child loops through several classified
+                        # gate invocations and repair dispatches must not
+                        # exhaust the node's remaining launches.
+                        node["evidence_counters"][classification] = node["evidence_counters"].get(classification, 0) + 1
                     state["imported_invocations"].add(invocation_id)
                 elif kind == "blocked": self._node(state, event["node_id"])["blocked"] = True
                 elif kind == "extended":
@@ -749,7 +761,7 @@ class RetryBudgetLedger:
                             or event.get("node_id") not in state["gates"]): raise ValueError
                     if event["carryover"] == "reset":
                         node = self._node(state, event["node_id"])
-                        node["launches"] = 0; node["extra"] = 0; node["counters"] = {}
+                        node["launches"] = 0; node["extra"] = 0; node["counters"] = {}; node["evidence_counters"] = {}
                         node["attempt_counters"] = {name: 0 for name in _ATTEMPT_COUNTERS}
                         for key, count in node["finding_keys"].items():
                             remaining = state["finding_keys"].get(key, 0) - count
@@ -768,7 +780,7 @@ class RetryBudgetLedger:
                         raise ValueError
                     state["accepted_plan_sha256"] = accepted_plan_sha256
                     if event["carryover"] == "reset":
-                        node["launches"] = 0; node["counters"] = {}
+                        node["launches"] = 0; node["counters"] = {}; node["evidence_counters"] = {}
                         node["attempt_counters"] = {name: 0 for name in _ATTEMPT_COUNTERS}
                         for key, count in node["finding_keys"].items():
                             remaining = state["finding_keys"].get(key, 0) - count
@@ -788,6 +800,7 @@ class RetryBudgetLedger:
         node["launches"] = 0
         node["extra"] = 0
         node["counters"] = {}
+        node["evidence_counters"] = {}
         node["attempt_counters"] = {name: 0 for name in _ATTEMPT_COUNTERS}
         for key, count in node["finding_keys"].items():
             remaining = state["finding_keys"].get(key, 0) - count

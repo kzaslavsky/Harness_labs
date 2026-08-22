@@ -3197,7 +3197,17 @@ class PlanGraph:
             for node_id, node in nodes.items():
                 if isinstance(node_id, str) and isinstance(node, Mapping):
                     budget_node = budget_nodes.get(node_id, {})
-                    counters = budget_node.get("counters", {}) if isinstance(budget_node, Mapping) else {}
+                    # Merge launch-class charges with imported child evidence
+                    # tallies: the escalation artifact reports every observed
+                    # classification even though only the former consumes the
+                    # launch allowance.
+                    counters: dict[str, int] = {}
+                    if isinstance(budget_node, Mapping):
+                        for source in (budget_node.get("counters", {}), budget_node.get("evidence_counters", {})):
+                            if isinstance(source, Mapping):
+                                for name, count in source.items():
+                                    if isinstance(count, int):
+                                        counters[name] = counters.get(name, 0) + count
                     classification = "indeterminate"
                     if node_id == result.failed_run_id and isinstance(evidence, Mapping):
                         candidate = evidence.get("classification")
