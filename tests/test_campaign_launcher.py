@@ -13,13 +13,31 @@ automatic_recovery.allowed_actions, max_structural_decisions bound).
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
+from harness_labs.featurerun.feature_run import (
+    DeterministicVerificationResult,
+    FeatureRunResult,
+)
+from harness_labs.featurerun.review_fix import ReviewFixResult
 from harness_labs.graphrun import campaign_launcher
 from harness_labs.graphrun.agent_mixture import build_role_profiles
-from harness_labs.graphrun.escalation_judge import DEFAULT_JUDGE_IDENTITY
+from harness_labs.graphrun.escalation_judge import (
+    DEFAULT_JUDGE_IDENTITY,
+    ConfirmEverythingStubJudge,
+)
+from harness_labs.plangraph.plan_graph import (
+    FEATURE_RUN_REQUEST_PROTOCOL,
+    FeatureRunRequest,
+    PlanGraph,
+    PlanRun,
+    register_plan_graph,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SHIM_PATH = REPO_ROOT / "experiments" / "run_convergence_plan_graph.py"
@@ -307,6 +325,372 @@ class Cc08WideningTests(unittest.TestCase):
         self.assertGreater(
             config["automatic_recovery"]["max_structural_decisions"], 0
         )
+
+
+# -- evidence seam: _launch_node must hand back outcome_evidence() -----------
+
+
+def _git(repository: Path, *arguments: str) -> str:
+    completed = subprocess.run(
+        ["git", *arguments],
+        cwd=repository,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if completed.returncode:
+        raise AssertionError(completed.stderr)
+    return completed.stdout.strip()
+
+
+def _escalated_record(key: str, required_paths: list[str], protects: str) -> dict:
+    """A full escalated-finding record as the review-fix ledger emits it."""
+
+    return {
+        "key": key,
+        "file": required_paths[0],
+        "anchor_path": required_paths[0],
+        "line": None,
+        "end_line": None,
+        "subject": "out of grant",
+        "statement": "This finding needs a path outside my grant.",
+        "category": "review",
+        "severity": "critical",
+        "score": 90,
+        "fix_cost": "local",
+        "protects": protects,
+        "requires_disposition": True,
+        "contract_violation": False,
+        "scope_expanding": True,
+        "outcome": "escalated",
+        "outcome_reason": "escalated: required_paths_outside_grant",
+        "escalation_reason": "required_paths_outside_grant",
+        "cycles_seen": [1],
+        "occurrences": 1,
+        "source_finding_ids": [key],
+        "evidence_refs": [],
+        "fix_attempts": [],
+        "reopened_count": 0,
+        "origin_node": "",
+        "transferred_to": "",
+        "transfer_eligible": True,
+        "required_paths": list(required_paths),
+        "anchor_out_of_grant": False,
+        "scope_screen_class": "",
+        "inherited": False,
+    }
+
+
+def _review_fix_result(*escalated: dict) -> ReviewFixResult:
+    return ReviewFixResult(
+        status="completed",
+        reason="review-fix loop completed",
+        cycles=1,
+        risk_tier="standard",
+        ledger_ref="artifact:sha256:" + "0" * 64,
+        open_finding_keys=(),
+        technical_debt_keys=(),
+        escalated_findings=tuple(escalated),
+    )
+
+
+def _stub_feature_run_result(
+    node_id: str, run_dir: Path, review_fix: ReviewFixResult | None
+) -> FeatureRunResult:
+    verification = DeterministicVerificationResult(
+        status="succeeded",
+        reason="verification command exited 0",
+        command_attempts=(
+            {
+                "invocation_id": f"verify-{node_id}-1",
+                "argv": ["python3", "-m", "pytest", "-q"],
+                "exit_code": 0,
+            },
+        ),
+        repair_attempts=0,
+    )
+    return FeatureRunResult(
+        status="succeeded",
+        contract=None,
+        dispatch=None,
+        run_view={},
+        git_receipts=(
+            {"operation": "commit", "candidate_commit": f"{node_id}-commit"},
+        ),
+        manifest={},
+        run_dir=run_dir,
+        worktree_path=run_dir,
+        review_fix=review_fix,
+        verification=verification,
+    )
+
+
+class LaunchNodeOutcomeEvidenceTests(unittest.TestCase):
+    """The launcher must return the canonical ``outcome_evidence()`` shape.
+
+    A launcher that hand-builds ``{"verification": ...}`` only starves
+    ``PlanGraph._escalated_findings`` / ``_transferred_findings`` /
+    ``_carried_finding_obligations`` on every node, so escalations never
+    reach the CC-08 judge and open findings are rediscovered from scratch
+    on retry (observed empirically on si-graph-r2 attempts 3-5).
+    """
+
+    def test_outcome_carries_review_fix_and_verification_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            run_dir = Path(temporary) / "run"
+            run_dir.mkdir()
+            run = PlanRun(
+                id="node-1",
+                objective="Build node 1",
+                plan_sections=("1",),
+                criteria=("AC-1",),
+                verification_argv=("python3", "-m", "pytest", "-q"),
+                allowed_paths=("consumer.py",),
+            )
+            request = FeatureRunRequest(
+                protocol=FEATURE_RUN_REQUEST_PROTOCOL,
+                run=run,
+                base_commit="0" * 40,
+                plan="docs/approved-plan.md",
+                plan_base_commit="0" * 40,
+                plan_sha256="0" * 64,
+                plan_graph_id="graph-1",
+                plan_node_id="node-1",
+                feature_run_id="fr-node-1",
+                run_dir=run_dir,
+            )
+            record = _escalated_record(
+                "consumer.py:needs-producer", ["producer.py"], protects="AC-1"
+            )
+            result = _stub_feature_run_result(
+                "node-1", run_dir, _review_fix_result(record)
+            )
+            config = campaign_launcher.build_campaign_launch_config()
+
+            with mock.patch.object(
+                campaign_launcher,
+                "run_plan_graph_feature_worktree",
+                return_value=result,
+            ):
+                outcome = campaign_launcher._launch_node(
+                    config, request, {"AC-1": "A works."}, "main"
+                )
+
+            self.assertEqual(outcome.status, "succeeded")
+            self.assertEqual(outcome.candidate_commit, "node-1-commit")
+            # The full canonical shape, not a hand-built verification-only dict.
+            self.assertEqual(outcome.evidence, result.outcome_evidence())
+            escalated = outcome.evidence["review_fix"]["escalated_findings"]
+            self.assertEqual(len(escalated), 1)
+            self.assertEqual(escalated[0]["key"], "consumer.py:needs-producer")
+            self.assertEqual(
+                escalated[0]["escalation_reason"], "required_paths_outside_grant"
+            )
+            self.assertEqual(
+                [
+                    attempt["invocation_id"]
+                    for attempt in outcome.evidence["verification"]["command_attempts"]
+                ],
+                ["verify-node-1-1"],
+            )
+
+    def test_outcome_evidence_is_none_when_run_produced_none(self) -> None:
+        """``outcome_evidence() or None`` — an evidence-free run must keep the
+        prior ``evidence=None`` contract rather than hand the graph ``{}``."""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            run_dir = Path(temporary) / "run"
+            run_dir.mkdir()
+            run = PlanRun(
+                id="node-1",
+                objective="Build node 1",
+                plan_sections=("1",),
+                criteria=("AC-1",),
+                verification_argv=("python3", "-m", "pytest", "-q"),
+                allowed_paths=("consumer.py",),
+            )
+            request = FeatureRunRequest(
+                protocol=FEATURE_RUN_REQUEST_PROTOCOL,
+                run=run,
+                base_commit="0" * 40,
+                plan="docs/approved-plan.md",
+                plan_base_commit="0" * 40,
+                plan_sha256="0" * 64,
+                plan_graph_id="graph-1",
+                plan_node_id="node-1",
+                feature_run_id="fr-node-1",
+                run_dir=run_dir,
+            )
+            result = _stub_feature_run_result("node-1", run_dir, None)
+            result = FeatureRunResult(
+                status=result.status,
+                contract=None,
+                dispatch=None,
+                run_view={},
+                git_receipts=result.git_receipts,
+                manifest={},
+                run_dir=run_dir,
+                worktree_path=run_dir,
+                review_fix=None,
+                verification=None,
+            )
+            config = campaign_launcher.build_campaign_launch_config()
+
+            with mock.patch.object(
+                campaign_launcher,
+                "run_plan_graph_feature_worktree",
+                return_value=result,
+            ):
+                outcome = campaign_launcher._launch_node(
+                    config, request, {"AC-1": "A works."}, "main"
+                )
+
+            self.assertIsNone(outcome.evidence)
+
+
+class LauncherEscalationIntegrationTests(unittest.TestCase):
+    """Escalations flow launcher -> graph -> CC-08 judge -> unseal.
+
+    Drives PlanGraph through the real ``_launcher`` wrapper (only the inner
+    ``run_plan_graph_feature_worktree`` is stubbed) with
+    ``ConfirmEverythingStubJudge``, mirroring tests/test_plan_graph.py's
+    stub-launcher escalation pin: a ``plan_graph_escalation_judged`` event is
+    journaled and the sealed owner node is unsealed.  Under the old
+    verification-only evidence dict both were unreachable.
+    """
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.repository = self.root / "repository"
+        self.repository.mkdir()
+        _git(self.repository, "init")
+        _git(self.repository, "config", "user.email", "tests@example.com")
+        _git(self.repository, "config", "user.name", "Tests")
+        plan = self.repository / "docs" / "approved-plan.md"
+        plan.parent.mkdir()
+        plan.write_text("Approved PlanGraph plan\n", encoding="utf-8")
+        _git(self.repository, "add", "docs/approved-plan.md")
+        _git(self.repository, "commit", "-m", "approved plan")
+        self.base_commit = _git(self.repository, "rev-parse", "HEAD")
+        self.payload = {
+            "plan": "docs/approved-plan.md",
+            "base_commit": self.base_commit,
+            "runs": [
+                {
+                    "id": "a", "objective": "Build A", "plan_sections": ["1"],
+                    "criteria": ["AC-1"], "depends_on": [],
+                    "verification_argv": ["python3", "-m", "unittest"],
+                    "allowed_paths": ["producer.py"],
+                },
+                {
+                    "id": "b", "objective": "Build B", "plan_sections": ["2"],
+                    "criteria": ["AC-2"], "depends_on": ["a"],
+                    "verification_argv": ["python3", "-m", "unittest"],
+                    "allowed_paths": ["consumer.py"],
+                },
+            ],
+            "plan_sections": {
+                "1": "Build A. AC-1: A works.",
+                "2": "Build B. AC-2: B works.",
+            },
+            "acceptance_criteria": {"AC-1": "A works.", "AC-2": "B works."},
+            "functionality_tests": [],
+        }
+        (self.root / "decomposition.json").write_text(
+            json.dumps(self.payload), encoding="utf-8"
+        )
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def test_escalation_reaches_judge_and_unseals_owner(self) -> None:
+        registration = register_plan_graph(
+            repository=self.repository,
+            logical_graph_id="launcher-evidence-seam",
+            decomposition=self.payload,
+            automatic_recovery={
+                "protocol": "plan-graph-automatic-recovery/1",
+                "allowed_actions": ["transfer_ownership"],
+                "max_extra_node_launches": 0,
+                "max_structural_decisions": 1,
+            },
+        )
+        record = _escalated_record(
+            "consumer.py:needs-producer", ["producer.py"], protects="AC-2"
+        )
+
+        def stub_run(**kwargs):
+            binding = kwargs["binding"]
+            run_dir = kwargs["run_dir"]
+            review_fix = (
+                _review_fix_result(record)
+                if binding.plan_node_id == "b"
+                else _review_fix_result()
+            )
+            return _stub_feature_run_result(
+                binding.plan_node_id, run_dir, review_fix
+            )
+
+        config = campaign_launcher.build_campaign_launch_config(
+            decomposition_path="decomposition.json"
+        )
+        judge = ConfirmEverythingStubJudge()
+
+        with mock.patch.object(campaign_launcher, "ROOT", self.root), \
+                mock.patch.object(
+                    campaign_launcher,
+                    "run_plan_graph_feature_worktree",
+                    side_effect=stub_run,
+                ):
+            launcher = campaign_launcher._launcher(config, "main")
+            graph = PlanGraph(
+                self.repository,
+                registration,
+                launcher,
+                run_root=self.root / "runs",
+                graph_run_id="launcher-evidence-attempt-1",
+                escalation_judge=judge,
+            )
+            result = graph.run()
+
+        # Confirmed escalation: owner "a" unsealed, attempt blocked for repair.
+        self.assertEqual(result.status, "blocked")
+        self.assertEqual(result.failed_run_id, "b")
+        self.assertEqual(len(judge.packets), 1)
+
+        audit = graph._audit_for_run()
+        events = [
+            json.loads(line)
+            for line in audit.journal.events_path.read_text(
+                encoding="utf-8"
+            ).splitlines()
+            if line.strip()
+        ]
+        judged = [
+            event for event in events
+            if event["event_type"] == "plan_graph_escalation_judged"
+        ]
+        self.assertEqual(len(judged), 1)
+        self.assertEqual(judged[0]["payload"]["finding_key"], record["key"])
+        self.assertEqual(judged[0]["payload"]["verdict"], "confirm")
+
+        unsealed = [
+            event for event in events
+            if event["event_type"] == "plan_graph_node_unsealed"
+        ]
+        self.assertEqual(len(unsealed), 1)
+        self.assertEqual(unsealed[0]["payload"]["plan_node_id"], "a")
+        self.assertEqual(unsealed[0]["payload"]["origin_node"], "b")
+        self.assertEqual(unsealed[0]["payload"]["finding_key"], record["key"])
+
+        escalation = json.loads(
+            (self.root / "runs" / graph.graph_run_id / "escalation.json")
+            .read_text(encoding="utf-8")
+        )
+        self.assertEqual(len(escalation["escalations"]), 1)
+        self.assertEqual(escalation["escalations"][0]["owner_node"], "a")
+        self.assertEqual(escalation["escalations"][0]["origin_node"], "b")
 
 
 if __name__ == "__main__":
