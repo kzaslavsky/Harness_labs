@@ -38,6 +38,7 @@ def project_run_view(kernel: ControllerKernel) -> dict[str, Any]:
                 "role": task["role"],
                 "objective": task["objective"],
                 "status": task["status"],
+                "orphaned": task.get("orphaned", False),
                 "details_schema": task["details_schema"],
                 "required_capabilities": list(task["required_capabilities"]),
                 "summary": task.get("summary"),
