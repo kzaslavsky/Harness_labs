@@ -14,6 +14,12 @@ Quick pointers:
   registry) — read `docs/development/engineering-memory-agent-guide.md`
   before authoring decompositions, editing `plan_approval.py` /
   `convergence_ledger.py`, or writing ADRs.
+- Self-improvement loop (mining run journals into blocker patterns and
+  gated improvement campaigns; `scripts/self_improve.py`) — read
+  `docs/development/self-improvement-agent-guide.md` before running an
+  audit, interpreting pattern records, or touching anything under
+  `docs/improvement/`; its §5–6 say what audit output means and what to
+  expect when fixes land on `main` mid-campaign.
 - Active development navigation: `docs/development/INDEX.md`.
 
 Quick rules that bite hardest:

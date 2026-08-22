@@ -4,31 +4,91 @@
     {
       "name": "plan-graph-dashboard",
       "runtimeExecutable": "python3",
-      "runtimeArgs": ["scripts/run_dashboard.py", "--assets-root", "dashboard/plan-graph/dist"],
+      "runtimeArgs": [
+        "scripts/run_dashboard.py",
+        "--assets-root",
+        "dashboard/plan-graph/dist"
+      ],
       "port": 8000
     },
     {
       "name": "cb-dashboard",
       "runtimeExecutable": "python3",
-      "runtimeArgs": ["scripts/run_dashboard.py", "--audit-root", "logs/runs/cb-graph", "--assets-root", "dashboard/plan-graph/dist", "--port", "8321", "--refresh-seconds", "10"],
+      "runtimeArgs": [
+        "scripts/run_dashboard.py",
+        "--audit-root",
+        "logs/runs/cb-graph",
+        "--assets-root",
+        "dashboard/plan-graph/dist",
+        "--port",
+        "8321",
+        "--refresh-seconds",
+        "10"
+      ],
       "port": 8321
     },
     {
       "name": "cc-dashboard",
       "runtimeExecutable": "python3",
-      "runtimeArgs": ["scripts/run_dashboard.py", "--audit-root", "logs/runs/cc-graph", "--assets-root", "dashboard/plan-graph/dist", "--port", "8322", "--refresh-seconds", "10"],
+      "runtimeArgs": [
+        "scripts/run_dashboard.py",
+        "--audit-root",
+        "logs/runs/cc-graph",
+        "--assets-root",
+        "dashboard/plan-graph/dist",
+        "--port",
+        "8322",
+        "--refresh-seconds",
+        "10"
+      ],
       "port": 8322
     },
     {
       "name": "dtr-dashboard",
       "runtimeExecutable": "python3",
-      "runtimeArgs": ["scripts/run_dashboard.py", "--audit-root", "logs/runs/dtr-graph", "--assets-root", "dashboard/plan-graph/dist", "--port", "8123", "--refresh-seconds", "2"],
+      "runtimeArgs": [
+        "scripts/run_dashboard.py",
+        "--audit-root",
+        "logs/runs/dtr-graph",
+        "--assets-root",
+        "dashboard/plan-graph/dist",
+        "--port",
+        "8123",
+        "--refresh-seconds",
+        "2"
+      ],
       "port": 8123
+    },
+    {
+      "name": "si-dashboard",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": [
+        "scripts/run_dashboard.py",
+        "--audit-root",
+        "logs/runs/si-graph-r2",
+        "--assets-root",
+        "dashboard/plan-graph/dist",
+        "--port",
+        "8325",
+        "--refresh-seconds",
+        "10"
+      ],
+      "port": 8325
     },
     {
       "name": "em-dashboard",
       "runtimeExecutable": "python3",
-      "runtimeArgs": ["scripts/run_dashboard.py", "--audit-root", "logs/runs/em-graph", "--assets-root", "dashboard/plan-graph/dist", "--port", "8323", "--refresh-seconds", "10"],
+      "runtimeArgs": [
+        "scripts/run_dashboard.py",
+        "--audit-root",
+        "logs/runs/em-graph",
+        "--assets-root",
+        "dashboard/plan-graph/dist",
+        "--port",
+        "8323",
+        "--refresh-seconds",
+        "10"
+      ],
       "port": 8323
     }
   ]

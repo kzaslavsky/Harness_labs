@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Self-improvement audit scheduler (SI-06 [si-06-schedule-close]).
+
+  This is a template, not a committed schedule: copy it to the operator's
+  own machine, fill in the two REPLACE_ME paths, and load it with
+  `launchd`. It is deliberately not installed by any script in this repo --
+  CI cannot mine (`logs/runs/*` is gitignored, mode-0700, local; a scheduled
+  GitHub Action would see an empty corpus), so the durable contract is this
+  operator-owned local schedule, not a CI cron.
+
+  The job's entire contract is one repo-owned command:
+
+      scripts/self_improve.py audit --propose-if-ready
+
+  `audit` mines `logs/runs/*` (SI-02) and clusters observations into
+  patterns (SI-03), writing pattern records to `logs/improvement/patterns/`.
+  `--propose-if-ready` only drafts a proposal when a `--judgment` callable
+  is also given (a live-model hook, deliberately never wired into this
+  template) -- with none, mining and clustering still run in full and any
+  drafted proposal still requires a separate operator `accept` ruling
+  before `scripts/self_improve.py open` can seed a campaign from it. This
+  job never opens a campaign, never dispatches a PlanGraph round, and never
+  commits anything: both human gates (the proposal ruling and the
+  per-round plan-approval receipt) stay exactly where SI-00 puts them.
+
+  Install:
+
+      cp docs/operations/self-improve.launchd.plist.example \
+        ~/Library/LaunchAgents/labs.harness.self-improve.plist
+      # edit the two REPLACE_ME paths below in the copy
+      launchctl load ~/Library/LaunchAgents/labs.harness.self-improve.plist
+
+  Uninstall:
+
+      launchctl unload ~/Library/LaunchAgents/labs.harness.self-improve.plist
+      rm ~/Library/LaunchAgents/labs.harness.self-improve.plist
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>labs.harness.self-improve</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/env</string>
+    <string>python3</string>
+    <string>REPLACE_ME/absolute/path/to/harness_labs/scripts/self_improve.py</string>
+    <string>audit</string>
+    <string>--propose-if-ready</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>REPLACE_ME/absolute/path/to/harness_labs</string>
+
+  <!-- Once a day at 06:00 local time. StartInterval (seconds) is an
+       alternative to StartCalendarInterval for a fixed-cadence schedule;
+       use only one of the two. -->
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>6</integer>
+    <key>Minute</key>
+    <integer>0</integer>
+  </dict>
+
+  <!-- logs/runs/* and logs/improvement/* are gitignored, mode-0700, local
+       (SI-00) -- this job's own stdout/stderr are operator-local state
+       too, kept outside the repository tree. -->
+  <key>StandardOutPath</key>
+  <string>/tmp/labs.harness.self-improve.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/labs.harness.self-improve.err.log</string>
+
+  <key>RunAtLoad</key>
+  <false/>
+</dict>
+</plist>

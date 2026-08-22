@@ -21,3 +21,8 @@ experiments/archimedes/
 experiments/retinology-demo/
 experiments/rocketship/
 experiments/trebuchet/
+
+# Self-improvement mining state, unaccepted drafts, and campaign ledgers
+# are local evidence; committed artifacts live under docs/improvement/
+# instead (SI-00/AC-SI06-1).
+logs/improvement/

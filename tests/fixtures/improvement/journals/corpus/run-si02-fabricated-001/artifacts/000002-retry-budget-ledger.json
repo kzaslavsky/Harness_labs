@@ -1,0 +1,1 @@
+{"classification":"infrastructure_transient","event":"abandoned","failure_keys":["gate:synthetic"],"lineage_id":"lineage-si02-fabricated","node_id":"node-c","protocol":"retry-budget-ledger/1","reason":"synthetic ceiling"}

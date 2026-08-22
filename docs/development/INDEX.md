@@ -91,6 +91,23 @@ Status: active
   and the campaign driver's history-aware ingest
   ([`../../harness_labs/plangraph/plan_refinement.py`](../../harness_labs/plangraph/plan_refinement.py),
   [`../../scripts/run_convergence_campaign.py`](../../scripts/run_convergence_campaign.py)).
+- Self-improvement agent (scheduled EM audit + delta-to-run planning +
+  convergence close, one braid over the three systems above, no parallel
+  machinery): [`self-improvement-agent-plan.md`](self-improvement-agent-plan.md)
+  and its registerable decomposition
+  [`self-improvement-decomposition.json`](self-improvement-decomposition.json).
+  Agent how-to (start here):
+  [`self-improvement-agent-guide.md`](self-improvement-agent-guide.md).
+  Recurrence: the repo-owned entry point `scripts/self_improve.py audit
+  --propose-if-ready`, scheduled locally via the launchd template
+  [`../operations/self-improve.launchd.plist.example`](../operations/self-improve.launchd.plist.example)
+  (CI cannot mine — `logs/runs/*` is gitignored and local). Committed
+  artifact home: [`../improvement/`](../improvement/), validated by
+  [`../../scripts/dev/check_improvement_artifacts.py`](../../scripts/dev/check_improvement_artifacts.py).
+  Close-out promotion drafts a `docs/decisions/` record from
+  `docs/decisions/TEMPLATE.md`
+  ([`../../harness_labs/graphrun/improvement_loop.py`](../../harness_labs/graphrun/improvement_loop.py):
+  `draft_decision_record`) for an operator to land by hand.
 
 ## Seed implementation records
 

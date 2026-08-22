@@ -1,0 +1,1 @@
+{"approved_plan": null, "created_at": "2026-08-01T00:00:00Z", "evidence_classification": "production_lifecycle", "objective": "SI-02 fixture run", "parent_correlation": null, "protocol": "harness-run-descriptor/1", "repository": {"base_commit": "0000000000000000000000000000000000000000"}, "run_id": "run-si02-valid-001", "run_kind": "feature_run"}

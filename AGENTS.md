@@ -22,6 +22,9 @@ Compare efficiency only across runs with equivalent acceptance criteria.
 - Campaign pipeline for agents: `docs/development/delta-to-run-agent-guide.md`
 - Engineering-memory features (impact warnings, finding history, decision
   registry) — agent how-to: `docs/development/engineering-memory-agent-guide.md`
+- Self-improvement loop (journal mining → blocker patterns → gated
+  improvement campaigns) — agent how-to:
+  `docs/development/self-improvement-agent-guide.md`
 - Machine-readable contracts: `schemas/`
 - Run output: `logs/runs/<run-id>/`
 - Bootstrap initializer retained from the seed project: `bin/`, `templates/`,
