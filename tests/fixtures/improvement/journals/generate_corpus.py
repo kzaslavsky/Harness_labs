@@ -241,6 +241,219 @@ def build_valid_002(run_dir: Path) -> None:
     _finish(run_dir, journal, run_id, "production_lifecycle")
 
 
+def build_causes_001(run_dir: Path) -> None:
+    """A run carrying one node-level cause per extraction source, plus the
+    lifecycle events that used to echo them.
+
+    Modelled on the real self-improvement campaign journals (SI-05 audit):
+    a kernel command rejection, a deliverable-floor placeholder trip, a
+    bypassed verification gate slot, a review/fix stop reported by the node
+    and then restated verbatim by the coordinator's recovery decision, and a
+    bare ``run_failed`` that says only that the run ended. It also carries an
+    authenticated ``plan-graph-block-escalation/1`` artifact whose blocked
+    node declares its own classification.
+    """
+
+    run_id = "run-si02-causes-001"
+    journal = AuditJournal(run_dir, run_id, actor=ACTOR, evidence_classification="production_lifecycle")
+
+    journal.append(
+        "command_rejected",
+        status="failed",
+        payload={
+            "command": {"type": "run.complete_request", "run_id": run_id},
+            "receipt": {
+                "error_code": "unknown_evidence",
+                "message": "completion gates failed: finding is unresolved: si02-impl/f1",
+                "status": "rejected",
+            },
+        },
+        attempt_id="attempt-1",
+    )
+    # A second rejection of the same shape: two genuine incidents from the
+    # same source, which dedup must NOT collapse into one.
+    journal.append(
+        "command_rejected",
+        status="failed",
+        payload={
+            "command": {"type": "task.dispatch", "run_id": run_id},
+            "receipt": {
+                "error_code": "unknown_evidence",
+                "message": "evidence ref is not admitted",
+                "status": "rejected",
+            },
+        },
+        attempt_id="attempt-1",
+    )
+
+    journal.append(
+        "deliverable_floor_refused",
+        status="failed",
+        payload={"field": "summary", "reason": "placeholder_token"},
+        attempt_id="attempt-1",
+    )
+
+    journal.append(
+        "plan_graph_gate_slot_bypassed",
+        status="failed",
+        payload={"plan_node_id": "SI-05"},
+    )
+
+    journal.append(
+        "review_fix_completed",
+        status="blocked",
+        payload={
+            "cycles": 2,
+            "node_id": "node-review",
+            "reason": "required findings escalated without discharge",
+            "status": "blocked",
+            "stop_reason": "required_findings_open",
+        },
+        attempt_id="attempt-1",
+    )
+    # The coordinator restating the node's blocked_reason verbatim: the echo
+    # that used to mint a second, differently-signed observation.
+    journal.append(
+        "recovery_decision",
+        status="blocked",
+        payload={
+            "action": "stop",
+            "blocked_reason": "required findings escalated without discharge",
+            "condition": "blocked",
+            "node_id": "node-review",
+            "reason": (
+                "non-transient blocked at stage 'review'; escalating with classified "
+                "evidence: required findings escalated without discharge"
+            ),
+            "stage": "review",
+            "stop_cause": "policy",
+        },
+        attempt_id="attempt-1",
+    )
+
+    review_ledger = {
+        "cycles": [{"cycle": 1, "distinct_findings": 2, "fix_keys": [], "review_attempt_id": "attempt-1"}],
+        "findings": {
+            "contract-1": {
+                "category": "repo-contract",
+                "contract_violation": True,
+                "cycles_seen": [1, 2],
+                "escalation_reason": "",
+                "evidence_refs": [],
+                "file": "docs/development/guide.md",
+                "fix_attempts": [{"cycle": 1, "outcome": "reopened"}],
+                "fix_cost": "one-line",
+                "key": "contract-1",
+                "occurrences": 2,
+                "origin_node": "node-review",
+                "outcome": "open",
+                "protects": "repository contracts",
+                "reopened_count": 1,
+                "requires_disposition": True,
+                "scope_expanding": False,
+                "score": 40,
+                "severity": "minor",
+                "source_finding_ids": ["contract-1"],
+                "statement": "Guide is missing its Status header.",
+                "subject": "guide missing status header",
+            },
+            "escalated-1": {
+                "category": "correctness",
+                "contract_violation": False,
+                "cycles_seen": [1],
+                "escalation_reason": "fixer made no progress",
+                "evidence_refs": [],
+                "file": "harness_labs/example.py",
+                "fix_attempts": [],
+                "fix_cost": "structural",
+                "key": "escalated-1",
+                "occurrences": 1,
+                "origin_node": "node-review",
+                "outcome": "escalated",
+                "outcome_reason": "escalated: fixer made no progress",
+                "protects": "runtime correctness",
+                "reopened_count": 0,
+                "requires_disposition": True,
+                "scope_expanding": False,
+                "score": 80,
+                "severity": "critical",
+                "source_finding_ids": ["escalated-1"],
+                "statement": "Retry path still unguarded after the fix budget.",
+                "subject": "retry guard",
+            },
+        },
+        "policy": {},
+        "protocol": "review-ledger/1",
+        "risk_tier": "mechanical",
+    }
+    review_artifact = journal.write_artifact("review-ledger", review_ledger)
+    journal.append(
+        "review_ledger_recorded",
+        status="succeeded",
+        payload={},
+        artifacts=(review_artifact,),
+    )
+
+    escalation = {
+        "blocked_node_id": "SI-05",
+        "graph_run_id": run_id,
+        "logical_graph_id": "si02-fixture-graph",
+        "nodes": [
+            {
+                "candidate_commit": None,
+                "classification": "harness_or_configuration",
+                "evidence_ref": None,
+                "node_id": "SI-05",
+                "open_obligations": [],
+                "reason": "writable worker completed without changing the repository",
+                "status": "blocked",
+                "tier": "tier_2",
+            },
+            {
+                "candidate_commit": "0" * 40,
+                "classification": "indeterminate",
+                "evidence_ref": None,
+                "node_id": "SI-04",
+                "open_obligations": [],
+                "reason": None,
+                "status": "succeeded",
+                "tier": "tier_2",
+            },
+        ],
+        "predecessor_attempt_id": None,
+        "protocol": "plan-graph-block-escalation/1",
+        "reason": "FeatureRun reported blocked",
+        "status_flags": {"complete": False, "success": False, "resumable": True, "deviated": False},
+    }
+    escalation_artifact = journal.write_artifact("plan-graph-block-escalation", escalation)
+    journal.append(
+        "plan_graph_block_escalated",
+        status="blocked",
+        payload={"stable_path": "escalation.json"},
+        artifacts=(escalation_artifact,),
+    )
+
+    # Pure lifecycle: no reason of its own, nothing but a terminal status.
+    journal.append("run_failed", status="blocked", payload={"terminal_status": "blocked"})
+
+    _finish(run_dir, journal, run_id, "production_lifecycle")
+
+
+def build_lifecycle_only_001(run_dir: Path) -> None:
+    """A run whose only failure record is a bare lifecycle event.
+
+    Proves the lifecycle-echo rule never empties a failing run: with no
+    cause-shaped or reason-bearing observation to defer to, the earliest
+    lifecycle observation is kept.
+    """
+
+    run_id = "run-si02-lifecycle-001"
+    journal = AuditJournal(run_dir, run_id, actor=ACTOR, evidence_classification="production_lifecycle")
+    journal.append("run_failed", status="failed", payload={"terminal_status": "failed"})
+    journal.append("plan_graph_completed", status="failed", payload={"terminal_status": "failed"})
+    _finish(run_dir, journal, run_id, "production_lifecycle")
+
+
 def build_fabricated_001(run_dir: Path) -> None:
     run_id = "run-si02-fabricated-001"
     journal = AuditJournal(run_dir, run_id, actor=ACTOR, evidence_classification="fabricated_fixture")
@@ -363,6 +576,8 @@ def main() -> None:
     for name, builder in (
         ("run-si02-valid-001", build_valid_001),
         ("run-si02-valid-002", build_valid_002),
+        ("run-si02-causes-001", build_causes_001),
+        ("run-si02-lifecycle-001", build_lifecycle_only_001),
         ("run-si02-fabricated-001", build_fabricated_001),
         ("run-si02-tampered-001", build_tampered_001),
     ):
