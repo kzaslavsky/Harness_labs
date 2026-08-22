@@ -212,6 +212,186 @@ class CoordinatorDispatcherTests(unittest.TestCase):
             self.assertEqual(resumed.manifest["status"], "succeeded")
             AuditJournal.verify(run_dir)
 
+    def _kernel_with_dead_session_running_task(
+        self,
+        schema: CoordinatorDispatchSchema,
+    ) -> tuple[ControllerKernel, EvidenceCatalog]:
+        """Checkpoint shape left by a coordinator process that died mid-task."""
+
+        contract = RunContract(
+            run_id="orphan-recovery",
+            objective="Recover in-flight work after coordinator death.",
+            phases=("active",),
+        )
+        evidence = EvidenceCatalog()
+        kernel = ControllerKernel(contract, evidence=evidence)
+
+        def dispatcher_command(kind: str, payload: dict, key: str):
+            return CommandEnvelope(
+                command_id=key,
+                run_id=contract.run_id,
+                type=kind,
+                actor=CommandActor("dispatcher-1", "dispatcher"),
+                expected_revision=kernel.revision,
+                idempotency_key=key,
+                payload=payload,
+            )
+
+        value = schema.as_dict()
+        registered = kernel.handle(
+            dispatcher_command(
+                "coordinator.schema_register",
+                {
+                    "protocol": value["protocol"],
+                    "schema_id": value["schema_id"],
+                    "sha256": schema.sha256(),
+                    "phases": ["active"],
+                    "segments": [
+                        {
+                            "id": segment.id,
+                            "phases": list(segment.phases),
+                            "max_attempts": segment.max_attempts,
+                        }
+                        for segment in schema.segments
+                    ],
+                },
+                "register-schema",
+            )
+        )
+        assert registered.accepted, registered.message
+        started = kernel.handle(
+            dispatcher_command(
+                "coordinator.session_start",
+                {
+                    "session_id": "active/attempt-1:dead-provider",
+                    "segment_id": "active",
+                    "attempt": 1,
+                },
+                "start-session",
+            )
+        )
+        assert started.accepted, started.message
+        dispatched = kernel.handle(
+            CommandEnvelope(
+                command_id="dispatch-implement",
+                run_id=contract.run_id,
+                type="task.dispatch",
+                actor=CommandActor("coordinator-1", "run_coordinator"),
+                expected_revision=kernel.revision,
+                idempotency_key="dispatch-implement",
+                payload={
+                    "tasks": [
+                        {
+                            "id": "implement",
+                            "role": "worker",
+                            "objective": "Implement the change",
+                            "details_schema": "work/1",
+                            "required_capabilities": [],
+                            "acceptance_criteria": [],
+                            "dependencies": [],
+                        }
+                    ]
+                },
+            )
+        )
+        assert dispatched.accepted, dispatched.message
+        kernel.mark_tasks_running(("implement",))
+        return kernel, evidence
+
+    def test_recovery_orphans_dead_sessions_running_task_for_supersede(
+        self,
+    ) -> None:
+        schema = _schema(
+            {"segments": [_segment("active", ["active"], max_attempts=2)]}
+        )
+        kernel, evidence = self._kernel_with_dead_session_running_task(schema)
+        dispatcher = CoordinatorDispatcher(
+            kernel,
+            evidence,
+            _scheduler(),
+            schema,
+            lambda launch, catalog: self.fail("recovery must not spawn"),
+        )
+
+        self.assertTrue(dispatcher.recover_interrupted_state())
+
+        state = kernel.snapshot()
+        self.assertNotEqual(state["status"], "blocked")
+        self.assertIsNone(state["coordinator_dispatch"]["active_session"])
+        task = state["tasks"]["implement"]
+        self.assertEqual(task["status"], "failed")
+        self.assertTrue(task["orphaned"])
+        self.assertEqual(
+            state["coordinator_dispatch"]["sessions"][-1]["orphaned_task_ids"],
+            ["implement"],
+        )
+
+        supersede = kernel.handle(
+            CommandEnvelope(
+                command_id="dispatch-implement-v2",
+                run_id=kernel.contract.run_id,
+                type="task.dispatch",
+                actor=CommandActor("coordinator-2", "run_coordinator"),
+                expected_revision=kernel.revision,
+                idempotency_key="dispatch-implement-v2",
+                payload={
+                    "tasks": [
+                        {
+                            "id": "implement-v2",
+                            "role": "worker",
+                            "objective": "Implement the change",
+                            "details_schema": "work/1",
+                            "required_capabilities": [],
+                            "acceptance_criteria": [],
+                            "dependencies": [],
+                            "supersedes_task_id": "implement",
+                        }
+                    ]
+                },
+            )
+        )
+        self.assertTrue(supersede.accepted, supersede.message)
+
+    def test_recovery_ingests_completed_unowned_worker_result(self) -> None:
+        schema = _schema(
+            {"segments": [_segment("active", ["active"], max_attempts=2)]}
+        )
+        kernel, evidence = self._kernel_with_dead_session_running_task(schema)
+        recovered_tasks = []
+
+        def recover(task) -> TaskResult | None:
+            recovered_tasks.append(task["id"])
+            return TaskResult(
+                attempt_id=task["attempt_id"],
+                status="succeeded",
+                payload=semantic_payload(
+                    summary="Reconstructed from the captured worker stdout.",
+                    details_schema="work/1",
+                    details={},
+                ),
+            )
+
+        dispatcher = CoordinatorDispatcher(
+            kernel,
+            evidence,
+            _scheduler(),
+            schema,
+            lambda launch, catalog: self.fail("recovery must not spawn"),
+            result_recovery=recover,
+        )
+
+        self.assertTrue(dispatcher.recover_interrupted_state())
+
+        self.assertEqual(recovered_tasks, ["implement"])
+        state = kernel.snapshot()
+        task = state["tasks"]["implement"]
+        self.assertEqual(task["status"], "succeeded")
+        self.assertFalse(task.get("orphaned", False))
+        self.assertEqual(
+            state["coordinator_dispatch"]["sessions"][-1]["orphaned_task_ids"],
+            [],
+        )
+
     def test_spawns_one_fresh_coordinator_per_schema_segment(self) -> None:
         contract = RunContract(
             run_id="segmented",
