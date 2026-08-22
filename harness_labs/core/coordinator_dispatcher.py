@@ -14,10 +14,59 @@ from harness_labs.core.controller_commands import CommandActor, CommandEnvelope
 from harness_labs.core.controller_coordinator import CoordinatorLoop
 from harness_labs.core.controller_evidence import EvidenceCatalog
 from harness_labs.core.controller_kernel import ControllerKernel, RunContract
-from harness_labs.core.controller_projection import ControllerQueries, project_run_view
+from harness_labs.core.controller_projection import (
+    ControllerQueries,
+    project_run_view,
+)
 from harness_labs.core.controller_run import restore_controller_checkpoint
 from harness_labs.core.controller_scheduler import CapabilityScheduler, RoleProfile
 from harness_labs.core.coordinator_schema import CoordinatorDispatchSchema, CoordinatorSegment
+
+
+# A coordinator turn that fails because a capability it depends on is simply
+# absent (a disabled tool host, a missing typed-controller surface, ...) will
+# fail identically on every relaunch: nothing about a fresh session changes
+# whether the capability exists. Retrying it is not "bounded patience", it is
+# a guaranteed-unproductive loop that only burns budget and grows the session
+# ledger. Recognize the shape of these reasons -- deliberately as an
+# extensible set of signatures rather than one hardcoded string -- and stop
+# immediately instead of classifying the outcome as recoverable.
+CAPABILITY_ABSENCE_SIGNATURES: tuple[str, ...] = (
+    "tool host is disabled",
+    "code-mode host is disabled",
+    "capability is not available",
+    "capability is unavailable",
+    "capability is disabled",
+    "host is not available",
+)
+
+
+def is_capability_absence_failure(reason: str) -> bool:
+    """True when ``reason`` names an absent/disabled capability, not a fluke.
+
+    Matched case-insensitively against ``CAPABILITY_ABSENCE_SIGNATURES``. A
+    hit means retrying will not help -- the run must stop and escalate with
+    the classified reason instead of relaunching the coordinator.
+    """
+
+    lowered = reason.lower()
+    return any(signature in lowered for signature in CAPABILITY_ABSENCE_SIGNATURES)
+
+
+def _coordinator_result_reason(result: TaskResult) -> str:
+    return str(result.payload.get("error") or result.payload.get("text") or "")
+
+
+# Hard backstop, independent of any per-segment ``max_attempts`` configured in
+# a schema and independent of how a failure gets classified: no coordinator
+# recovery loop may relaunch more than this many times within one dispatcher
+# run. This is what actually stopped the incident this constant is named
+# for -- 967 consecutive relaunches of a coordinator whose first turn was
+# already terminally blocked -- before the capability-absence classification
+# above existed. Keep both: classification handles the known failure shapes
+# fast (on the first attempt); this cap is the guardrail for every failure
+# shape nobody has classified yet.
+COORDINATOR_RECOVERY_HARD_CAP = 15
 
 
 @dataclass(frozen=True)
@@ -102,6 +151,24 @@ class CoordinatorDispatcher:
                 self._block(
                     f"coordinator segment {segment.id} exhausted "
                     f"{segment.max_attempts} attempts"
+                )
+                return self._result(last_result)
+            if attempt > COORDINATOR_RECOVERY_HARD_CAP:
+                # Backstop independent of schema config and independent of
+                # classification: whatever kept this segment relaunching --
+                # a misclassified transient, an unrecognized failure
+                # signature, anything -- stops here rather than looping
+                # unbounded.
+                last_reason = (
+                    _coordinator_result_reason(last_result)
+                    if last_result is not None
+                    else ""
+                )
+                self._block(
+                    f"coordinator segment {segment.id} exceeded the hard "
+                    f"coordinator recovery cap of {COORDINATOR_RECOVERY_HARD_CAP} "
+                    "relaunches within one node attempt; repeating failure: "
+                    + last_reason[:200]
                 )
                 return self._result(last_result)
             missing = self._missing_required_artifacts(segment, state)
@@ -189,11 +256,28 @@ class CoordinatorDispatcher:
                         + ", ".join(missing_exit)
                     )
                     outcome = "blocked"
+            capability_absence_reason: str | None = None
+            if outcome == "recoverable_failure":
+                reason_text = _coordinator_result_reason(last_result)
+                if is_capability_absence_failure(reason_text):
+                    # Non-transient by nature: a fresh coordinator session
+                    # will hit the same absent capability every time, so
+                    # relaunching cannot recover it. Stop now, on the first
+                    # occurrence, instead of spending the recovery budget.
+                    outcome = "blocked"
+                    capability_absence_reason = reason_text
             self._session_ended(
                 tracked.audit_session_id,
                 outcome,
                 last_result,
             )
+            if capability_absence_reason is not None:
+                self._block(
+                    f"coordinator segment {segment.id} reported a missing or "
+                    "disabled capability; stopping without retry: "
+                    + capability_absence_reason[:200]
+                )
+                return self._result(last_result)
             if outcome in {"boundary", "recoverable_failure"}:
                 continue
             return self._result(last_result)
@@ -246,10 +330,6 @@ class CoordinatorDispatcher:
             for _ref, record in sorted(state["artifacts"].items())
             if record["kind"] in segment.context_artifact_kinds
         ]
-        history = [
-            copy.deepcopy(item)
-            for item in state["coordinator_dispatch"]["sessions"]
-        ]
         context = {
             "protocol": "coordinator-segment-context/1",
             "schema_id": self.schema.schema_id,
@@ -262,7 +342,15 @@ class CoordinatorDispatcher:
                 "coordinator_profile": segment.coordinator_profile,
             },
             "handoff_artifacts": selected,
-            "prior_coordinator_sessions": history,
+            # Prior coordinator session history is carried once, in
+            # run_view.coordinator_dispatch.sessions (bounded by
+            # controller_projection.bound_coordinator_sessions) -- it is
+            # deliberately not duplicated here. A duplicated, unbounded
+            # session ledger serialized twice into the same coordinator turn
+            # is what let one retry storm's context balloon past the
+            # backend's input-size cap; see run_view for the authoritative,
+            # bounded history.
+            "prior_coordinator_sessions_location": "run_view.coordinator_dispatch.sessions",
             "development_policy": (
                 segment.development_policy.as_dict()
                 if segment.development_policy is not None
