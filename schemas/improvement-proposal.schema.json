@@ -1,0 +1,141 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://harness-labs.local/schemas/improvement-proposal.schema.json",
+  "title": "Improvement agent proposal",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol",
+    "proposal_id",
+    "pattern_ids",
+    "question",
+    "choice",
+    "alternatives",
+    "rationale",
+    "evidence",
+    "consequences",
+    "reversible",
+    "status",
+    "demonstrated_failure",
+    "production_consumer",
+    "end_to_end_assertion",
+    "target_surface",
+    "accuracy_risk",
+    "success_criteria",
+    "rollback",
+    "ruling"
+  ],
+  "$defs": {
+    "success_criterion": {
+      "description": "Finding-shaped so an accepted proposal seeds delta-to-run intake without transformation (file/subject/required_paths/statement match finding_intake.DraftFinding's envelope).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["file", "subject", "required_paths", "statement", "assertion"],
+      "properties": {
+        "file": { "type": "string", "minLength": 1 },
+        "subject": { "type": "string", "minLength": 1 },
+        "required_paths": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "statement": { "type": "string", "minLength": 1 },
+        "assertion": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["argv", "timeout_seconds"],
+              "properties": {
+                "argv": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": { "type": "string", "minLength": 1 }
+                },
+                "timeout_seconds": { "type": "number", "exclusiveMinimum": 0 }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["signature_absent"],
+              "properties": {
+                "signature_absent": { "type": "string", "minLength": 1 }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "ruling": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["disposition", "actor", "statement", "ruled_at"],
+      "properties": {
+        "disposition": { "enum": ["accept", "reject", "waive"] },
+        "actor": { "type": "string", "minLength": 1 },
+        "statement": { "type": "string", "minLength": 1 },
+        "ruled_at": { "type": "string", "format": "date-time" }
+      }
+    }
+  },
+  "properties": {
+    "protocol": { "const": "improvement-proposal/1" },
+    "proposal_id": { "type": "string", "minLength": 1 },
+    "pattern_ids": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "question": { "type": "string", "minLength": 1 },
+    "choice": { "type": "string", "minLength": 1 },
+    "alternatives": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "rationale": { "type": "string", "minLength": 1 },
+    "evidence": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "consequences": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "reversible": { "type": "boolean" },
+    "status": { "enum": ["proposed", "accepted", "rejected", "superseded"] },
+    "demonstrated_failure": { "type": "string", "minLength": 1 },
+    "production_consumer": { "type": "string", "minLength": 1 },
+    "end_to_end_assertion": { "type": "string", "minLength": 1 },
+    "target_surface": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "kind", "governing_decisions"],
+        "properties": {
+          "path": { "type": "string", "minLength": 1 },
+          "kind": { "enum": ["doc", "schema", "gate", "policy", "code"] },
+          "governing_decisions": {
+            "type": "array",
+            "items": { "type": "string", "minLength": 1 }
+          }
+        }
+      }
+    },
+    "accuracy_risk": { "enum": ["none", "gate_relaxation", "gate_addition"] },
+    "success_criteria": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/success_criterion" }
+    },
+    "rollback": { "type": "string", "minLength": 1 },
+    "ruling": {
+      "anyOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/ruling" }
+      ]
+    }
+  }
+}

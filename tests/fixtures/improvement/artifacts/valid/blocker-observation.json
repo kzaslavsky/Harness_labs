@@ -1,0 +1,32 @@
+{
+  "protocol": "blocker-observation/1",
+  "run_id": "run-2026-08-21-0001",
+  "run_kind": "plangraph_attempt",
+  "evidence_classification": "production_lifecycle",
+  "node_id": "SI-01",
+  "attempt_id": "attempt-01",
+  "phase": "verify",
+  "classification": "harness_or_configuration",
+  "rule_id": "gate-timeout-v1",
+  "signature": "pytest-timeout::tests/test_improvement_artifacts.py",
+  "first_event_sequence": 42,
+  "event_hashes": [
+    "ce36863f51b6baf9d16397ffb3e9af506b284a816f72d487e55943c1fd974d6d",
+    "b4e3d14e7519279e6a352f776d75a905a9de9a27efdb6d802fe4e700224ade2e"
+  ],
+  "resolution": "repair_attempt",
+  "resolution_cost": {
+    "retries": 1,
+    "repair_dispatches": 1,
+    "wall_clock_ms": 120000,
+    "tokens": 4200,
+    "diff_churn_lines": 18
+  },
+  "artifact_refs": [
+    {
+      "path": "logs/runs/run-2026-08-21-0001/events.jsonl",
+      "sha256": "81ee06cd71f3bb57fe5436333e7858023b629210181bae252245fc458d35c183"
+    }
+  ],
+  "redaction_applied": false
+}

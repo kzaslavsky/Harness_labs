@@ -1,0 +1,154 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://harness-labs.local/schemas/blocker-pattern.schema.json",
+  "title": "Improvement agent blocker pattern",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol",
+    "pattern_id",
+    "signature",
+    "classification",
+    "status",
+    "support",
+    "first_seen_at",
+    "last_seen_at",
+    "observations",
+    "cost_aggregate",
+    "fixes_employed",
+    "generalizability",
+    "recurrence"
+  ],
+  "$defs": {
+    "observation_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["run_id", "attempt_id", "sha256"],
+      "properties": {
+        "run_id": { "type": "string", "minLength": 1 },
+        "attempt_id": { "type": "string", "minLength": 1 },
+        "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+      }
+    },
+    "cost_stat": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["median", "tail"],
+      "properties": {
+        "median": { "type": "number", "minimum": 0 },
+        "tail": { "type": "number", "minimum": 0 }
+      }
+    }
+  },
+  "properties": {
+    "protocol": { "const": "blocker-pattern/1" },
+    "pattern_id": { "type": "string", "minLength": 1 },
+    "signature": { "type": "string", "minLength": 1 },
+    "classification": {
+      "enum": [
+        "product",
+        "indeterminate",
+        "infrastructure_transient",
+        "harness_or_configuration",
+        "policy_violation",
+        "structural_decision"
+      ]
+    },
+    "status": {
+      "description": "No external source: minted here for pattern lifecycle state, distinct from the resolution vocabulary owned by blocker-observation.schema.json.",
+      "enum": [
+        "observed",
+        "candidate",
+        "proposed",
+        "addressed",
+        "superseded",
+        "rejected"
+      ]
+    },
+    "support": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "observation_count",
+        "distinct_run_count",
+        "distinct_lineage_count",
+        "distinct_task_suite_count"
+      ],
+      "properties": {
+        "observation_count": { "type": "integer", "minimum": 0 },
+        "distinct_run_count": { "type": "integer", "minimum": 0 },
+        "distinct_lineage_count": { "type": "integer", "minimum": 0 },
+        "distinct_task_suite_count": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "first_seen_at": { "type": "string", "format": "date-time" },
+    "last_seen_at": { "type": "string", "format": "date-time" },
+    "observations": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/observation_ref" }
+    },
+    "cost_aggregate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "wall_clock_ms",
+        "tokens",
+        "diff_churn_lines"
+      ],
+      "properties": {
+        "wall_clock_ms": { "$ref": "#/$defs/cost_stat" },
+        "tokens": { "$ref": "#/$defs/cost_stat" },
+        "diff_churn_lines": { "$ref": "#/$defs/cost_stat" }
+      }
+    },
+    "fixes_employed": {
+      "description": "Mechanisms observed to end this pattern's episodes; the generalizability tell when prompt_workaround recurs. Same closed vocabulary as blocker-observation resolution, referenced rather than retyped.",
+      "type": "array",
+      "items": { "$ref": "blocker-observation.schema.json#/$defs/resolution" }
+    },
+    "generalizability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["verdict", "rubric_id", "rationale", "counterexamples"],
+      "properties": {
+        "verdict": {
+          "enum": [
+            "one_off",
+            "policy_gap",
+            "gate_defeated_by_mechanical_compliance",
+            "superseded_by_existing_mechanism",
+            "environmental"
+          ]
+        },
+        "rubric_id": { "const": "burden-admission/1" },
+        "rationale": { "type": "string", "minLength": 1 },
+        "counterexamples": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "recurrence": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["source", "key", "ref"],
+        "properties": {
+          "source": { "enum": ["finding_history", "decision_registry"] },
+          "key": { "type": "string", "minLength": 1 },
+          "ref": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "campaign_id": { "type": "string", "minLength": 1 },
+    "landing_commit": { "type": "string", "pattern": "^[0-9a-f]{7,40}$" }
+  },
+  "if": {
+    "properties": { "status": { "const": "addressed" } },
+    "required": ["status"]
+  },
+  "then": {
+    "required": ["campaign_id", "landing_commit"]
+  }
+}
