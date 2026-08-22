@@ -35,7 +35,114 @@ from harness_labs.core.verification_images import attached_image_paths
 
 
 class LiveExecutionError(RuntimeError):
-    """Raised when a live model task cannot produce a valid result."""
+    """Raised when a live model task cannot produce a valid result.
+
+    ``park_disposition`` carries the worker's own structured explanation for
+    an honest no-change completion -- a fix worker that parked because the
+    required repair lies outside its write fence -- so the failure surfaces
+    with the actionable cause instead of only the opaque no-change message.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        park_disposition: Mapping[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.park_disposition = park_disposition
+
+
+PARK_DISPOSITION_PROTOCOL = "worker-park-disposition/1"
+
+
+def extract_park_disposition(
+    raw: object,
+    allowed_paths: Sequence[str] = (),
+) -> dict[str, Any] | None:
+    """Parse a parked-work disposition out of a worker's final semantic output.
+
+    A writable worker that honestly declines to change the repository states
+    why in its final JSON: findings flagged ``scope_expanding`` or
+    ``requires_disposition`` (or whose ``required_paths`` fall outside the
+    write fence), plus ``unresolved_questions`` asking the controller to
+    widen the grant. Returns ``None`` when the output carries no such
+    disposition -- an unexplained no-change completion stays an ordinary
+    failure.
+    """
+
+    if not isinstance(raw, Mapping):
+        return None
+    parked: list[dict[str, Any]] = []
+    findings = raw.get("findings")
+    if isinstance(findings, Sequence) and not isinstance(findings, (str, bytes)):
+        for finding in findings:
+            if not isinstance(finding, Mapping):
+                continue
+            required_paths = finding.get("required_paths")
+            required = (
+                tuple(str(p) for p in required_paths if isinstance(p, str) and p)
+                if isinstance(required_paths, Sequence)
+                and not isinstance(required_paths, (str, bytes))
+                else ()
+            )
+            out_of_fence = (
+                tuple(paths_outside_scope(required, allowed_paths))
+                if required
+                else ()
+            )
+            if not (
+                finding.get("scope_expanding")
+                or finding.get("requires_disposition")
+                or out_of_fence
+            ):
+                continue
+            entry: dict[str, Any] = {}
+            for key in ("id", "subject", "file", "statement", "severity"):
+                value = finding.get(key)
+                if isinstance(value, str) and value.strip():
+                    entry[key] = value
+            if required:
+                entry["required_paths"] = list(required)
+            if out_of_fence:
+                entry["out_of_fence_paths"] = list(out_of_fence)
+            entry["scope_expanding"] = bool(finding.get("scope_expanding"))
+            parked.append(entry)
+    questions_raw = raw.get("unresolved_questions")
+    questions = (
+        [q for q in questions_raw if isinstance(q, str) and q.strip()]
+        if isinstance(questions_raw, Sequence)
+        and not isinstance(questions_raw, (str, bytes))
+        else []
+    )
+    parked_questions: list[dict[str, Any]] = []
+    details_json = raw.get("details_json")
+    if isinstance(details_json, str):
+        try:
+            details = json.loads(details_json)
+        except json.JSONDecodeError:
+            details = None
+        if isinstance(details, Mapping):
+            details_parked = details.get("parked_questions")
+            if isinstance(details_parked, Sequence) and not isinstance(
+                details_parked, (str, bytes)
+            ):
+                parked_questions = [
+                    dict(item) for item in details_parked if isinstance(item, Mapping)
+                ]
+    if not parked and not parked_questions:
+        return None
+    disposition: dict[str, Any] = {
+        "protocol": PARK_DISPOSITION_PROTOCOL,
+        "findings": parked,
+        "unresolved_questions": questions,
+    }
+    summary = raw.get("summary")
+    if isinstance(summary, str) and summary.strip():
+        disposition["summary"] = summary
+    if parked_questions:
+        disposition["parked_questions"] = parked_questions
+    return disposition
 
 
 # Reserved for the controller-authored workspace-change receipt only; a task's
@@ -535,10 +642,17 @@ class CodexSemanticTaskExecutor:
             ValueError,
             json.JSONDecodeError,
         ) as exc:
+            payload: dict[str, Any] = {
+                "error": str(exc),
+                "error_type": type(exc).__name__,
+            }
+            parked = getattr(exc, "park_disposition", None)
+            if isinstance(parked, Mapping):
+                payload["park_disposition"] = dict(parked)
             result = TaskResult(
                 attempt_id=attempt.attempt_id,
                 status="failed",
-                payload={"error": str(exc), "error_type": type(exc).__name__},
+                payload=payload,
             )
             return result
         finally:
@@ -707,7 +821,10 @@ class CodexSemanticTaskExecutor:
                 )
             if self.require_repository_change and not worker_changed_paths:
                 raise LiveExecutionError(
-                    "writable worker completed without changing the repository"
+                    "writable worker completed without changing the repository",
+                    park_disposition=extract_park_disposition(
+                        raw, self.writable_paths
+                    ),
                 )
             if self.forbid_repository_change and worker_changed_paths:
                 raise LiveExecutionError(

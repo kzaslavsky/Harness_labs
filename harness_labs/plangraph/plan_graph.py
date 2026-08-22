@@ -806,6 +806,28 @@ def canonical_json(value: object) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
+def _review_fix_park_reason(evidence: object) -> str | None:
+    """The blocked launch's fix-worker park reason, when its evidence has one.
+
+    A review-fix record that carries a ``park_disposition`` already rendered
+    its readable reason ("fix blocked: finding ... requires out-of-fence path
+    ...") into its own ``reason`` field; every other blocked launch returns
+    ``None`` so its reason stays exactly as before.
+    """
+
+    if not isinstance(evidence, Mapping):
+        return None
+    review_fix = evidence.get("review_fix")
+    if not isinstance(review_fix, Mapping):
+        return None
+    if not isinstance(review_fix.get("park_disposition"), Mapping):
+        return None
+    reason = review_fix.get("reason")
+    if isinstance(reason, str) and reason.strip():
+        return reason
+    return None
+
+
 def _required_path_mapping(value: RequiredPath) -> dict[str, object]:
     result: dict[str, object] = {
         "path": value.path,
@@ -1736,6 +1758,13 @@ class PlanGraph:
             if status == "blocked":
                 if outcome.status == "blocked":
                     reason = "FeatureRun reported blocked"
+                    park_reason = _review_fix_park_reason(outcome.evidence)
+                    if park_reason is not None:
+                        # The fix worker honestly parked on an out-of-fence
+                        # finding; surface its own statement of the cause so
+                        # the escalation names the actionable widening
+                        # decision instead of only "blocked".
+                        reason = f"FeatureRun reported blocked: {park_reason}"
                 elif escalation.unrouted is not None:
                     reason = (
                         f"escalated finding {escalation.unrouted['finding_key']} "

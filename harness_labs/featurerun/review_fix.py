@@ -70,11 +70,68 @@ _EMPTY_MAPPING: Mapping[str, Any] = types.MappingProxyType({})
 
 
 class ReviewFixError(RuntimeError):
-    """Raised when the review/fix protocol cannot safely continue."""
+    """Raised when the review/fix protocol cannot safely continue.
+
+    ``park_disposition`` carries the fix worker's own structured explanation
+    when it honestly parked instead of fixing -- the assigned finding's
+    required paths fall outside the write fence -- so the failure reason
+    names the actionable cause instead of only the opaque no-change error.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        park_disposition: Mapping[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.park_disposition = park_disposition
 
 
 class _RecoverableFixError(ReviewFixError):
     """A fix worker failed mechanically while the frozen work remains valid."""
+
+
+def _park_reason(park: Mapping[str, Any]) -> str:
+    """Render one operator-readable sentence from a park disposition."""
+
+    clauses: list[str] = []
+    findings = park.get("findings")
+    if isinstance(findings, (list, tuple)):
+        for finding in findings[:3]:
+            if not isinstance(finding, Mapping):
+                continue
+            subject = (
+                finding.get("subject")
+                or finding.get("id")
+                or finding.get("file")
+                or "finding"
+            )
+            paths = finding.get("out_of_fence_paths") or finding.get(
+                "required_paths"
+            )
+            if isinstance(paths, (list, tuple)) and paths:
+                clause = (
+                    f"finding {subject} requires out-of-fence path "
+                    + ", ".join(str(path) for path in paths)
+                )
+            else:
+                clause = f"finding {subject} parked as scope-expanding"
+            statement = finding.get("statement")
+            if isinstance(statement, str) and statement.strip():
+                clause += f" ({statement.strip()[:200]})"
+            clauses.append(clause)
+    text = "fix blocked: " + (
+        "; ".join(clauses)
+        if clauses
+        else "worker parked without a repository change"
+    )
+    questions = park.get("unresolved_questions")
+    if isinstance(questions, (list, tuple)) and questions:
+        first = str(questions[0]).strip()
+        if first:
+            text += f"; unresolved: {first[:300]}"
+    return text
 
 
 class ReviewFixExecutorFactory(Protocol):
@@ -157,8 +214,22 @@ class ReviewFixResult:
     # route or judge it without re-opening the ledger artifact. Always empty
     # when ``escalation_enabled`` is off (AC-CC08-1).
     escalated_findings: tuple[Mapping[str, Any], ...] = ()
+    # The fix worker's own structured explanation for an honest no-change
+    # completion (worker-park-disposition/1): the assigned finding's required
+    # paths fall outside the write fence, with the unresolved question asking
+    # the controller to widen. ``None`` -- and absent from ``as_dict`` -- for
+    # every loop that never parked, keeping prior results byte-identical.
+    park_disposition: Mapping[str, Any] | None = None
 
     def as_dict(self) -> dict[str, Any]:
+        if self.park_disposition is not None:
+            return {
+                **self._base_dict(),
+                "park_disposition": dict(self.park_disposition),
+            }
+        return self._base_dict()
+
+    def _base_dict(self) -> dict[str, Any]:
         return {
             "protocol": REVIEW_FIX_RESULT_PROTOCOL,
             "status": self.status,
@@ -1101,13 +1172,20 @@ class ReviewFixLoop:
                 "interrupted",
             )
         except Exception as exc:
+            park = getattr(exc, "park_disposition", None)
+            park = dict(park) if isinstance(park, Mapping) else None
+            failure_payload: dict[str, Any] = {"error": str(exc), "cycle": cycle}
+            if park is not None:
+                failure_payload["park_disposition"] = park
             self.audit.append(
                 "review_fix_failed",
                 status="failed",
-                payload={"error": str(exc), "cycle": cycle},
+                payload=failure_payload,
                 actor=AuditActor("review-fix-controller", "controller"),
             )
-            return self._finish(ledger, "failed", str(exc), cycle, "failed")
+            return self._finish(
+                ledger, "failed", str(exc), cycle, "failed", park_disposition=park
+            )
 
     def _run_bounded_fix_only(self) -> ReviewFixResult:
         """Discharge exactly ``seeded_fix_keys`` and nothing else.
@@ -1167,13 +1245,20 @@ class ReviewFixLoop:
                 "interrupted",
             )
         except Exception as exc:
+            park = getattr(exc, "park_disposition", None)
+            park = dict(park) if isinstance(park, Mapping) else None
+            failure_payload: dict[str, Any] = {"error": str(exc), "cycle": cycle}
+            if park is not None:
+                failure_payload["park_disposition"] = park
             self.audit.append(
                 "review_fix_failed",
                 status="failed",
-                payload={"error": str(exc), "cycle": cycle},
+                payload=failure_payload,
                 actor=AuditActor("review-fix-controller", "controller"),
             )
-            return self._finish(ledger, "failed", str(exc), cycle, "failed")
+            return self._finish(
+                ledger, "failed", str(exc), cycle, "failed", park_disposition=park
+            )
 
         if ledger.open_required():
             return self._finish(
@@ -1204,15 +1289,18 @@ class ReviewFixLoop:
         try:
             return self._execute("fix", cycle, ledger, fix_keys=fix_keys)
         except _RecoverableFixError as exc:
+            recovery_payload: dict[str, Any] = {
+                "cycle": cycle,
+                "fix_keys": fix_keys,
+                "reason": str(exc),
+                "recovery_attempt": 1,
+            }
+            if exc.park_disposition is not None:
+                recovery_payload["park_disposition"] = dict(exc.park_disposition)
             self.audit.append(
                 "review_fix_recovery_triggered",
                 status="recovering",
-                payload={
-                    "cycle": cycle,
-                    "fix_keys": fix_keys,
-                    "reason": str(exc),
-                    "recovery_attempt": 1,
-                },
+                payload=recovery_payload,
                 actor=AuditActor("review-fix-controller", "controller"),
             )
             return self._execute(
@@ -1317,19 +1405,26 @@ class ReviewFixLoop:
         )
         if result.status != "succeeded":
             error = str(result.payload.get("error", ""))
+            park = result.payload.get("park_disposition")
+            park = dict(park) if isinstance(park, Mapping) else None
+            if park is not None:
+                message = (
+                    f"{stage} attempt ended with status {result.status}: "
+                    f"{_park_reason(park)}"
+                )
+            else:
+                message = (
+                    f"{stage} attempt ended with status {result.status}: "
+                    f"{result.payload}"
+                )
             if (
                 stage == "fix"
                 and recovery_attempt is None
                 and error
                 == "writable worker completed without changing the repository"
             ):
-                raise _RecoverableFixError(
-                    f"{stage} attempt ended with status {result.status}: "
-                    f"{result.payload}"
-                )
-            raise ReviewFixError(
-                f"{stage} attempt ended with status {result.status}: {result.payload}"
-            )
+                raise _RecoverableFixError(message, park_disposition=park)
+            raise ReviewFixError(message, park_disposition=park)
         receipt = self.evidence.add(
             kind=f"review-fix-{stage}-result",
             content={
@@ -1428,16 +1523,20 @@ class ReviewFixLoop:
         reason: str,
         cycles: int,
         stop_reason: str = "",
+        park_disposition: Mapping[str, Any] | None = None,
     ) -> ReviewFixResult:
+        completed_payload: dict[str, Any] = {
+            "status": status,
+            "reason": reason,
+            "cycles": cycles,
+            "stop_reason": stop_reason,
+        }
+        if park_disposition is not None:
+            completed_payload["park_disposition"] = dict(park_disposition)
         ledger_ref = self._persist(
             ledger,
             "review_fix_completed",
-            {
-                "status": status,
-                "reason": reason,
-                "cycles": cycles,
-                "stop_reason": stop_reason,
-            },
+            completed_payload,
         )
         debt = tuple(
             sorted(
@@ -1459,6 +1558,7 @@ class ReviewFixLoop:
             stop_reason,
             ledger.scope_screening(),
             ledger.escalated(),
+            park_disposition=park_disposition,
         )
 
 
