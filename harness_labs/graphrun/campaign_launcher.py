@@ -789,17 +789,11 @@ def _launch_node(
         recovery_limit=config["recovery_limit"],
         continuation_recovery_limit=config["continuation_recovery_limit"],
     )
-    evidence: dict[str, object] | None = None
-    if result.verification is not None:
-        evidence = {
-            "verification": {
-                "command_attempts": list(result.verification.command_attempts),
-                "repair_invocation_ids": list(
-                    result.verification.repair_invocation_ids
-                ),
-                "repair_invocations": list(result.verification.repair_invocations),
-            }
-        }
+    # ``outcome_evidence`` is the canonical shape: verification facts plus the
+    # review-fix record. Omitting the review-fix half here silently dropped
+    # transferred findings, still-open findings, and a parked fix worker's
+    # out-of-fence disposition from every graph decision and escalation.
+    evidence = result.outcome_evidence() or None
     return FeatureRunOutcome(
         status=result.status,
         candidate_commit=result.candidate_commit,

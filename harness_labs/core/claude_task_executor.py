@@ -28,6 +28,7 @@ from harness_labs.core.controller_live import (
     _RAW_OUTPUT_SCHEMA,
     _WORKSPACE_CHANGE_RECEIPT_KIND,
     LiveExecutionError,
+    extract_park_disposition,
     _filter_satisfied_criteria,
     _is_latest_writable_attempt,
     _parse_context,
@@ -165,10 +166,17 @@ class ClaudeSemanticTaskExecutor:
             ValueError,
             json.JSONDecodeError,
         ) as exc:
+            payload: dict[str, Any] = {
+                "error": str(exc),
+                "error_type": type(exc).__name__,
+            }
+            parked = getattr(exc, "park_disposition", None)
+            if isinstance(parked, Mapping):
+                payload["park_disposition"] = dict(parked)
             result = TaskResult(
                 attempt_id=attempt.attempt_id,
                 status="failed",
-                payload={"error": str(exc), "error_type": type(exc).__name__},
+                payload=payload,
             )
             return result
         finally:
@@ -344,7 +352,10 @@ class ClaudeSemanticTaskExecutor:
                 )
             if self.require_repository_change and not worker_changed_paths:
                 raise LiveExecutionError(
-                    "writable worker completed without changing the repository"
+                    "writable worker completed without changing the repository",
+                    park_disposition=extract_park_disposition(
+                        raw, self.writable_paths
+                    ),
                 )
             if self.forbid_repository_change and worker_changed_paths:
                 raise LiveExecutionError(

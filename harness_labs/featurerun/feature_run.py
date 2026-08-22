@@ -1409,7 +1409,7 @@ def _review_stage_detail(
 
     ledger = loop.ledger
     cycles = list(ledger.cycles) if ledger is not None else []
-    return {
+    detail: dict[str, object] = {
         "protocol": "review-stage-detail/1",
         "status": result.status,
         "reason": result.reason,
@@ -1439,6 +1439,12 @@ def _review_stage_detail(
             len(entry.get("verified_finding_keys", ())) for entry in cycles
         ),
     }
+    if result.park_disposition is not None:
+        # The fix worker's own out-of-fence explanation: the one fact the
+        # recovery agent needs to see that a retry inside the same fence
+        # cannot succeed.
+        detail["park_disposition"] = dict(result.park_disposition)
+    return detail
 
 
 def _remember_review_transfers(
