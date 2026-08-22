@@ -13,6 +13,7 @@ import unittest
 
 from harness_labs.plangraph.plan_approval import (
     ACTIVE_DECISION_NOTICE,
+    CRITERION_GRANT_MISMATCH_WARNING,
     IMPACT_ANALYSIS_UNSUPPORTED_NOTICE,
     OPERATOR_APPROVAL_PROTOCOL,
     REQUIRED_PATHS_IMPACT_WARNING,
@@ -1111,6 +1112,366 @@ class ImpactAndDecisionAdmissionTests(PlanApprovalTests):
             receipt_path=receipt,
         )
         self.assertTrue(issued.exists())
+
+
+class CriterionGrantWarningTests(unittest.TestCase):
+    """Static detection of criteria testing logic outside the testing
+    node's grant — the SI-06 defect class: AC-SI06-3 required a close-out
+    emitter in ``improvement_loop.py`` (SI-05's sealed grant) while SI-06
+    could only write tests and docs, blocking the graph twice mid-flight.
+    """
+
+    BASE_PATHS = (
+        "harness_labs/core/decision_registry.py",
+        "docs/decisions/TEMPLATE.md",
+        "docs/plan.md",
+    )
+
+    @staticmethod
+    def _plan(runs, acceptance_criteria):
+        from harness_labs.plangraph.plan_graph import PlanGraphPlan, PlanRun
+
+        return PlanGraphPlan(
+            plan="docs/plan.md",
+            base_commit="0" * 40,
+            runs=tuple(
+                PlanRun(
+                    id=run_id,
+                    objective=f"objective {run_id}",
+                    plan_sections=(run_id,),
+                    criteria=tuple(criteria),
+                    depends_on=tuple(depends_on),
+                    allowed_paths=tuple(allowed_paths),
+                )
+                for run_id, depends_on, allowed_paths, criteria in runs
+            ),
+            plan_sections={},
+            acceptance_criteria=dict(acceptance_criteria),
+        )
+
+    @staticmethod
+    def _warnings(plan, base_paths):
+        from harness_labs.plangraph.plan_approval import (
+            _criterion_grant_warnings,
+        )
+
+        return _criterion_grant_warnings(plan, base_paths)
+
+    def _si_shaped_plan(self, close_criterion_text):
+        return self._plan(
+            runs=[
+                (
+                    "IMPL",
+                    [],
+                    [
+                        "harness_labs/graphrun/improvement_loop.py",
+                        "scripts/self_improve.py",
+                        "tests/test_loop.py",
+                    ],
+                    ["AC-IMPL-1"],
+                ),
+                (
+                    "CLOSE",
+                    ["IMPL"],
+                    [
+                        "docs/development/agent-guide.md",
+                        "docs/improvement",
+                        ".gitignore",
+                        "tests/test_closeout.py",
+                    ],
+                    ["AC-CLOSE-1"],
+                ),
+            ],
+            acceptance_criteria={
+                "AC-IMPL-1": (
+                    "self_improve.py round synthesizes a decomposition and "
+                    "dispatch refuses to launch without a receipt."
+                ),
+                "AC-CLOSE-1": close_criterion_text,
+            },
+        )
+
+    def test_test_only_run_symbol_reference_warns_with_candidate_homes(
+        self,
+    ) -> None:
+        """The AC-SI06-3 shape: the criterion never names the foreign file
+        literally — a dotted production symbol plus a run that can only
+        write tests and docs is the detectable signature."""
+
+        plan = self._si_shaped_plan(
+            "closing a successful fixture campaign emits a decision-record "
+            "draft from docs/decisions/TEMPLATE.md and a test asserts "
+            "decision_registry.active_decisions_for_paths returns the new "
+            "record for those paths once accepted."
+        )
+        warnings = self._warnings(plan, self.BASE_PATHS)
+        self.assertEqual(len(warnings), 1)
+        warning = warnings[0]
+        self.assertEqual(warning["kind"], CRITERION_GRANT_MISMATCH_WARNING)
+        self.assertEqual(warning["severity"], "high")
+        self.assertEqual(warning["runs"], ["CLOSE"])
+        self.assertEqual(
+            warning["paths"], ["harness_labs/core/decision_registry.py"]
+        )
+        self.assertEqual(
+            warning["criteria"],
+            [
+                {
+                    "criterion": "AC-CLOSE-1",
+                    "path": "harness_labs/core/decision_registry.py",
+                    "writable_homes": [],
+                }
+            ],
+        )
+        self.assertEqual(
+            warning["dependency_production_grants"],
+            [
+                "harness_labs/graphrun/improvement_loop.py",
+                "scripts/self_improve.py",
+            ],
+        )
+
+    def test_criterion_naming_another_runs_grant_warns_with_home(self) -> None:
+        plan = self._si_shaped_plan(
+            "closing a campaign invokes the emitter in "
+            "harness_labs/graphrun/improvement_loop.py and a test asserts "
+            "the record lands."
+        )
+        warnings = self._warnings(plan, self.BASE_PATHS)
+        self.assertEqual(len(warnings), 1)
+        warning = warnings[0]
+        self.assertEqual(warning["runs"], ["CLOSE"])
+        self.assertEqual(
+            warning["criteria"],
+            [
+                {
+                    "criterion": "AC-CLOSE-1",
+                    "path": "harness_labs/graphrun/improvement_loop.py",
+                    "writable_homes": ["IMPL"],
+                }
+            ],
+        )
+        # A literal foreign-grant reference is flagged for its home, not
+        # for homelessness, so no candidate-home listing is attached.
+        self.assertNotIn("dependency_production_grants", warning)
+
+    def test_production_capable_run_foreign_grant_reference_still_warns(
+        self,
+    ) -> None:
+        plan = self._plan(
+            runs=[
+                ("A", [], ["pkg/alpha.py"], ["AC-A"]),
+                ("B", [], ["pkg/beta.py"], ["AC-B"]),
+            ],
+            acceptance_criteria={
+                "AC-A": "pkg/alpha.py works.",
+                "AC-B": "pkg/beta.py consumes pkg/alpha.py output.",
+            },
+        )
+        warnings = self._warnings(plan, self.BASE_PATHS)
+        self.assertEqual(len(warnings), 1)
+        self.assertEqual(warnings[0]["runs"], ["B"])
+        self.assertEqual(warnings[0]["paths"], ["pkg/alpha.py"])
+        self.assertEqual(
+            warnings[0]["criteria"][0]["writable_homes"], ["A"]
+        )
+
+    def test_benign_references_do_not_warn(self) -> None:
+        """Own-grant paths, tests/ paths, docs with no writable home,
+        homeless production symbols referenced by a production-capable run,
+        and unresolvable or class-cased tokens all stay silent."""
+
+        plan = self._plan(
+            runs=[
+                (
+                    "A",
+                    [],
+                    ["pkg/alpha.py", "tests/test_alpha.py"],
+                    ["AC-A"],
+                ),
+            ],
+            acceptance_criteria={
+                "AC-A": (
+                    "pkg/alpha.py folds decision_registry.active_decisions"
+                    "_for_paths under docs/decisions/TEMPLATE.md, seeds "
+                    "logs/improvement/campaigns/ state, reads "
+                    "ConvergenceLedger.open_findings, and "
+                    "tests/test_alpha.py passes."
+                ),
+            },
+        )
+        self.assertEqual(self._warnings(plan, self.BASE_PATHS), [])
+
+    def test_test_only_run_with_no_production_reference_does_not_warn(
+        self,
+    ) -> None:
+        plan = self._si_shaped_plan(
+            "the agent guide exists in docs/development/agent-guide.md and "
+            "docs/improvement holds the committed artifacts."
+        )
+        self.assertEqual(self._warnings(plan, self.BASE_PATHS), [])
+
+    def test_ambiguous_bare_module_reference_is_dropped(self) -> None:
+        plan = self._si_shaped_plan(
+            "closing a campaign updates util.helper bookkeeping."
+        )
+        base = self.BASE_PATHS + ("pkg/util.py", "other/util.py")
+        self.assertEqual(self._warnings(plan, base), [])
+
+
+class CriterionGrantAdmissionTests(PlanApprovalTests):
+    """End-to-end admission wiring of the criterion-grant gate: the SI-06
+    shape reproduced in a real git fixture must surface as a high warning
+    in gate evidence and gate ``issue_receipt`` on acknowledgement."""
+
+    def _testing_node_payload(self) -> dict[str, object]:
+        return {
+            "protocol": "plan-graph-plan/1",
+            "plan": "docs/plan.md",
+            "plan_sections": {
+                "1": "Build logic_module.py. AC-1: logic builds.",
+                "2": "Close out. AC-2: close-out promotes.",
+            },
+            "acceptance_criteria": {
+                "AC-1": "logic_module.py builds the campaign state.",
+                "AC-2": (
+                    "closing a successful campaign emits a record and a "
+                    "test asserts core_registry.serve returns it."
+                ),
+            },
+            "runs": [
+                {
+                    "id": "IMPL",
+                    "objective": "Build the logic module",
+                    "plan_sections": ["1"],
+                    "criteria": ["AC-1"],
+                    "depends_on": [],
+                    "allowed_paths": ["logic_module.py"],
+                    "path_intents": [
+                        {"path": "logic_module.py", "action": "create"}
+                    ],
+                    "verification_argv": [sys.executable, "-c", "pass"],
+                    "verification_timeout_seconds": 30,
+                    "verification_required_paths": [],
+                },
+                {
+                    "id": "CLOSE",
+                    "objective": "Close out with tests and docs only",
+                    "plan_sections": ["2"],
+                    "criteria": ["AC-2"],
+                    "depends_on": ["IMPL"],
+                    "allowed_paths": [
+                        "docs/closeout.md",
+                        "tests/test_closeout.py",
+                    ],
+                    "path_intents": [
+                        {"path": "docs/closeout.md", "action": "create"},
+                        {"path": "tests/test_closeout.py", "action": "create"},
+                    ],
+                    "verification_argv": [sys.executable, "-c", "pass"],
+                    "verification_timeout_seconds": 30,
+                    "verification_required_paths": [],
+                },
+            ],
+            "functionality_tests": [],
+            "referenced_artifacts": [],
+        }
+
+    def test_testing_node_criterion_gates_receipt_on_acknowledgement(
+        self,
+    ) -> None:
+        (self.repository / "core_registry.py").write_text(
+            "def serve():\n    return []\n", encoding="utf-8"
+        )
+        decomposition = self._commit_decomposition(self._testing_node_payload())
+        output = self.root / "criterion-grant"
+        prepared = prepare_approval(
+            repository=self.repository,
+            decomposition_path=decomposition,
+            output_directory=output,
+        )
+        gates = json.loads(prepared.gate_evidence_path.read_text(encoding="utf-8"))
+        findings = [
+            warning
+            for warning in gates.get("warnings") or ()
+            if warning["kind"] == CRITERION_GRANT_MISMATCH_WARNING
+        ]
+        self.assertEqual(len(findings), 1)
+        warning = findings[0]
+        self.assertEqual(warning["severity"], "high")
+        self.assertEqual(warning["runs"], ["CLOSE"])
+        self.assertEqual(warning["paths"], ["core_registry.py"])
+        self.assertEqual(
+            warning["dependency_production_grants"], ["logic_module.py"]
+        )
+
+        unacknowledged = output / "operator-no-ack.json"
+        self._write_json(
+            unacknowledged,
+            {
+                "protocol": OPERATOR_APPROVAL_PROTOCOL,
+                "subject_sha256": prepared.subject_sha256,
+                "actor": "test-operator",
+                "approved_at": "2026-08-10T00:00:00Z",
+                "statement": "Approve without acknowledging the mismatch.",
+            },
+        )
+        receipt = output / "receipt.json"
+        with self.assertRaisesRegex(
+            PlanApprovalError, "unacknowledged high-severity"
+        ):
+            issue_receipt(
+                repository=self.repository,
+                subject_path=prepared.subject_path,
+                gate_evidence_path=prepared.gate_evidence_path,
+                operator_approval_path=unacknowledged,
+                receipt_path=receipt,
+            )
+
+        acknowledged = output / "operator-ack.json"
+        self._write_json(
+            acknowledged,
+            {
+                "protocol": OPERATOR_APPROVAL_PROTOCOL,
+                "subject_sha256": prepared.subject_sha256,
+                "actor": "test-operator",
+                "approved_at": "2026-08-10T00:00:00Z",
+                "statement": "Approve, criterion re-homing tracked separately.",
+                "warning_acknowledgements": [
+                    {
+                        "warning_sha256": warning_identity(warning),
+                        "reason": "close-out emitter lands with IMPL",
+                    }
+                ],
+            },
+        )
+        issued = issue_receipt(
+            repository=self.repository,
+            subject_path=prepared.subject_path,
+            gate_evidence_path=prepared.gate_evidence_path,
+            operator_approval_path=acknowledged,
+            receipt_path=receipt,
+        )
+        self.assertTrue(issued.exists())
+
+    def test_criteria_inside_own_grants_admit_without_warning(self) -> None:
+        payload = self._testing_node_payload()
+        payload["acceptance_criteria"]["AC-2"] = (
+            "docs/closeout.md records the outcome and "
+            "tests/test_closeout.py passes."
+        )
+        decomposition = self._commit_decomposition(payload)
+        prepared, receipt = self._approve(decomposition)
+        gates = json.loads(prepared.gate_evidence_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            [
+                warning
+                for warning in gates.get("warnings") or ()
+                if warning["kind"] == CRITERION_GRANT_MISMATCH_WARNING
+            ],
+            [],
+        )
+        self.assertTrue(receipt.exists())
 
 
 class DecisionHeaderParityTests(unittest.TestCase):
