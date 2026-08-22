@@ -24,6 +24,7 @@ from harness_labs.plangraph.plan_graph_authority import (
     AutomaticRecoveryAuthority,
     RecoveryAuthorityError,
     digest as recovery_decision_digest,
+    validate_plan_version_transition,
     DECISION_PROTOCOL as RECOVERY_DECISION_PROTOCOL,
 )
 from harness_labs.plangraph.plan_graph_join import (
@@ -1136,9 +1137,51 @@ def load_registration(path: Path) -> PlanGraphRegistration:
     return registration
 
 
+def _transition_authorizes_replacement(
+    existing: PlanGraphRegistration, registration: PlanGraphRegistration
+) -> bool:
+    """Whether ``registration`` carries an attested succession of ``existing``.
+
+    True only when the incoming registration's ``plan_version_transition``
+    validates against its own registered recovery authority and names the
+    exact persisted predecessor: ``predecessor_plan_sha256`` must equal the
+    existing registration's ``plan_sha256``, ``successor_plan_sha256`` the
+    incoming one's, and the logical id, lineage, and recovery authority must
+    be unchanged.  Anything less keeps the write-once refusal.
+    """
+    transition = registration.plan_version_transition
+    if transition is None:
+        return False
+    try:
+        authority = AutomaticRecoveryAuthority.from_mapping(
+            registration.automatic_recovery
+        )
+        checked = validate_plan_version_transition(transition, authority)
+    except RecoveryAuthorityError:
+        return False
+    return (
+        checked["predecessor_plan_sha256"] == existing.plan_sha256
+        and checked["successor_plan_sha256"] == registration.plan_sha256
+        and existing.logical_graph_id == registration.logical_graph_id
+        and existing.plan_lineage_id == registration.plan_lineage_id
+        and existing.automatic_recovery == registration.automatic_recovery
+    )
+
+
 def persist_registration(
     *, repository: Path, registration_root: Path, registration: PlanGraphRegistration
 ) -> Path:
+    """Publish a registration write-once, or replace under an attested transition.
+
+    Publication is an atomic non-overwriting hard link.  When the logical id
+    is already registered, the only sanctioned divergence is a plan-version
+    transition (``plan-graph-version-transition/1``) carried by the incoming
+    registration that validates against its recovery authority and names the
+    persisted registration's exact ``plan_sha256`` as predecessor; that case
+    atomically replaces the file, preserving lineage continuity (the
+    successor registration durably embeds the transition, and the retry
+    ledger separately consumes it).  Every un-attested change fails closed.
+    """
     verify_registration(repository, registration)
     registration_root.mkdir(parents=True, exist_ok=True)
     final_path = registration_root / f"{registration.logical_graph_id}.json"
@@ -1158,11 +1201,25 @@ def persist_registration(
         except FileExistsError:
             existing = load_registration(final_path)
             verify_registration(repository, existing)
-            if existing.graph_digest != registration.graph_digest or final_path.read_bytes() != content:
+            if existing.graph_digest == registration.graph_digest and final_path.read_bytes() == content:
+                return final_path
+            if _transition_authorizes_replacement(existing, registration):
+                os.replace(temporary_path, final_path)
+                directory = os.open(registration_root, os.O_RDONLY)
+                try:
+                    os.fsync(directory)
+                finally:
+                    os.close(directory)
+                return final_path
+            if registration.plan_version_transition is not None:
                 raise PlanGraphError(
-                    f"logical graph ID {registration.logical_graph_id!r} is already registered differently"
+                    f"logical graph ID {registration.logical_graph_id!r} is already "
+                    "registered differently and the plan-version transition does not "
+                    "name it as the exact predecessor"
                 )
-            return final_path
+            raise PlanGraphError(
+                f"logical graph ID {registration.logical_graph_id!r} is already registered differently"
+            )
         except OSError as exc:
             if exc.errno in {errno.ENOTSUP, errno.EOPNOTSUPP, errno.EXDEV, errno.EPERM}:
                 raise PlanGraphError("registration filesystem does not support atomic hard-link publication") from exc

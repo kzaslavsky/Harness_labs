@@ -101,11 +101,17 @@ from harness_labs.plangraph.plan_graph import (
     FeatureRunOutcome,
     FeatureRunRequest,
     PlanGraph,
+    PlanGraphError,
     RepairResumeDirective,
     load_registration,
     persist_registration,
     plan_from_registration,
     register_plan_graph,
+)
+from harness_labs.plangraph.plan_graph_authority import (
+    AutomaticRecoveryAuthority,
+    RecoveryAuthorityError,
+    validate_plan_version_transition,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -180,6 +186,7 @@ def build_campaign_launch_config(
     agent_mixture: Mapping[str, str] | None = None,
     profile_builder=PROFILE_BUILDER_HOOK,
     operator_notes_dir: str = DEFAULT_OPERATOR_NOTES_DIR,
+    automatic_recovery: Mapping[str, object] | None = None,
 ) -> dict:
     """The pinned product-config surface (AC-LK-1).
 
@@ -226,12 +233,21 @@ def build_campaign_launch_config(
             "spec": ESCALATION_JUDGE_SPEC,
             "timeout_seconds": ESCALATION_JUDGE_TIMEOUT_SECONDS,
         },
-        "automatic_recovery": {
-            "protocol": "plan-graph-automatic-recovery/1",
-            "allowed_actions": AUTOMATIC_RECOVERY_ALLOWED_ACTIONS,
-            "max_extra_node_launches": MAX_EXTRA_NODE_LAUNCHES,
-            "max_structural_decisions": MAX_STRUCTURAL_DECISIONS,
-        },
+        # Parameterized like the other product-specific values: recovery
+        # authority is registration-immutable per lineage, so a campaign that
+        # wants the plan-version transition path must grant its revision
+        # action (e.g. "revise_acceptance") here at first registration. The
+        # default stays the pinned CC-08 value.
+        "automatic_recovery": (
+            dict(automatic_recovery)
+            if automatic_recovery is not None
+            else {
+                "protocol": "plan-graph-automatic-recovery/1",
+                "allowed_actions": AUTOMATIC_RECOVERY_ALLOWED_ACTIONS,
+                "max_extra_node_launches": MAX_EXTRA_NODE_LAUNCHES,
+                "max_structural_decisions": MAX_STRUCTURAL_DECISIONS,
+            }
+        ),
     }
 
 
@@ -840,20 +856,71 @@ def _escalation_judge(
     )
 
 
-def run_graph(
+def _registration_root() -> Path:
+    return ROOT / "logs" / "registration"
+
+
+def load_validated_transition(
     config: Mapping[str, object],
-    receipt_path: Path,
-    graph_attempt_id: str,
-    run_root: Path,
-) -> int:
-    admission = PlanApprovalAdmission(repository=ROOT, receipt_path=receipt_path)
-    approved = admission.validate()
-    base_branch = git(ROOT, "rev-parse", "--abbrev-ref", "HEAD")
-    logical_graph_id = config["logical_graph_id"]
+    transition_path: Path,
+    registration_root: Path,
+) -> dict[str, object]:
+    """Load a plan-version transition and fail closed before any registration.
+
+    The record must be a JSON object validating as
+    ``plan-graph-version-transition/1`` against the campaign's configured
+    recovery authority (so the revision action must be granted there), and
+    the campaign's persisted registration must exist and be the exact
+    predecessor the transition names.  Both refusals happen before
+    ``register_plan_graph`` or ``persist_registration`` can observe the
+    transition, so a rejected record never strands the registration slot.
+    """
+    payload = json.loads(transition_path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise PlanGraphError("plan-version transition must be a JSON object")
+    try:
+        authority = AutomaticRecoveryAuthority.from_mapping(
+            dict(
+                config["automatic_recovery"],
+                allowed_actions=list(config["automatic_recovery"]["allowed_actions"]),
+            )
+        )
+        checked = validate_plan_version_transition(payload, authority)
+    except RecoveryAuthorityError as exc:
+        raise PlanGraphError(f"plan-version transition is invalid: {exc}") from exc
+    registration_path = registration_root / f"{config['logical_graph_id']}.json"
+    if not registration_path.exists():
+        raise PlanGraphError(
+            "plan-version transition requires an existing predecessor "
+            f"registration at {registration_path}"
+        )
+    predecessor = load_registration(registration_path)
+    if checked["predecessor_plan_sha256"] != predecessor.plan_sha256:
+        raise PlanGraphError(
+            "plan-version transition does not name the persisted "
+            "registration's plan_sha256 as its exact predecessor"
+        )
+    return checked
+
+
+def _register_campaign_graph(
+    config: Mapping[str, object],
+    approved,
+    transition: Mapping[str, object] | None,
+):
+    """Register and persist the campaign graph, honoring a validated transition.
+
+    Without a transition this is the pre-existing fail-closed registration.
+    With one, ``persist_registration`` replaces the persisted predecessor
+    under attestation.  After a transition has been consumed, the persisted
+    registration keeps carrying it; a later transition-less invocation of the
+    same approved plan adopts that persisted registration instead of failing
+    on the digest difference the embedded transition causes.
+    """
     automatic_recovery = config["automatic_recovery"]
     registration = register_plan_graph(
         repository=ROOT,
-        logical_graph_id=logical_graph_id,
+        logical_graph_id=config["logical_graph_id"],
         decomposition=approved.decomposition,
         base_commit=approved.base_commit,
         repository_id=approved.repository_id,
@@ -866,11 +933,43 @@ def run_graph(
             "max_extra_node_launches": automatic_recovery["max_extra_node_launches"],
             "max_structural_decisions": automatic_recovery["max_structural_decisions"],
         },
+        plan_version_transition=transition,
     )
+    registration_root = _registration_root()
+    if transition is None:
+        existing_path = registration_root / f"{registration.logical_graph_id}.json"
+        if existing_path.exists():
+            existing = load_registration(existing_path)
+            if (
+                existing.plan_version_transition is not None
+                and existing.plan_sha256 == registration.plan_sha256
+                and existing.base_commit == registration.base_commit
+                and existing.definition_json == registration.definition_json
+                and existing.plan_lineage_id == registration.plan_lineage_id
+                and existing.automatic_recovery == registration.automatic_recovery
+            ):
+                return existing, existing_path
     registration_path = persist_registration(
         repository=ROOT,
-        registration_root=ROOT / "logs" / "registration",
+        registration_root=registration_root,
         registration=registration,
+    )
+    return registration, registration_path
+
+
+def run_graph(
+    config: Mapping[str, object],
+    receipt_path: Path,
+    graph_attempt_id: str,
+    run_root: Path,
+    transition: Mapping[str, object] | None = None,
+) -> int:
+    admission = PlanApprovalAdmission(repository=ROOT, receipt_path=receipt_path)
+    approved = admission.validate()
+    base_branch = git(ROOT, "rev-parse", "--abbrev-ref", "HEAD")
+    logical_graph_id = config["logical_graph_id"]
+    registration, registration_path = _register_campaign_graph(
+        config, approved, transition
     )
     print(json.dumps({"registration": str(registration_path)}))
     judge = _escalation_judge(config, registration)
@@ -916,13 +1015,23 @@ def resume_graph(
     predecessor: str,
     frontier: list[str],
     blocker: str,
+    transition: Mapping[str, object] | None = None,
 ) -> int:
     admission = PlanApprovalAdmission(repository=ROOT, receipt_path=receipt_path)
-    admission.validate()
+    approved = admission.validate()
     base_branch = git(ROOT, "rev-parse", "--abbrev-ref", "HEAD")
-    registration = load_registration(
-        ROOT / "logs" / "registration" / f"{config['logical_graph_id']}.json"
-    )
+    if transition is not None:
+        # An amendment mid-lineage: re-register the approved successor plan
+        # under the validated transition (attested replace of the persisted
+        # predecessor) instead of resuming the stale registration.
+        registration, registration_path = _register_campaign_graph(
+            config, approved, transition
+        )
+        print(json.dumps({"registration": str(registration_path)}))
+    else:
+        registration = load_registration(
+            _registration_root() / f"{config['logical_graph_id']}.json"
+        )
     directive = RepairResumeDirective(
         logical_graph_id=logical_id,
         predecessor_attempt_id=predecessor,
@@ -983,6 +1092,14 @@ def main(
     parser.add_argument("--predecessor-attempt-id")
     parser.add_argument("--retry-frontier", action="append", default=[])
     parser.add_argument("--blocker-evidence-ref")
+    parser.add_argument(
+        "--transition",
+        type=Path,
+        help=(
+            "path to a plan-graph-version-transition/1 JSON record "
+            "authorizing a plan amendment on run or resume"
+        ),
+    )
     arguments = parser.parse_args(argv)
     # PlanGraph IDs must match ^[a-z0-9][a-z0-9-]{0,127}$ -- lowercase, no T/Z.
     if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,100}", arguments.run_id):
@@ -990,9 +1107,11 @@ def main(
             f"--run-id must match ^[a-z0-9][a-z0-9-]+$, got {arguments.run_id!r}"
         )
 
-    if arguments.stage == "prepare":
-        return prepare(config, arguments.run_id)
-    if arguments.stage == "issue":
+    if arguments.stage in ("prepare", "issue"):
+        if arguments.transition is not None:
+            parser.error("--transition applies only to the run and resume stages")
+        if arguments.stage == "prepare":
+            return prepare(config, arguments.run_id)
         return issue(arguments.run_id)
     receipt = arguments.receipt
     if receipt is None:
@@ -1000,6 +1119,17 @@ def main(
     if not receipt.exists():
         parser.error(f"receipt not found: {receipt}")
     run_root = arguments.run_root or (ROOT / "logs" / "runs" / "cc-graph")
+    transition = None
+    if arguments.transition is not None:
+        try:
+            transition = load_validated_transition(
+                config, arguments.transition, _registration_root()
+            )
+        except (OSError, ValueError) as exc:
+            # PlanGraphError subclasses ValueError; a refused transition must
+            # halt before registration, admission, or ledger state changes.
+            print(f"plan-version transition refused: {exc}", file=sys.stderr)
+            return 1
     if arguments.stage == "resume":
         if not (
             arguments.predecessor_attempt_id and arguments.blocker_evidence_ref
@@ -1017,9 +1147,10 @@ def main(
             arguments.predecessor_attempt_id,
             arguments.retry_frontier,
             arguments.blocker_evidence_ref,
+            transition=transition,
         )
     graph_attempt_id = arguments.graph_attempt_id or f"cc-graph-{arguments.run_id}"
-    return run_graph(config, receipt, graph_attempt_id, run_root)
+    return run_graph(config, receipt, graph_attempt_id, run_root, transition=transition)
 
 
 if __name__ == "__main__":

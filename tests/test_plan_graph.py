@@ -1947,5 +1947,145 @@ class GateSlotTests(unittest.TestCase):
         self.assertEqual(audit.released, [("a", 2), ("b", 1)])
 
 
+class AttestedTransitionReplacementTests(unittest.TestCase):
+    """persist_registration's documented attested replace path.
+
+    A logical id's persisted registration may only ever be replaced by a
+    successor carrying a valid ``plan-graph-version-transition/1`` record
+    that names the persisted registration's exact ``plan_sha256`` as
+    predecessor; every un-attested divergence keeps the write-once refusal.
+    """
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.repository = self.root / "repository"
+        self.repository.mkdir()
+        git(self.repository, "init")
+        git(self.repository, "config", "user.email", "tests@example.com")
+        git(self.repository, "config", "user.name", "Tests")
+        plan = self.repository / "docs" / "approved-plan.md"
+        plan.parent.mkdir()
+        plan.write_text("Approved PlanGraph plan\n", encoding="utf-8")
+        git(self.repository, "add", "docs/approved-plan.md")
+        git(self.repository, "commit", "-m", "approved plan")
+        self.payload = decomposition(git(self.repository, "rev-parse", "HEAD"))
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    AUTHORITY = {
+        "protocol": "plan-graph-automatic-recovery/1",
+        "allowed_actions": ["revise_acceptance"],
+        "max_extra_node_launches": 0,
+        "max_structural_decisions": 1,
+    }
+
+    def _register(self, payload, *, authority=None, transition=None, lineage=None):
+        return register_plan_graph(
+            repository=self.repository,
+            logical_graph_id="amend-graph",
+            decomposition=payload,
+            plan_lineage_id=lineage,
+            automatic_recovery=authority or self.AUTHORITY,
+            plan_version_transition=transition,
+        )
+
+    def _persist(self, registration, root):
+        return persist_registration(
+            repository=self.repository,
+            registration_root=root,
+            registration=registration,
+        )
+
+    def _revised_payload(self):
+        plan = self.repository / "docs" / "approved-plan.md"
+        plan.write_text("Approved PlanGraph plan, revised\n", encoding="utf-8")
+        git(self.repository, "commit", "-am", "revise approved plan")
+        return decomposition(git(self.repository, "rev-parse", "HEAD"))
+
+    @staticmethod
+    def _transition(predecessor: str, successor: str) -> dict:
+        return {
+            "protocol": "plan-graph-version-transition/1",
+            "action": "revise_acceptance",
+            "predecessor_plan_sha256": predecessor,
+            "successor_plan_sha256": successor,
+            "node_correspondence": {"a": "a", "b": "b"},
+            "budget_carryover": {"a": "full", "b": "full"},
+            "authorizing_decision": {
+                "protocol": "plan-graph-recovery-decision/1",
+                "action": "revise_acceptance",
+                "target": "plan_version",
+                "expected_prior_digest": predecessor,
+                "payload": {},
+            },
+        }
+
+    def test_attested_transition_replaces_predecessor_registration(self) -> None:
+        root = self.root / "registrations"
+        predecessor = self._register(self.payload)
+        path = self._persist(predecessor, root)
+        revised = self._revised_payload()
+        probe = self._register(revised)
+        successor = self._register(
+            revised,
+            transition=self._transition(predecessor.plan_sha256, probe.plan_sha256),
+        )
+        replaced_path = self._persist(successor, root)
+        self.assertEqual(replaced_path, path)
+        persisted = load_registration(path)
+        self.assertEqual(persisted.graph_digest, successor.graph_digest)
+        self.assertEqual(
+            persisted.plan_version_transition["predecessor_plan_sha256"],
+            predecessor.plan_sha256,
+        )
+        # Replaying the persisted successor stays idempotent.
+        self.assertEqual(self._persist(successor, root), path)
+
+    def test_transition_not_naming_exact_predecessor_fails_closed(self) -> None:
+        root = self.root / "registrations"
+        predecessor = self._register(self.payload)
+        path = self._persist(predecessor, root)
+        original_bytes = path.read_bytes()
+        revised = self._revised_payload()
+        probe = self._register(revised)
+        successor = self._register(
+            revised, transition=self._transition("f" * 64, probe.plan_sha256)
+        )
+        with self.assertRaisesRegex(PlanGraphError, "exact predecessor"):
+            self._persist(successor, root)
+        self.assertEqual(path.read_bytes(), original_bytes)
+
+    def test_transition_without_granted_revision_action_fails_closed(self) -> None:
+        root = self.root / "registrations"
+        authority = dict(self.AUTHORITY, allowed_actions=["resume"])
+        predecessor = self._register(self.payload, authority=authority)
+        self._persist(predecessor, root)
+        revised = self._revised_payload()
+        probe = self._register(revised, authority=authority)
+        successor = self._register(
+            revised,
+            authority=authority,
+            transition=self._transition(predecessor.plan_sha256, probe.plan_sha256),
+        )
+        with self.assertRaisesRegex(PlanGraphError, "already registered differently"):
+            self._persist(successor, root)
+
+    def test_transition_with_changed_lineage_fails_closed(self) -> None:
+        root = self.root / "registrations"
+        predecessor = self._register(self.payload)
+        self._persist(predecessor, root)
+        revised = self._revised_payload()
+        probe = self._register(revised)
+        successor = self._register(
+            revised,
+            lineage="lineage-elsewhere",
+            transition=self._transition(predecessor.plan_sha256, probe.plan_sha256),
+        )
+        with self.assertRaisesRegex(PlanGraphError, "exact predecessor"):
+            self._persist(successor, root)
+
+
 if __name__ == "__main__":
     unittest.main()

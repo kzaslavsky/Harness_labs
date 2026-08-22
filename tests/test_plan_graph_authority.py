@@ -51,6 +51,34 @@ class RecoveryAuthorityTests(unittest.TestCase):
             with self.assertRaisesRegex(BudgetError, "active lineage"):
                 ledger.register(plan_sha256="c" * 64, gates={"one": "gate", "two": "gate"}, automatic_recovery=authority, transition={**transition, "successor_plan_sha256": "c" * 64})
 
+    def test_consumed_transition_replays_idempotently_on_re_registration(self) -> None:
+        """A persisted successor registration carries its transition forever,
+        so every later attempt replays the exact consumed record; that replay
+        must register idempotently without spending authority, while any
+        other same-plan transition keeps failing closed."""
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = RetryBudgetLedger(Path(directory), "lineage")
+            authority = {"protocol": "plan-graph-automatic-recovery/1", "allowed_actions": ["revise_acceptance"], "max_extra_node_launches": 0, "max_structural_decisions": 1}
+            ledger.register(plan_sha256="a" * 64, gates={"one": "gate", "two": "gate"}, automatic_recovery=authority)
+            transition = {
+                "protocol": "plan-graph-version-transition/1", "action": "revise_acceptance",
+                "predecessor_plan_sha256": "a" * 64, "successor_plan_sha256": "b" * 64,
+                "node_correspondence": {"one": "one", "two": "two"},
+                "budget_carryover": {"one": "full", "two": "full"},
+                "authorizing_decision": {"protocol": "plan-graph-recovery-decision/1", "action": "revise_acceptance", "target": "plan_version", "expected_prior_digest": "a" * 64, "payload": {}},
+            }
+            ledger.register(plan_sha256="b" * 64, gates={"one": "gate", "two": "gate"}, automatic_recovery=authority, transition=transition)
+            ledger.register(plan_sha256="b" * 64, gates={"one": "gate", "two": "gate"}, automatic_recovery=authority, transition=transition)
+            ledger.reserve(node_id="one", gate="gate")
+            with ledger._locked(shared=True) as handle:
+                state = ledger._fold(handle)
+            self.assertEqual(state["automatic_recovery_structural_decisions"], 1)
+            with self.assertRaisesRegex(BudgetError, "requires a changed plan digest"):
+                ledger.register(
+                    plan_sha256="b" * 64, gates={"one": "gate", "two": "gate"}, automatic_recovery=authority,
+                    transition={**transition, "budget_carryover": {"one": "reset", "two": "reset"}},
+                )
+
     def test_supplied_invalid_transition_cannot_fall_back_to_legacy_relief(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             ledger = RetryBudgetLedger(Path(directory), "lineage")
