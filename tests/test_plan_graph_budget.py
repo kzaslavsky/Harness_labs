@@ -333,8 +333,60 @@ class RetryBudgetLedgerTests(unittest.TestCase):
         counters = state["nodes"]["node"]["attempt_counters"]
         self.assertEqual(counters["gate_invocations"], 2)
         self.assertEqual(counters["repair_dispatches"], 1)
-        self.assertEqual(state["nodes"]["node"]["counters"]["infrastructure_transient"], 2)
-        self.assertNotIn("product", state["nodes"]["node"]["counters"])
+        # Imported classifications are recorded as evidence, not charged
+        # against the launch-class allowance admission checks read.
+        self.assertEqual(state["nodes"]["node"]["evidence_counters"]["infrastructure_transient"], 2)
+        self.assertNotIn("product", state["nodes"]["node"]["evidence_counters"])
+        self.assertEqual(state["nodes"]["node"]["counters"], {})
+
+    def test_imported_child_evidence_does_not_consume_launch_allowance(self) -> None:
+        """One thorough launch (many classified gate invocations and repair
+        dispatches) must leave the remaining launch budget intact: only the
+        reservation itself counts against ``node_gate_limit``."""
+        reservation = self.ledger.reserve(node_id="node", gate="gate")
+        self.ledger.started(reservation)
+        evidence = {
+            "verification": {
+                "command_attempts": [
+                    {"invocation_id": f"child:command:{ordinal}",
+                     "failure": {"classification": "indeterminate"}}
+                    for ordinal in range(7)
+                ],
+                "repair_invocation_ids": [f"child:repair:{ordinal}" for ordinal in range(6)],
+                "repair_invocations": [
+                    {"invocation_id": f"child:repair:{ordinal}", "classification": "indeterminate"}
+                    for ordinal in range(6)
+                ],
+            },
+        }
+        self.assertEqual(len(self.ledger.import_child_evidence(node_id="node", evidence=evidence)), 13)
+        self.ledger.completed(reservation, "failed")
+        # node_gate_limit=2 with one launch spent: both the resume-time
+        # admission verdict and a second reservation must still pass.
+        self.ledger.verdict(node_id="node", gate="gate")
+        self.ledger.reserve(node_id="node", gate="gate")
+        with self.ledger._locked(shared=True) as handle:
+            state = self.ledger._fold(handle)
+        self.assertEqual(state["nodes"]["node"]["counters"], {"indeterminate": 2})
+        self.assertEqual(state["nodes"]["node"]["evidence_counters"], {"indeterminate": 13})
+
+    def test_resume_verdict_is_read_only_and_never_exhausts_adopted_nodes(self) -> None:
+        """N successive resume attempts over an adopted node consume nothing:
+        verdict() appends no events and the budget only moves on launches."""
+        before = self.ledger.path.read_text(encoding="utf-8")
+        for _ in range(8):
+            self.ledger.verdict(node_id="node", gate="gate")
+        self.assertEqual(self.ledger.path.read_text(encoding="utf-8"), before)
+        with self.ledger._locked(shared=True) as handle:
+            state = self.ledger._fold(handle)
+        node = state["nodes"].get("node", {})
+        self.assertEqual(node.get("launches", 0), 0)
+        self.assertEqual(node.get("counters", {}), {})
+        # A genuinely exhausted launch budget still fails closed at verdict.
+        self.ledger.reserve(node_id="node", gate="gate")
+        self.ledger.reserve(node_id="node", gate="gate")
+        with self.assertRaisesRegex(BudgetError, "exhausted"):
+            self.ledger.verdict(node_id="node", gate="gate")
 
 
 if __name__ == "__main__":
