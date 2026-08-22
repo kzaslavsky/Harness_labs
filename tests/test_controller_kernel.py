@@ -250,6 +250,198 @@ class ControllerKernelTests(unittest.TestCase):
         self.assertEqual(tasks["verify"]["status"], "failed")
         self.assertEqual(tasks["verify-r2"]["supersedes_task_id"], "verify")
 
+    def dispatcher_command(
+        self,
+        kind: str,
+        payload: dict,
+        *,
+        command_id: str,
+    ) -> CommandEnvelope:
+        return CommandEnvelope(
+            command_id=command_id,
+            run_id="run-1",
+            type=kind,
+            actor=CommandActor("dispatcher-1", "dispatcher"),
+            expected_revision=self.kernel.revision,
+            idempotency_key=command_id,
+            payload=payload,
+        )
+
+    def start_coordinator_session(self, session_id: str) -> None:
+        registered = self.kernel.handle(
+            self.dispatcher_command(
+                "coordinator.schema_register",
+                {
+                    "protocol": "coordinator-dispatch-schema/1",
+                    "schema_id": "orphan-schema/1",
+                    "sha256": "a" * 64,
+                    "phases": ["active"],
+                    "segments": [{"id": "active", "phases": ["active"]}],
+                },
+                command_id="register-schema",
+            )
+        )
+        self.assertTrue(registered.accepted, registered.message)
+        started = self.kernel.handle(
+            self.dispatcher_command(
+                "coordinator.session_start",
+                {
+                    "session_id": session_id,
+                    "segment_id": "active",
+                    "attempt": 1,
+                },
+                command_id=f"start-{session_id}",
+            )
+        )
+        self.assertTrue(started.accepted, started.message)
+
+    # A dead coordinator session must not leave its in-flight tasks
+    # permanently "running": no later session can record their results
+    # (record_task_results is gone with the session), supersede only accepts
+    # terminal tasks, and phases cannot advance over active tasks -- the
+    # exact deadlock observed in flow-editor-uc1-coreloop-attempt-3-UC-1G.
+    def test_session_end_orphans_running_tasks_preserving_worker_evidence(
+        self,
+    ) -> None:
+        self.kernel.handle(
+            self.command(
+                "task.dispatch",
+                {
+                    "tasks": [
+                        {
+                            "id": "implement",
+                            "role": "worker",
+                            "objective": "Implement the change",
+                            "details_schema": "work/1",
+                            "required_capabilities": [],
+                            "acceptance_criteria": [],
+                            "dependencies": [],
+                        }
+                    ]
+                },
+                command_id="dispatch-implement",
+            )
+        )
+        self.start_coordinator_session("session-1")
+        self.kernel.mark_tasks_running(("implement",))
+        worker_stdout = self.evidence.add(
+            kind="live-worker-stdout",
+            content='{"result": "completed"}',
+            media_type="application/json",
+            producer_task_id="implement",
+        )
+
+        ended = self.kernel.handle(
+            self.dispatcher_command(
+                "coordinator.session_end",
+                {
+                    "session_id": "session-1",
+                    "outcome": "recoverable_failure",
+                    "result_status": "failed",
+                    "reason": "coordinator killed by the gate-claim fence",
+                },
+                command_id="end-session-1",
+            )
+        )
+
+        self.assertTrue(ended.accepted, ended.message)
+        self.assertIn("task:implement", ended.effect_refs)
+        task = self.kernel.task("implement")
+        self.assertEqual(task["status"], "failed")
+        self.assertTrue(task["orphaned"])
+        self.assertEqual(task["result"]["error_type"], "OrphanedTaskError")
+        self.assertIn(worker_stdout.ref, task["evidence"])
+        session = self.kernel.snapshot()["coordinator_dispatch"]["sessions"][-1]
+        self.assertEqual(session["orphaned_task_ids"], ["implement"])
+        view_tasks = {
+            item["id"]: item for item in project_run_view(self.kernel)["tasks"]
+        }
+        self.assertTrue(view_tasks["implement"]["orphaned"])
+
+        # A late worker result for the orphaned attempt is now rejected
+        # instead of racing kernel state.
+        with self.assertRaisesRegex(KernelError, "not running"):
+            self.kernel.record_task_results(
+                (
+                    (
+                        "implement",
+                        TaskResult(
+                            attempt_id="implement/attempt-1",
+                            status="succeeded",
+                            payload=semantic_payload(
+                                summary="Too late.",
+                                details_schema="work/1",
+                                details={},
+                            ),
+                        ),
+                    ),
+                )
+            )
+
+    def test_fresh_attempt_supersedes_orphaned_task(self) -> None:
+        original = {
+            "id": "implement",
+            "role": "worker",
+            "objective": "Implement the change",
+            "details_schema": "work/1",
+            "required_capabilities": [],
+            "acceptance_criteria": [],
+            "dependencies": [],
+        }
+        self.kernel.handle(
+            self.command(
+                "task.dispatch",
+                {"tasks": [original]},
+                command_id="dispatch-implement",
+            )
+        )
+        self.start_coordinator_session("session-1")
+        self.kernel.mark_tasks_running(("implement",))
+        self.kernel.handle(
+            self.dispatcher_command(
+                "coordinator.session_end",
+                {"session_id": "session-1", "outcome": "recoverable_failure"},
+                command_id="end-session-1",
+            )
+        )
+
+        successor = self.kernel.handle(
+            self.command(
+                "task.dispatch",
+                {
+                    "tasks": [
+                        {
+                            **original,
+                            "id": "implement-v2",
+                            "supersedes_task_id": "implement",
+                        }
+                    ]
+                },
+                command_id="dispatch-successor",
+            )
+        )
+        self.assertTrue(successor.accepted, successor.message)
+        self.kernel.mark_tasks_running(("implement-v2",))
+        self.kernel.record_task_results(
+            (
+                (
+                    "implement-v2",
+                    TaskResult(
+                        attempt_id="implement-v2/attempt-1",
+                        status="succeeded",
+                        payload=semantic_payload(
+                            summary="Implemented on the fresh attempt.",
+                            details_schema="work/1",
+                            details={},
+                        ),
+                    ),
+                ),
+            )
+        )
+        failures = self.kernel.completion_failures()
+        self.assertNotIn("task is still active: implement", failures)
+        self.assertNotIn("required task did not succeed: implement", failures)
+
     def test_task_result_promotes_evidence_and_satisfies_completion(self) -> None:
         report = self.evidence.add(
             kind="final-report",

@@ -70,6 +70,9 @@ class CoordinatorDispatcher:
         session_factory: CoordinatorSessionFactory,
         *,
         actor_id: str = "dispatcher-1",
+        result_recovery: Callable[
+            [Mapping[str, Any]], TaskResult | None
+        ] | None = None,
     ) -> None:
         schema.validate_phases(kernel.contract.phases)
         if not actor_id.strip():
@@ -80,6 +83,7 @@ class CoordinatorDispatcher:
         self.schema = schema
         self.session_factory = session_factory
         self.actor_id = actor_id
+        self.result_recovery = result_recovery
         self._launches: list[CoordinatorLaunch] = []
 
     def run(self) -> CoordinatorDispatchResult:
@@ -391,9 +395,36 @@ class CoordinatorDispatcher:
                 f"interrupted coordinator recovery failed: {receipt.message}"
             )
 
+    def recover_completed_unowned_results(self) -> tuple[str, ...]:
+        """Ingest terminal worker results whose owning session died.
+
+        A worker may have finished (its result captured, e.g., in a
+        live-worker-stdout artifact) while the coordinator session that
+        dispatched it never recorded the result. The caller-supplied
+        result_recovery hook reconstructs a TaskResult from such captured
+        evidence; anything it recovers is recorded through the kernel
+        before session recovery orphans the remaining running tasks.
+        """
+
+        if self.result_recovery is None:
+            return ()
+        state = self.kernel.snapshot()
+        recovered: list[tuple[str, TaskResult]] = []
+        for task_id in sorted(state["tasks"]):
+            task = state["tasks"][task_id]
+            if task["status"] != "running":
+                continue
+            result = self.result_recovery(copy.deepcopy(task))
+            if result is not None:
+                recovered.append((task_id, result))
+        if recovered:
+            self.kernel.record_task_results(recovered)
+        return tuple(task_id for task_id, _result in recovered)
+
     def recover_interrupted_state(self) -> bool:
         """Reconcile safe checkpointed work before launching a new coordinator."""
 
+        self.recover_completed_unowned_results()
         self.recover_interrupted_session()
         state = self.kernel.snapshot()
         running = sorted(
@@ -402,6 +433,10 @@ class CoordinatorDispatcher:
             if task["status"] == "running"
         )
         if running:
+            # Reachable only when running tasks exist without a recorded
+            # active session (e.g., a checkpoint written before session
+            # tracking): coordinator.session_end orphans a dead session's
+            # running tasks, so session recovery normally clears this.
             self._block(
                 "dispatcher resumed with externally unproven running tasks: "
                 + ", ".join(running)
@@ -581,6 +616,9 @@ def resume_dispatched_controller(
     session_factory: CoordinatorSessionFactory,
     profile_builder: Callable[[EvidenceCatalog], tuple[RoleProfile, ...]],
     run_dir: Path,
+    result_recovery: Callable[
+        [Mapping[str, Any]], TaskResult | None
+    ] | None = None,
 ) -> DispatchedControllerRunResult:
     """Resume a nonterminal schema-dispatched run from its verified checkpoint."""
 
@@ -592,6 +630,7 @@ def resume_dispatched_controller(
         scheduler,
         schema,
         session_factory,
+        result_recovery=result_recovery,
     )
     if dispatcher.recover_interrupted_state():
         dispatch = dispatcher.run()

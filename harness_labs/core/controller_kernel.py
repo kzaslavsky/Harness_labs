@@ -785,6 +785,39 @@ class ControllerKernel:
             "interrupted",
         }:
             raise ValueError("coordinator session outcome is invalid")
+        # A session end means the coordinator context that owned the in-flight
+        # work is gone: a task still "running" can never receive its result
+        # through record_task_results again, so it would deadlock every later
+        # attempt (supersede only accepts terminal tasks, phases cannot
+        # advance over active tasks). Terminalize such tasks as orphaned
+        # failures, preserving any evidence their worker already produced.
+        orphaned_task_ids = sorted(
+            task_id
+            for task_id, task in self._state["tasks"].items()
+            if task["status"] == "running"
+        )
+        effects: list[tuple[str, dict[str, Any]]] = []
+        for task_id in orphaned_task_ids:
+            task = self._state["tasks"][task_id]
+            preserved = sorted(
+                {
+                    record.ref
+                    for record in self.evidence.list()
+                    if record.producer_task_id == task_id
+                }.union(task["evidence"])
+            )
+            effects.append(
+                (
+                    "task.orphaned",
+                    {
+                        "task_id": task_id,
+                        "attempt_id": task["attempt_id"],
+                        "session_id": session_id,
+                        "session_outcome": outcome,
+                        "evidence": preserved,
+                    },
+                )
+            )
         value = {
             **copy.deepcopy(dict(active)),
             "outcome": outcome,
@@ -792,10 +825,12 @@ class ControllerKernel:
             "run_status": self._state["status"],
             "result_status": str(command.payload.get("result_status", "")),
             "reason": str(command.payload.get("reason", "")),
+            "orphaned_task_ids": orphaned_task_ids,
         }
-        return [("coordinator.session_ended", value)], (
-            f"coordinator-session:{session_id}",
-        )
+        effects.append(("coordinator.session_ended", value))
+        return effects, tuple(
+            f"task:{task_id}" for task_id in orphaned_task_ids
+        ) + (f"coordinator-session:{session_id}",)
 
     def _criterion_propose(
         self,
@@ -1332,6 +1367,19 @@ class ControllerKernel:
             self._state["tasks"][task["id"]] = task
         elif event_type == "task.started":
             self._state["tasks"][payload["task_id"]]["status"] = "running"
+        elif event_type == "task.orphaned":
+            task = self._state["tasks"][payload["task_id"]]
+            task["status"] = "failed"
+            task["orphaned"] = True
+            task["result"] = {
+                "error": (
+                    "coordinator session ended while the task was still "
+                    f"running: session {payload['session_id']} "
+                    f"({payload['session_outcome']})"
+                ),
+                "error_type": "OrphanedTaskError",
+            }
+            task["evidence"] = list(payload["evidence"])
         elif event_type == "task.result_recorded":
             task = self._state["tasks"][payload["task_id"]]
             task["status"] = payload["status"]
