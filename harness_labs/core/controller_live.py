@@ -722,11 +722,58 @@ class CodexSemanticTaskExecutor:
         # Images the controller's own (unsandboxed) verification run captured
         # from the failure this attempt repairs. Empty for every other attempt.
         image_paths = attached_image_paths(context)
+
+        retry_addendum = ""
+        for dispatch_index in range(DELIVERABLE_FLOOR_RETRY_LIMIT + 1):
+            try:
+                return self._dispatch_and_validate(
+                    attempt,
+                    codex,
+                    repository,
+                    context,
+                    initial_workspace,
+                    adoption_grant,
+                    artifact_kind,
+                    preflight_artifact,
+                    image_paths,
+                    retry_addendum,
+                )
+            except DeliverableFloorViolation as exc:
+                if dispatch_index >= DELIVERABLE_FLOOR_RETRY_LIMIT:
+                    # ``execute()`` catches this and audits the terminal
+                    # refusal itself -- auditing here too would double the
+                    # ``deliverable_floor_refused`` event for the same
+                    # violation.
+                    raise
+                self._audit_deliverable_floor_violation(attempt, exc)
+                self._audit_deliverable_floor_retry(
+                    attempt, exc, dispatch_index + 2
+                )
+                retry_addendum = deliverable_floor_retry_addendum(exc)
+        raise AssertionError(
+            "unreachable: deliverable floor retry loop exhausted without "
+            "returning or raising"
+        )
+
+    def _dispatch_and_validate(
+        self,
+        attempt: TaskAttempt,
+        codex: str,
+        repository: Path,
+        context: Mapping[str, Any],
+        initial_workspace: Mapping[str, Any] | None,
+        adoption_grant: Mapping[str, Any] | None,
+        artifact_kind: str,
+        preflight_artifact: Any,
+        image_paths: Sequence[Path],
+        retry_addendum: str,
+    ) -> TaskResult:
         prompt = _worker_prompt(
             self.task,
             context,
             self.role_instructions,
             image_paths,
+            retry_addendum=retry_addendum,
         )
 
         with tempfile.TemporaryDirectory(prefix="controller-live-codex-") as temporary:
@@ -936,6 +983,41 @@ class CodexSemanticTaskExecutor:
             "deliverable_floor_refused",
             status="failed",
             payload={"field": exc.field, "reason": exc.reason},
+            actor=AuditActor(
+                attempt.attempt_id,
+                "capability_adapter",
+                parent_id=attempt.parent_attempt_id,
+            ),
+            attempt_id=attempt.attempt_id,
+            parent_attempt_id=attempt.parent_attempt_id,
+            backend_id="subprocess",
+        )
+
+    def _audit_deliverable_floor_retry(
+        self,
+        attempt: TaskAttempt,
+        exc: DeliverableFloorViolation,
+        attempt_number: int,
+    ) -> None:
+        """Journal that a floor violation is being retried, distinct from a refusal.
+
+        Recorded once per in-dispatch retry, between the ``deliverable_floor_refused``
+        event for the violation that triggered it and the re-dispatch itself, so the
+        audit trail shows the retry was deliberate rather than a second unrelated
+        refusal. ``attempt_number`` names which dispatch is about to run (2 for the
+        first retry, and so on) so the trail stays legible if the bound ever grows.
+        """
+
+        if self.audit is None:
+            return
+        self.audit.append(
+            "deliverable_floor_retry_dispatched",
+            status="retrying",
+            payload={
+                "field": exc.field,
+                "reason": exc.reason,
+                "attempt": attempt_number,
+            },
             actor=AuditActor(
                 attempt.attempt_id,
                 "capability_adapter",
@@ -1309,12 +1391,42 @@ def _parse_context(value: str) -> dict[str, Any]:
     return dict(parsed)
 
 
+# A submission refused by ``enforce_deliverable_floor`` (placeholder
+# summary/deliverable content) consumes one bounded in-dispatch retry before
+# the executor gives up and reports a failed TaskResult. One retry is enough
+# to recover a worker that submitted a probe/test payload as its first
+# structured-output call while leaving real work in the workspace; a module
+# constant keeps the bound identical (and easy to audit) across both live
+# executors.
+DELIVERABLE_FLOOR_RETRY_LIMIT = 1
+
+
+def deliverable_floor_retry_addendum(exc: DeliverableFloorViolation) -> str:
+    """Corrective instructions appended to the prompt for a floor-violation retry.
+
+    Names the exact refused field and machine-classified reason so the
+    worker cannot mistake this for a generic error, and states plainly that
+    its earlier workspace edits are intact -- the retry re-dispatches into
+    the same attempt workspace, not a fresh baseline.
+    """
+
+    return (
+        "\n\nCorrective addendum: your previous structured result was refused "
+        f"by the deterministic deliverable-content floor: field '{exc.field}', "
+        f"reason '{exc.reason}'. Your structured-output submission is the "
+        "deliverable and your first submission is final -- resubmit the "
+        "complete, real result now; the work you already performed in the "
+        "workspace is intact.\n"
+    )
+
+
 def _worker_prompt(
     task: Mapping[str, Any],
     context: Mapping[str, Any],
     role_instructions: str,
     image_paths: Sequence[Path] = (),
     images_attached: bool = True,
+    retry_addendum: str = "",
 ) -> str:
     access_instructions = (
         "You may inspect and edit files inside the repository using shell commands. "
@@ -1363,14 +1475,17 @@ def _worker_prompt(
         f"Result detail schema identity: {task['details_schema']}\n"
         f"Controller-supplied context:\n{json.dumps(context, sort_keys=True)}\n"
         f"{image_instructions}"
+        f"{retry_addendum}"
     )
 
 
 __all__ = [
     "ATTEMPT_START_BASELINE_RESTORATION_EVENT",
     "CodexSemanticTaskExecutor",
+    "DELIVERABLE_FLOOR_RETRY_LIMIT",
     "DirtyBaselineGrantVerification",
     "LiveExecutionError",
+    "deliverable_floor_retry_addendum",
     "dirty_baseline_grant_refusal_detail",
     "restore_attempt_start_baseline",
     "select_dirty_baseline_receipt",

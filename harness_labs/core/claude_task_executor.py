@@ -18,16 +18,18 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from time import monotonic_ns
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from harness_labs.core.attempts import TaskAttempt, TaskResult
 from harness_labs.core.audit import AuditActor, AuditJournal
 from harness_labs.core.controller_evidence import EvidenceCatalog
 from harness_labs.core.controller_live import (
     ATTEMPT_START_BASELINE_RESTORATION_EVENT,
+    DELIVERABLE_FLOOR_RETRY_LIMIT,
     _RAW_OUTPUT_SCHEMA,
     _WORKSPACE_CHANGE_RECEIPT_KIND,
     LiveExecutionError,
+    deliverable_floor_retry_addendum,
     extract_park_disposition,
     _filter_satisfied_criteria,
     _is_latest_writable_attempt,
@@ -249,12 +251,59 @@ class ClaudeSemanticTaskExecutor:
         # switching stdin to the stream-json content-block protocol would
         # change the transport for every task, not just repair rounds.
         image_paths = attached_image_paths(context)
+
+        retry_addendum = ""
+        for dispatch_index in range(DELIVERABLE_FLOOR_RETRY_LIMIT + 1):
+            try:
+                return self._dispatch_and_validate(
+                    attempt,
+                    claude,
+                    repository,
+                    context,
+                    initial_workspace,
+                    adoption_grant,
+                    artifact_kind,
+                    preflight_artifact,
+                    image_paths,
+                    retry_addendum,
+                )
+            except DeliverableFloorViolation as exc:
+                if dispatch_index >= DELIVERABLE_FLOOR_RETRY_LIMIT:
+                    # ``execute()`` catches this and audits the terminal
+                    # refusal itself -- auditing here too would double the
+                    # ``deliverable_floor_refused`` event for the same
+                    # violation.
+                    raise
+                self._audit_deliverable_floor_violation(attempt, exc)
+                self._audit_deliverable_floor_retry(
+                    attempt, exc, dispatch_index + 2
+                )
+                retry_addendum = deliverable_floor_retry_addendum(exc)
+        raise AssertionError(
+            "unreachable: deliverable floor retry loop exhausted without "
+            "returning or raising"
+        )
+
+    def _dispatch_and_validate(
+        self,
+        attempt: TaskAttempt,
+        claude: str,
+        repository: Path,
+        context: Mapping[str, Any],
+        initial_workspace: Mapping[str, Any],
+        adoption_grant: Mapping[str, Any] | None,
+        artifact_kind: str,
+        preflight_artifact: Any,
+        image_paths: Sequence[Path],
+        retry_addendum: str,
+    ) -> TaskResult:
         prompt = _worker_prompt(
             self.task,
             context,
             self.role_instructions,
             image_paths,
             images_attached=False,
+            retry_addendum=retry_addendum,
         )
 
         argv = [
@@ -478,6 +527,41 @@ class ClaudeSemanticTaskExecutor:
             "deliverable_floor_refused",
             status="failed",
             payload={"field": exc.field, "reason": exc.reason},
+            actor=AuditActor(
+                attempt.attempt_id,
+                "capability_adapter",
+                parent_id=attempt.parent_attempt_id,
+            ),
+            attempt_id=attempt.attempt_id,
+            parent_attempt_id=attempt.parent_attempt_id,
+            backend_id="subprocess",
+        )
+
+    def _audit_deliverable_floor_retry(
+        self,
+        attempt: TaskAttempt,
+        exc: DeliverableFloorViolation,
+        attempt_number: int,
+    ) -> None:
+        """Journal that a floor violation is being retried, distinct from a refusal.
+
+        Recorded once per in-dispatch retry, between the ``deliverable_floor_refused``
+        event for the violation that triggered it and the re-dispatch itself, so the
+        audit trail shows the retry was deliberate rather than a second unrelated
+        refusal. ``attempt_number`` names which dispatch is about to run (2 for the
+        first retry, and so on) so the trail stays legible if the bound ever grows.
+        """
+
+        if self.audit is None:
+            return
+        self.audit.append(
+            "deliverable_floor_retry_dispatched",
+            status="retrying",
+            payload={
+                "field": exc.field,
+                "reason": exc.reason,
+                "attempt": attempt_number,
+            },
             actor=AuditActor(
                 attempt.attempt_id,
                 "capability_adapter",
