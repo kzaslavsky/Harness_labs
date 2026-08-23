@@ -88,6 +88,7 @@ from harness_labs.plangraph.plan_graph_contract import (
     sha256_json,
 )
 from harness_labs.plangraph.plan_synthesis import plan_synthesis
+from harness_labs.observability.run_forensics import Refusal, SkippedDir
 
 PROPOSAL_PROTOCOL = "improvement-proposal/1"
 CAMPAIGN_DOMAIN = "self-improvement"
@@ -1367,6 +1368,9 @@ class AuditResult:
     observations: tuple[dict[str, Any], ...]
     patterns: tuple[dict[str, Any], ...]
     proposals: tuple[dict[str, Any], ...]
+    skipped: tuple[SkippedDir, ...] = ()
+    refused: tuple[Refusal, ...] = ()
+    excluded_run_ids: tuple[str, ...] = ()
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -1377,6 +1381,9 @@ class AuditResult:
             "proposal_ids": sorted(
                 str(proposal.get("proposal_id")) for proposal in self.proposals
             ),
+            "skipped": [s.as_dict() for s in self.skipped],
+            "refused": [r.as_dict() for r in self.refused],
+            "excluded_run_ids": list(self.excluded_run_ids),
         }
 
 
@@ -1492,6 +1499,7 @@ def run_audit(
     if not runs_root.exists():
         return AuditResult(observations=(), patterns=(), proposals=())
 
+
     now = datetime.now(timezone.utc).isoformat()
     mining = mine(runs_root, state_root=state_root)
     patterns = cluster_observations(mining.observations, now=now)
@@ -1544,6 +1552,8 @@ def run_audit(
     return AuditResult(
         observations=tuple(mining.observations), patterns=tuple(patterns),
         proposals=tuple(proposals),
+        skipped=tuple(mining.skipped), refused=tuple(mining.refused),
+        excluded_run_ids=tuple(mining.excluded_run_ids),
     )
 
 
