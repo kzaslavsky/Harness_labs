@@ -20,6 +20,7 @@ from harness_labs.core.controller_evidence import EvidenceCatalog, EvidenceError
 from harness_labs.core.controller_results import (
     DeliverableFloorViolation,
     MIN_DELIVERABLE_LENGTH,
+    SemanticResultError,
     enforce_deliverable_floor,
     semantic_payload,
     validate_semantic_result,
@@ -750,6 +751,20 @@ class CodexSemanticTaskExecutor:
                     attempt, exc, dispatch_index + 2
                 )
                 retry_addendum = deliverable_floor_retry_addendum(exc)
+            except SemanticResultError as exc:
+                # Broader than ``DeliverableFloorViolation`` (caught above):
+                # any other typed shape refusal from ``validate_semantic_result``,
+                # e.g. an invalid ``addressed_finding_keys`` list. Unlike the
+                # floor violation, the terminal case is audited here too --
+                # there is no outer ``except SemanticResultError`` in
+                # ``execute()`` to split the responsibility with, only the
+                # generic ``ValueError`` catch-all.
+                if dispatch_index >= DELIVERABLE_FLOOR_RETRY_LIMIT:
+                    self._audit_semantic_shape_violation(attempt, exc)
+                    raise
+                self._audit_semantic_shape_violation(attempt, exc)
+                self._audit_semantic_shape_retry(attempt, exc, dispatch_index + 2)
+                retry_addendum = semantic_shape_retry_addendum(exc)
         raise AssertionError(
             "unreachable: deliverable floor retry loop exhausted without "
             "returning or raising"
@@ -1016,6 +1031,61 @@ class CodexSemanticTaskExecutor:
             payload={
                 "field": exc.field,
                 "reason": exc.reason,
+                "attempt": attempt_number,
+            },
+            actor=AuditActor(
+                attempt.attempt_id,
+                "capability_adapter",
+                parent_id=attempt.parent_attempt_id,
+            ),
+            attempt_id=attempt.attempt_id,
+            parent_attempt_id=attempt.parent_attempt_id,
+            backend_id="subprocess",
+        )
+
+    def _audit_semantic_shape_violation(
+        self,
+        attempt: TaskAttempt,
+        exc: SemanticResultError,
+    ) -> None:
+        if self.audit is None:
+            return
+        self.audit.append(
+            "semantic_shape_refused",
+            status="failed",
+            payload={"violation": type(exc).__name__, "message": str(exc)},
+            actor=AuditActor(
+                attempt.attempt_id,
+                "capability_adapter",
+                parent_id=attempt.parent_attempt_id,
+            ),
+            attempt_id=attempt.attempt_id,
+            parent_attempt_id=attempt.parent_attempt_id,
+            backend_id="subprocess",
+        )
+
+    def _audit_semantic_shape_retry(
+        self,
+        attempt: TaskAttempt,
+        exc: SemanticResultError,
+        attempt_number: int,
+    ) -> None:
+        """Journal that a semantic-shape violation is being retried.
+
+        Mirrors :meth:`_audit_deliverable_floor_retry` for the broader
+        ``SemanticResultError`` family -- recorded once per in-dispatch
+        retry, between the ``semantic_shape_refused`` event for the
+        violation that triggered it and the re-dispatch itself.
+        """
+
+        if self.audit is None:
+            return
+        self.audit.append(
+            "semantic_shape_retry_dispatched",
+            status="retrying",
+            payload={
+                "violation": type(exc).__name__,
+                "message": str(exc),
                 "attempt": attempt_number,
             },
             actor=AuditActor(
@@ -1420,6 +1490,29 @@ def deliverable_floor_retry_addendum(exc: DeliverableFloorViolation) -> str:
     )
 
 
+def semantic_shape_retry_addendum(exc: SemanticResultError) -> str:
+    """Corrective instructions appended to the prompt for a semantic-shape retry.
+
+    Sibling to :func:`deliverable_floor_retry_addendum` for the broader
+    ``SemanticResultError`` family -- any other typed shape refusal from
+    ``validate_semantic_result`` (an invalid ``addressed_finding_keys``
+    list, a malformed ``criterion_coverage`` entry, and so on). Quotes the
+    exact validation error text so the worker sees the precise required
+    shape rather than a generic complaint, and reuses
+    ``DELIVERABLE_FLOOR_RETRY_LIMIT`` as the shared single-retry bound --
+    the two violation classes are variants of the same "one bounded
+    correction, then give up" policy, not separate budgets.
+    """
+
+    return (
+        "\n\nCorrective addendum: your previous structured result failed "
+        f"semantic-shape validation: {exc}. Your structured-output "
+        "submission is the deliverable and your first submission is final "
+        "-- resubmit the complete, real result now in the required shape; "
+        "the work you already performed in the workspace is intact.\n"
+    )
+
+
 def _worker_prompt(
     task: Mapping[str, Any],
     context: Mapping[str, Any],
@@ -1486,6 +1579,7 @@ __all__ = [
     "DirtyBaselineGrantVerification",
     "LiveExecutionError",
     "deliverable_floor_retry_addendum",
+    "semantic_shape_retry_addendum",
     "dirty_baseline_grant_refusal_detail",
     "restore_attempt_start_baseline",
     "select_dirty_baseline_receipt",
