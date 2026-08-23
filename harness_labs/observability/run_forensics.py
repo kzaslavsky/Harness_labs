@@ -21,19 +21,26 @@ trusted on path-existence alone.
 Run discovery follows the dashboard run-catalog's audit-root semantics
 (``run_catalog.build_run_catalog``): the direct, non-symlinked, non-dotted
 children of a root are its runs. PlanGraph campaigns, however, register the
-*graph root* as the audit root and nest their runs one level deeper
-(``logs/runs/<graph-root>/<run-id>/``), so a miner that only ever looks at
-immediate children of ``logs/runs`` sees nothing but containers and mines
-zero observations. ``_iter_run_dirs`` therefore recognizes a directory that
-is not itself run-shaped (no ``events.jsonl``) but holds run-shaped children
-as a *container* and descends exactly one bounded level into it. Watermark
-keys stay stable for flat runs (the directory name) and are qualified with
-the container name for nested ones (``<graph-root>/<run-id>``), so two graph
-roots holding same-named run directories never collide. Every directory that
-is neither run-shaped nor a container -- and every non-run child of a
-container -- is reported in ``MiningResult.skipped`` with the reason it was
-not mined, so an empty or thin harvest always explains itself instead of
-silently capping coverage.
+*graph root* as the audit root and nest their runs one or more levels deeper
+-- ``logs/runs/<graph-root>/<run-id>/`` for a plain campaign, and
+``logs/runs/<graph-root>/feature-runs/<run-id>/`` when an intermediate,
+non-run-shaped grouping directory (e.g. ``feature-runs/``) sits between the
+graph root and its runs -- so a miner that only ever looks at immediate
+children of ``logs/runs`` sees nothing but containers and mines zero
+observations. ``_iter_run_dirs`` therefore recognizes a directory that is
+not itself run-shaped (no ``events.jsonl``) but holds run-shaped descendants
+as a *container* and recurses into it, up to ``MAX_CONTAINER_DEPTH`` levels
+of non-run-shaped nesting, rather than stopping after one. Watermark keys
+stay stable for flat runs (the directory name) and are qualified with every
+intermediate directory name for nested ones (``<graph-root>/<run-id>``, or
+``<graph-root>/<intermediate>/<run-id>`` for the two-level shape), joined
+with ``/`` down the full path from the runs root, so two graph roots (or two
+intermediate groupings) holding same-named run directories never collide.
+Every directory that is neither run-shaped nor a container -- and every
+non-run descendant of a container that itself yields no run-shaped
+descendant within the depth bound -- is reported in ``MiningResult.skipped``
+with the reason it was not mined, so an empty or thin harvest always
+explains itself instead of silently capping coverage.
 
 Mining is watermarked per run directory under a caller-supplied state root
 (``logs/improvement/state/`` in production, per SI-02), keyed on that run's
@@ -361,11 +368,14 @@ def _save_state(state_root: Path, processed: Mapping[str, Mapping[str, Any]]) ->
 #: cannot be a run.
 RUN_JOURNAL_FILENAME = "events.jsonl"
 
-#: How many levels of container nesting ``_iter_run_dirs`` will descend.
-#: PlanGraph nests exactly one (``logs/runs/<graph-root>/<run-id>/``); the
-#: bound is explicit so a deep, unrelated tree under the runs root can never
-#: turn discovery into an unbounded walk.
-MAX_CONTAINER_DEPTH = 1
+#: How many levels of non-run-shaped container nesting ``_iter_run_dirs``
+#: will descend below a top-level candidate before giving up on it. PlanGraph
+#: nests one level for a plain campaign (``logs/runs/<graph-root>/<run-id>/``)
+#: and two when an intermediate grouping directory sits in between
+#: (``logs/runs/<graph-root>/feature-runs/<run-id>/``); the bound is set to
+#: cover both known shapes explicitly, so a deep, unrelated tree under the
+#: runs root can never turn discovery into an unbounded walk.
+MAX_CONTAINER_DEPTH = 2
 
 
 def _is_run_dir(path: Path) -> bool:
@@ -398,12 +408,17 @@ def _candidate_children(directory: Path) -> tuple[list[Path], list[Path]]:
 def _iter_run_dirs(runs_root: Path) -> tuple[list[tuple[str, Path]], list[SkippedDir]]:
     """Discover ``(watermark_key, run_dir)`` pairs plus every skipped entry.
 
-    A direct child that is run-shaped keeps its bare directory name as its
-    watermark key -- runs already watermarked by an earlier release stay
-    watermarked. A direct child that is *not* run-shaped but holds
-    run-shaped children is a container (a PlanGraph graph root): its runs
-    are keyed ``<container>/<run>`` so two graph roots holding same-named
-    run directories never share a watermark entry.
+    A run-shaped directory keeps its full path relative to ``runs_root``
+    (joined with ``/``) as its watermark key -- a bare directory name for a
+    flat run, ``<container>/<run>`` for a run nested one container level
+    down, ``<container>/<intermediate>/<run>`` for two, and so on -- so runs
+    already watermarked by an earlier release stay watermarked and two
+    containers holding same-named run directories never share a watermark
+    entry. A directory that is *not* itself run-shaped is a candidate
+    container and is recursed into, up to ``MAX_CONTAINER_DEPTH`` levels of
+    such nesting; a container that yields no run-shaped descendant within
+    that bound is reported once, at the point descent stopped, in
+    ``skipped``.
     """
 
     if not runs_root.is_dir():
@@ -421,40 +436,50 @@ def _iter_run_dirs(runs_root: Path) -> tuple[list[tuple[str, Path]], list[Skippe
                 )
             )
 
-    top_level, top_bookkeeping = _candidate_children(runs_root)
-    note_bookkeeping(top_bookkeeping)
-    for entry in top_level:
+    def walk(entry: Path, key: str, depth: int) -> bool:
+        """Discover ``entry``; return whether it is or contains a run.
+
+        ``depth`` counts levels of non-run-shaped container nesting already
+        crossed to reach ``entry`` (a top-level candidate starts at 1).
+        """
+
         if _is_run_dir(entry):
-            discovered.append((entry.name, entry))
-            continue
-        children, child_bookkeeping = _candidate_children(entry)
-        nested = [child for child in children if _is_run_dir(child)]
-        if not nested:
+            discovered.append((key, entry))
+            return True
+        if depth > MAX_CONTAINER_DEPTH:
             skipped.append(
                 SkippedDir(
-                    path=entry.name,
+                    path=key,
+                    reason=(
+                        f"nested directory holds no {RUN_JOURNAL_FILENAME}; container "
+                        f"descent is bounded at depth {MAX_CONTAINER_DEPTH}"
+                    ),
+                )
+            )
+            return False
+        children, bookkeeping = _candidate_children(entry)
+        note_bookkeeping(bookkeeping, prefix=f"{key}/")
+        if not children:
+            skipped.append(
+                SkippedDir(
+                    path=key,
                     reason=(
                         f"directory holds no {RUN_JOURNAL_FILENAME} and no run-shaped "
                         "child directory"
                     ),
                 )
             )
-            continue
-        note_bookkeeping(child_bookkeeping, prefix=f"{entry.name}/")
+            return False
+        found_any = False
         for child in children:
-            key = f"{entry.name}/{child.name}"
-            if _is_run_dir(child):
-                discovered.append((key, child))
-            else:
-                skipped.append(
-                    SkippedDir(
-                        path=key,
-                        reason=(
-                            f"nested directory holds no {RUN_JOURNAL_FILENAME}; container "
-                            f"descent is bounded at depth {MAX_CONTAINER_DEPTH}"
-                        ),
-                    )
-                )
+            if walk(child, f"{key}/{child.name}", depth + 1):
+                found_any = True
+        return found_any
+
+    top_level, top_bookkeeping = _candidate_children(runs_root)
+    note_bookkeeping(top_bookkeeping)
+    for entry in top_level:
+        walk(entry, entry.name, depth=1)
     return discovered, skipped
 
 

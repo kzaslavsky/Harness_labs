@@ -1116,6 +1116,38 @@ class RunAuditTests(_RepoFixture):
             entries_after = json.loads(ledger_path.read_text(encoding="utf-8"))
             self.assertEqual(len(entries_after), 1)
 
+    def test_skipped_and_refused_reach_the_audit_result_not_just_mine(self) -> None:
+        """run_forensics.mine() computes skipped/refused so a thin harvest
+        always explains itself (self-improvement-agent-guide.md SS5); this
+        asserts run_audit() actually threads that data through to
+        AuditResult/its as_dict() instead of discarding it after mining."""
+        self._seed_runs()
+        runs_root = self.repository / "logs" / "runs"
+        shutil.copytree(CORPUS_ROOT / "run-si02-tampered-001", runs_root / "run-si02-tampered-001")
+        (runs_root / "not-a-run").mkdir()
+
+        result = loop.run_audit(repository=self.repository)
+
+        skipped_paths = [entry.path for entry in result.skipped]
+        self.assertIn("not-a-run", skipped_paths)
+        refused_dirs = [refusal.run_dir for refusal in result.refused]
+        self.assertIn("run-si02-tampered-001", refused_dirs)
+
+        as_dict = result.as_dict()
+        self.assertIn("not-a-run", [entry["path"] for entry in as_dict["skipped"]])
+        self.assertIn(
+            "run-si02-tampered-001", [entry["run_dir"] for entry in as_dict["refused"]]
+        )
+        self.assertIsInstance(as_dict["excluded_run_ids"], list)
+
+        # Strictly additive: the pre-existing three keys are unchanged.
+        self.assertEqual(as_dict["observation_count"], len(result.observations))
+        self.assertEqual(
+            as_dict["pattern_ids"],
+            sorted(str(p.get("pattern_id")) for p in result.patterns),
+        )
+        self.assertEqual(as_dict["proposal_ids"], [])
+
     def test_propose_path_refuses_an_uncited_governed_path(self) -> None:
         self._seed_runs()
         decisions_dir = self.repository / "docs" / "decisions"

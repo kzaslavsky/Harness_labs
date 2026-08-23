@@ -338,17 +338,41 @@ class NestedGraphRootDiscoveryTests(unittest.TestCase):
             result.new_run_dirs, (_VALID_RUN_ID, f"si-graph/{_VALID_RUN_ID_2}")
         )
 
-    def test_descent_is_bounded_at_one_level(self) -> None:
-        """A run buried two levels deep is not mined -- and is reported as
-        skipped rather than silently ignored."""
+    def test_two_levels_of_container_nesting_are_mined(self) -> None:
+        """The real-world regression: a non-run-shaped intermediate grouping
+        directory (e.g. ``feature-runs/``) sits between the graph root and
+        its actual run directories
+        (``<graph-root>/feature-runs/<run-id>/``). Descent must not stop
+        after the first container level."""
 
-        deep = self.runs_root / "outer" / "inner" / _VALID_RUN_ID
+        deep = self.runs_root / "si-graph" / "feature-runs" / _VALID_RUN_ID
+        shutil.copytree(FIXTURE_CORPUS / _VALID_RUN_ID, deep)
+        result = mine(self.runs_root, state_root=self.state_root)
+        self.assertGreater(len(result.observations), 0)
+        self.assertTrue(all(obs["run_id"] == _VALID_RUN_ID for obs in result.observations))
+        expected_key = f"si-graph/feature-runs/{_VALID_RUN_ID}"
+        self.assertEqual(result.new_run_dirs, (expected_key,))
+        state = json.loads((self.state_root / run_forensics.STATE_FILENAME).read_text(encoding="utf-8"))
+        self.assertIn(expected_key, state["processed_run_dirs"])
+        # The nested watermark key cannot collide with the same run id
+        # mined flat or under a different graph root -- assert its exact,
+        # fully-qualified shape rather than merely "it was discovered".
+        self.assertNotIn(_VALID_RUN_ID, state["processed_run_dirs"])
+        self.assertNotIn(f"si-graph/{_VALID_RUN_ID}", state["processed_run_dirs"])
+
+    def test_descent_is_bounded_beyond_the_configured_depth(self) -> None:
+        """A run buried past ``MAX_CONTAINER_DEPTH`` levels of non-run-shaped
+        containers is not mined -- and the descent's stopping point is
+        reported as skipped rather than the whole tree silently ignored."""
+
+        deep = self.runs_root / "outer" / "middle" / "inner" / _VALID_RUN_ID
         shutil.copytree(FIXTURE_CORPUS / _VALID_RUN_ID, deep)
         result = mine(self.runs_root, state_root=self.state_root)
         self.assertEqual(result.observations, ())
         self.assertEqual(result.new_run_dirs, ())
         skipped = {entry.path: entry.reason for entry in result.skipped}
-        self.assertIn("outer", skipped)
+        self.assertIn("outer/middle/inner", skipped)
+        self.assertIn("bounded at depth", skipped["outer/middle/inner"])
 
     def test_a_root_of_only_containers_explains_its_empty_harvest(self) -> None:
         """The real-world regression: every direct child of ``logs/runs`` is
