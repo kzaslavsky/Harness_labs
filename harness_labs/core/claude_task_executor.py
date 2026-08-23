@@ -40,10 +40,12 @@ from harness_labs.core.controller_live import (
     dirty_baseline_grant_refusal_detail,
     restore_attempt_start_baseline,
     select_dirty_baseline_receipt,
+    semantic_shape_retry_addendum,
     verify_dirty_baseline_grant,
 )
 from harness_labs.core.controller_results import (
     DeliverableFloorViolation,
+    SemanticResultError,
     enforce_deliverable_floor,
     semantic_payload,
     validate_semantic_result,
@@ -60,6 +62,92 @@ from harness_labs.core.verification_images import attached_image_paths
 
 _READ_ONLY_TOOLS = "Read,Glob,Grep"
 _WORKSPACE_WRITE_TOOLS = "Read,Glob,Grep,Edit,Write,Bash"
+
+# The claude CLI's own terminal classification for a worker that exhausted
+# its structured-output retries (subtype "error_max_structured_output_retries",
+# terminal_reason "structured_output_retry_exhausted"): the model kept
+# producing text that failed schema validation until the CLI gave up on its
+# side, five turns deep in real workspace edits. Claude-CLI-specific -- the
+# Codex backend has no equivalent failure shape, so this stays local to this
+# module rather than living alongside the shared Codex/Claude retry helpers
+# in controller_live.py.
+_STRUCTURED_OUTPUT_EXHAUSTION_TERMINAL_REASON = "structured_output_retry_exhausted"
+_STRUCTURED_OUTPUT_EXHAUSTION_SUBTYPE = "error_max_structured_output_retries"
+
+
+class StructuredOutputExhaustionError(LiveExecutionError):
+    """Raised when the claude CLI reports it exhausted its structured-output retries.
+
+    Carries the CLI's own ``terminal_reason``/``subtype``/``errors`` fields
+    so the corrective addendum can quote the exact CLI-side failure without
+    the caller re-parsing the raw transcript.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        terminal_reason: str,
+        subtype: str,
+        cli_errors: tuple[str, ...],
+    ) -> None:
+        super().__init__(message)
+        self.terminal_reason = terminal_reason
+        self.subtype = subtype
+        self.cli_errors = cli_errors
+
+
+def _structured_output_exhaustion_detail(
+    result_payload: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Classify a failed CLI result envelope as structured-output exhaustion.
+
+    ``result_payload`` is the JSON envelope already parsed from the CLI's
+    stdout by ``_parse_result_envelope`` -- the claude CLI still emits its
+    full result envelope on stdout for this failure (nonzero exit status),
+    so no second parse of the raw transcript is needed. Returns ``None`` for
+    any other payload shape, leaving existing behavior unchanged.
+    """
+
+    if not isinstance(result_payload, Mapping):
+        return None
+    if (
+        result_payload.get("terminal_reason")
+        != _STRUCTURED_OUTPUT_EXHAUSTION_TERMINAL_REASON
+        or result_payload.get("subtype") != _STRUCTURED_OUTPUT_EXHAUSTION_SUBTYPE
+    ):
+        return None
+    errors = result_payload.get("errors", [])
+    cli_errors = (
+        tuple(str(item) for item in errors) if isinstance(errors, list) else ()
+    )
+    return {
+        "terminal_reason": str(result_payload.get("terminal_reason", "")),
+        "subtype": str(result_payload.get("subtype", "")),
+        "cli_errors": cli_errors,
+    }
+
+
+def structured_output_exhaustion_retry_addendum(
+    exc: StructuredOutputExhaustionError,
+) -> str:
+    """Corrective instructions appended to the prompt for an exhaustion retry.
+
+    Names the CLI's own failure ("Failed to provide valid structured output
+    after N attempts") and restates the required schema, since the previous
+    session never got a schema-valid submission accepted at all -- unlike
+    the floor and shape retries, there is no refused-but-parsed payload to
+    quote back.
+    """
+
+    errors_text = "; ".join(exc.cli_errors) if exc.cli_errors else exc.subtype
+    return (
+        "\n\nCorrective addendum: your previous session failed to submit "
+        f"valid structured output ({errors_text}). The schema is "
+        f"{json.dumps(_RAW_OUTPUT_SCHEMA, sort_keys=True)}. Your workspace "
+        "edits are intact -- resubmit only the structured result now, "
+        "matching the schema exactly.\n"
+    )
 
 
 @dataclass
@@ -279,6 +367,33 @@ class ClaudeSemanticTaskExecutor:
                     attempt, exc, dispatch_index + 2
                 )
                 retry_addendum = deliverable_floor_retry_addendum(exc)
+            except StructuredOutputExhaustionError as exc:
+                # The claude CLI itself gave up on structured output after
+                # real workspace edits -- unlike a shape refusal, there is
+                # no outer handler in ``execute()`` specific to this class,
+                # only the generic ``LiveExecutionError`` catch-all, so both
+                # the retry and the terminal refusal are audited here.
+                if dispatch_index >= DELIVERABLE_FLOOR_RETRY_LIMIT:
+                    self._audit_structured_output_exhaustion(attempt, exc)
+                    raise
+                self._audit_structured_output_exhaustion(attempt, exc)
+                self._audit_structured_output_exhaustion_retry(
+                    attempt, exc, dispatch_index + 2
+                )
+                retry_addendum = structured_output_exhaustion_retry_addendum(exc)
+            except SemanticResultError as exc:
+                # Broader than ``DeliverableFloorViolation`` (caught above):
+                # any other typed shape refusal from ``validate_semantic_result``,
+                # e.g. an invalid ``addressed_finding_keys`` list. No outer
+                # ``except SemanticResultError`` in ``execute()`` either, only
+                # the generic ``ValueError`` catch-all, so the terminal
+                # refusal is audited here too.
+                if dispatch_index >= DELIVERABLE_FLOOR_RETRY_LIMIT:
+                    self._audit_semantic_shape_violation(attempt, exc)
+                    raise
+                self._audit_semantic_shape_violation(attempt, exc)
+                self._audit_semantic_shape_retry(attempt, exc, dispatch_index + 2)
+                retry_addendum = semantic_shape_retry_addendum(exc)
         raise AssertionError(
             "unreachable: deliverable floor retry loop exhausted without "
             "returning or raising"
@@ -365,6 +480,12 @@ class ClaudeSemanticTaskExecutor:
         )
         if completed.returncode != 0:
             detail = (completed.stderr.strip() or completed.stdout.strip())[-2000:]
+            exhaustion = _structured_output_exhaustion_detail(result_payload)
+            if exhaustion is not None:
+                raise StructuredOutputExhaustionError(
+                    f"Claude exited with status {completed.returncode}: {detail}",
+                    **exhaustion,
+                )
             raise LiveExecutionError(
                 f"Claude exited with status {completed.returncode}: {detail}"
             )
@@ -560,6 +681,117 @@ class ClaudeSemanticTaskExecutor:
             payload={
                 "field": exc.field,
                 "reason": exc.reason,
+                "attempt": attempt_number,
+            },
+            actor=AuditActor(
+                attempt.attempt_id,
+                "capability_adapter",
+                parent_id=attempt.parent_attempt_id,
+            ),
+            attempt_id=attempt.attempt_id,
+            parent_attempt_id=attempt.parent_attempt_id,
+            backend_id="subprocess",
+        )
+
+    def _audit_semantic_shape_violation(
+        self,
+        attempt: TaskAttempt,
+        exc: SemanticResultError,
+    ) -> None:
+        if self.audit is None:
+            return
+        self.audit.append(
+            "semantic_shape_refused",
+            status="failed",
+            payload={"violation": type(exc).__name__, "message": str(exc)},
+            actor=AuditActor(
+                attempt.attempt_id,
+                "capability_adapter",
+                parent_id=attempt.parent_attempt_id,
+            ),
+            attempt_id=attempt.attempt_id,
+            parent_attempt_id=attempt.parent_attempt_id,
+            backend_id="subprocess",
+        )
+
+    def _audit_semantic_shape_retry(
+        self,
+        attempt: TaskAttempt,
+        exc: SemanticResultError,
+        attempt_number: int,
+    ) -> None:
+        """Journal that a semantic-shape violation is being retried.
+
+        Mirrors :meth:`_audit_deliverable_floor_retry` for the broader
+        ``SemanticResultError`` family.
+        """
+
+        if self.audit is None:
+            return
+        self.audit.append(
+            "semantic_shape_retry_dispatched",
+            status="retrying",
+            payload={
+                "violation": type(exc).__name__,
+                "message": str(exc),
+                "attempt": attempt_number,
+            },
+            actor=AuditActor(
+                attempt.attempt_id,
+                "capability_adapter",
+                parent_id=attempt.parent_attempt_id,
+            ),
+            attempt_id=attempt.attempt_id,
+            parent_attempt_id=attempt.parent_attempt_id,
+            backend_id="subprocess",
+        )
+
+    def _audit_structured_output_exhaustion(
+        self,
+        attempt: TaskAttempt,
+        exc: StructuredOutputExhaustionError,
+    ) -> None:
+        if self.audit is None:
+            return
+        self.audit.append(
+            "structured_output_exhaustion_refused",
+            status="failed",
+            payload={
+                "terminal_reason": exc.terminal_reason,
+                "subtype": exc.subtype,
+                "errors": list(exc.cli_errors),
+            },
+            actor=AuditActor(
+                attempt.attempt_id,
+                "capability_adapter",
+                parent_id=attempt.parent_attempt_id,
+            ),
+            attempt_id=attempt.attempt_id,
+            parent_attempt_id=attempt.parent_attempt_id,
+            backend_id="subprocess",
+        )
+
+    def _audit_structured_output_exhaustion_retry(
+        self,
+        attempt: TaskAttempt,
+        exc: StructuredOutputExhaustionError,
+        attempt_number: int,
+    ) -> None:
+        """Journal that a structured-output exhaustion is being retried.
+
+        Mirrors :meth:`_audit_deliverable_floor_retry` for the CLI-level
+        structured-output-exhaustion class.
+        """
+
+        if self.audit is None:
+            return
+        self.audit.append(
+            "structured_output_exhaustion_retry_dispatched",
+            status="retrying",
+            payload={
+                "terminal_reason": exc.terminal_reason,
+                "subtype": exc.subtype,
+                "errors": list(exc.cli_errors),
                 "attempt": attempt_number,
             },
             actor=AuditActor(
@@ -882,4 +1114,8 @@ def _structured_output(payload: Mapping[str, Any]) -> Mapping[str, Any]:
     raise LiveExecutionError("Claude did not return a structured semantic result")
 
 
-__all__ = ["ClaudeSemanticTaskExecutor"]
+__all__ = [
+    "ClaudeSemanticTaskExecutor",
+    "StructuredOutputExhaustionError",
+    "structured_output_exhaustion_retry_addendum",
+]
