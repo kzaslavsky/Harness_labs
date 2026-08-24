@@ -392,6 +392,63 @@ class RunExecTests(unittest.TestCase):
             resume,
         )
 
+    def test_network_access_is_derived_from_ui_capability(self) -> None:
+        spec_path = self._spec()
+        spec = json.loads(spec_path.read_text(encoding="utf-8"))
+        ordinary = _codex_argv(
+            spec, "codex", self.root / "ordinary.json", self.schema
+        )
+        self.assertNotIn("sandbox_workspace_write.network_access=true", ordinary)
+
+        spec.update(
+            sandbox="workspace-write",
+            required_capabilities=["repo.read", "browser.playwright.local"],
+        )
+        ui_argv = _codex_argv(
+            spec, "codex", self.root / "ui.json", self.schema
+        )
+        self.assertIn("sandbox_workspace_write.network_access=true", ui_argv)
+        self.assertIn("--ignore-user-config", ui_argv)
+        self.assertIn("--strict-config", ui_argv)
+        self.assertEqual(ui_argv[-1], "-")
+        spec["resume_thread_id"] = "thread-test"
+        ui_resume_argv = _codex_argv(
+            spec, "codex", self.root / "ui-resume.json", self.schema
+        )
+        self.assertIn(
+            "sandbox_workspace_write.network_access=true", ui_resume_argv
+        )
+
+    def test_network_access_cannot_be_selected_directly_or_read_only(self) -> None:
+        spec_path = self._spec()
+        spec = json.loads(spec_path.read_text(encoding="utf-8"))
+        spec["network_access"] = True
+        with self.assertRaisesRegex(StateError, "not an authority field"):
+            _codex_argv(spec, "codex", self.root / "output.json", self.schema)
+
+        del spec["network_access"]
+        spec["required_capabilities"] = ["browser.playwright.local"]
+        with self.assertRaisesRegex(StateError, "workspace-write"):
+            _codex_argv(spec, "codex", self.root / "output.json", self.schema)
+
+    def test_ui_process_receipt_records_network_access(self) -> None:
+        spec_path = self._spec()
+        spec = json.loads(spec_path.read_text(encoding="utf-8"))
+        spec.update(
+            sandbox="workspace-write",
+            required_capabilities=["repo.read", "browser.playwright.local"],
+        )
+        atomic_write_json(spec_path, spec)
+        with patch("run_exec.shutil.which", return_value=str(self.fake)):
+            receipt = run(spec_path)
+        self.assertTrue(receipt["network_access"])
+        self.assertIn(
+            "browser.playwright.local", receipt["required_capabilities"]
+        )
+        self.assertIn(
+            "sandbox_workspace_write.network_access=true", receipt["argv"]
+        )
+
     def test_child_launch_and_resume_disable_internal_multi_agent(self) -> None:
         spec_path = self._spec()
         spec = json.loads(spec_path.read_text(encoding="utf-8"))

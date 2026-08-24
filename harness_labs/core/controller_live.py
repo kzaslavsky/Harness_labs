@@ -151,6 +151,7 @@ def extract_park_disposition(
 # deliverable, or a worker could mint a catalog entry that the dirty-baseline
 # grant resolver would trust as a genuine prior-attempt receipt.
 _WORKSPACE_CHANGE_RECEIPT_KIND = "workspace-change-receipt"
+_UI_PLAYWRIGHT_CAPABILITY = "browser.playwright.local"
 
 
 @dataclass(frozen=True)
@@ -556,6 +557,7 @@ class CodexSemanticTaskExecutor:
     require_repository_change: bool = False
     forbid_repository_change: bool = False
     writable_paths: tuple[str, ...] = ()
+    network_access: bool = False
     # Deprecated: superseded by ``dirty_baseline_grant``, which binds a
     # per-dispatch adoption to a specific receipted change set instead of
     # blanket-accepting any dirty baseline. Accepted only so callers built
@@ -596,6 +598,16 @@ class CodexSemanticTaskExecutor:
             normalize_allowed_paths(self.writable_paths)
         elif self.writable_paths:
             raise ValueError("writable_paths require the workspace-write sandbox")
+        if not isinstance(self.network_access, bool):
+            raise ValueError("network_access must be a boolean")
+        if self.network_access:
+            if self.sandbox != "workspace-write":
+                raise ValueError("network_access requires workspace-write")
+            required = set(self.task.get("required_capabilities", ()))
+            if _UI_PLAYWRIGHT_CAPABILITY not in required:
+                raise ValueError(
+                    "network_access requires an authorized UI capability"
+                )
         if self.allow_dirty_baseline and self.sandbox != "workspace-write":
             raise ValueError("allow_dirty_baseline requires the workspace-write sandbox")
         if self.dirty_baseline_grant is not None:
@@ -826,6 +838,10 @@ class CodexSemanticTaskExecutor:
                 "-o",
                 str(output_path),
             ]
+            if self.network_access:
+                argv.extend(
+                    ["-c", "sandbox_workspace_write.network_access=true"]
+                )
             for image_path in image_paths:
                 # ``codex exec -i/--image <FILE>`` attaches the file to the
                 # initial prompt as real image input. The Codex CLI process
@@ -903,6 +919,10 @@ class CodexSemanticTaskExecutor:
                     "dirty_baseline_grant": adoption_grant,
                     "baseline_changed_paths": initial_workspace["changed_paths"],
                     "allowed_paths": list(normalize_allowed_paths(self.writable_paths)),
+                    "network_access": self.network_access,
+                    "required_capabilities": sorted(
+                        self.task.get("required_capabilities", ())
+                    ),
                     "changed_paths": final_workspace["changed_paths"],
                     "worker_changed_paths": worker_changed_paths,
                     "baseline_files": initial_workspace["files"],
@@ -1350,6 +1370,10 @@ class CodexSemanticTaskExecutor:
                 "model": self.model,
                 "reasoning": self.reasoning,
                 "sandbox": self.sandbox,
+                "network_access": self.network_access,
+                "required_capabilities": sorted(
+                    self.task.get("required_capabilities", ())
+                ),
                 "writable_paths": list(self.writable_paths),
                 "forbid_repository_change": self.forbid_repository_change,
                 "dirty_baseline_grant": adoption_grant,

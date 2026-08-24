@@ -66,12 +66,15 @@ adapter registers the prose deliverable and any controller-owned command receipt
 in the evidence catalog, injects their real hashes, constructs the semantic
 result envelope, and validates it before the kernel sees it.
 
-Capabilities that require writable transient state, such as a Playwright walk,
-run as a fixed controller-owned command in the explicitly selected repository
-worktree. The reasoning worker remains read-only and receives the complete
-command receipt as context. This separates deterministic execution authority
-from model interpretation without pretending that a read-only model sandbox can
-launch a stateful browser harness.
+Playwright UI tasks use the dedicated `ui-playwright` role and require the
+`browser.playwright.local` capability. The capability scheduler must select
+that profile before its executor can enable Codex network access. The
+controller-owned role, not task prose or a generic task field, adds
+`sandbox_workspace_write.network_access=true`; ordinary profiles remain
+network-disabled. UI inspection runs in `workspace-write` because Codex exposes
+this network switch under that sandbox, while the profile's repository-change
+guard still rejects any file mutation. Backend receipts record whether network
+access was enabled.
 
 The live flexibility suite exercises commit planning/review, parallel UI
 diagnosis with a real browser gate, and a broad product appraisal with parallel

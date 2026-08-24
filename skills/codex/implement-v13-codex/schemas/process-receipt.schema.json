@@ -5,6 +5,8 @@
   "properties": {
     "protocol": {"type": "string", "enum": ["implement-v13-codex/process-receipt/1", "implement-v13-codex/process-receipt/2", "implement-v13-codex/process-receipt/3"]},
     "reasoning": {"type": "string", "enum": ["low", "medium", "high"]},
+    "network_access": {"type": "boolean"},
+    "required_capabilities": {"type": "array", "items": {"type": "string", "minLength": 1}},
     "status": {"type": "string", "enum": ["prepared", "spawned_unconfirmed", "released", "running", "succeeded", "failed", "orphaned"]},
     "state_revision": {"type": "integer", "minimum": 0},
     "prompt_source_path": {"type": "string", "minLength": 1},

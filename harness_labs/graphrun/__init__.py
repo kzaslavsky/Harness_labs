@@ -13,6 +13,8 @@ from harness_labs.featurerun.feature_run import (
 )
 from harness_labs.graphrun.agent_mixture import (
     BackendSpec,
+    UI_PLAYWRIGHT_CAPABILITY,
+    UI_PLAYWRIGHT_ROLE,
     WorkerRole,
     build_role_profiles,
     parse_backend_spec,
@@ -33,6 +35,8 @@ __all__ = [
     "PlanGraph",
     "PlanGraphFeatureRunBinding",
     "RepairResumeDirective",
+    "UI_PLAYWRIGHT_CAPABILITY",
+    "UI_PLAYWRIGHT_ROLE",
     "WorkerRole",
     "build_role_profiles",
     "issue_receipt",

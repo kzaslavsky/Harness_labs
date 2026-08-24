@@ -177,6 +177,45 @@ class ControllerSchedulerTests(unittest.TestCase):
 
         self.assertEqual(self.kernel.task("visual")["status"], "ready")
 
+    def test_playwright_ui_task_cannot_use_non_ui_profile(self) -> None:
+        scheduler = CapabilityScheduler(
+            (
+                RoleProfile(
+                    "code-only",
+                    "ui_inspector",
+                    frozenset({"repo.read"}),
+                    lambda task: ResultExecutor(
+                        details_schema=task["details_schema"],
+                        payload_factory=lambda attempt: semantic_payload(
+                            summary="Code only",
+                            details_schema=task["details_schema"],
+                            details={},
+                        ),
+                    ),
+                ),
+            )
+        )
+        task_ids = self.dispatch_command(
+            [
+                {
+                    "id": "playwright-visual",
+                    "role": "ui_inspector",
+                    "objective": "Inspect rendered UI",
+                    "details_schema": "visual-inspection-details/1",
+                    "required_capabilities": [
+                        "repo.read",
+                        "browser.playwright.local",
+                    ],
+                    "acceptance_criteria": [],
+                    "dependencies": [],
+                }
+            ],
+            key="playwright-visual-batch",
+        )
+        with self.assertRaisesRegex(SchedulingError, "no profile"):
+            scheduler.dispatch(self.kernel, task_ids, max_parallelism=1)
+        self.assertEqual(self.kernel.task("playwright-visual")["status"], "ready")
+
     def test_profile_view_surfaces_dirty_baseline_eligibility(self) -> None:
         scheduler = CapabilityScheduler(
             (
