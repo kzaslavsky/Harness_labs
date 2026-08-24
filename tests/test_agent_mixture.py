@@ -14,6 +14,8 @@ from harness_labs import (
     BackendSpec,
     ClaudeSemanticTaskExecutor,
     CodexSemanticTaskExecutor,
+    UI_PLAYWRIGHT_CAPABILITY,
+    UI_PLAYWRIGHT_ROLE,
     WorkerRole,
     build_role_profiles,
     parse_backend_spec,
@@ -79,6 +81,25 @@ class WorkerRoleTests(unittest.TestCase):
             )
         with self.assertRaisesRegex(ValueError, "preflight"):
             _role(preflight_argv=(), require_preflight_success=True)
+
+    def test_network_access_requires_writable_ui_capability(self) -> None:
+        with self.assertRaisesRegex(ValueError, "workspace-write"):
+            _role(
+                capabilities=frozenset({"repo.read", UI_PLAYWRIGHT_CAPABILITY}),
+                sandbox="read-only",
+                writable_paths=(),
+                require_repository_change=False,
+                network_access=True,
+            )
+        with self.assertRaisesRegex(ValueError, UI_PLAYWRIGHT_CAPABILITY):
+            _role(network_access=True)
+
+    def test_dedicated_ui_role_is_non_mutating_and_network_authorized(self) -> None:
+        self.assertEqual(UI_PLAYWRIGHT_ROLE.profile_id, "ui-playwright")
+        self.assertIn(UI_PLAYWRIGHT_CAPABILITY, UI_PLAYWRIGHT_ROLE.capabilities)
+        self.assertEqual(UI_PLAYWRIGHT_ROLE.sandbox, "workspace-write")
+        self.assertTrue(UI_PLAYWRIGHT_ROLE.network_access)
+        self.assertTrue(UI_PLAYWRIGHT_ROLE.forbid_repository_change)
 
 
 class MixtureResolutionTests(unittest.TestCase):
@@ -162,6 +183,42 @@ class BuildRoleProfilesTests(unittest.TestCase):
         self.assertEqual(verifier.executable, "/apps/codex")
         self.assertEqual(verifier.preflight_argv, ("python3", "verify.py"))
         self.assertTrue(verifier.require_preflight_success)
+
+    def test_codex_ui_profile_propagates_controller_network_authority(self) -> None:
+        profiles = build_role_profiles(
+            mixture={"*": "codex:gpt-5.6-sol@medium"},
+            roles=(UI_PLAYWRIGHT_ROLE,),
+            repository=Path("."),
+            evidence=EvidenceCatalog(),
+        )
+        executor = profiles[0].executor_factory(
+            {
+                "id": "inspect-ui",
+                "context": "",
+                "details_schema": "visual-inspection-details/1",
+                "required_capabilities": ["repo.read", UI_PLAYWRIGHT_CAPABILITY],
+            }
+        )
+        self.assertIsInstance(executor, CodexSemanticTaskExecutor)
+        self.assertTrue(executor.network_access)
+        self.assertTrue(executor.forbid_repository_change)
+
+    def test_ordinary_codex_profile_keeps_network_disabled(self) -> None:
+        profiles = build_role_profiles(
+            mixture={"*": "codex:gpt-5.6-terra@medium"},
+            roles=(_role(),),
+            repository=Path("."),
+            evidence=EvidenceCatalog(),
+        )
+        executor = profiles[0].executor_factory(
+            {
+                "id": "build",
+                "context": "",
+                "details_schema": "demo-implementation/1",
+                "required_capabilities": ["repo.write"],
+            }
+        )
+        self.assertFalse(executor.network_access)
 
     def test_propagates_role_allow_dirty_baseline_to_the_profile(self) -> None:
         roles = (

@@ -39,6 +39,7 @@ TERMINAL_FAILURE_EVENTS = {"turn.failed", "error"}
 _CODEX_VERSION_RE = re.compile(r"^codex-cli\s+\S+")
 VALIDATOR_UNAVAILABLE_ERROR = "jsonschema is required for subprocess output validation"
 PROCESS_RECEIPT_PROTOCOL = "implement-v13-codex/process-receipt/3"
+UI_PLAYWRIGHT_CAPABILITY = "browser.playwright.local"
 TERMINAL_RETRY_POLICY = {
     "none": False,
     "controller_interrupted": False,
@@ -290,6 +291,31 @@ def _writable_roots(spec: dict[str, Any]) -> list[Path]:
         if root not in roots:
             roots.append(root)
     return roots
+
+
+def _required_capabilities(spec: dict[str, Any]) -> list[str]:
+    raw = spec.get("required_capabilities", [])
+    if not isinstance(raw, list) or any(
+        not isinstance(item, str) or not item.strip() for item in raw
+    ):
+        raise StateError("spec.required_capabilities must be an array of names")
+    return raw
+
+
+def _network_access_enabled(spec: dict[str, Any]) -> bool:
+    """Derive Codex network authority from the task capability contract."""
+
+    if "network_access" in spec:
+        raise StateError(
+            "spec.network_access is not an authority field; network access is "
+            "derived from required_capabilities"
+        )
+    enabled = UI_PLAYWRIGHT_CAPABILITY in _required_capabilities(spec)
+    if enabled and spec.get("sandbox", "read-only") != "workspace-write":
+        raise StateError(
+            "browser.playwright.local requires the workspace-write sandbox"
+        )
+    return enabled
 
 
 def _capability_manifest_identity(spec: dict[str, Any]) -> tuple[str | None, str | None]:
@@ -1027,6 +1053,12 @@ def _assert_receipt_matches(
         "codex_version": codex_version,
         "codex_executable_sha256": codex_sha256,
     }
+    network_access = _network_access_enabled(spec)
+    if "network_access" in receipt:
+        expected["network_access"] = network_access
+        expected["required_capabilities"] = _required_capabilities(spec)
+    elif network_access:
+        raise StateError("existing receipt lacks network access authority evidence")
     if not legacy:
         package_digest, package_version, package_path = _controller_package_identity(spec)
         capability_path, capability_digest = _capability_manifest_identity(spec)
@@ -1136,6 +1168,7 @@ def _codex_argv(spec: dict[str, Any], codex: str, output: Path, schema: Path) ->
     if sandbox not in {"read-only", "workspace-write"}:
         raise StateError("production subprocess sandbox must be read-only or workspace-write")
     writable_roots = _writable_roots(spec)
+    network_access = _network_access_enabled(spec)
     common = [
         "--ignore-user-config",
         "--strict-config",
@@ -1153,6 +1186,8 @@ def _codex_argv(spec: dict[str, Any], codex: str, output: Path, schema: Path) ->
         str(output),
         "--json",
     ]
+    if network_access:
+        common.extend(["-c", "sandbox_workspace_write.network_access=true"])
     resume_thread_id = spec.get("resume_thread_id")
     if resume_thread_id is not None:
         if not isinstance(resume_thread_id, str) or not resume_thread_id:
@@ -1427,6 +1462,8 @@ def run(spec_path: Path) -> dict[str, Any]:
         "model": spec["model"],
         "reasoning": spec["reasoning"],
         "sandbox": spec.get("sandbox", "read-only"),
+        "network_access": _network_access_enabled(spec),
+        "required_capabilities": _required_capabilities(spec),
         "writable_roots": [str(path) for path in _writable_roots(spec)],
         "ephemeral_scratch": str(scratch) if scratch is not None else None,
         "ephemeral_scratch_contents_sha256": None,

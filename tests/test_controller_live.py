@@ -56,6 +56,27 @@ class CodexSemanticTaskExecutorTests(unittest.TestCase):
                 forbid_repository_change=True,
             )
 
+    def test_network_access_requires_writable_sandbox_and_ui_capability(self) -> None:
+        ui_capability = "browser.playwright.local"
+        with self.assertRaisesRegex(ValueError, "workspace-write"):
+            CodexSemanticTaskExecutor(
+                {"required_capabilities": [ui_capability]},
+                Path("."),
+                EvidenceCatalog(),
+                "Inspect UI.",
+                network_access=True,
+            )
+        with self.assertRaisesRegex(ValueError, "authorized UI capability"):
+            CodexSemanticTaskExecutor(
+                {"required_capabilities": ["repo.read"]},
+                Path("."),
+                EvidenceCatalog(),
+                "Inspect UI.",
+                sandbox="workspace-write",
+                writable_paths=("artifacts/ui",),
+                network_access=True,
+            )
+
     def test_preflight_and_model_output_become_hashed_semantic_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             repository = Path(temporary) / "repo"
@@ -107,6 +128,9 @@ class CodexSemanticTaskExecutorTests(unittest.TestCase):
                         encoding="utf-8"
                     )
                 )
+                self.assertNotIn(
+                    "sandbox_workspace_write.network_access=true", argv
+                )
                 finding_schema = schema["properties"]["findings"]["items"]
                 self.assertEqual(
                     set(finding_schema["required"]),
@@ -154,6 +178,97 @@ class CodexSemanticTaskExecutorTests(unittest.TestCase):
             self.assertIn("CHECK PASSED", prompts[0])
             for ref in result.evidence[:2]:
                 self.assertTrue(evidence.contains(ref))
+
+    def test_ui_worker_argv_and_receipt_record_network_access(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repository = Path(temporary) / "repo"
+            repository.mkdir()
+            (repository / ".git").write_text("gitdir: elsewhere\n", encoding="utf-8")
+            evidence = EvidenceCatalog()
+            task = {
+                "id": "inspect-ui",
+                "objective": "Inspect rendered UI",
+                "context": json.dumps({"artifact_kind": "visual-inspection"}),
+                "details_schema": "visual-inspection-details/1",
+                "acceptance_criteria": ["ui-inspected"],
+                "required_capabilities": [
+                    "repo.read",
+                    "browser.playwright.local",
+                ],
+            }
+            raw = {
+                "summary": "UI inspected.",
+                "deliverable_markdown": "# UI inspection\nRendered UI checked.",
+                "details_json": "{}",
+                "claims": [],
+                "findings": [],
+                "recommendations": [],
+                "unresolved_questions": [],
+                "satisfied_criteria": ["ui-inspected"],
+            }
+            snapshots = (
+                {"head": "abc", "branch": "feature", "changed_paths": [], "files": {}},
+                {"head": "abc", "branch": "feature", "changed_paths": [], "files": {}},
+            )
+
+            def run(argv, **kwargs):
+                self.assertIn(
+                    "sandbox_workspace_write.network_access=true", argv
+                )
+                self.assertIn("--ignore-user-config", argv)
+                self.assertIn("--strict-config", argv)
+                self.assertEqual(argv[-1], "-")
+                output = Path(argv[argv.index("-o") + 1])
+                output.write_text(json.dumps(raw), encoding="utf-8")
+                return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+            executor = CodexSemanticTaskExecutor(
+                task,
+                repository,
+                evidence,
+                "Inspect the rendered UI using Playwright.",
+                sandbox="workspace-write",
+                writable_paths=("artifacts/ui",),
+                forbid_repository_change=True,
+                network_access=True,
+            )
+            with (
+                patch(
+                    "harness_labs.core.controller_live.shutil.which",
+                    return_value="codex",
+                ),
+                patch(
+                    "harness_labs.core.controller_live.subprocess.run",
+                    side_effect=run,
+                ),
+                patch(
+                    "harness_labs.core.controller_live.workspace_snapshot",
+                    side_effect=snapshots,
+                ),
+            ):
+                result = executor.execute(
+                    TaskAttempt(
+                        "inspect-ui/attempt-1",
+                        "task:inspect-ui",
+                        "context:inspect-ui",
+                        "profile:ui-playwright",
+                    )
+                )
+            self.assertEqual(result.status, "succeeded", result.payload)
+            semantic = validate_semantic_result(
+                result, expected_details_schema="visual-inspection-details/1"
+            )
+            receipt = next(
+                item
+                for item in semantic.artifacts
+                if item["kind"] == "workspace-change-receipt"
+            )
+            receipt_content = json.loads(evidence.open(receipt["ref"]))
+            self.assertTrue(receipt_content["network_access"])
+            self.assertIn(
+                "browser.playwright.local",
+                receipt_content["required_capabilities"],
+            )
 
     def test_writable_worker_uses_workspace_sandbox_and_requires_a_change(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

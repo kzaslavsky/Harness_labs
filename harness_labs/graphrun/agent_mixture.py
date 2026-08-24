@@ -40,6 +40,7 @@ _PROVIDER_EXECUTABLES = {
     "codex": "codex",
 }
 _DEFAULT_MIXTURE_KEY = "*"
+UI_PLAYWRIGHT_CAPABILITY = "browser.playwright.local"
 
 
 @dataclass(frozen=True)
@@ -120,6 +121,9 @@ class WorkerRole:
     require_repository_change: bool = False
     forbid_repository_change: bool = False
     allow_dirty_baseline: bool = False
+    # Controller-owned execution authority. Task prompts and context cannot
+    # turn this on; only the selected, predeclared role profile can.
+    network_access: bool = False
     preflight_argv: tuple[str, ...] = ()
     require_preflight_success: bool = False
 
@@ -146,8 +150,31 @@ class WorkerRole:
             raise ValueError("repository changes cannot be both required and forbidden")
         if self.allow_dirty_baseline and self.sandbox != "workspace-write":
             raise ValueError("allow_dirty_baseline requires the workspace-write sandbox")
+        if not isinstance(self.network_access, bool):
+            raise ValueError("network_access must be a boolean")
+        if self.network_access:
+            if self.sandbox != "workspace-write":
+                raise ValueError("network_access requires workspace-write")
+            if UI_PLAYWRIGHT_CAPABILITY not in self.capabilities:
+                raise ValueError(
+                    "network_access requires browser.playwright.local capability"
+                )
         if self.require_preflight_success and not self.preflight_argv:
             raise ValueError("require_preflight_success requires a preflight command")
+
+
+UI_PLAYWRIGHT_ROLE = WorkerRole(
+    profile_id="ui-playwright",
+    role="ui_inspector",
+    capabilities=frozenset({"repo.read", UI_PLAYWRIGHT_CAPABILITY}),
+    details_schemas=frozenset({"visual-inspection-details/1"}),
+    instructions="Inspect the rendered UI using Playwright.",
+    artifact_kind="visual-inspection",
+    sandbox="workspace-write",
+    writable_paths=("artifacts/ui",),
+    forbid_repository_change=True,
+    network_access=True,
+)
 
 
 def task_with_artifact_kind(
@@ -282,6 +309,7 @@ def _executor_factory(
                 dirty_baseline_grant=_controller_dirty_baseline_grant(
                     role, repository, evidence, audit=audit, attempt_id=task["id"]
                 ),
+                network_access=role.network_access,
                 **shared,
             )
     return factory
@@ -373,6 +401,8 @@ def build_coordinator_session(
 
 __all__ = [
     "BackendSpec",
+    "UI_PLAYWRIGHT_CAPABILITY",
+    "UI_PLAYWRIGHT_ROLE",
     "WorkerRole",
     "build_coordinator_session",
     "build_role_profiles",

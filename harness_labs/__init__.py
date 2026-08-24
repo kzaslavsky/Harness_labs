@@ -25,6 +25,8 @@ from harness_labs.core.agent_sessions import (
 from harness_labs.core.backends import ClaudePrintBackend, CodexExecBackend, OmlxBackend, PoemBackend
 from harness_labs.graphrun.agent_mixture import (
     BackendSpec,
+    UI_PLAYWRIGHT_CAPABILITY,
+    UI_PLAYWRIGHT_ROLE,
     WorkerRole,
     build_coordinator_session,
     build_role_profiles,
@@ -362,6 +364,8 @@ __all__ = [
     "standard_feature_run_policy",
     "standard_review_continuation_recovery_agent",
     "usage_payload",
+    "UI_PLAYWRIGHT_CAPABILITY",
+    "UI_PLAYWRIGHT_ROLE",
     "WorkerRole",
     "build_coordinator_session",
     "build_role_profiles",
